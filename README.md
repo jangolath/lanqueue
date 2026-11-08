@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/lanqueue-banner.svg" alt="LanQueue - your spare machines, back to work" width="100%"></p>
+<p align="center"><img src="assets/lanqueue-banner.png" alt="LanQueue - your spare machines, back to work" width="100%"></p>
 
 # LanQueue
 
