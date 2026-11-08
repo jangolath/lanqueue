@@ -11,6 +11,7 @@
     <Description>Plug your old PCs back in and give them work. lanq sends builds, tests and coding-agent jobs to spare machines on your LAN over key-only SSH, with allowlisted commands and per-job git worktrees.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>PACKAGE.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <PackageReleaseNotes>See https://github.com/jangolath/lanqueue/releases</PackageReleaseNotes>
     <RepositoryUrl>https://github.com/jangolath/lanqueue</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -25,6 +26,7 @@
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.403" PrivateAssets="all" />
     <None Include="PACKAGE.md" Pack="true" PackagePath="\" />
+    <None Include="../../assets/lanqueue-icon.png" Pack="true" PackagePath="icon.png" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="LanQueue.Tests" />

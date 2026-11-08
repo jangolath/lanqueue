@@ -1,3 +1,5 @@
+![LanQueue - your spare machines, back to work](https://raw.githubusercontent.com/jangolath/lanqueue/main/assets/lanqueue-banner.png)
+
 # LanQueue
 
 **RAM and new hardware are expensive. Your old PCs are not. Plug them back in and give them work.**

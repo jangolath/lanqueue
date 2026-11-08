@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/lanqueue-banner.svg" alt="LanQueue - your spare machines, back to work" width="100%"></p>
+
 # LanQueue
 
 **RAM and new hardware are expensive. Your old PCs are not. Plug them back in and give them work.**
