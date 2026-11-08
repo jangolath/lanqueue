@@ -328,4 +328,69 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(JobStatus.Completed, r.Status);
         Assert.Contains(lines, l => l.Contains("skipped 2 symlink(s) and 1 submodule(s)", StringComparison.Ordinal));
     }
+
+    private (JobRunner Runner, List<string> Lines) ArchiveFailureRig(Action<Config.FleetConfig> shape, Exception failure, string slot = "SLOT=1", double gitLoad = 0.5)
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        shape(config);
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, slot)
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.01 : gitLoad)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = failure };
+        var lines = new List<string>();
+        return (new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add), lines);
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureFailsFastWhenTheOnlyGitMachineLacksTheCapability()
+    {
+        var (runner, lines) = ArchiveFailureRig(c => c.Machines[1].Capabilities = ["windows"], new InvalidOperationException("Cannot build an archive: rule x-rule."));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Equal(70, r.ExitCode);
+        Assert.Contains("x-rule", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, l => l.Contains("waiting", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureFailsFastWhenTheGitMachineIsHeld()
+    {
+        // A git machine held for load (0.95 > 0.8) is not eligible this round; the archive error is deterministic, so waiting for it cannot fix the job.
+        var (runner, _) = ArchiveFailureRig(_ => { }, new InvalidOperationException("Cannot build an archive: rule y-rule."), gitLoad: 0.95);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(70, r.ExitCode);
+        Assert.Contains("y-rule", r.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public async Task ArchiveBuildIoFailureIsAnInfraErrorNotACrash(Type type)
+    {
+        var ex = (Exception)Activator.CreateInstance(type, "disk said no")!;
+        var (runner, _) = ArchiveFailureRig(c => c.Machines[1].Transfer = Config.TransferMode.Archive, ex);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Equal(70, r.ExitCode);
+        Assert.Contains("Could not build the archive: disk said no", r.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArchiveFailureIsPrintedOnceAndAppearsInTheNoEligibleMachineSummary()
+    {
+        // The git machine is eligible but its slots are full, so the run ends 75 and the summary carries the archive reason.
+        var (runner, lines) = ArchiveFailureRig(_ => { }, new InvalidOperationException("Cannot build an archive: rule z-rule."), "SLOT=FULL");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(75, r.ExitCode);
+        Assert.Contains("z-rule", r.Message, StringComparison.Ordinal);
+        Assert.Equal(1, lines.Count(l => l.Contains("z-rule", StringComparison.Ordinal)));
+    }
 }

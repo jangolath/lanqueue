@@ -309,8 +309,10 @@ Each default below is enforced in code and covered by a unit test.
   and reported, never archived. The worker uses only GNU tar or bsdtar (busybox tar is refused, because it hides hard
   links and rewrites paths in its listing), lists the archive first (`tar -tzf` and `tar -tvzf`) and refuses it,
   writing nothing, if any entry is absolute, contains `..` or a backslash, is anything but a file or directory, or is
-  shown as a link (symlink or hard link). Windows workers call the built-in `System32\tar.exe` by full path. Extraction
-  runs with `--no-same-owner --no-same-permissions`. This is checked by tests that run the generated scripts against
+  shown as a link (symlink or hard link). Windows workers call the built-in `System32\tar.exe` by full path; the health probe checks once that
+  it accepts `--no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions` (otherwise the machine is
+  held), and Prepare then extracts exactly once with those flags, with no fallback or retry. Linux extraction runs
+  with `--no-same-owner --no-same-permissions`. This is checked by tests that run the generated scripts against
   crafted hostile archives; it is a defence in depth for a trusted-network tool, not a sandbox.
 - **No telemetry**, no network access except the SSH hosts you configure.
 

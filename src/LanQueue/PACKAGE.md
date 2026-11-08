@@ -28,7 +28,7 @@ uncommitted changes) to a throw-away worktree, runs the one allowlisted command,
 ## What a worker needs
 
 An SSH server, the toolchain your jobs use, and git (recommended, the default) or, with `transfer: archive`, just
-`tar` (built into Windows 10 1803+ and Linux). Nothing from lanqueue is installed on it, and it needs no GitHub
+`tar` (the built-in bsdtar on Windows 10 1803+; GNU tar or bsdtar plus gzip on Linux, busybox tar is refused). Nothing from lanqueue is installed on it, and it needs no GitHub
 access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md).
 
 ## Safe by default

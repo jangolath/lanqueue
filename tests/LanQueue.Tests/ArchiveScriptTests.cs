@@ -133,4 +133,29 @@ public class ArchiveScriptTests
         Assert.True(rd >= 0 && verify > rd, "cleanup must verify the folder is gone after rd");
         Assert.Contains("exit $rc", w, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void WindowsPrepareExtractsExactlyOnceWithEveryRestrictingFlagAndNeverRetries()
+    {
+        var s = RemoteScripts.Prepare(Windows(), "j");
+        Assert.Equal(1, s.Split("-xzf").Length - 1);
+        foreach (var flag in new[] { "--no-same-owner", "--no-same-permissions", "--no-acls", "--no-xattrs", "--no-fflags" })
+        {
+            Assert.Contains(flag, s, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("fallback", s, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("2>$null", s[s.IndexOf("-xzf", StringComparison.Ordinal)..], StringComparison.Ordinal);
+        Assert.Contains("exit $LASTEXITCODE", s, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WindowsProbeChecksThatTarAcceptsTheRestrictingFlags()
+    {
+        var s = RemoteScripts.Probe(Windows());
+        foreach (var flag in new[] { "-xf NUL", "--no-same-owner", "--no-same-permissions", "--no-acls", "--no-xattrs", "--no-fflags" })
+        {
+            Assert.Contains(flag, s, StringComparison.Ordinal);
+        }
+    }
 }

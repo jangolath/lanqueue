@@ -317,6 +317,29 @@ public sealed class TarHostileArchiveTests : IDisposable
     }
 
     [OptInTarFact]
+    public void WindowsPartialExtractFailureIsNotRetriedWithoutTheRestrictingFlags()
+    {
+        var h = new HostInfo("local");
+        if (!h.IsWindows)
+        {
+            return;
+        }
+
+        // ro.txt is read-only in the archive, a/x makes folder a, then the file a collides: the one extract fails part way.
+        var ro = Reg("ro.txt", "ro");
+        ro.Mode = (UnixFileMode)Convert.ToInt32("444", 8);
+        var (code, output) = Prepare(h, Build(ro, Reg("a/x", "x"), Reg("a", "collides")));
+
+        Assert.NotEqual(0, code);
+        Assert.DoesNotContain("fallback", output, StringComparison.OrdinalIgnoreCase);
+        var landed = JobPath("ro.txt");
+        if (File.Exists(landed))
+        {
+            Assert.False(new FileInfo(landed).IsReadOnly, "a second, unrestricted extract applied the archive's permissions. Output: " + output);
+        }
+    }
+
+    [OptInTarFact]
     public void WindowsPrepareIgnoresAGnuTarEarlierOnPath()
     {
         var h = new HostInfo("local");

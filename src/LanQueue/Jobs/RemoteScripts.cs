@@ -63,10 +63,15 @@ public static class RemoteScripts
 
     private const string LinuxTarProbe = LinuxTarSupportedFunction + "\nif tar_supported; then echo tool=ok; else echo tool=missing; fi";
 
-    /// <summary>The Windows built-in bsdtar, by full path so a GNU tar earlier on PATH (for example Git for Windows) is never used.</summary>
+    /// <summary>
+    /// The Windows built-in bsdtar, by full path so a GNU tar earlier on PATH (for example Git for Windows) is never used. It must also accept
+    /// every restricting extract option: that is probed once here with an empty archive (extracts nothing), so Prepare never needs a fallback.
+    /// </summary>
     private const string WindowsTarProbe =
         "$t = \"$env:SystemRoot\\System32\\tar.exe\"\n"
-        + "'tool=' + $(if ((Test-Path -LiteralPath $t) -and (\"$(& $t --version 2>$null | Select-Object -First 1)\" -match 'bsdtar|libarchive')) { 'ok' } else { 'missing' })";
+        + "$ok = (Test-Path -LiteralPath $t) -and (\"$(& $t --version 2>$null | Select-Object -First 1)\" -match 'bsdtar|libarchive')\n"
+        + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
+        + "'tool=' + $(if ($ok) { 'ok' } else { 'missing' })";
 
     /// <summary>Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL.</summary>
     public static string AcquireSlot(Machine m, string jobId) => m.Os == MachineOs.Windows
@@ -116,8 +121,8 @@ public static class RemoteScripts
             if (Test-Path -LiteralPath $j) { exit 1 }
             New-Item -ItemType Directory -Force -Path $j | Out-Null
             $ErrorActionPreference = 'Continue'
-            & $tar -xzf $a -C $j --no-same-owner --no-same-permissions --no-acls --no-xattrs --no-fflags 2>$null
-            if ($LASTEXITCODE -ne 0) { & $tar -xzf $a -C $j; exit $LASTEXITCODE }
+            & $tar -xzf $a -C $j --no-same-owner --no-same-permissions --no-acls --no-xattrs --no-fflags 2>&1 | ForEach-Object { "$_" }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             exit 0
             """
         : $$"""

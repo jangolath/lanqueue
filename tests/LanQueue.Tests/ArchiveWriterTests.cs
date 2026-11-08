@@ -123,4 +123,13 @@ public sealed class ArchiveWriterTests : IDisposable
     [InlineData("160000", false)]
     public void OnlyRegularFileModesAreArchived(string mode, bool expected) =>
         Assert.Equal(expected, ArchiveWriter.IsRegularMode(mode));
+
+    [Theory]
+    [InlineData("a -> b.txt")]
+    [InlineData("dir/x link to y")]
+    public void NamesThatLookLikeLinkListingsAreRefusedLocallyWithANamedRule(string path)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => ArchiveWriter.ValidatePath(path));
+        Assert.Contains("name-looks-like-link-listing", ex.Message, StringComparison.Ordinal);
+    }
 }

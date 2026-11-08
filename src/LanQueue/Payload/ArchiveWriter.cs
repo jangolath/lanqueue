@@ -48,6 +48,11 @@ public static class ArchiveWriter
             throw Refused(path, "absolute-backslash-or-control-character");
         }
 
+        if (path.Contains(" -> ", StringComparison.Ordinal) || path.Contains(" link to ", StringComparison.Ordinal))
+        {
+            throw Refused(path, "name-looks-like-link-listing");
+        }
+
         if (path.AsSpan().IndexOfAny("<>:\"|?*") >= 0)
         {
             throw Refused(path, "windows-forbidden-character");

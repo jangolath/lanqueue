@@ -100,9 +100,11 @@ public sealed class JobRunner(
                 health.Add((m, await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false)));
             }
 
-            foreach (var machine in Scheduler.Rank(health, req.Needs))
+            var ranked = Scheduler.Rank(health, req.Needs).ToList();
+            var eligible = ranked.Where(m => m.Transfer == TransferMode.Git).ToList();
+            foreach (var machine in ranked)
             {
-                var result = await TryOnMachine(jobId, req, payload, archive, machine, ct).ConfigureAwait(false);
+                var result = await TryOnMachine(jobId, req, payload, archive, machine, eligible, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -112,7 +114,8 @@ public sealed class JobRunner(
             if (deadline.Elapsed >= req.Wait)
             {
                 var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
-                return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held);
+                var archiveNote = archive.Failure is null ? "" : " Archive build failed: " + archive.Failure;
+                return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + archiveNote);
             }
 
             output("[lanq] no eligible machine; waiting 15s");
@@ -121,7 +124,7 @@ public sealed class JobRunner(
     }
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
-    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, CancellationToken ct)
+    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, IReadOnlyList<Machine> eligibleGit, CancellationToken ct)
     {
         string? archivePath = null;
         if (machine.Transfer == TransferMode.Archive)
@@ -130,16 +133,23 @@ public sealed class JobRunner(
             {
                 archivePath = await archive.GetAsync(ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
                 var message = "Could not build the archive: " + ex.Message;
-                if (!config.Machines.Any(m => m.Transfer == TransferMode.Git))
+                // A git machine that is eligible for THIS job (capabilities, hours, load, space) can still take it: skip this archive machine.
+                // Otherwise nobody can ever take the job, so fail fast instead of waiting for a machine that cannot help.
+                if (!eligibleGit.Any())
                 {
                     return new JobResult(jobId, JobStatus.InfraError, 70, null, message);
                 }
 
-                // A git machine can still take the job: skip this archive machine instead of failing the whole run.
-                output($"[lanq] {machine.Name}: {message}");
+                if (!archive.ReportedFailure)
+                {
+                    archive.ReportedFailure = true;
+                    output($"[lanq] {machine.Name}: {message}");
+                }
+
+                archive.Failure = message;
                 return null;
             }
         }
@@ -255,6 +265,10 @@ public sealed class JobRunner(
     private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output)
     {
         private Task<ArchiveBuild>? _task;
+
+        public bool ReportedFailure { get; set; }
+
+        public string? Failure { get; set; }
 
         public async Task<string> GetAsync(CancellationToken ct)
         {
