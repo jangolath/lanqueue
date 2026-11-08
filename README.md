@@ -33,13 +33,17 @@ Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, and `git
 Remote machines need `git` and an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+).
 
 ```bash
-dotnet tool install --global LanQueue      # once published to NuGet
-# until then, from a clone:
+dotnet tool install --global LanQueue      # works once the first release is published to NuGet
+# from source, from a clone:
 dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
 
 ## Quick start
+
+Before your first job, each worker needs an SSH server, git and the toolchain your jobs use; it does **not** need
+GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
+[docs/WORKERS.md](docs/WORKERS.md).
 
 1. Copy `machines.example.yml` to a private location (for example `~/.config/lanq/machines.yml`, or
    `%APPDATA%\lanq\machines.yml` on Windows) and edit it. A config in the current directory is never picked up
