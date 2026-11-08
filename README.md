@@ -33,8 +33,8 @@ Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, and `git
 Remote machines need `git` and an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+).
 
 ```bash
-dotnet tool install --global LanQueue      # once published to NuGet
-# until then, from a clone:
+dotnet tool install --global LanQueue      # works once the first release is published to NuGet
+# from source, from a clone:
 dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
