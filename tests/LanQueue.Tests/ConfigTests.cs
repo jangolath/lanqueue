@@ -90,10 +90,23 @@ public class ConfigTests
     [InlineData("zip")]
     [InlineData("rsync")]
     [InlineData("\"\"")]
+    [InlineData("1")]
+    [InlineData("0")]
+    [InlineData("true")]
+    [InlineData("[git]")]
     public void UnknownTransferIsRefused(string value)
     {
         var yaml = T.Yaml.Replace("os: linux", "os: linux\n    transfer: " + value, StringComparison.Ordinal);
         Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+    }
+
+    [Fact]
+    public void TransferWordsAreCaseInsensitiveAndTheErrorIsFriendly()
+    {
+        var yaml = T.Yaml.Replace("os: linux", "os: linux\n    transfer: Archive", StringComparison.Ordinal);
+        Assert.Equal(TransferMode.Archive, ConfigLoader.Parse(yaml).Machines[0].Transfer);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml.Replace("Archive", "1", StringComparison.Ordinal)));
+        Assert.Contains("'git' or 'archive'", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -4,7 +4,15 @@ using System.IO.Compression;
 namespace LanQueue.Payload;
 
 /// <param name="Path">Repository-relative path with forward slashes.</param>
-public sealed record ArchiveFile(string Path, bool Executable, byte[] Content);
+/// <param name="Executable">Whether the file gets the executable mode bits.</param>
+/// <param name="OpenAsync">Opens the content. Called once per file, in path order, and the stream is disposed after the entry is written.</param>
+public sealed record ArchiveFile(string Path, bool Executable, Func<CancellationToken, ValueTask<Stream>> OpenAsync)
+{
+    public ArchiveFile(string path, bool executable, byte[] content)
+        : this(path, executable, _ => ValueTask.FromResult<Stream>(new MemoryStream(content, writable: false)))
+    {
+    }
+}
 
 /// <summary>
 /// Writes a deterministic tar.gz: entries sorted ordinally, fixed timestamps and ownership, regular files and
@@ -17,26 +25,57 @@ public static class ArchiveWriter
     /// <summary>Git tree entry modes that may be archived: regular and executable files. Symlinks (120000) and submodules (160000) are not.</summary>
     public static bool IsRegularMode(string mode) => mode is "100644" or "100755";
 
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    /// <summary>
+    /// Refuses any path that could escape the extraction root or misbehave on any worker. The rules apply to every archive
+    /// (any worker may be Windows). The message names the rule that failed.
+    /// </summary>
     public static void ValidatePath(string path)
     {
         if (path.Length == 0 || path.Length > 4096)
         {
-            throw new ArgumentException("Archive path is empty or too long.", nameof(path));
+            throw Refused(path, "empty-or-too-long");
         }
 
-        if (path[0] == '/' || path.Contains('\\', StringComparison.Ordinal) || (path.Length >= 2 && path[1] == ':') || path.Any(char.IsControl))
+        if (path[0] == '/' || path.Contains('\\', StringComparison.Ordinal) || path.Any(char.IsControl))
         {
-            throw new ArgumentException($"Archive path '{path}' is absolute or contains forbidden characters.", nameof(path));
+            throw Refused(path, "absolute-backslash-or-control-character");
+        }
+
+        if (path.AsSpan().IndexOfAny("<>:\"|?*") >= 0)
+        {
+            throw Refused(path, "windows-forbidden-character");
         }
 
         foreach (var segment in path.Split('/'))
         {
             if (segment.Length == 0 || segment is "." or "..")
             {
-                throw new ArgumentException($"Archive path '{path}' contains an empty, '.' or '..' segment.", nameof(path));
+                throw Refused(path, "empty-dot-or-dotdot-segment");
+            }
+
+            if (segment[^1] is '.' or ' ')
+            {
+                throw Refused(path, "windows-trailing-dot-or-space");
+            }
+
+            var dot = segment.IndexOf('.', StringComparison.Ordinal);
+            var stem = (dot < 0 ? segment : segment[..dot]).TrimEnd(' ');
+            if (ReservedDeviceNames.Contains(stem))
+            {
+                throw Refused(path, "windows-reserved-device-name");
             }
         }
     }
+
+    private static ArgumentException Refused(string path, string rule) =>
+        new($"Archive path '{path}' refused (rule: {rule}).", nameof(path));
 
     public static async Task CreateAsync(string outputPath, IEnumerable<ArchiveFile> files, CancellationToken ct)
     {
@@ -80,12 +119,18 @@ public static class ArchiveWriter
                     entry.ModificationTime = FixedTime;
                     entry.Uid = 0;
                     entry.Gid = 0;
-                    if (file is not null)
+                    if (file is null)
                     {
-                        entry.DataStream = new MemoryStream(file.Content, writable: false);
+                        await tar.WriteEntryAsync(entry, ct).ConfigureAwait(false);
+                        continue;
                     }
 
-                    await tar.WriteEntryAsync(entry, ct).ConfigureAwait(false);
+                    var data = await file.OpenAsync(ct).ConfigureAwait(false);
+                    await using (data.ConfigureAwait(false))
+                    {
+                        entry.DataStream = data;
+                        await tar.WriteEntryAsync(entry, ct).ConfigureAwait(false);
+                    }
                 }
             }
 

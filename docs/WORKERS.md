@@ -10,7 +10,7 @@ your own PC runs `lanq`, ships the code over SSH (as a git bundle by default, or
 |---|---|---|---|
 | SSH server accepting your public key | **Required** | every lanq call is key-only SSH | from your PC: `ssh -o BatchMode=yes <user>@<worker> echo ok` |
 | Git | **Recommended; required for the default `transfer: git` mode.** Optional with `transfer: archive` | git mode unpacks the bundle into a throwaway worktree | `git --version` |
-| tar | Only with `transfer: archive` (built into Windows 10 1803+ / Server 2019+ and Linux) | archive mode extracts the `tar.gz` into a fresh job folder | `tar --version` (Windows: `tar.exe --version`) |
+| tar (+ gzip on Linux) | Only with `transfer: archive`. Must be **GNU tar** or the **Windows built-in bsdtar** (`%SystemRoot%\System32\tar.exe`, Windows 10 1803+ / Server 2019+). **busybox tar (Alpine, many minimal images) is refused**: `lanq health` holds the machine as unsupported | archive mode extracts the `tar.gz` into a fresh job folder; lanq trusts the pre-extraction listing only from these tars | `tar --version` must say `GNU tar` (Windows: `%SystemRoot%\System32\tar.exe --version` says `bsdtar`); `command -v gzip` on Linux |
 | Shell | **Required** | Windows: Windows PowerShell (built in). Linux: `sh` | — |
 | Writable work folder (`work_root`) with free disk | **Required** | each job gets its own worktree or folder there; `lanq health` holds a machine with low disk | `lanq health` from your PC |
 | Toolchain your jobs run (e.g. .NET SDK, Node) | Per job | tag the machine with matching `capabilities` (`dotnet`, `node`, ...) | `dotnet --version`, `node --version` |

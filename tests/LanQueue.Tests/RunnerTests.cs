@@ -36,6 +36,26 @@ public sealed class RunnerTests : IDisposable
 
             return Task.FromResult(new JobPayload(bundle, "abc", files, diff, archive));
         }
+
+        public int ArchivesBuilt { get; private set; }
+
+        public Exception? ArchiveFailure { get; set; }
+
+        public (int Symlinks, int Submodules) Skipped { get; set; }
+
+        public Task<ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct)
+        {
+            ArchivesBuilt++;
+            if (ArchiveFailure is not null)
+            {
+                throw ArchiveFailure;
+            }
+
+            Directory.CreateDirectory(outputDir);
+            var archive = Path.Combine(outputDir, jobId + ".tar.gz");
+            File.WriteAllText(archive, "x");
+            return Task.FromResult(new ArchiveBuild(archive, Skipped.Symlinks, Skipped.Submodules));
+        }
     }
 
     public RunnerTests() => Directory.CreateDirectory(_dir);
@@ -217,7 +237,8 @@ public sealed class RunnerTests : IDisposable
 
         Assert.Equal(JobStatus.Completed, r.Status);
         Assert.Equal("build-01", r.Machine);
-        Assert.Equal(PayloadKinds.Archive | PayloadKinds.Bundle, payloads.LastKinds);
+        Assert.Equal(PayloadKinds.Bundle, payloads.LastKinds);
+        Assert.Equal(1, payloads.ArchivesBuilt);
         Assert.Equal("build-01:/srv/lanq/incoming/" + r.JobId + ".tar.gz", Assert.Single(ssh.Uploads));
         Assert.Contains(ssh.Calls, c => c.Command.Contains("-tzf", StringComparison.Ordinal));
         Assert.DoesNotContain(ssh.Calls.Where(c => c.Machine == "build-01"), c => c.Command.Contains("worktree", StringComparison.Ordinal));
@@ -234,6 +255,77 @@ public sealed class RunnerTests : IDisposable
         var ssh = new FakeSsh { Handler = (_, _) => new SshResult(255, "down") };
         var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
         await runner.RunAsync(Req(["dotnet", "test"]), CancellationToken.None);
-        Assert.Equal(PayloadKinds.Archive, payloads.LastKinds);
+        Assert.Equal(PayloadKinds.None, payloads.LastKinds);
+    }
+
+    [Fact]
+    public async Task GitOnlyJobNeverBuildsAnArchive()
+    {
+        var (runner, _, payloads, _) = Make();
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal(0, payloads.ArchivesBuilt);
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureDoesNotFailAJobThatAGitMachineCanTake()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.01 : 0.5)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = new InvalidOperationException("Cannot build an archive: nope") };
+        var lines = new List<string>();
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-02", r.Machine);
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureFailsClearlyWhenEveryMachineNeedsAnArchive()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = new InvalidOperationException("Cannot build an archive: Archive path 'CON' refused (rule: windows-reserved-device-name).") };
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains("windows-reserved-device-name", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Uploads);
+    }
+
+    [Fact]
+    public async Task SkippedSymlinksAndSubmodulesAreReportedInTheJobOutput()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        config.Machines[1].Capabilities = ["windows"];
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { Skipped = (2, 1) };
+        var lines = new List<string>();
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Contains(lines, l => l.Contains("skipped 2 symlink(s) and 1 submodule(s)", StringComparison.Ordinal));
     }
 }

@@ -129,4 +129,63 @@ public sealed class GitPayloadBuilderTests : IDisposable
         Assert.Contains("new.txt", p.ChangedFiles);
         Assert.Empty(Git("for-each-ref", "refs/lanq"));
     }
+
+    [Fact]
+    public async Task LazyArchiveStreamsLargeFilesInOrderAndCountsSkippedSymlinksAndSubmodules()
+    {
+        var big = new byte[24 * 1024 * 1024];
+        new Random(7).NextBytes(big);
+        File.WriteAllBytes(Path.Combine(_repo, "a.big"), big);
+        Directory.CreateDirectory(Path.Combine(_repo, "a"));
+        File.WriteAllText(Path.Combine(_repo, "a", "b.txt"), "inner");
+        File.WriteAllText(Path.Combine(_repo, "empty.txt"), "");
+        File.WriteAllText(Path.Combine(_repo, "z.txt"), "last");
+        Git("add", "-A");
+        var blob = Git("hash-object", "-w", "a.txt").Trim();
+        Git("update-index", "--add", "--cacheinfo", $"120000,{blob},link1");
+        Git("update-index", "--add", "--cacheinfo", $"120000,{blob},link2");
+        Git("update-index", "--add", "--cacheinfo", $"160000,{Git("rev-parse", "HEAD").Trim()},sub");
+        Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "more");
+        // Commit straight from the index (symlink and submodule entries have no working-tree files, so a snapshot's "add -A" would drop them).
+        var builder = new GitPayloadBuilder();
+        var built = await builder.BuildArchiveAsync("j6", _repo, Path.Combine(_repo, ".out"), Git("rev-parse", "HEAD").Trim(), CancellationToken.None);
+
+        Assert.Equal(2, built.SkippedSymlinks);
+        Assert.Equal(1, built.SkippedSubmodules);
+        using var gz = new System.IO.Compression.GZipStream(File.OpenRead(built.Path), System.IO.Compression.CompressionMode.Decompress);
+        using var reader = new System.Formats.Tar.TarReader(gz);
+        var names = new List<string>();
+        System.Formats.Tar.TarEntry? e;
+        while ((e = reader.GetNextEntry()) is not null)
+        {
+            names.Add(e.Name);
+            if (e.EntryType != System.Formats.Tar.TarEntryType.RegularFile)
+            {
+                continue;
+            }
+
+            using var ms = new MemoryStream();
+            e.DataStream?.CopyTo(ms);
+            switch (e.Name)
+            {
+                case "a.big":
+                    Assert.True(big.AsSpan().SequenceEqual(ms.ToArray()), "large file content must survive streaming");
+                    break;
+                case "empty.txt":
+                    Assert.Equal(0, ms.Length);
+                    break;
+                case "z.txt":
+                    Assert.Equal("last", System.Text.Encoding.UTF8.GetString(ms.ToArray()));
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        Assert.DoesNotContain("link1", names);
+        Assert.DoesNotContain("sub", names);
+        Assert.Contains("a/b.txt", names);
+        Assert.Contains("z.txt", names);
+        Assert.Empty(Git("for-each-ref", "refs/lanq"));
+    }
 }

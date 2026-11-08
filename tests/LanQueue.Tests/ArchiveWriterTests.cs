@@ -60,17 +60,60 @@ public sealed class ArchiveWriterTests : IDisposable
     [InlineData("../x")]
     [InlineData("a/../../x")]
     [InlineData("a/..")]
-    [InlineData("a\b")]
+    [InlineData(@"a\b")]
     [InlineData("C:/x")]
     [InlineData("")]
     [InlineData("a//b")]
     [InlineData("a/./b")]
     [InlineData("a\nb")]
+    [InlineData("...")]
+    [InlineData("x/.. /y")]
+    [InlineData("x/ ")]
+    [InlineData("dir./file")]
+    [InlineData("trail ing /x")]
+    [InlineData("a<b")]
+    [InlineData("a>b")]
+    [InlineData("a:b")]
+    [InlineData("a\"b")]
+    [InlineData("a|b")]
+    [InlineData("a?b")]
+    [InlineData("a*b")]
+    [InlineData("CON")]
+    [InlineData("con")]
+    [InlineData("src/NUL.txt")]
+    [InlineData("Aux.tar.gz")]
+    [InlineData("prn")]
+    [InlineData("COM1")]
+    [InlineData("lpt9.log")]
+    [InlineData("a/com5/b")]
+    [InlineData("CON .txt")]
     public async Task RefusesUnsafeEntryPaths(string bad)
     {
         var path = Path.Combine(_dir, "bad.tar.gz");
         await Assert.ThrowsAsync<ArgumentException>(() => ArchiveWriter.CreateAsync(path, [F(bad, "x")], CancellationToken.None));
         Assert.False(File.Exists(path));
+    }
+
+    [Theory]
+    [InlineData("a/CONSOLE.txt")]
+    [InlineData("COM0")]
+    [InlineData("COM10")]
+    [InlineData("LPT")]
+    [InlineData("a.b/c.d")]
+    [InlineData(".gitignore")]
+    [InlineData("dir/.hidden")]
+    [InlineData("name with space.txt")]
+    public void ValidatePathAcceptsOrdinaryNames(string ok) => ArchiveWriter.ValidatePath(ok);
+
+    [Theory]
+    [InlineData("a/CON", "windows-reserved-device-name")]
+    [InlineData("x/...", "windows-trailing-dot-or-space")]
+    [InlineData("a:b", "windows-forbidden-character")]
+    [InlineData("../x", "empty-dot-or-dotdot-segment")]
+    public void RefusalNamesTheRule(string bad, string rule)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => ArchiveWriter.ValidatePath(bad));
+        Assert.Contains("rule: " + rule, ex.Message, StringComparison.Ordinal);
     }
 
     [Theory]

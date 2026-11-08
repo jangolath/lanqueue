@@ -150,17 +150,22 @@ Each machine in `machines.yml` has an optional `transfer` setting:
   detached worktree per job. Later jobs on the same worker are cheaper to prepare. The worker needs `git`.
 - **`archive`**: `lanq` builds the same snapshot (HEAD plus uncommitted and untracked files, honouring `.gitignore`,
   never `.lanq/`) on your PC and sends it as a `tar.gz`; the worker extracts it into a fresh per-job folder with its
-  own `tar` (built into Linux and into Windows 10 1803+ / Server 2019+). **The worker does not need git at all**, so
-  the old PC that cannot or should not have git installed still joins the queue: SSH + tar + your toolchain.
+  own `tar`: GNU tar (with gzip) on Linux, or the bsdtar built into Windows 10 1803+ / Server 2019+. **The worker does
+  not need git at all**, so the old PC that cannot or should not have git installed still joins the queue: SSH + tar +
+  your toolchain. A worker whose `tar` is busybox tar (Alpine and many minimal images) is refused, because its
+  listing cannot be trusted; install GNU tar there or use `transfer: git`.
 
 Everything else is identical in both modes: the allowlists, forbidden flags and secret scan run on your PC before
 anything is sent, the directory checks and process-group kill apply to the job folder, and cleanup removes the job
 folder, the upload and the slot. Archive mode copies the files, not history, so a job that needs git metadata (for
-example one that runs `git log` or `git describe`) should run on a `git` machine. Symlinks and submodules are not
-included in the archive; only regular files and directories are.
+example one that runs `git log` or `git describe`) should run on a `git` machine. Symlinks and submodules are
+skipped, not archived (only regular files and directories are), and the job output reports how many were skipped.
+Paths that Windows cannot store (names ending in a dot or space, the characters `<>:"|?*`, or device names such as
+`CON`, `NUL` or `COM1`) make the archive build fail with the offending path and rule, because any worker could be a
+Windows one.
 
-`lanq health` checks `git --version` on `git` machines and `tar` on `archive` machines, and holds a machine that
-lacks the tool, with the reason.
+`lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
+(plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
 
 ## Keeping your keys safe
 
@@ -300,9 +305,13 @@ Each default below is enforced in code and covered by a unit test.
 - **Isolation.** One detached worktree (git mode) or one fresh extracted folder (archive mode) per job, removed
   afterwards. Gitignored files are never shipped.
 - **Archive extraction is checked before it happens.** `lanq` refuses to create an archive with an absolute path, a
-  `..` segment, a backslash or a non-regular entry, and the worker lists the archive first (`tar -tzf`) and refuses
-  it, writing nothing, if any entry is absolute, contains `..` or a backslash, or is anything but a file or
-  directory (symlinks and hard links are rejected). Linux also extracts with `--no-same-owner --no-same-permissions`.
+  `..` segment, a backslash or a name Windows cannot store; non-regular entries (symlinks, submodules) are skipped
+  and reported, never archived. The worker uses only GNU tar or bsdtar (busybox tar is refused, because it hides hard
+  links and rewrites paths in its listing), lists the archive first (`tar -tzf` and `tar -tvzf`) and refuses it,
+  writing nothing, if any entry is absolute, contains `..` or a backslash, is anything but a file or directory, or is
+  shown as a link (symlink or hard link). Windows workers call the built-in `System32\tar.exe` by full path. Extraction
+  runs with `--no-same-owner --no-same-permissions`. This is checked by tests that run the generated scripts against
+  crafted hostile archives; it is a defence in depth for a trusted-network tool, not a sandbox.
 - **No telemetry**, no network access except the SSH hosts you configure.
 
 See [SECURITY.md](SECURITY.md) for what this does not protect against.

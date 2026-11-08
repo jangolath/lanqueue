@@ -59,8 +59,8 @@ public sealed class JobRunner(
         JobPayload payload;
         try
         {
-            var kinds = (config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : 0)
-                | (config.Machines.Any(m => m.Transfer == TransferMode.Archive) ? PayloadKinds.Archive : 0);
+            // Only the bundle is built up front; an archive is built lazily, the first time an archive machine actually gets the job.
+            var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
             payload = await payloads.BuildAsync(jobId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex)
@@ -68,6 +68,7 @@ public sealed class JobRunner(
             return new JobResult(jobId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message);
         }
 
+        var archive = new LazyArchive(payloads, jobId, req.RepoDir, scratchDir, payload.Sha, output);
         try
         {
             var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
@@ -78,16 +79,17 @@ public sealed class JobRunner(
                 return Rejected(jobId, findings);
             }
 
-            return await Dispatch(jobId, req, payload, ct).ConfigureAwait(false);
+            return await Dispatch(jobId, req, payload, archive, ct).ConfigureAwait(false);
         }
         finally
         {
             TryDelete(payload.BundlePath);
             TryDelete(payload.ArchivePath);
+            await archive.DeleteAsync().ConfigureAwait(false);
         }
     }
 
-    private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, CancellationToken ct)
+    private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
         while (true)
@@ -100,7 +102,7 @@ public sealed class JobRunner(
 
             foreach (var machine in Scheduler.Rank(health, req.Needs))
             {
-                var result = await TryOnMachine(jobId, req, payload, machine, ct).ConfigureAwait(false);
+                var result = await TryOnMachine(jobId, req, payload, archive, machine, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -119,8 +121,29 @@ public sealed class JobRunner(
     }
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
-    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, Machine machine, CancellationToken ct)
+    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, CancellationToken ct)
     {
+        string? archivePath = null;
+        if (machine.Transfer == TransferMode.Archive)
+        {
+            try
+            {
+                archivePath = await archive.GetAsync(ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                var message = "Could not build the archive: " + ex.Message;
+                if (!config.Machines.Any(m => m.Transfer == TransferMode.Git))
+                {
+                    return new JobResult(jobId, JobStatus.InfraError, 70, null, message);
+                }
+
+                // A git machine can still take the job: skip this archive machine instead of failing the whole run.
+                output($"[lanq] {machine.Name}: {message}");
+                return null;
+            }
+        }
+
         var started = DateTimeOffset.UtcNow;
         var clock = Stopwatch.StartNew();
         var command = string.Join(' ', req.Argv);
@@ -146,19 +169,23 @@ public sealed class JobRunner(
         JobResult result;
         try
         {
-            result = await Transfer(jobId, req, payload, machine, OnLine, ct).ConfigureAwait(false);
+            result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
         }
         finally
         {
-            await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
+            var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
                 .ConfigureAwait(false);
+            if (!cleanup.Ok)
+            {
+                output($"[lanq] warning: cleanup on {machine.Name} did not finish; check {machine.WorkRoot}/jobs/{jobId}");
+            }
         }
 
         log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
         return result;
     }
 
-    private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, Machine machine, Action<string> onLine, CancellationToken ct)
+    private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, Action<string> onLine, CancellationToken ct)
     {
         string executeCommand;
         try
@@ -171,7 +198,7 @@ public sealed class JobRunner(
         }
 
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-        var local = machine.Transfer == TransferMode.Archive ? payload.ArchivePath : payload.BundlePath;
+        var local = machine.Transfer == TransferMode.Archive ? archivePath : payload.BundlePath;
         if (step.Ok && local is null)
         {
             return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine.");
@@ -223,6 +250,42 @@ public sealed class JobRunner(
     private static JobResult Rejected(string jobId, IEnumerable<SecretFinding> findings) =>
         new(jobId, JobStatus.Rejected, 2, null,
             "Refused: possible secrets in payload (" + string.Join(", ", findings.Select(f => $"{f.Rule} in {f.Where}")) + "). Nothing was sent.");
+
+    /// <summary>Builds the archive at most once per job, on first use, and reports what a tar.gz could not carry.</summary>
+    private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output)
+    {
+        private Task<ArchiveBuild>? _task;
+
+        public async Task<string> GetAsync(CancellationToken ct)
+        {
+            var first = _task is null;
+            _task ??= builder.BuildArchiveAsync(jobId, repoDir, dir, sha, ct);
+            var built = await _task.ConfigureAwait(false);
+            if (first && (built.SkippedSymlinks > 0 || built.SkippedSubmodules > 0))
+            {
+                output($"[lanq] archive: skipped {built.SkippedSymlinks} symlink(s) and {built.SkippedSubmodules} submodule(s) (not sent in archive mode)");
+            }
+
+            return built.Path;
+        }
+
+        public async Task DeleteAsync()
+        {
+            if (_task is null)
+            {
+                return;
+            }
+
+            try
+            {
+                TryDelete((await _task.ConfigureAwait(false)).Path);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException)
+            {
+                // nothing was built
+            }
+        }
+    }
 
     private static string NewId() =>
         DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..6];

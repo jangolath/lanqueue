@@ -54,7 +54,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
 
         var hold = tool == "missing"
             ? machine.Transfer == TransferMode.Archive
-                ? "tar is not installed on the machine (transfer: archive needs tar)"
+                ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or the Windows built-in bsdtar, and gzip on Linux)"
                 : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)"
             : Evaluate(machine, policy, outside, load, disk);
         return new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, hold, null);
