@@ -1,0 +1,14 @@
+bin/
+obj/
+.vs/
+*.user
+.lanq/
+machines.local.yml
+*.local.yml
+*.local.yaml
+*.local.md
+*.local.txt
+.env
+.env.*
+!.env.example
+TestResults/

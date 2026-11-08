@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LanQueue/LanQueue.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LanQueue.Tests/LanQueue.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,38 @@
+# Example registry. Copy to machines.local.yml (gitignored) and edit. Never commit real hosts or key paths.
+#
+# Hosts must already be in known_hosts (StrictHostKeyChecking=yes), and key-based login must work:
+#   ssh -i "$LANQ_KEY_BUILD01" user@build-01.lan true
+
+policy:
+  # A machine whose load ratio (0..1, load average per core on Linux, CPU% on Windows) is above this is "hold short".
+  load_threshold: 0.80
+  # A job's argv must start with one of these token sequences. Everything else is refused.
+  allowed_commands:
+    - dotnet build
+    - dotnet test
+    - npm ci
+    - npm test
+    - git status
+  # Directories (relative to the repo root) a job may run in. "src" also allows "src/App".
+  allowed_directories:
+    - "."
+    - src
+    - tests
+
+machines:
+  - name: build-01
+    os: linux                  # linux | windows
+    ssh: user@build-01.lan     # user@host, key-only
+    key_env: LANQ_KEY_BUILD01  # environment variable holding the path to the private key file
+    work_root: /srv/lanq       # absolute, forward slashes, no spaces
+    capabilities: [dotnet, node, linux]
+    max_jobs: 2
+
+  - name: build-02
+    os: windows
+    ssh: user@build-02.lan
+    key_env: LANQ_KEY_BUILD02
+    work_root: D:/lanq
+    capabilities: [dotnet, windows]
+    max_jobs: 1
+    allowed_hours: "22:00-07:00"   # optional; local time of the machine running lanq; may wrap midnight
