@@ -21,6 +21,12 @@ public class SecretScannerTests
     [InlineData("DB_PASSWORD=Sup3rS3cret!")]
     [InlineData("password = \"p@ss;w0rd!#$%^&*\"")]
     [InlineData("client_secret: 'abc!def?ghi#jkl'")]
+    [InlineData("DB_PASS=Sup3rS3cret")]
+    [InlineData("passphrase=correct-horse-battery")]
+    [InlineData("pass: hunter2hunter2")]
+    [InlineData("{ \"DB_PASS\": \"hunter2hunter2\" }")]
+    [InlineData("url = postgres://app:Sup3rS3cret@db.internal/app")]
+    [InlineData("git clone https://bob:ghpass1234@example.com/x.git")]
     public void ObviousSecretsAreFound(string text) =>
         Assert.NotEmpty(SecretScanner.ScanText(text, "x"));
 
@@ -32,6 +38,13 @@ public class SecretScannerTests
     [InlineData("var password = GetPassword();")]
     [InlineData("Server=db;Database=app;Integrated Security=true")]
     [InlineData("dotnet test --filter Category=Unit")]
+    [InlineData("bypass = something_long_here")]
+    [InlineData("PasswordAuthentication=no")]
+    [InlineData("pass = request.Value;")]
+    [InlineData("passthrough=enabled-for-all")]
+    [InlineData("see http://localhost:8080/health and https://example.com/a")]
+    [InlineData("url = postgres://app:${DB_PASSWORD}@db/app")]
+    [InlineData("git@github.com:owner/repo.git ssh://git@host:22/repo")]
     public void OrdinaryCodeIsNotFlagged(string text) =>
         Assert.Empty(SecretScanner.ScanText(text, "x"));
 
@@ -81,5 +94,24 @@ public class SecretScannerTests
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _ = SecretScanner.ScanText(hostile, "x");
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10));
+    }
+
+    public static TheoryData<string, string> Hostile => new()
+    {
+        { "blank lines", new string((char)10, 200_000) },
+        { "whitespace lines", string.Concat(Enumerable.Repeat(" " + (char)9 + " " + (char)10, 70_000)) },
+        { "dashes", new string('-', 200_000) },
+        { "repeated secret", string.Concat(Enumerable.Repeat("secret", 40_000)) },
+    };
+
+    [Theory]
+    [MemberData(nameof(Hostile))]
+    public void LargeHostileInputScansQuicklyWithNoTimeoutAndNoFinding(string label, string text)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var found = SecretScanner.ScanText(text, label);
+        sw.Stop();
+        Assert.Empty(found);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1), $"{label}: {sw.Elapsed}");
     }
 }

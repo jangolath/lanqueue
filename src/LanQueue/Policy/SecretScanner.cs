@@ -16,9 +16,10 @@ public static class SecretScanner
         ("api-key-sk", Make(@"\bsk-[A-Za-z0-9_-]{20,}")),
         ("jwt", Make(@"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}")),
         ("bearer-token", Make(@"\bBearer\s+[A-Za-z0-9._~+/-]{20,}")),
-        ("quoted-credential", Make("""(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\w*["']?\s*[:=]\s*(?:"(?!\$\{|\$\(|<|%|\{\{)[^"\s]{8,}"|'(?!\$\{|\$\(|<|%|\{\{)[^'\s]{8,}')""")),
-        ("unquoted-credential", Make("""^[+\-\s]*(?:export\s+)?["']?[\w.-]*?(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\w*["']?\s*[:=]\s*(?!\$|<|%|\{\{|(?:this|self|process|os|env|config|options|request|req|args|params|input)[.\[])[^\s"'#;,(){}<>]{8,}[ \t\r]*(?:#.*)?$""")),
-        ("connection-string-password", Make("""(?:;\s*(?:password|pwd)=(?![$<%{])[^;"'\s]{3,})|(?:(?:^|["'])\s*(?:password|pwd)=(?![$<%{])[^;"'\s]{3,};\s*\w+=)""")),
+        ("quoted-credential", Make("""(?:(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\w{0,40}|(?<![a-z0-9])pass(?:phrase|wd)?)["']?\s*[:=]\s*(?:"(?!\$\{|\$\(|<|%|\{\{)[^"\s]{8,}"|'(?!\$\{|\$\(|<|%|\{\{)[^'\s]{8,}')""")),
+        ("unquoted-credential", Make("""^[ \t+\-]{0,40}(?:export[ \t]+)?["']?[\w.-]{0,60}?(?:(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\w{0,40}|(?<![a-z0-9])pass(?:phrase|wd)?)["']?\s*[:=]\s*(?!\$|<|%|\{\{|(?:this|self|process|os|env|config|options|request|req|args|params|input)[.\[])[^\s"'#;,(){}<>]{8,}[ \t\r]*(?:#.*)?$""")),
+        ("url-credential", Make("""://[^/\s:@]{1,100}:(?![$<%{])[^/\s@]{3,100}@""")),
+        ("connection-string-password", Make("""(?:;\s*(?:password|pwd)=(?![$<%{])[^;"'\s]{3,})|(?:(?:^|["'])[ \t]*(?:password|pwd)=(?![$<%{])[^;"'\s]{3,};\s*\w+=)""")),
     ];
 
     private static readonly string[] SecretFileNames =
