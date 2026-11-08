@@ -2,8 +2,14 @@
 # Pass it with --config or LANQ_CONFIG; lanq never reads a config from the current directory implicitly.
 # Never commit real hosts or key paths.
 #
-# Hosts must already be in known_hosts (StrictHostKeyChecking=yes), and key-based login must work:
-#   ssh -i "$LANQ_KEY_BUILD01" user@build-01.lan true
+# Hosts must already be in known_hosts (StrictHostKeyChecking=yes), and key-based login must work.
+#
+# Two ways to authenticate (both are key-only; there is no password option):
+#   1. ssh-agent (preferred): omit key_env. lanq passes no -i and ssh uses the identities in your agent.
+#        ssh-add -l && ssh user@build-01.lan true
+#   2. A key file: set key_env to the NAME of an environment variable that holds the key file's path.
+#        ssh -i "$LANQ_KEY_BUILD02" user@build-02.lan true
+#      `lanq health` warns if that file has no passphrase. See the README, "Keeping your keys safe".
 
 policy:
   # A machine whose load ratio (0..1, load average per core on Linux, CPU% on Windows) is above this is "hold short".
@@ -25,7 +31,7 @@ machines:
   - name: build-01
     os: linux                  # linux | windows
     ssh: user@build-01.lan     # user@host, key-only
-    key_env: LANQ_KEY_BUILD01  # environment variable holding the path to the private key file
+    # No key_env: authenticates with the key loaded in ssh-agent (preferred).
     work_root: /srv/lanq       # absolute, forward slashes, no spaces
     capabilities: [dotnet, node, linux]
     max_jobs: 2
@@ -33,7 +39,7 @@ machines:
   - name: build-02
     os: windows
     ssh: user@build-02.lan
-    key_env: LANQ_KEY_BUILD02
+    key_env: LANQ_KEY_BUILD02  # optional: NAME of an env var holding the path to a key file (pins that key only)
     work_root: D:/lanq
     capabilities: [dotnet, windows]
     max_jobs: 1

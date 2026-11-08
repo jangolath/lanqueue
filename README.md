@@ -44,8 +44,8 @@ dotnet tool install --global --add-source ./nupkg LanQueue
 1. Copy `machines.example.yml` to a private location (for example `~/.config/lanq/machines.yml`, or
    `%APPDATA%\lanq\machines.yml` on Windows) and edit it. A config in the current directory is never picked up
    implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
-2. Make sure key-based login works and the host key is already in `known_hosts`:
-   `ssh -i "$LANQ_KEY_BUILD01" user@build-01.lan true`
+2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
+   (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
 3. Check the fleet:
 
    ```
@@ -66,7 +66,41 @@ dotnet tool install --global --add-source ./nupkg LanQueue
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
 `75` no eligible machine.
 
-## How a job runs
+## How it works
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Dev as You or your agent
+    participant L as lanq (local)
+    participant M as Chosen machine
+    Dev->>L: lanq run --needs dotnet -- dotnet test
+    L->>L: Policy: command and directory allowlists
+    L->>L: Snapshot HEAD + overlay (throwaway index), secret scan
+    L->>M: Health probe of every machine (ssh)
+    L->>L: Skip held machines, pick least loaded with the needed capabilities
+    L->>M: Claim a slot file (max_jobs)
+    L->>M: scp the git bundle
+    L->>M: Fetch into a bare cache, add a per-job worktree
+    L->>M: Run the allowlisted command in the worktree
+    M-->>L: Stream the log (terminal and state folder)
+    L->>M: Kill the process group, remove worktree, ref, bundle and slot
+    L->>L: Record wall-clock time in jobs.jsonl
+    L-->>Dev: Exit code = the job's exit code
+```
+
+Where each safety check sits (numbers are the diagram steps):
+
+| Step | Check |
+| --- | --- |
+| 2 | Command and directory must match your allowlists; permission-skipping flags are refused. Nothing has touched the network yet. |
+| 3 | The command line and the uncommitted overlay are secret-scanned; a hit refuses the job before anything is sent. |
+| 4-5 | Machines that are unreachable, loaded, outside their hours, low on disk or missing a capability are skipped. |
+| 6 | `max_jobs` is enforced with an atomic slot file per machine. |
+| 4-10 | Every ssh/scp call is key-only, non-interactive and uses `StrictHostKeyChecking=yes`. |
+| 11 | Cleanup runs even when the job fails, is cancelled or times out (best effort if the network is down). |
+
+### The steps in words
 
 1. The command and directory are checked against your policy. Rejected jobs never touch the network.
 2. HEAD plus uncommitted and untracked, non-ignored files are snapshotted into a commit using a temporary index
@@ -80,6 +114,95 @@ Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` in
 6. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
    `<state>/jobs.jsonl`. Any `.lanq/` folder in the repository is excluded from the snapshot.
 
+## Keeping your keys safe
+
+`lanq` never stores or sends your key; it only calls `ssh` and `scp`. The aim is that a synced folder, a stolen
+laptop or a leaked log cannot hand someone a way into your build machines.
+
+- **Prefer a passphrase-protected key held by ssh-agent.** Omit `key_env` in `machines.yml` and `lanq` passes no
+  `-i`; ssh uses whatever your agent holds (still `BatchMode=yes`, so a missing identity fails fast instead of
+  prompting). Create a key with `ssh-keygen -t ed25519` and choose a passphrase.
+- **Windows.** The OpenSSH Authentication Agent service is disabled by default. From an elevated PowerShell:
+  `Get-Service ssh-agent | Set-Service -StartupType Automatic`, then `Start-Service ssh-agent`, then
+  `ssh-add $env:USERPROFILE\.ssh\id_ed25519`. Microsoft's guide suggests backing the key up somewhere safe and then
+  deleting the plain file from the machine once it is in the agent.
+- **Linux / macOS.** Run an agent and `ssh-add ~/.ssh/id_ed25519`; `ssh-add -l` lists what is loaded and
+  `ssh-add -t <seconds>` limits how long a key stays loaded. To share one agent across logins on Linux,
+  [keychain](https://www.funtoo.org/Keychain) works: put ``eval `keychain --eval id_ed25519` `` in your shell profile.
+- **Hardware-backed keys.** `ssh-keygen -t ed25519-sk` creates a key whose secret lives on a FIDO2 token (touch is
+  required by default). It needs a token and FIDO-capable OpenSSH on both ends, and a person to touch it, which
+  suits interactive use better than unattended overnight runs.
+- **If you must use a key file** (`key_env`): keep it out of every repository and out of synced folders (OneDrive,
+  Dropbox, iCloud); restrict it (`chmod 600 ~/.ssh/id_ed25519`; on Windows `icacls <file> /inheritance:r` and then
+  `icacls <file> /grant:r "%USERNAME%:F"`); and give it a passphrase. `lanq health` warns when a configured OpenSSH-format
+  key file opens with an empty passphrase (checked with `ssh-keygen -y -P ""`). Other key formats and `-sk` keys
+  are not checked, so no warning is not a guarantee.
+- **Use a dedicated low-privilege build user on each worker.** Build tools run project code with that user's
+  rights, so give it nothing but its `work_root`. On Windows, a standard (non-admin) user's keys go in
+  `~\.ssh\authorized_keys`; administrator accounts use `C:\ProgramData\ssh\administrators_authorized_keys`.
+- **Restrict the key on the worker** in that user's `authorized_keys`, for example
+  `restrict,from="<your-lan-subnet>" ssh-ed25519 AAAA... lanq-build`. `restrict` turns off port, agent and X11
+  forwarding and PTY allocation, none of which `lanq` needs; `from=` accepts CIDR notation, so a stolen key is
+  useless off your LAN. Replace the placeholder with your LAN subnet in CIDR form.
+- **Secrets that are not the SSH key: PowerShell SecretManagement + SecretStore.** Use them for the key
+  *passphrase* and any job tokens: `Install-PSResource Microsoft.PowerShell.SecretManagement` and
+  `Install-PSResource Microsoft.PowerShell.SecretStore` (or `Install-Module`), then
+  `Register-SecretVault -Name SecretStore -ModuleName Microsoft.PowerShell.SecretStore -DefaultVault`,
+  `Set-Secret -Name BuildToken -Secret "..."` and `Get-Secret -Name BuildToken` (add `-AsPlainText` only where you
+  must). It is not a home for the SSH key *file*: ssh wants a key file or an agent, while the vault stores
+  strings, `SecureString`, `PSCredential`, byte arrays and hashtables for PowerShell to read back. Microsoft
+  states these modules are feature-complete and receive security and critical fixes only.
+
+Sources: [Microsoft, key-based authentication in OpenSSH for Windows](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_keymanagement),
+[Microsoft, SecretStore getting started](https://learn.microsoft.com/en-us/powershell/utility-modules/secretmanagement/get-started/using-secretstore?view=ps-modules),
+[ssh-keygen(1)](https://man.openbsd.org/ssh-keygen.1), [ssh-add(1)](https://man.openbsd.org/ssh-add.1),
+[sshd(8)](https://man.openbsd.org/sshd.8).
+
+## Two ways to use it
+
+### As a developer, directly
+
+```bash
+lanq health                                                    # who is awake and idle?
+lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is the job's exit code
+lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
+lanq stats                                                     # wall-clock time per machine
+```
+
+You own `machines.yml` and the allowlists. Edit them yourself; nothing else should.
+
+### With a coding agent such as Claude Code (scripts-first)
+
+Coding agents are good at deciding *what* to build and test. They are wasteful at working out *how* to reach a
+remote box on every turn: composing ssh commands, retrying, and pasting long logs back into the conversation, all
+of which spends context. With `lanq` the agent runs one deterministic command and reads one exit code plus the
+last lines of output. The remote mechanics, the allowlist and the cleanup live in code instead of being re-derived
+in prose each time. (This is a qualitative argument; this repository does not publish a token measurement.)
+
+```bash
+mkdir -p .lanq && lanq run --needs dotnet -- dotnet test -c Release > .lanq/last.log 2>&1; echo "exit=$?"; tail -n 40 .lanq/last.log
+```
+
+On Windows PowerShell:
+
+```powershell
+New-Item -Force -ItemType Directory .lanq | Out-Null; lanq run --needs dotnet -- dotnet test -c Release *> .lanq/last.log; "exit=$LASTEXITCODE"; Get-Content .lanq/last.log -Tail 40
+```
+
+The agent keeps the exit code and a short tail, and opens more of `.lanq/last.log` only when the tail is not
+enough. (`.lanq/` is excluded from the snapshot sent to the worker.)
+
+Ready-to-copy assets live in [docs/agents/](docs/agents/):
+
+- [`CLAUDE.md-snippet.md`](docs/agents/CLAUDE.md-snippet.md): rules to paste into your project's `CLAUDE.md`.
+- [`skills/lanq/SKILL.md`](docs/agents/skills/lanq/SKILL.md): a minimal Claude Code skill. Copy the `lanq` folder to
+  `.claude/skills/` in your project (or `~/.claude/skills/` for all projects).
+
+The split is deliberate: the developer owns the config and allowlists; the agent only calls `lanq run`. Text in
+`CLAUDE.md` or a skill is guidance the model follows, not enforcement (Claude Code's docs say to use a hook for
+that). The hard stops are in `lanq`: it refuses commands outside your allowlist and permission-skipping flags. To
+also keep the agent away from the config file, use Claude Code permission rules or a hook.
+
 ## Configuration reference
 
 ```yaml
@@ -92,7 +215,7 @@ machines:
   - name: build-01            # letters, digits, - _
     os: linux                 # linux | windows
     ssh: user@host            # no leading "-"
-    key_env: ENV_VAR_NAME     # env var holding the path of the private key file (optional; else ssh defaults)
+    key_env: ENV_VAR_NAME     # optional. Omit to use ssh-agent (no -i is passed). Else the NAME of an env var holding a key file path
     work_root: /srv/lanq      # Linux: absolute path. Windows: a drive path such as D:/lanq. Forward slashes, no spaces, no ".."
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files

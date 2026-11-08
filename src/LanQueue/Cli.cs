@@ -100,7 +100,7 @@ public static class Cli
         var probe = new HealthProbe(ssh, TimeProvider.System);
         if (p.Command == "health")
         {
-            return await Health(config, probe, stdout, ct).ConfigureAwait(false);
+            return await Health(config, probe, stdout, stderr, ct).ConfigureAwait(false);
         }
 
         var scratch = Path.Combine(home, "tmp");
@@ -163,8 +163,13 @@ public static class Cli
     private static string HomeDir(Func<string, string?> env) =>
         env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    private static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, CancellationToken ct)
+    private static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
+        foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
+        {
+            await stderr.WriteLineAsync(w).ConfigureAwait(false);
+        }
+
         foreach (var m in config.Machines)
         {
             var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
