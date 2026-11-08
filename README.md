@@ -41,6 +41,10 @@ dotnet tool install --global --add-source ./nupkg LanQueue
 
 ## Quick start
 
+Before your first job, each worker needs an SSH server, git and the toolchain your jobs use; it does **not** need
+GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
+[docs/WORKERS.md](docs/WORKERS.md).
+
 1. Copy `machines.example.yml` to a private location (for example `~/.config/lanq/machines.yml`, or
    `%APPDATA%\lanq\machines.yml` on Windows) and edit it. A config in the current directory is never picked up
    implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
