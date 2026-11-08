@@ -20,6 +20,9 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
     private static partial Regex WindowsWorkRootRegex();
 
+    [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.None, 1000)]
+    private static partial Regex EnvNameRegex();
+
     public static FleetConfig Parse(string yaml)
     {
         // Strict: unknown keys (for example "password") are an error, not ignored.
@@ -75,6 +78,11 @@ public static partial class ConfigLoader
             if (!SshTargetRegex().IsMatch(m.Ssh))
             {
                 throw new ConfigException($"Machine '{m.Name}': ssh target must be user@host (no leading '-', no spaces).");
+            }
+
+            if (m.KeyEnv is not null && !EnvNameRegex().IsMatch(m.KeyEnv))
+            {
+                throw new ConfigException($"Machine '{m.Name}': key_env must be the NAME of an environment variable (not a path). Omit it to use ssh-agent.");
             }
 
             var rootOk = m.Os == MachineOs.Windows ? WindowsWorkRootRegex().IsMatch(m.WorkRoot) : PosixWorkRootRegex().IsMatch(m.WorkRoot);

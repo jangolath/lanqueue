@@ -62,4 +62,18 @@ public class ConfigTests
     [Fact]
     public void MinFreeDiskIsReadFromConfig() =>
         Assert.Equal(12, ConfigLoader.Parse(T.Yaml.Replace("load_threshold: 0.8", "load_threshold: 0.8\n  min_free_disk_gb: 12", StringComparison.Ordinal)).Policy.MinFreeDiskGb);
+
+    [Fact]
+    public void KeyEnvIsOptional() => Assert.Null(T.Windows().KeyEnv);
+
+    [Theory]
+    [InlineData("C:/keys/id_ed25519")]
+    [InlineData("~/.ssh/id")]
+    [InlineData("")]
+    [InlineData("has space")]
+    public void KeyEnvMustBeAnEnvironmentVariableNameNotAPath(string value)
+    {
+        var yaml = T.Yaml.Replace("key_env: LANQ_KEY_BUILD01", $"key_env: \"{value}\"", StringComparison.Ordinal);
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+    }
 }

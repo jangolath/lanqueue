@@ -13,7 +13,7 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     public Task<SshResult> UploadAsync(Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
         Execute("scp", SshArgs.Scp(machine, ResolveKey(machine), localPath, remotePath), null, timeout, ct);
 
-    private string? ResolveKey(Machine machine)
+    internal string? ResolveKey(Machine machine)
     {
         if (string.IsNullOrEmpty(machine.KeyEnv))
         {

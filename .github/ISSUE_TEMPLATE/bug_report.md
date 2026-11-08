@@ -10,4 +10,4 @@ labels: bug
 
 **Local OS / remote OS (linux or windows) / `lanq` version / .NET version**
 
-**Relevant output** (exit code, `.lanq/logs/<job>.log` excerpt)
+**Relevant output** (exit code, job log excerpt from the lanq state folder)
