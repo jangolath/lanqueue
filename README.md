@@ -133,8 +133,8 @@ laptop or a leaked log cannot hand someone a way into your build machines.
   required by default). It needs a token and FIDO-capable OpenSSH on both ends, and a person to touch it, which
   suits interactive use better than unattended overnight runs.
 - **If you must use a key file** (`key_env`): keep it out of every repository and out of synced folders (OneDrive,
-  Dropbox, iCloud); restrict it (`chmod 600 ~/.ssh/id_ed25519`; on Windows `icacls <file> /inheritance:r` and then
-  `icacls <file> /grant:r "%USERNAME%:F"`); and give it a passphrase. `lanq health` warns when a configured OpenSSH-format
+  Dropbox, iCloud); restrict it (`chmod 600 ~/.ssh/id_ed25519`; on Windows, in PowerShell `icacls <file> /inheritance:r /grant:r "${env:USERNAME}:F"`, in cmd
+  `icacls <file> /inheritance:r /grant:r "%USERNAME%:F"`); and give it a passphrase. `lanq health` warns when a configured OpenSSH-format
   key file opens with an empty passphrase (checked with `ssh-keygen -y -P ""`). Other key formats and `-sk` keys
   are not checked, so no warning is not a guarantee.
 - **Use a dedicated low-privilege build user on each worker.** Build tools run project code with that user's
@@ -180,17 +180,18 @@ last lines of output. The remote mechanics, the allowlist and the cleanup live i
 in prose each time. (This is a qualitative argument; this repository does not publish a token measurement.)
 
 ```bash
-mkdir -p .lanq && lanq run --needs dotnet -- dotnet test -c Release > .lanq/last.log 2>&1; echo "exit=$?"; tail -n 40 .lanq/last.log
+lanq run --needs dotnet -- dotnet test -c Release > "${TMPDIR:-/tmp}/lanq-last.log" 2>&1; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
 ```
 
 On Windows PowerShell:
 
 ```powershell
-New-Item -Force -ItemType Directory .lanq | Out-Null; lanq run --needs dotnet -- dotnet test -c Release *> .lanq/last.log; "exit=$LASTEXITCODE"; Get-Content .lanq/last.log -Tail 40
+$log = Join-Path $env:TEMP 'lanq-last.log'; lanq run --needs dotnet -- dotnet test -c Release *> $log; "exit=$LASTEXITCODE"; Get-Content $log -Tail 40
 ```
 
-The agent keeps the exit code and a short tail, and opens more of `.lanq/last.log` only when the tail is not
-enough. (`.lanq/` is excluded from the snapshot sent to the worker.)
+The agent keeps the exit code and a short tail, and opens more of the log file only when the tail is not
+enough. The log lives in the temp folder, not in your repository; lanq also keeps full per-job logs in its own state
+folder (`$LANQ_HOME`, else a per-user folder). (A `.lanq/` folder in the repository is excluded from the snapshot.)
 
 Ready-to-copy assets live in [docs/agents/](docs/agents/):
 

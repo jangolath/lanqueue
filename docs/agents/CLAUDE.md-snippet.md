@@ -6,7 +6,7 @@
 - Run builds and tests through `lanq`, not by ssh-ing anywhere yourself:
   `lanq run --needs <capability> -- <command>`. The command must be one the developer has allowlisted.
 - Capture output and read only a summary:
-  `mkdir -p .lanq && lanq run --needs dotnet -- dotnet test > .lanq/last.log 2>&1; echo "exit=$?"; tail -n 40 .lanq/last.log`
+  `lanq run --needs dotnet -- dotnet test > "${TMPDIR:-/tmp}/lanq-last.log" 2>&1; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"`
   Report the exit code and the failing tests from the tail. Open more of the log only if the tail is not enough.
   Never paste a whole log into the conversation.
 - Exit codes: the job's own code; `2` refused by policy or bad arguments; `70` infrastructure error (ssh, git);

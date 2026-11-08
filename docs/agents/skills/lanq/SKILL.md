@@ -26,18 +26,19 @@ lanq health
 Run a job (run from inside the git repository) and keep only a short result:
 
 ```bash
-mkdir -p .lanq && lanq run --needs dotnet -- dotnet test -c Release > .lanq/last.log 2>&1; echo "exit=$?"; tail -n 40 .lanq/last.log
+lanq run --needs dotnet -- dotnet test -c Release > "${TMPDIR:-/tmp}/lanq-last.log" 2>&1; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
 ```
 
 - `--needs a,b` requires every listed capability on the machine (tags come from the developer's config).
 - `--dir <relative dir>` runs in a subdirectory, for example `--dir tests`.
 - `--wait 120` retries for up to 120 seconds while every machine is busy.
+- lanq keeps full per-job logs in its own state folder (`$LANQ_HOME`, else a per-user folder), never in the repository.
 
 ## Reading the result
 
 - Exit `0`: the job passed. Say so in one line.
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from the tail; open
-  `.lanq/last.log` further only if the tail does not show them.
+  the log file further only if the tail does not show them.
 - `2`: refused by policy (command, directory, secret scan, bad flag). Report the message and stop.
 - `70`: infrastructure error (ssh, git). Report it; do not retry in a loop.
 - `75`: no eligible machine. Retry once with `--wait 120`, then tell the developer.
