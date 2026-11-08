@@ -88,7 +88,7 @@ public sealed class RunnerTests : IDisposable
         var (runner, ssh, _, _) = Make((m, cmd) =>
             DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
             : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
-            : DecodedContains(m, cmd, "LASTEXITCODE") || cmd.Contains("exec ", StringComparison.Ordinal) ? new SshResult(3, "boom")
+            : DecodedContains(m, cmd, "LASTEXITCODE") || cmd.Contains("setsid -w", StringComparison.Ordinal) ? new SshResult(3, "boom")
             : new SshResult(0, ""));
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
 

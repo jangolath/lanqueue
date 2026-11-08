@@ -8,10 +8,23 @@ namespace LanQueue.Jobs;
 /// <summary>Builds the remote command strings (sh on Linux, PowerShell on Windows). Pure functions, unit tested.</summary>
 public static class RemoteScripts
 {
-    public static string Wrap(Machine m, string script) => m.Os == MachineOs.Windows
-        ? "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
-            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + script))
-        : "sh -c " + ShellQuote.Posix(script);
+    /// <summary>Conservative cap on the whole remote command line for Windows hosts (cmd.exe allows 8191 characters).</summary>
+    internal const int MaxWindowsCommandLength = 8000;
+
+    public static string Wrap(Machine m, string script)
+    {
+        if (m.Os != MachineOs.Windows)
+        {
+            return "sh -c " + ShellQuote.Posix(script);
+        }
+
+        var command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + script));
+        return command.Length > MaxWindowsCommandLength
+            ? throw new InvalidOperationException(
+                $"The command is too long for Windows machine '{m.Name}' ({command.Length} > {MaxWindowsCommandLength} characters once encoded). Shorten the arguments.")
+            : command;
+    }
 
     public static string Probe(Machine m) => m.Os == MachineOs.Windows
         ? $$"""
@@ -86,23 +99,69 @@ public static class RemoteScripts
         ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null"
         : $"mkdir -p {ShellQuote.Posix(m.WorkRoot + "/incoming")}";
 
-    /// <summary>Runs the allowlisted argv inside the job worktree. Each argument is individually quoted.</summary>
+    /// <summary>
+    /// Runs the allowlisted argv inside the job worktree. Each argument is individually quoted. The directory is the
+    /// normalized one (never the raw input) and its real path must stay inside the worktree. The job's process group
+    /// (Linux, via setsid) or PowerShell PID (Windows) is recorded in locks/job-ID.pid so cleanup can kill it.
+    /// </summary>
     public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv)
     {
-        var dir = $"{m.WorkRoot}/jobs/{jobId}" + (directory is "." or "" ? "" : "/" + directory);
+        var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
+        var worktree = $"{m.WorkRoot}/jobs/{jobId}";
+        var dir = rel == "." ? worktree : worktree + "/" + rel;
+        var pidFile = $"{m.WorkRoot}/locks/job-{jobId}.pid";
         if (m.Os == MachineOs.Windows)
         {
             var parts = string.Join(' ', argv.Select(ShellQuote.PowerShell));
-            return $"Set-Location -LiteralPath {ShellQuote.PowerShell(dir)}\n& {parts}\nexit $LASTEXITCODE";
+            return $$"""
+                $pf = {{ShellQuote.PowerShell(pidFile)}}
+                $wr = (Resolve-Path -LiteralPath {{ShellQuote.PowerShell(worktree)}}).ProviderPath
+                Set-Location -LiteralPath {{ShellQuote.PowerShell(dir)}}
+                $here = (Get-Location).ProviderPath
+                $sep = [IO.Path]::DirectorySeparatorChar
+                if (-not (($here + $sep).StartsWith($wr + $sep, [StringComparison]::OrdinalIgnoreCase))) { exit 126 }
+                $p = Get-Item -LiteralPath $here
+                while ($p.FullName.Length -gt $wr.Length) {
+                  if ($p.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 126 }
+                  $p = $p.Parent
+                }
+                Set-Content -LiteralPath $pf -Value $PID
+                $code = 1
+                try {
+                  & {{parts}}
+                  $code = $LASTEXITCODE
+                } finally {
+                  Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
+                }
+                exit $code
+                """;
         }
 
-        return $"cd {ShellQuote.Posix(dir)} || exit 126\nexec {string.Join(' ', argv.Select(ShellQuote.Posix))}";
+        return $$"""
+            cd -P {{ShellQuote.Posix(dir)}} || exit 126
+            case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
+            P={{ShellQuote.Posix(pidFile)}}
+            S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
+            $S sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$P" {{string.Join(' ', argv.Select(ShellQuote.Posix))}}
+            rc=$?
+            rm -f "$P"
+            exit $rc
+            """;
     }
 
     /// <summary>Best-effort teardown: worktree, ref, bundle, slot. Never fails the job.</summary>
     public static string Cleanup(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $pf = "$root/locks/job-$id.pid"
+            if (Test-Path -LiteralPath $pf) {
+              $jp = (Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
+              if ("$jp" -match '^[0-9]+$') {
+                $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
+                if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
+              }
+              Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
+            }
             & git -C "$root/repo.git" worktree remove --force "$root/jobs/$id" 2>$null
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
             & git -C "$root/repo.git" worktree prune 2>$null
@@ -113,6 +172,15 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
+            P="$R/locks/job-$ID.pid"
+            if [ -f "$P" ]; then
+              g=$(cat "$P" 2>/dev/null)
+              case "$g" in
+                ''|*[!0-9]*) ;;
+                *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
+              esac
+              rm -f "$P"
+            fi
             git -C "$R/repo.git" worktree remove --force "$R/jobs/$ID" 2>/dev/null
             rm -rf "$R/jobs/$ID"
             git -C "$R/repo.git" worktree prune 2>/dev/null

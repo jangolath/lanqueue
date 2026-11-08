@@ -71,6 +71,20 @@ public sealed class GitPayloadBuilderTests : IDisposable
     }
 
     [Fact]
+    public async Task LanqStateFolderIsNeverShippedEvenWhenNotIgnored()
+    {
+        Directory.CreateDirectory(Path.Combine(_repo, ".lanq", "logs"));
+        File.WriteAllText(Path.Combine(_repo, ".lanq", "jobs.jsonl"), "log");
+        Directory.CreateDirectory(Path.Combine(_repo, "sub", ".lanq"));
+        File.WriteAllText(Path.Combine(_repo, "sub", ".lanq", "x.log"), "log");
+        File.WriteAllText(Path.Combine(_repo, "real.txt"), "keep");
+        var p = await new GitPayloadBuilder().BuildAsync("j4", _repo, Path.Combine(_repo, ".out"), CancellationToken.None);
+        Assert.Contains("real.txt", p.ChangedFiles);
+        Assert.DoesNotContain(p.ChangedFiles, f => f.Contains(".lanq", StringComparison.Ordinal));
+        Assert.DoesNotContain("log", p.OverlayDiff.Replace("+keep", "", StringComparison.Ordinal), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GitignoredFilesAreNotShipped()
     {
         File.WriteAllText(Path.Combine(_repo, ".gitignore"), "secret.txt\n.out/\n");

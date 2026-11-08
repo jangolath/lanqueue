@@ -39,19 +39,28 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
         }
 
         var values = Parse(result.Output);
-        var load = Num(values, "load");
-        var disk = Num(values, "disk_free_gb");
-        var slots = (int)Num(values, "slots_used");
-        return new MachineHealth(machine.Name, true, load, disk, slots, Evaluate(machine, policy, outside, load), null);
+        if (!TryNum(values, "load", out var load) || !TryNum(values, "disk_free_gb", out var disk) || !TryNum(values, "slots_used", out var slotsRaw)
+            || load < 0 || disk < 0 || slotsRaw < 0)
+        {
+            // A missing or garbled key must never read as "idle machine with space": hold instead.
+            return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (load, disk_free_gb or slots_used missing or invalid)", null);
+        }
+
+        return new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, Evaluate(machine, policy, outside, load, disk), null);
     }
 
     /// <summary>"Hold short" rules: outside allowed hours, or load above the threshold.</summary>
-    public static string? Evaluate(Machine machine, PolicyConfig policy, bool outsideHours, double load)
+    public static string? Evaluate(Machine machine, PolicyConfig policy, bool outsideHours, double load, double diskFreeGb)
     {
         _ = machine;
         if (outsideHours)
         {
             return "outside allowed hours";
+        }
+
+        if (diskFreeGb < policy.MinFreeDiskGb)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"disk free {diskFreeGb:0.#} GB below minimum {policy.MinFreeDiskGb:0.#} GB");
         }
 
         return load > policy.LoadThreshold
@@ -74,8 +83,13 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
         return map;
     }
 
-    private static double Num(Dictionary<string, string> v, string key) =>
-        v.TryGetValue(key, out var s) && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : 0;
+    private static bool TryNum(Dictionary<string, string> v, string key, out double value)
+    {
+        value = 0;
+        return v.TryGetValue(key, out var s)
+            && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value)
+            && double.IsFinite(value);
+    }
 
     private static string FirstLine(string text) =>
         text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "no output";

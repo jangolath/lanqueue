@@ -47,4 +47,19 @@ public class ConfigTests
     public void EmptyAllowlistIsRejected() =>
         Assert.Throws<ConfigException>(() => ConfigLoader.Parse(
             T.Yaml.Replace("[\"dotnet build\", \"dotnet test\", \"npm test\"]", "[]", StringComparison.Ordinal)));
+
+    [Theory]
+    [InlineData("work_root: D:/lanq", "work_root: /srv/lanq")]
+    [InlineData("work_root: D:/lanq", "work_root: lanq")]
+    [InlineData("work_root: /srv/lanq", "work_root: D:/lanq")]
+    public void WorkRootMustMatchTheMachineOs(string good, string bad) =>
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace(good, bad, StringComparison.Ordinal)));
+
+    [Fact]
+    public void NegativeMinFreeDiskIsRefused() =>
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace("load_threshold: 0.8", "load_threshold: 0.8\n  min_free_disk_gb: -1", StringComparison.Ordinal)));
+
+    [Fact]
+    public void MinFreeDiskIsReadFromConfig() =>
+        Assert.Equal(12, ConfigLoader.Parse(T.Yaml.Replace("load_threshold: 0.8", "load_threshold: 0.8\n  min_free_disk_gb: 12", StringComparison.Ordinal)).Policy.MinFreeDiskGb);
 }

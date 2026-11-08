@@ -10,7 +10,7 @@ public class ScriptTests
     public void LinuxExecuteQuotesEveryArgumentAndStaysInWorktree()
     {
         var s = RemoteScripts.Execute(T.Linux(), "job1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /"]);
-        Assert.Contains("cd '/srv/lanq/jobs/job1/src'", s, StringComparison.Ordinal);
+        Assert.Contains("cd -P '/srv/lanq/jobs/job1/src'", s, StringComparison.Ordinal);
         Assert.Contains("'a b; rm -rf /'", s, StringComparison.Ordinal);
     }
 
@@ -20,7 +20,7 @@ public class ScriptTests
         var s = RemoteScripts.Execute(T.Windows(), "job1", ".", ["dotnet", "test"]);
         Assert.Contains("& 'dotnet' 'test'", s, StringComparison.Ordinal);
         Assert.Contains("'D:/lanq/jobs/job1'", s, StringComparison.Ordinal);
-        Assert.EndsWith("exit $LASTEXITCODE", s, StringComparison.Ordinal);
+        Assert.Contains("$LASTEXITCODE", s, StringComparison.Ordinal);
     }
 
     [Fact]

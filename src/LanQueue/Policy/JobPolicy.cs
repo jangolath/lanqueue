@@ -19,6 +19,11 @@ public static class JobPolicy
         "bypasspermissions",
         "--yolo",
         "bypass-approvals",
+        "danger-full-access",
+        "approval_policy=never",
+        "approval-policy=never",
+        "ask-for-approval never",
+        "ask-for-approval=never",
     ];
 
     public static PolicyResult Validate(PolicyConfig policy, IReadOnlyList<string> argv, string directory)
@@ -40,6 +45,14 @@ public static class JobPolicy
             {
                 return PolicyResult.Deny($"Permission-skipping flag rejected ('{flag}'). Jobs must never bypass agent permission prompts.");
             }
+        }
+
+        // Also check the joined, quote-stripped command so "--ask-for-approval" "never" and approval_policy="never" are caught.
+        var joined = string.Join(' ', argv).Replace("\"", "", StringComparison.Ordinal).Replace("'", "", StringComparison.Ordinal);
+        var joinedFlag = ForbiddenFragments.FirstOrDefault(f => joined.Contains(f, StringComparison.OrdinalIgnoreCase));
+        if (joinedFlag is not null)
+        {
+            return PolicyResult.Deny($"Permission-skipping flag rejected ('{joinedFlag}'). Jobs must never bypass agent permission prompts or sandboxes.");
         }
 
         if (!CommandAllowed(policy, argv))

@@ -14,8 +14,11 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]*$", RegexOptions.None, 1000)]
     private static partial Regex NameRegex();
 
-    [GeneratedRegex(@"^([A-Za-z]:)?/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
-    private static partial Regex WorkRootRegex();
+    [GeneratedRegex(@"^/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
+    private static partial Regex PosixWorkRootRegex();
+
+    [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
+    private static partial Regex WindowsWorkRootRegex();
 
     public static FleetConfig Parse(string yaml)
     {
@@ -51,6 +54,11 @@ public static partial class ConfigLoader
             throw new ConfigException("policy.allowed_commands is empty; nothing could ever run.");
         }
 
+        if (!double.IsFinite(config.Policy.MinFreeDiskGb) || config.Policy.MinFreeDiskGb < 0)
+        {
+            throw new ConfigException("policy.min_free_disk_gb must be >= 0.");
+        }
+
         if (config.Policy.LoadThreshold is <= 0 or > 1)
         {
             throw new ConfigException("policy.load_threshold must be in (0, 1].");
@@ -69,9 +77,12 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': ssh target must be user@host (no leading '-', no spaces).");
             }
 
-            if (!WorkRootRegex().IsMatch(m.WorkRoot) || m.WorkRoot.Contains("..", StringComparison.Ordinal))
+            var rootOk = m.Os == MachineOs.Windows ? WindowsWorkRootRegex().IsMatch(m.WorkRoot) : PosixWorkRootRegex().IsMatch(m.WorkRoot);
+            if (!rootOk || m.WorkRoot.Contains("..", StringComparison.Ordinal))
             {
-                throw new ConfigException($"Machine '{m.Name}': work_root must be an absolute path with forward slashes, no spaces, no '..'.");
+                throw new ConfigException(m.Os == MachineOs.Windows
+                    ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lanq (forward slashes, no spaces, no '..')."
+                    : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
             }
 
             if (m.MaxJobs < 1)

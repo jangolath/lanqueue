@@ -27,7 +27,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         try
         {
             await Git(top, env, ct, "read-tree", "HEAD").ConfigureAwait(false);
-            await Git(top, env, ct, "add", "-A").ConfigureAwait(false);
+
+            // lanq's own state (logs, job history) must never ride along in a snapshot, even when not gitignored.
+            await Git(top, env, ct, "add", "-A", "--", ".", ":(exclude,glob)**/.lanq/**").ConfigureAwait(false);
             var tree = (await Git(top, env, ct, "write-tree").ConfigureAwait(false)).Trim();
             var headTree = (await Git(top, null, ct, "rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
             var changed = tree == headTree

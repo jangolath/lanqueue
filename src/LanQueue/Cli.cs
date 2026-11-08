@@ -50,11 +50,12 @@ public static class Cli
     private const string Usage = """
         lanq - headless job runner for your own LAN machines
 
-          lanq health [--config machines.local.yml]
+          lanq health [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--config FILE] -- dotnet test
           lanq stats
 
-        Config lookup: --config, then $LANQ_CONFIG, then ./machines.local.yml.
+        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
+        State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine.
         """;
 
@@ -71,7 +72,7 @@ public static class Cli
             return 2;
         }
 
-        var home = Environment.GetEnvironmentVariable("LANQ_HOME") ?? Path.Combine(Directory.GetCurrentDirectory(), ".lanq");
+        var home = ResolveHome(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
         var log = new JobLog(home);
         if (p.Command == "stats")
         {
@@ -87,7 +88,7 @@ public static class Cli
         FleetConfig config;
         try
         {
-            config = ConfigLoader.Load(ResolveConfig(p.ConfigPath));
+            config = ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
         }
         catch (Exception ex) when (ex is ConfigException or IOException)
         {
@@ -111,11 +112,56 @@ public static class Cli
         return result.CliExitCode;
     }
 
-    private static string ResolveConfig(string? explicitPath)
+    /// <summary>State folder: $LANQ_HOME, else a per-user folder. Deliberately never inside the current repository.</summary>
+    internal static string ResolveHome(Func<string, string?> env, bool windows)
     {
-        var path = explicitPath ?? Environment.GetEnvironmentVariable("LANQ_CONFIG") ?? "machines.local.yml";
-        return File.Exists(path) ? path : throw new ConfigException($"Config file not found: {path}");
+        var explicitHome = env("LANQ_HOME");
+        if (!string.IsNullOrEmpty(explicitHome))
+        {
+            return explicitHome;
+        }
+
+        if (windows)
+        {
+            var local = env("LOCALAPPDATA");
+            return Path.Combine(string.IsNullOrEmpty(local) ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) : local, "lanq");
+        }
+
+        var state = env("XDG_STATE_HOME");
+        return !string.IsNullOrEmpty(state)
+            ? Path.Combine(state, "lanq")
+            : Path.Combine(HomeDir(env), ".local", "state", "lanq");
     }
+
+    /// <summary>Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder. Never the current directory.</summary>
+    internal static string ResolveConfig(string? explicitPath, Func<string, string?> env, bool windows, Func<string, bool> exists)
+    {
+        var path = explicitPath ?? env("LANQ_CONFIG");
+        if (!string.IsNullOrEmpty(path))
+        {
+            return exists(path) ? path : throw new ConfigException($"Config file not found: {path}");
+        }
+
+        string userDir;
+        if (windows)
+        {
+            var appData = env("APPDATA");
+            userDir = Path.Combine(string.IsNullOrEmpty(appData) ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) : appData, "lanq");
+        }
+        else
+        {
+            var xdg = env("XDG_CONFIG_HOME");
+            userDir = Path.Combine(!string.IsNullOrEmpty(xdg) ? xdg : Path.Combine(HomeDir(env), ".config"), "lanq");
+        }
+
+        var userFile = Path.Combine(userDir, "machines.yml");
+        return exists(userFile)
+            ? userFile
+            : throw new ConfigException($"No config found. Pass --config FILE, set LANQ_CONFIG, or create {userFile}. (A machines file in the current directory is never picked up implicitly.)");
+    }
+
+    private static string HomeDir(Func<string, string?> env) =>
+        env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
     private static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, CancellationToken ct)
     {

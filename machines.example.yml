@@ -1,4 +1,6 @@
-# Example registry. Copy to machines.local.yml (gitignored) and edit. Never commit real hosts or key paths.
+# Example registry. Copy to a private location (for example ~/.config/lanq/machines.yml) and edit.
+# Pass it with --config or LANQ_CONFIG; lanq never reads a config from the current directory implicitly.
+# Never commit real hosts or key paths.
 #
 # Hosts must already be in known_hosts (StrictHostKeyChecking=yes), and key-based login must work:
 #   ssh -i "$LANQ_KEY_BUILD01" user@build-01.lan true

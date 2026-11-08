@@ -54,6 +54,38 @@ public class HealthTests
         Assert.Null(h.Hold);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("garbage")]
+    [InlineData("load=0.1\nslots_used=0")]
+    [InlineData("disk_free_gb=50\nslots_used=0")]
+    [InlineData("load=abc\ndisk_free_gb=50\nslots_used=0")]
+    [InlineData("load=0.1\ndisk_free_gb=NaN\nslots_used=0")]
+    [InlineData("load=0.1\ndisk_free_gb=50")]
+    public async Task MissingOrGarbledHealthKeysHoldInsteadOfLookingIdle(string output)
+    {
+        var h = await Probe(T.Linux(), output, 0, Noon);
+        Assert.NotNull(h.Hold);
+        Assert.Contains("health", h.Hold, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LowFreeDiskIsHoldShort()
+    {
+        var h = await Probe(T.Linux(), "load=0.1\ndisk_free_gb=1.5\nslots_used=0", 0, Noon);
+        Assert.Contains("disk", h.Hold, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MinFreeDiskIsConfigurable()
+    {
+        var policy = T.Config().Policy;
+        policy.MinFreeDiskGb = 1;
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, "load=0.1\ndisk_free_gb=1.5\nslots_used=0") };
+        var h = await new HealthProbe(ssh, new FakeClock(Noon)).ProbeAsync(T.Linux(), policy, CancellationToken.None);
+        Assert.Null(h.Hold);
+    }
+
     [Fact]
     public async Task Ssh255MeansUnreachable()
     {

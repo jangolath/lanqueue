@@ -157,6 +157,16 @@ public sealed class JobRunner(
 
     private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, Machine machine, Action<string> onLine, CancellationToken ct)
     {
+        string executeCommand;
+        try
+        {
+            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message);
+        }
+
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         if (step.Ok)
         {
@@ -175,7 +185,7 @@ public sealed class JobRunner(
 
         var run = await ssh.RunAsync(
             machine,
-            RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv)),
+            executeCommand,
             onLine,
             TimeSpan.FromHours(4),
             ct).ConfigureAwait(false);

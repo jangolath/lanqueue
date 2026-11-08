@@ -9,6 +9,7 @@ public enum MachineOs
 public sealed class PolicyConfig
 {
     public double LoadThreshold { get; set; } = 0.80;
+    public double MinFreeDiskGb { get; set; } = 5;
     public List<string> AllowedCommands { get; set; } = [];
     public List<string> AllowedDirectories { get; set; } = [];
 }
