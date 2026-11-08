@@ -23,4 +23,6 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0` (the version is the tag without `v`).
 3. Watch the `release` run in the Actions tab. It builds with warnings as errors, tests, packs, then (after any environment approval) pushes to nuget.org with `--skip-duplicate` and creates a GitHub Release with the `.nupkg` attached.
 
+Once a release is indexed, users install it with `dotnet tool install --global LanQueue` and upgrade with `dotnet tool update --global LanQueue`. The package page uses the dedicated `src/LanQueue/PACKAGE.md` (NuGet renders limited Markdown: no mermaid, HTML or relative links), so keep its links absolute and update it when the README changes materially.
+
 To rehearse, run the `release` workflow manually (workflow_dispatch); it builds, tests and packs but never publishes.

@@ -1,14 +1,29 @@
 # LanQueue
 
-**Put the spare machines on your own network to work, without giving up your desk.**
+**RAM and new hardware are expensive. Your old PCs are not. Plug them back in and give them work.**
 
-`lanq` is a small .NET global tool that sends builds, tests, log analysis and headless coding-agent jobs to the
-other computers you already own. It checks which ones are awake and not busy, picks the least loaded machine that
-has what the job needs, ships your current git state (HEAD plus uncommitted changes) to a throw-away worktree over
-key-only SSH, runs one allowlisted command, streams the log back, cleans up, and records how long it took.
+`lanq` is a small .NET global tool that sends builds, tests, log analysis and headless coding-agent jobs to the other
+computers you already own: the old desktop in the closet, the spare laptop, the small-form-factor box. Your old
+machines can still help you get development done. All a worker needs is a LAN connection, SSH, git and the toolchain
+for your jobs, and it joins your queue. Your dev PC stays free for writing code.
 
-It is headless and scriptable, it has no daemon and no server to install on the remote machines (just `ssh`, `git`
-and a shell), and it sends nothing anywhere except to the hosts you list. There is no telemetry.
+```bash
+dotnet tool install --global LanQueue      # update later: dotnet tool update --global LanQueue
+```
+
+A 3-command taste (after you list your machines once in `machines.yml`, see [Quick start](#quick-start)):
+
+```bash
+lanq health                                                        # which machines are awake and free?
+lanq run --needs dotnet,linux -- dotnet test -c Release            # run on the least loaded match
+lanq stats                                                         # how long did jobs take?
+```
+
+For each job it checks which machines are awake and not busy, picks the least loaded one that has what the job
+needs, ships your current git state (HEAD plus uncommitted changes) to a throw-away worktree over key-only SSH, runs
+one allowlisted command, streams the log back, cleans up, and records how long it took. It is headless and
+scriptable, it has no daemon and no server to install on the remote machines (just `ssh`, `git` and a shell), and it
+sends nothing anywhere except to the hosts you list. There is no telemetry.
 
 ## Why this exists
 
@@ -33,8 +48,14 @@ Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, and `git
 Remote machines need `git` and an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+).
 
 ```bash
-dotnet tool install --global LanQueue      # works once the first release is published to NuGet
-# from source, from a clone:
+dotnet tool install --global LanQueue
+dotnet tool update --global LanQueue       # later, to upgrade
+```
+
+Package: [nuget.org/packages/LanQueue](https://www.nuget.org/packages/LanQueue). Prefer to build it yourself? From a
+clone:
+
+```bash
 dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
