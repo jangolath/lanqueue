@@ -37,6 +37,7 @@ public static class RemoteScripts
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
             'slots_used=' + $slots
+            {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
@@ -46,7 +47,31 @@ public static class RemoteScripts
             echo "load=$(awk -v l="$l" -v c="$cpus" 'BEGIN{printf "%.3f", l/c}')"
             echo "disk_free_gb=$(df -Pk "$d" | awk 'NR==2{printf "%.1f", $4/1048576}')"
             echo "slots_used=$(ls -d "$R"/locks/slot-* 2>/dev/null | wc -l | tr -d ' ')"
+            {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
             """;
+
+    private const string GitProbeWindows = "'tool=' + $(if (Get-Command git -ErrorAction SilentlyContinue) { 'ok' } else { 'missing' })";
+
+    private const string GitProbeLinux = "if git --version >/dev/null 2>&1; then echo tool=ok; else echo tool=missing; fi";
+
+    /// <summary>
+    /// Archive mode needs a tar whose -t listing can be trusted: GNU tar or bsdtar/libarchive (busybox tar hides hard links and strips
+    /// leading '/' and '../' in its listing, so it is refused), plus gzip. Defines the shell function tar_supported.
+    /// </summary>
+    private const string LinuxTarSupportedFunction =
+        "tar_supported() { v=$(tar --version 2>&1 | head -n 1); case \"$v\" in *\"GNU tar\"*|*bsdtar*|*libarchive*) command -v gzip >/dev/null 2>&1 ;; *) return 1 ;; esac; }";
+
+    private const string LinuxTarProbe = LinuxTarSupportedFunction + "\nif tar_supported; then echo tool=ok; else echo tool=missing; fi";
+
+    /// <summary>
+    /// The Windows built-in bsdtar, by full path so a GNU tar earlier on PATH (for example Git for Windows) is never used. It must also accept
+    /// every restricting extract option: that is probed once here with an empty archive (extracts nothing), so Prepare never needs a fallback.
+    /// </summary>
+    private const string WindowsTarProbe =
+        "$t = \"$env:SystemRoot\\System32\\tar.exe\"\n"
+        + "$ok = (Test-Path -LiteralPath $t) -and (\"$(& $t --version 2>$null | Select-Object -First 1)\" -match 'bsdtar|libarchive')\n"
+        + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
+        + "'tool=' + $(if ($ok) { 'ok' } else { 'missing' })";
 
     /// <summary>Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL.</summary>
     public static string AcquireSlot(Machine m, string jobId) => m.Os == MachineOs.Windows
@@ -74,7 +99,57 @@ public static class RemoteScripts
             """;
 
     /// <summary>Fetches the uploaded bundle into a bare cache repo and adds a detached per-job worktree.</summary>
-    public static string Prepare(Machine m, string jobId) => m.Os == MachineOs.Windows
+    public static string Prepare(Machine m, string jobId) => m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId);
+
+    /// <summary>
+    /// Extracts the uploaded tar.gz into a fresh per-job folder with the platform's own tar. Only GNU tar or bsdtar is accepted. The archive is
+    /// listed first and refused before anything is written if any entry is absolute, contains '..' or a backslash (on Windows also names that
+    /// Windows cannot store), or is anything but a plain file or directory (a verbose-listing line showing a link is refused as well).
+    /// </summary>
+    private static string PrepareArchive(Machine m, string jobId) => m.Os == MachineOs.Windows
+        ? $$"""
+            $ErrorActionPreference = 'Stop'
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $tar = "$env:SystemRoot\System32\tar.exe"
+            if (-not (Test-Path -LiteralPath $tar)) { Write-Output 'unsupported tar: the Windows built-in tar.exe was not found'; exit 1 }
+            if ("$(& $tar --version 2>$null | Select-Object -First 1)" -notmatch 'bsdtar|libarchive') { Write-Output 'unsupported tar: need the Windows built-in bsdtar'; exit 1 }
+            $a = "$root/incoming/$id.tar.gz"; $j = "$root/jobs/$id"
+            $names = @(& $tar -tzf $a); if ($LASTEXITCODE -ne 0) { exit 1 }
+            foreach ($n in $names) { if ($n -match '^[/\\]|\\|[<>:"|?*]|(^|/)\.\.(/|$)|(^|/)[^/]*[. ](/|$)|(^|/)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.[^/]*)?(/|$)') { Write-Output "unsafe archive entry: $n"; exit 1 } }
+            $kinds = @(& $tar -tvzf $a); if ($LASTEXITCODE -ne 0) { exit 1 }
+            foreach ($k in $kinds) { if ($k -notmatch '^[-d]' -or $k -match ' link to | -> ') { Write-Output "unsafe archive entry type: $k"; exit 1 } }
+            if (Test-Path -LiteralPath $j) { exit 1 }
+            New-Item -ItemType Directory -Force -Path $j | Out-Null
+            $ErrorActionPreference = 'Continue'
+            & $tar -xzf $a -C $j --no-same-owner --no-same-permissions --no-acls --no-xattrs --no-fflags 2>&1 | ForEach-Object { "$_" }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            exit 0
+            """
+        : $$"""
+            set -e
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
+            A="$R/incoming/$ID.tar.gz"; J="$R/jobs/$ID"; L="$R/incoming/$ID.list"
+            {{LinuxTarSupportedFunction}}
+            tar_supported || { echo "unsupported tar (need GNU tar or bsdtar, and gzip)"; exit 1; }
+            tar -tzf "$A" > "$L"
+            while IFS= read -r e; do
+              case "$e" in /*|..|../*|*/..|*/../*|*\\*) echo "unsafe archive entry: $e"; exit 1 ;; esac
+            done < "$L"
+            tar -tvzf "$A" > "$L"
+            while IFS= read -r e; do
+              case "$e" in
+                *" link to "*|*" -> "*) echo "unsafe archive entry link: $e"; exit 1 ;;
+                -*|d*) ;;
+                *) echo "unsafe archive entry type: $e"; exit 1 ;;
+              esac
+            done < "$L"
+            rm -f "$L"
+            mkdir -p "$R/jobs"
+            mkdir "$J"
+            tar -xzf "$A" -C "$J" --no-same-owner --no-same-permissions
+            """;
+
+    private static string PrepareGit(Machine m, string jobId) => m.Os == MachineOs.Windows
         ? $$"""
             $ErrorActionPreference = 'Stop'
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
@@ -93,7 +168,7 @@ public static class RemoteScripts
             git -C "$R/repo.git" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
 
-    public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}.bundle";
+    public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
 
     public static string EnsureIncoming(Machine m) => m.Os == MachineOs.Windows
         ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null"
@@ -150,7 +225,49 @@ public static class RemoteScripts
     }
 
     /// <summary>Best-effort teardown: worktree, ref, bundle, slot. Never fails the job.</summary>
-    public static string Cleanup(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
+    public static string Cleanup(Machine m, string jobId, string slot) =>
+        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot);
+
+    private static string CleanupArchive(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
+        ? $$"""
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $pf = "$root/locks/job-$id.pid"
+            if (Test-Path -LiteralPath $pf) {
+              $jp = (Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
+              if ("$jp" -match '^[0-9]+$') {
+                $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
+                if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
+              }
+              Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
+            }
+            $rc = 0
+            $jd = "$root/jobs/$id"
+            if (Test-Path -LiteralPath $jd) {
+              $full = [IO.Path]::GetFullPath($jd.Replace('/','\'))
+              cmd /c rd /s /q "\\?\$full" 2>$null | Out-Null
+              if (Test-Path -LiteralPath $jd) { Write-Output "cleanup incomplete: $jd could not be removed"; $rc = 1 }
+            }
+            Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.tar.gz", "$root/incoming/$id.list"
+            Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
+            exit $rc
+            """
+        : $$"""
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
+            P="$R/locks/job-$ID.pid"
+            if [ -f "$P" ]; then
+              g=$(cat "$P" 2>/dev/null)
+              case "$g" in
+                ''|*[!0-9]*) ;;
+                *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
+              esac
+              rm -f "$P"
+            fi
+            rm -rf "$R/jobs/$ID"
+            rm -f "$R/incoming/$ID.tar.gz" "$R/incoming/$ID.list" "$R/locks/slot-{{SafeSlot(slot)}}"
+            exit 0
+            """;
+
+    private static string CleanupGit(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $pf = "$root/locks/job-$id.pid"

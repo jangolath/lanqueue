@@ -14,13 +14,47 @@ public sealed class RunnerTests : IDisposable
     {
         public int Built { get; private set; }
 
-        public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, CancellationToken ct)
+        public PayloadKinds? LastKinds { get; private set; }
+
+        public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct)
         {
             Built++;
+            LastKinds = kinds;
             Directory.CreateDirectory(outputDir);
-            var path = Path.Combine(outputDir, jobId + ".bundle");
-            File.WriteAllText(path, "x");
-            return Task.FromResult(new JobPayload(path, "abc", files, diff));
+            string? bundle = null, archive = null;
+            if (kinds.HasFlag(PayloadKinds.Bundle))
+            {
+                bundle = Path.Combine(outputDir, jobId + ".bundle");
+                File.WriteAllText(bundle, "x");
+            }
+
+            if (kinds.HasFlag(PayloadKinds.Archive))
+            {
+                archive = Path.Combine(outputDir, jobId + ".tar.gz");
+                File.WriteAllText(archive, "x");
+            }
+
+            return Task.FromResult(new JobPayload(bundle, "abc", files, diff, archive));
+        }
+
+        public int ArchivesBuilt { get; private set; }
+
+        public Exception? ArchiveFailure { get; set; }
+
+        public (int Symlinks, int Submodules) Skipped { get; set; }
+
+        public Task<ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct)
+        {
+            ArchivesBuilt++;
+            if (ArchiveFailure is not null)
+            {
+                throw ArchiveFailure;
+            }
+
+            Directory.CreateDirectory(outputDir);
+            var archive = Path.Combine(outputDir, jobId + ".tar.gz");
+            File.WriteAllText(archive, "x");
+            return Task.FromResult(new ArchiveBuild(archive, Skipped.Symlinks, Skipped.Submodules));
         }
     }
 
@@ -28,7 +62,7 @@ public sealed class RunnerTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private static string Healthy(double load) => $"load={load}\ndisk_free_gb=50\nslots_used=0";
+    private static string Healthy(double load) => $"load={load}\ndisk_free_gb=50\nslots_used=0\ntool=ok";
 
     private (JobRunner Runner, FakeSsh Ssh, FakePayloads Payloads, JobLog Log) Make(Func<Config.Machine, string, SshResult>? handler = null, string diff = "", params string[] files)
     {
@@ -183,5 +217,210 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(2, all.Count);
         Assert.Equal(20, all.Sum(r => r.WallSeconds));
         await Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task ArchiveMachineGetsTheTarballAndNoGitCommands()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        config.Machines[1].Capabilities = ["windows"];
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("");
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-01", r.Machine);
+        Assert.Equal(PayloadKinds.Bundle, payloads.LastKinds);
+        Assert.Equal(1, payloads.ArchivesBuilt);
+        Assert.Equal("build-01:/srv/lanq/incoming/" + r.JobId + ".tar.gz", Assert.Single(ssh.Uploads));
+        Assert.Contains(ssh.Calls, c => c.Command.Contains("-tzf", StringComparison.Ordinal));
+        Assert.DoesNotContain(ssh.Calls.Where(c => c.Machine == "build-01"), c => c.Command.Contains("worktree", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "tmp")));
+    }
+
+    [Fact]
+    public async Task OnlyArchiveMachinesBuildsNoBundle()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].Transfer = Config.TransferMode.Archive;
+        var payloads = new FakePayloads("");
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(255, "down") };
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+        await runner.RunAsync(Req(["dotnet", "test"]), CancellationToken.None);
+        Assert.Equal(PayloadKinds.None, payloads.LastKinds);
+    }
+
+    [Fact]
+    public async Task GitOnlyJobNeverBuildsAnArchive()
+    {
+        var (runner, _, payloads, _) = Make();
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal(0, payloads.ArchivesBuilt);
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureDoesNotFailAJobThatAGitMachineCanTake()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.01 : 0.5)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = new InvalidOperationException("Cannot build an archive: nope") };
+        var lines = new List<string>();
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-02", r.Machine);
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureFailsClearlyWhenEveryMachineNeedsAnArchive()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = new InvalidOperationException("Cannot build an archive: Archive path 'CON' refused (rule: windows-reserved-device-name).") };
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains("windows-reserved-device-name", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Uploads);
+    }
+
+    [Fact]
+    public async Task SkippedSymlinksAndSubmodulesAreReportedInTheJobOutput()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        config.Machines[1].Capabilities = ["windows"];
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { Skipped = (2, 1) };
+        var lines = new List<string>();
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Contains(lines, l => l.Contains("skipped 2 symlink(s) and 1 submodule(s)", StringComparison.Ordinal));
+    }
+
+    private (JobRunner Runner, List<string> Lines) ArchiveFailureRig(Action<Config.FleetConfig> shape, Exception failure, string slot = "SLOT=1", double gitLoad = 0.5)
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        shape(config);
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, slot)
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.01 : gitLoad)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = failure };
+        var lines = new List<string>();
+        return (new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add), lines);
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureFailsFastWhenTheOnlyGitMachineLacksTheCapability()
+    {
+        var (runner, lines) = ArchiveFailureRig(c => c.Machines[1].Capabilities = ["windows"], new InvalidOperationException("Cannot build an archive: rule x-rule."));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Equal(70, r.ExitCode);
+        Assert.Contains("x-rule", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, l => l.Contains("waiting", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureWaitsForAHeldCapableGitMachineAndEndsWith75WhenTheWaitExpires()
+    {
+        // The git machine is held for load (0.95 > 0.8) only temporarily, so the archive failure must not end the job at 70.
+        var (runner, lines) = ArchiveFailureRig(_ => { }, new InvalidOperationException("Cannot build an archive: rule y-rule."), gitLoad: 0.95);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(75, r.ExitCode);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("No eligible machine", r.Message, StringComparison.Ordinal);
+        Assert.Contains("y-rule", r.Message, StringComparison.Ordinal);
+        Assert.Equal(1, lines.Count(l => l.Contains("y-rule", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureRunsOnTheHeldGitMachineOnceItBecomesFree()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        var busy = true;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.01 : busy ? 0.95 : 0.5)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = new InvalidOperationException("Cannot build an archive: rule w-rule.") };
+        var lines = new List<string>();
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add,
+            (_, _) =>
+            {
+                busy = false;
+                return Task.CompletedTask;
+            });
+        var r = await runner.RunAsync(new JobRequest(["dotnet"], ["dotnet", "test"], ".", _dir, TimeSpan.FromMinutes(5)), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-02", r.Machine);
+        Assert.Equal(1, lines.Count(l => l.Contains("w-rule", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public async Task ArchiveBuildIoFailureIsAnInfraErrorNotACrash(Type type)
+    {
+        var ex = (Exception)Activator.CreateInstance(type, "disk said no")!;
+        var (runner, _) = ArchiveFailureRig(c => c.Machines[1].Transfer = Config.TransferMode.Archive, ex);
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Equal(70, r.ExitCode);
+        Assert.Contains("Could not build the archive: disk said no", r.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArchiveFailureIsPrintedOnceAndAppearsInTheNoEligibleMachineSummary()
+    {
+        // The git machine is eligible but its slots are full, so the run ends 75 and the summary carries the archive reason.
+        var (runner, lines) = ArchiveFailureRig(_ => { }, new InvalidOperationException("Cannot build an archive: rule z-rule."), "SLOT=FULL");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(75, r.ExitCode);
+        Assert.Contains("z-rule", r.Message, StringComparison.Ordinal);
+        Assert.Equal(1, lines.Count(l => l.Contains("z-rule", StringComparison.Ordinal)));
     }
 }

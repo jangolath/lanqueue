@@ -1,14 +1,33 @@
+<p align="center"><img src="assets/lanqueue-banner.png" alt="LanQueue - your spare machines, back to work" width="100%"></p>
+
 # LanQueue
 
-**Put the spare machines on your own network to work, without giving up your desk.**
+**RAM and new hardware are expensive. Your old PCs are not. Plug them back in and give them work.**
 
-`lanq` is a small .NET global tool that sends builds, tests, log analysis and headless coding-agent jobs to the
-other computers you already own. It checks which ones are awake and not busy, picks the least loaded machine that
-has what the job needs, ships your current git state (HEAD plus uncommitted changes) to a throw-away worktree over
-key-only SSH, runs one allowlisted command, streams the log back, cleans up, and records how long it took.
+`lanq` is a small .NET global tool that sends builds, tests, log analysis and headless coding-agent jobs to the other
+computers you already own: the old desktop in the closet, the spare laptop, the small-form-factor box. Your old
+machines can still help you get development done. All a worker needs is a LAN connection, SSH, git (or just `tar`, see
+[Transfer modes](#transfer-modes-git-default-recommended-or-archive)) and the toolchain for your jobs, and it joins
+your queue. Your dev PC stays free for writing code. Even a PC too old or locked down to install git can help: SSH,
+tar and your toolchain are enough.
 
-It is headless and scriptable, it has no daemon and no server to install on the remote machines (just `ssh`, `git`
-and a shell), and it sends nothing anywhere except to the hosts you list. There is no telemetry.
+```bash
+dotnet tool install --global LanQueue      # update later: dotnet tool update --global LanQueue
+```
+
+A 3-command taste (after you list your machines once in `machines.yml`, see [Quick start](#quick-start)):
+
+```bash
+lanq health                                                        # which machines are awake and free?
+lanq run --needs dotnet,linux -- dotnet test -c Release            # run on the least loaded match
+lanq stats                                                         # how long did jobs take?
+```
+
+For each job it checks which machines are awake and not busy, picks the least loaded one that has what the job
+needs, ships your current git state (HEAD plus uncommitted changes) to a throw-away worktree over key-only SSH, runs
+one allowlisted command, streams the log back, cleans up, and records how long it took. It is headless and
+scriptable, it has no daemon and no server to install on the remote machines (just `ssh`, `git` or `tar`, and a shell), and it
+sends nothing anywhere except to the hosts you list. There is no telemetry.
 
 ## Why this exists
 
@@ -30,18 +49,25 @@ makes no speed-up claim.
 ## Install
 
 Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, and `git` and `ssh`/`scp` on the PATH.
-Remote machines need `git` and an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+).
+Remote machines need an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+) and either `git`
+(the default) or `tar` (with `transfer: archive`).
 
 ```bash
-dotnet tool install --global LanQueue      # works once the first release is published to NuGet
-# from source, from a clone:
+dotnet tool install --global LanQueue
+dotnet tool update --global LanQueue       # later, to upgrade
+```
+
+Package: [nuget.org/packages/LanQueue](https://www.nuget.org/packages/LanQueue). Prefer to build it yourself? From a
+clone:
+
+```bash
 dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
 
 ## Quick start
 
-Before your first job, each worker needs an SSH server, git and the toolchain your jobs use; it does **not** need
+Before your first job, each worker needs an SSH server, git (or only `tar` in archive mode) and the toolchain your jobs use; it does **not** need
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
 [docs/WORKERS.md](docs/WORKERS.md).
 
@@ -117,6 +143,31 @@ Where each safety check sits (numbers are the diagram steps):
    `<state>` is `$LANQ_HOME` or a per-user folder (`%LOCALAPPDATA%\lanq`, or `~/.local/state/lanq`), never your repo.
 6. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
    `<state>/jobs.jsonl`. Any `.lanq/` folder in the repository is excluded from the snapshot.
+
+## Transfer modes: git (default, recommended) or archive
+
+Each machine in `machines.yml` has an optional `transfer` setting:
+
+- **`git`** (the default, recommended): `lanq` sends a git bundle and the worker keeps a bare cache repo with a
+  detached worktree per job. Later jobs on the same worker are cheaper to prepare. The worker needs `git`.
+- **`archive`**: `lanq` builds the same snapshot (HEAD plus uncommitted and untracked files, honouring `.gitignore`,
+  never `.lanq/`) on your PC and sends it as a `tar.gz`; the worker extracts it into a fresh per-job folder with its
+  own `tar`: GNU tar (with gzip) on Linux, or the bsdtar built into Windows 10 1803+ / Server 2019+. **The worker does
+  not need git at all**, so the old PC that cannot or should not have git installed still joins the queue: SSH + tar +
+  your toolchain. A worker whose `tar` is busybox tar (Alpine and many minimal images) is refused, because its
+  listing cannot be trusted; install GNU tar there or use `transfer: git`.
+
+Everything else is identical in both modes: the allowlists, forbidden flags and secret scan run on your PC before
+anything is sent, the directory checks and process-group kill apply to the job folder, and cleanup removes the job
+folder, the upload and the slot. Archive mode copies the files, not history, so a job that needs git metadata (for
+example one that runs `git log` or `git describe`) should run on a `git` machine. Symlinks and submodules are
+skipped, not archived (only regular files and directories are), and the job output reports how many were skipped.
+Paths that Windows cannot store (names ending in a dot or space, the characters `<>:"|?*`, or device names such as
+`CON`, `NUL` or `COM1`) make the archive build fail with the offending path and rule, because any worker could be a
+Windows one.
+
+`lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
+(plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
 
 ## Keeping your keys safe
 
@@ -224,6 +275,7 @@ machines:
     work_root: /srv/lanq      # Linux: absolute path. Windows: a drive path such as D:/lanq. Forward slashes, no spaces, no ".."
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files
+    transfer: git             # optional: git (default, recommended; worker needs git) | archive (worker needs only tar)
     allowed_hours: "22:00-07:00"   # optional; local time of the machine running lanq; may wrap midnight
 ```
 
@@ -252,12 +304,23 @@ Each default below is enforced in code and covered by a unit test.
 - **No permission-skipping agent flags.** Any argument containing `dangerously`, `skip-permissions`,
   `bypassPermissions`, `--yolo`, `bypass-approvals`, `danger-full-access`, `approval_policy=never` or
   `--ask-for-approval never` is rejected, even for an allowlisted command.
-- **Isolation.** One detached worktree per job, removed afterwards. Gitignored files are never shipped.
+- **Isolation.** One detached worktree (git mode) or one fresh extracted folder (archive mode) per job, removed
+  afterwards. Gitignored files are never shipped.
+- **Archive extraction is checked before it happens.** `lanq` refuses to create an archive with an absolute path, a
+  `..` segment, a backslash or a name Windows cannot store; non-regular entries (symlinks, submodules) are skipped
+  and reported, never archived. The worker uses only GNU tar or bsdtar (busybox tar is refused, because it hides hard
+  links and rewrites paths in its listing), lists the archive first (`tar -tzf` and `tar -tvzf`) and refuses it,
+  writing nothing, if any entry is absolute, contains `..` or a backslash, is anything but a file or directory, or is
+  shown as a link (symlink or hard link). Windows workers call the built-in `System32\tar.exe` by full path; the health probe checks once that
+  it accepts `--no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions` (otherwise the machine is
+  held), and Prepare then extracts exactly once with those flags, with no fallback or retry. Linux extraction runs
+  with `--no-same-owner --no-same-permissions`. This is checked by tests that run the generated scripts against
+  crafted hostile archives; it is a defence in depth for a trusted-network tool, not a sandbox.
 - **No telemetry**, no network access except the SSH hosts you configure.
 
 See [SECURITY.md](SECURITY.md) for what this does not protect against.
 
-## Limitations (v0.1)
+## Limitations
 
 - The secret scan is pattern-based and best effort; it does not scan already-committed history or file contents
   of binary files. It is a safety net, not a guarantee.
@@ -271,7 +334,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   job that deliberately detaches into a new session or process group can escape it.
 - Windows remote commands are passed as an encoded command line limited to roughly 8000 characters; very long
   argument lists are refused with a clear message.
-- The full HEAD history is bundled on every run (no incremental transfer yet).
+- The full HEAD history is bundled on every run in git mode (no incremental transfer yet). Archive mode sends the
+  whole working snapshot each time, with no history and no cache.
 - A crashed orchestrator can leave a slot file behind; delete `locks/slot-N` (and any stale `locks/job-*.pid`) under
   the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds. Windows arguments containing embedded double quotes can
@@ -292,4 +356,4 @@ based on each project's public README at the time of writing; check the project 
 
 ## Contributing and licence
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). MIT licensed, see [LICENSE](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md). MIT licensed, see [LICENSE](LICENSE).

@@ -27,7 +27,7 @@ public class HealthTests
     [Fact]
     public async Task HealthyMachineHasNoHold()
     {
-        var h = await Probe(T.Linux(), "load=0.20\ndisk_free_gb=50\nslots_used=0", 0, Noon);
+        var h = await Probe(T.Linux(), "load=0.20\ndisk_free_gb=50\nslots_used=0\ntool=ok", 0, Noon);
         Assert.True(h.Reachable);
         Assert.Null(h.Hold);
         Assert.Equal(50, h.DiskFreeGb);
@@ -36,31 +36,31 @@ public class HealthTests
     [Fact]
     public async Task LoadAboveThresholdIsHoldShort()
     {
-        var h = await Probe(T.Linux(), "load=0.95\ndisk_free_gb=50\nslots_used=0", 0, Noon);
+        var h = await Probe(T.Linux(), "load=0.95\ndisk_free_gb=50\nslots_used=0\ntool=ok", 0, Noon);
         Assert.Contains("above threshold", h.Hold, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task OutsideAllowedHoursIsHoldShort()
     {
-        var h = await Probe(T.Windows(), "load=0.1\ndisk_free_gb=50\nslots_used=0", 0, Noon);
+        var h = await Probe(T.Windows(), "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok", 0, Noon);
         Assert.Equal("outside allowed hours", h.Hold);
     }
 
     [Fact]
     public async Task InsideWrappedHoursIsAllowed()
     {
-        var h = await Probe(T.Windows(), "load=0.1\ndisk_free_gb=50\nslots_used=0", 0, Night);
+        var h = await Probe(T.Windows(), "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok", 0, Night);
         Assert.Null(h.Hold);
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("garbage")]
-    [InlineData("load=0.1\nslots_used=0")]
-    [InlineData("disk_free_gb=50\nslots_used=0")]
-    [InlineData("load=abc\ndisk_free_gb=50\nslots_used=0")]
-    [InlineData("load=0.1\ndisk_free_gb=NaN\nslots_used=0")]
+    [InlineData("load=0.1\nslots_used=0\ntool=ok")]
+    [InlineData("disk_free_gb=50\nslots_used=0\ntool=ok")]
+    [InlineData("load=abc\ndisk_free_gb=50\nslots_used=0\ntool=ok")]
+    [InlineData("load=0.1\ndisk_free_gb=NaN\nslots_used=0\ntool=ok")]
     [InlineData("load=0.1\ndisk_free_gb=50")]
     public async Task MissingOrGarbledHealthKeysHoldInsteadOfLookingIdle(string output)
     {
@@ -70,9 +70,47 @@ public class HealthTests
     }
 
     [Fact]
+    public async Task GitMachineWithoutGitHoldsWithTheReason()
+    {
+        var h = await Probe(T.Linux(), "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=missing", 0, Noon);
+        Assert.Contains("git", h.Hold, StringComparison.Ordinal);
+        Assert.Contains("transfer: archive", h.Hold, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArchiveMachineWithoutTarHoldsWithTheReason()
+    {
+        var m = T.Linux();
+        m.Transfer = TransferMode.Archive;
+        var h = await Probe(m, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=missing", 0, Noon);
+        Assert.Contains("tar", h.Hold, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MissingToolKeyHoldsInsteadOfLookingReady()
+    {
+        var h = await Probe(T.Linux(), "load=0.1\ndisk_free_gb=50\nslots_used=0", 0, Noon);
+        Assert.Contains("health", h.Hold, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProbeChecksGitForGitMachinesAndTarForArchiveMachines()
+    {
+        foreach (var m in new[] { T.Linux(), T.Windows() })
+        {
+            Assert.Contains("git", LanQueue.Jobs.RemoteScripts.Probe(m), StringComparison.Ordinal);
+            m.Transfer = TransferMode.Archive;
+            var s = LanQueue.Jobs.RemoteScripts.Probe(m);
+            Assert.Contains("tar", s, StringComparison.Ordinal);
+            Assert.DoesNotContain("git", s, StringComparison.Ordinal);
+            Assert.Contains("tool=", s, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task LowFreeDiskIsHoldShort()
     {
-        var h = await Probe(T.Linux(), "load=0.1\ndisk_free_gb=1.5\nslots_used=0", 0, Noon);
+        var h = await Probe(T.Linux(), "load=0.1\ndisk_free_gb=1.5\nslots_used=0\ntool=ok", 0, Noon);
         Assert.Contains("disk", h.Hold, StringComparison.Ordinal);
     }
 
@@ -81,7 +119,7 @@ public class HealthTests
     {
         var policy = T.Config().Policy;
         policy.MinFreeDiskGb = 1;
-        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, "load=0.1\ndisk_free_gb=1.5\nslots_used=0") };
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, "load=0.1\ndisk_free_gb=1.5\nslots_used=0\ntool=ok") };
         var h = await new HealthProbe(ssh, new FakeClock(Noon)).ProbeAsync(T.Linux(), policy, CancellationToken.None);
         Assert.Null(h.Hold);
     }

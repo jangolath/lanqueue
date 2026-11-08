@@ -1,10 +1,34 @@
 using System.Text.RegularExpressions;
+using YamlDotNet.Core;
+using YamlDotNet.Core.Events;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
 namespace LanQueue.Config;
 
 public sealed class ConfigException(string message) : Exception(message);
+
+/// <summary>Accepts only the exact words 'git' and 'archive' (any case); a number, bool or anything else is a friendly error.</summary>
+internal sealed class TransferModeConverter : IYamlTypeConverter
+{
+    public bool Accepts(Type type) => type == typeof(TransferMode);
+
+    public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
+    {
+        var scalar = parser.Consume<Scalar>();
+        if (string.Equals(scalar.Value, "git", StringComparison.OrdinalIgnoreCase))
+        {
+            return TransferMode.Git;
+        }
+
+        return string.Equals(scalar.Value, "archive", StringComparison.OrdinalIgnoreCase)
+            ? TransferMode.Archive
+            : throw new YamlException(scalar.Start, scalar.End, $"transfer must be the word 'git' or 'archive' (got '{scalar.Value}').");
+    }
+
+    public void WriteYaml(IEmitter emitter, object? value, Type type, ObjectSerializer serializer) =>
+        throw new NotSupportedException();
+}
 
 public static partial class ConfigLoader
 {
@@ -28,6 +52,7 @@ public static partial class ConfigLoader
         // Strict: unknown keys (for example "password") are an error, not ignored.
         var deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
+            .WithTypeConverter(new TransferModeConverter())
             .Build();
         FleetConfig config;
         try
@@ -91,6 +116,11 @@ public static partial class ConfigLoader
                 throw new ConfigException(m.Os == MachineOs.Windows
                     ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lanq (forward slashes, no spaces, no '..')."
                     : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
+            }
+
+            if (!Enum.IsDefined(m.Transfer))
+            {
+                throw new ConfigException($"Machine '{m.Name}': transfer must be 'git' or 'archive'.");
             }
 
             if (m.MaxJobs < 1)

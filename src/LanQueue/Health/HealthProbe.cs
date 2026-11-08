@@ -39,6 +39,12 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
         }
 
         var values = Parse(result.Output);
+        values.TryGetValue("tool", out var tool);
+        if (tool is not ("ok" or "missing"))
+        {
+            return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (tool check missing or invalid)", null);
+        }
+
         if (!TryNum(values, "load", out var load) || !TryNum(values, "disk_free_gb", out var disk) || !TryNum(values, "slots_used", out var slotsRaw)
             || load < 0 || disk < 0 || slotsRaw < 0)
         {
@@ -46,7 +52,12 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
             return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (load, disk_free_gb or slots_used missing or invalid)", null);
         }
 
-        return new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, Evaluate(machine, policy, outside, load, disk), null);
+        var hold = tool == "missing"
+            ? machine.Transfer == TransferMode.Archive
+                ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or bsdtar plus gzip on Linux, or a Windows built-in tar.exe that accepts --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions)"
+                : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)"
+            : Evaluate(machine, policy, outside, load, disk);
+        return new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, hold, null);
     }
 
     /// <summary>"Hold short" rules: outside allowed hours, or load above the threshold.</summary>
