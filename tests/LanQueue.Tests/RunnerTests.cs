@@ -358,14 +358,44 @@ public sealed class RunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task ArchiveBuildFailureFailsFastWhenTheGitMachineIsHeld()
+    public async Task ArchiveBuildFailureWaitsForAHeldCapableGitMachineAndEndsWith75WhenTheWaitExpires()
     {
-        // A git machine held for load (0.95 > 0.8) is not eligible this round; the archive error is deterministic, so waiting for it cannot fix the job.
-        var (runner, _) = ArchiveFailureRig(_ => { }, new InvalidOperationException("Cannot build an archive: rule y-rule."), gitLoad: 0.95);
+        // The git machine is held for load (0.95 > 0.8) only temporarily, so the archive failure must not end the job at 70.
+        var (runner, lines) = ArchiveFailureRig(_ => { }, new InvalidOperationException("Cannot build an archive: rule y-rule."), gitLoad: 0.95);
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
 
-        Assert.Equal(70, r.ExitCode);
+        Assert.Equal(75, r.ExitCode);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("No eligible machine", r.Message, StringComparison.Ordinal);
         Assert.Contains("y-rule", r.Message, StringComparison.Ordinal);
+        Assert.Equal(1, lines.Count(l => l.Contains("y-rule", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ArchiveBuildFailureRunsOnTheHeldGitMachineOnceItBecomesFree()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        var busy = true;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.01 : busy ? 0.95 : 0.5)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("") { ArchiveFailure = new InvalidOperationException("Cannot build an archive: rule w-rule.") };
+        var lines = new List<string>();
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), lines.Add,
+            (_, _) =>
+            {
+                busy = false;
+                return Task.CompletedTask;
+            });
+        var r = await runner.RunAsync(new JobRequest(["dotnet"], ["dotnet", "test"], ".", _dir, TimeSpan.FromMinutes(5)), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-02", r.Machine);
+        Assert.Equal(1, lines.Count(l => l.Contains("w-rule", StringComparison.Ordinal)));
     }
 
     [Theory]

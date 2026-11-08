@@ -39,8 +39,11 @@ public sealed class JobRunner(
     HealthProbe probe,
     JobLog log,
     string scratchDir,
-    Action<string> output)
+    Action<string> output,
+    Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
+    private readonly Func<TimeSpan, CancellationToken, Task> delay = delay ?? Task.Delay;
+
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
         var jobId = NewId();
@@ -92,6 +95,9 @@ public sealed class JobRunner(
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
+        // Static property of the config: can any git-transfer machine ever take this job (capabilities only; load, hours and slots are temporary)?
+        var gitCanEverTakeIt = config.Machines.Any(m => m.Transfer == TransferMode.Git
+            && req.Needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)));
         while (true)
         {
             var health = new List<(Machine, MachineHealth)>();
@@ -101,10 +107,9 @@ public sealed class JobRunner(
             }
 
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
-            var eligible = ranked.Where(m => m.Transfer == TransferMode.Git).ToList();
             foreach (var machine in ranked)
             {
-                var result = await TryOnMachine(jobId, req, payload, archive, machine, eligible, ct).ConfigureAwait(false);
+                var result = await TryOnMachine(jobId, req, payload, archive, machine, gitCanEverTakeIt, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -119,12 +124,12 @@ public sealed class JobRunner(
             }
 
             output("[lanq] no eligible machine; waiting 15s");
-            await Task.Delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+            await delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
         }
     }
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
-    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, IReadOnlyList<Machine> eligibleGit, CancellationToken ct)
+    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, bool gitCanEverTakeIt, CancellationToken ct)
     {
         string? archivePath = null;
         if (machine.Transfer == TransferMode.Archive)
@@ -136,9 +141,10 @@ public sealed class JobRunner(
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
                 var message = "Could not build the archive: " + ex.Message;
-                // A git machine that is eligible for THIS job (capabilities, hours, load, space) can still take it: skip this archive machine.
-                // Otherwise nobody can ever take the job, so fail fast instead of waiting for a machine that cannot help.
-                if (!eligibleGit.Any())
+                // If any git machine has the capabilities this job needs, it can take the job now or later (it may only be busy, full
+                // or outside its hours): skip this archive machine and keep waiting. Only when no git machine could EVER take it
+                // does the archive failure end the job (70) instead of waiting for a machine that cannot help.
+                if (!gitCanEverTakeIt)
                 {
                     return new JobResult(jobId, JobStatus.InfraError, 70, null, message);
                 }
