@@ -93,6 +93,11 @@ public static partial class ConfigLoader
                     : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
             }
 
+            if (!Enum.IsDefined(m.Transfer))
+            {
+                throw new ConfigException($"Machine '{m.Name}': transfer must be 'git' or 'archive'.");
+            }
+
             if (m.MaxJobs < 1)
             {
                 throw new ConfigException($"Machine '{m.Name}': max_jobs must be >= 1.");

@@ -9,7 +9,7 @@ namespace LanQueue.Payload;
 /// </summary>
 public sealed class GitPayloadBuilder : IPayloadBuilder
 {
-    public async Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, CancellationToken ct)
+    public async Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct)
     {
         Directory.CreateDirectory(outputDir);
         var top = (await Git(repoDir, null, ct, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim();
@@ -43,10 +43,30 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 ? head
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
 
-            var bundle = Path.Combine(outputDir, jobId + ".bundle");
-            await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
-            await Git(top, null, ct, "bundle", "create", bundle, refName).ConfigureAwait(false);
-            return new JobPayload(bundle, sha, changed, diff);
+            string? bundle = null;
+            if (kinds.HasFlag(PayloadKinds.Bundle))
+            {
+                bundle = Path.Combine(outputDir, jobId + ".bundle");
+                await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
+                await Git(top, null, ct, "bundle", "create", bundle, refName).ConfigureAwait(false);
+            }
+
+            string? archive = null;
+            if (kinds.HasFlag(PayloadKinds.Archive))
+            {
+                archive = Path.Combine(outputDir, jobId + ".tar.gz");
+                var snapshot = await ReadSnapshotFiles(top, tree, ct).ConfigureAwait(false);
+                try
+                {
+                    await ArchiveWriter.CreateAsync(archive, snapshot, ct).ConfigureAwait(false);
+                }
+                catch (ArgumentException ex)
+                {
+                    throw new InvalidOperationException("Cannot build an archive: " + ex.Message, ex);
+                }
+            }
+
+            return new JobPayload(bundle, sha, changed, diff, archive);
         }
         finally
         {
@@ -61,6 +81,100 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
 
             File.Delete(tmpIndex);
         }
+    }
+
+    /// <summary>Reads every regular file of the snapshot tree (the throwaway index result) through one long-lived cat-file process.</summary>
+    private static async Task<List<ArchiveFile>> ReadSnapshotFiles(string top, string tree, CancellationToken ct)
+    {
+        var listing = await Git(top, null, ct, "ls-tree", "-r", "-z", tree).ConfigureAwait(false);
+        var wanted = new List<(string Sha, string Path, bool Exec)>();
+        foreach (var rec in listing.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            // "<mode> SP <type> SP <sha> TAB <path>"
+            var tab = rec.IndexOf('\t', StringComparison.Ordinal);
+            var meta = rec[..tab].Split(' ');
+            if (meta[1] == "blob" && ArchiveWriter.IsRegularMode(meta[0]))
+            {
+                wanted.Add((meta[2], rec[(tab + 1)..], meta[0] == "100755"));
+            }
+        }
+
+        var files = new List<ArchiveFile>(wanted.Count);
+        if (wanted.Count == 0)
+        {
+            return files;
+        }
+
+        var psi = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = top,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.ArgumentList.Add("cat-file");
+        psi.ArgumentList.Add("--batch");
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start git.");
+        var err = p.StandardError.ReadToEndAsync(ct);
+        var feed = Task.Run(
+            async () =>
+            {
+                foreach (var w in wanted)
+                {
+                    await p.StandardInput.WriteAsync(w.Sha + "\n").ConfigureAwait(false);
+                }
+
+                p.StandardInput.Close();
+            },
+            ct);
+        var stdout = p.StandardOutput.BaseStream;
+        foreach (var w in wanted)
+        {
+            var header = await ReadLine(stdout, ct).ConfigureAwait(false);
+            var parts = header.Split(' ');
+            if (parts.Length != 3 || parts[1] != "blob" || !long.TryParse(parts[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var size) || size > int.MaxValue)
+            {
+                throw new InvalidOperationException($"git cat-file returned '{header}' for {w.Path}.");
+            }
+
+            var buf = new byte[size];
+            await stdout.ReadExactlyAsync(buf, ct).ConfigureAwait(false);
+            await ReadLine(stdout, ct).ConfigureAwait(false); // trailing LF
+            files.Add(new ArchiveFile(w.Path, w.Exec, buf));
+        }
+
+        await feed.ConfigureAwait(false);
+        await p.WaitForExitAsync(ct).ConfigureAwait(false);
+        if (p.ExitCode != 0)
+        {
+            throw new InvalidOperationException("git cat-file failed: " + (await err.ConfigureAwait(false)).Trim());
+        }
+
+        return files;
+    }
+
+    private static async Task<string> ReadLine(Stream s, CancellationToken ct)
+    {
+        var bytes = new List<byte>(64);
+        var one = new byte[1];
+        while (true)
+        {
+            if (await s.ReadAsync(one, ct).ConfigureAwait(false) == 0)
+            {
+                break;
+            }
+
+            if (one[0] == (byte)'\n')
+            {
+                break;
+            }
+
+            bytes.Add(one[0]);
+        }
+
+        return Encoding.UTF8.GetString(bytes.ToArray());
     }
 
     private static async Task<string> Git(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)

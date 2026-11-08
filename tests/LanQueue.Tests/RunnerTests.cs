@@ -14,13 +14,27 @@ public sealed class RunnerTests : IDisposable
     {
         public int Built { get; private set; }
 
-        public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, CancellationToken ct)
+        public PayloadKinds? LastKinds { get; private set; }
+
+        public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct)
         {
             Built++;
+            LastKinds = kinds;
             Directory.CreateDirectory(outputDir);
-            var path = Path.Combine(outputDir, jobId + ".bundle");
-            File.WriteAllText(path, "x");
-            return Task.FromResult(new JobPayload(path, "abc", files, diff));
+            string? bundle = null, archive = null;
+            if (kinds.HasFlag(PayloadKinds.Bundle))
+            {
+                bundle = Path.Combine(outputDir, jobId + ".bundle");
+                File.WriteAllText(bundle, "x");
+            }
+
+            if (kinds.HasFlag(PayloadKinds.Archive))
+            {
+                archive = Path.Combine(outputDir, jobId + ".tar.gz");
+                File.WriteAllText(archive, "x");
+            }
+
+            return Task.FromResult(new JobPayload(bundle, "abc", files, diff, archive));
         }
     }
 
@@ -28,7 +42,7 @@ public sealed class RunnerTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private static string Healthy(double load) => $"load={load}\ndisk_free_gb=50\nslots_used=0";
+    private static string Healthy(double load) => $"load={load}\ndisk_free_gb=50\nslots_used=0\ntool=ok";
 
     private (JobRunner Runner, FakeSsh Ssh, FakePayloads Payloads, JobLog Log) Make(Func<Config.Machine, string, SshResult>? handler = null, string diff = "", params string[] files)
     {
@@ -183,5 +197,43 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(2, all.Count);
         Assert.Equal(20, all.Sum(r => r.WallSeconds));
         await Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task ArchiveMachineGetsTheTarballAndNoGitCommands()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].AllowedHours = null;
+        config.Machines[1].Capabilities = ["windows"];
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1)) : new SshResult(0, "ran"),
+        };
+        var payloads = new FakePayloads("");
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-01", r.Machine);
+        Assert.Equal(PayloadKinds.Archive | PayloadKinds.Bundle, payloads.LastKinds);
+        Assert.Equal("build-01:/srv/lanq/incoming/" + r.JobId + ".tar.gz", Assert.Single(ssh.Uploads));
+        Assert.Contains(ssh.Calls, c => c.Command.Contains("-tzf", StringComparison.Ordinal));
+        Assert.DoesNotContain(ssh.Calls.Where(c => c.Machine == "build-01"), c => c.Command.Contains("worktree", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "tmp")));
+    }
+
+    [Fact]
+    public async Task OnlyArchiveMachinesBuildsNoBundle()
+    {
+        var config = T.Config();
+        config.Machines[0].Transfer = Config.TransferMode.Archive;
+        config.Machines[1].Transfer = Config.TransferMode.Archive;
+        var payloads = new FakePayloads("");
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(255, "down") };
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+        await runner.RunAsync(Req(["dotnet", "test"]), CancellationToken.None);
+        Assert.Equal(PayloadKinds.Archive, payloads.LastKinds);
     }
 }

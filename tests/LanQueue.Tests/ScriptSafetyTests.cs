@@ -135,6 +135,9 @@ public class ScriptSafetyTests
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
             ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2"),
+            ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
+            ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
+            ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
         };
         foreach (var (name, script) in scripts)
         {
@@ -169,6 +172,9 @@ public class ScriptSafetyTests
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
             ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2"),
+            ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
+            ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
+            ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
         };
         var checker = Path.Combine(Path.GetTempPath(), "lanq-ps-check-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(
@@ -197,6 +203,16 @@ public class ScriptSafetyTests
             File.Delete(checker);
         }
     }
+
+    private static LanQueue.Config.Machine Archive(LanQueue.Config.Machine m) => new()
+    {
+        Name = m.Name,
+        Os = m.Os,
+        Ssh = m.Ssh,
+        WorkRoot = m.WorkRoot,
+        MaxJobs = m.MaxJobs,
+        Transfer = LanQueue.Config.TransferMode.Archive,
+    };
 
     private static int Run(string exe, params string[] args)
     {

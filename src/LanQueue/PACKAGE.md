@@ -4,8 +4,8 @@
 
 `lanq` is a small .NET global tool that sends builds, tests, log analysis and headless coding-agent jobs to the
 other computers you already own. Your old machines can still help you get development done: all a worker needs is a
-LAN connection, SSH, git and the toolchain for your jobs, and it joins your queue. Your dev PC stays free for writing
-code.
+LAN connection, SSH, git and the toolchain for your jobs, and it joins your queue. No git on the old PC? Set
+`transfer: archive` and it needs only SSH, tar and your toolchain. Your dev PC stays free for writing code.
 
 ## Install
 
@@ -27,7 +27,8 @@ uncommitted changes) to a throw-away worktree, runs the one allowlisted command,
 
 ## What a worker needs
 
-An SSH server, git and the toolchain your jobs use. Nothing from lanqueue is installed on it, and it needs no GitHub
+An SSH server, the toolchain your jobs use, and git (recommended, the default) or, with `transfer: archive`, just
+`tar` (built into Windows 10 1803+ and Linux). Nothing from lanqueue is installed on it, and it needs no GitHub
 access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md).
 
 ## Safe by default
@@ -43,6 +44,7 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 - [Security model and limits](https://github.com/jangolath/lanqueue/blob/main/SECURITY.md)
 - [Using it with coding agents](https://github.com/jangolath/lanqueue/tree/main/docs/agents)
 - [Releasing](https://github.com/jangolath/lanqueue/blob/main/RELEASING.md)
+- [Changelog](https://github.com/jangolath/lanqueue/blob/main/CHANGELOG.md)
 - [Release notes](https://github.com/jangolath/lanqueue/releases)
 
 MIT licensed.

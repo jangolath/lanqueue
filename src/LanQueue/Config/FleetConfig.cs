@@ -6,6 +6,15 @@ public enum MachineOs
     Linux,
 }
 
+public enum TransferMode
+{
+    /// <summary>Git bundle fetched into a bare cache repo, with a per-job worktree. Recommended; needs git on the worker.</summary>
+    Git,
+
+    /// <summary>A tar.gz of the same snapshot, extracted into a fresh per-job folder. Needs only tar on the worker.</summary>
+    Archive,
+}
+
 public sealed class PolicyConfig
 {
     public double LoadThreshold { get; set; } = 0.80;
@@ -24,6 +33,7 @@ public sealed class Machine
     public List<string> Capabilities { get; set; } = [];
     public int MaxJobs { get; set; } = 1;
     public string? AllowedHours { get; set; }
+    public TransferMode Transfer { get; set; } = TransferMode.Git;
 }
 
 public sealed class FleetConfig

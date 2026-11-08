@@ -59,7 +59,9 @@ public sealed class JobRunner(
         JobPayload payload;
         try
         {
-            payload = await payloads.BuildAsync(jobId, req.RepoDir, scratchDir, ct).ConfigureAwait(false);
+            var kinds = (config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : 0)
+                | (config.Machines.Any(m => m.Transfer == TransferMode.Archive) ? PayloadKinds.Archive : 0);
+            payload = await payloads.BuildAsync(jobId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex)
         {
@@ -81,6 +83,7 @@ public sealed class JobRunner(
         finally
         {
             TryDelete(payload.BundlePath);
+            TryDelete(payload.ArchivePath);
         }
     }
 
@@ -168,9 +171,15 @@ public sealed class JobRunner(
         }
 
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        var local = machine.Transfer == TransferMode.Archive ? payload.ArchivePath : payload.BundlePath;
+        if (step.Ok && local is null)
+        {
+            return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine.");
+        }
+
         if (step.Ok)
         {
-            step = await ssh.UploadAsync(machine, payload.BundlePath, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
+            step = await ssh.UploadAsync(machine, local!, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
         }
 
         if (step.Ok)
@@ -218,8 +227,13 @@ public sealed class JobRunner(
     private static string NewId() =>
         DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..6];
 
-    private static void TryDelete(string path)
+    private static void TryDelete(string? path)
     {
+        if (path is null)
+        {
+            return;
+        }
+
         try
         {
             File.Delete(path);

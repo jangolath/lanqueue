@@ -1,16 +1,18 @@
 # What each worker needs
 
 A *worker* is any machine on your network that `lanq` sends jobs to. Nothing from lanqueue is installed on it:
-your own PC runs `lanq`, ships the code over SSH as a git bundle, and the worker only needs the pieces below.
+your own PC runs `lanq`, ships the code over SSH (as a git bundle by default, or as a `tar.gz` with
+`transfer: archive`), and the worker only needs the pieces below. **An old PC needs only SSH, tar and your toolchain.**
 
 ## Checklist
 
 | Need | Required? | Why | How to check on the worker |
 |---|---|---|---|
 | SSH server accepting your public key | **Required** | every lanq call is key-only SSH | from your PC: `ssh -o BatchMode=yes <user>@<worker> echo ok` |
-| Git | **Required** | the bundle is unpacked into a throwaway worktree | `git --version` |
+| Git | **Recommended; required for the default `transfer: git` mode.** Optional with `transfer: archive` | git mode unpacks the bundle into a throwaway worktree | `git --version` |
+| tar | Only with `transfer: archive` (built into Windows 10 1803+ / Server 2019+ and Linux) | archive mode extracts the `tar.gz` into a fresh job folder | `tar --version` (Windows: `tar.exe --version`) |
 | Shell | **Required** | Windows: Windows PowerShell (built in). Linux: `sh` | — |
-| Writable work folder (`work_root`) with free disk | **Required** | each job gets its own worktree there; `lanq health` holds a machine with low disk | `lanq health` from your PC |
+| Writable work folder (`work_root`) with free disk | **Required** | each job gets its own worktree or folder there; `lanq health` holds a machine with low disk | `lanq health` from your PC |
 | Toolchain your jobs run (e.g. .NET SDK, Node) | Per job | tag the machine with matching `capabilities` (`dotnet`, `node`, ...) | `dotnet --version`, `node --version` |
 | Docker | Only for jobs that need it | e.g. integration tests with Testcontainers; tag the machine `docker` | `docker version` |
 | Internet access to package registries | Only if jobs restore packages | `dotnet restore` / `npm ci` download from nuget.org / npm | — |
@@ -37,7 +39,7 @@ simpler and safer). See "Keeping your keys safe" in the README for `restrict` an
 **Linux** (Debian/Ubuntu shown):
 
 ```sh
-sudo apt install openssh-server git
+sudo apt install openssh-server git    # git is optional with `transfer: archive`; tar is already there
 sudo systemctl enable --now ssh
 ```
 
@@ -46,7 +48,8 @@ Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
 ## Then, on your PC
 
 1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
-   `capabilities`, `max_jobs`, optional `allowed_hours`.
+   `capabilities`, `max_jobs`, optional `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for
+   a worker without git).
 2. Make sure the worker's host key is in your `known_hosts` (connect once with `ssh` and verify the fingerprint):
    lanq uses `StrictHostKeyChecking=yes`.
 3. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason.

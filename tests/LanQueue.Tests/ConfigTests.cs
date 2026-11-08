@@ -76,4 +76,37 @@ public class ConfigTests
         var yaml = T.Yaml.Replace("key_env: LANQ_KEY_BUILD01", $"key_env: \"{value}\"", StringComparison.Ordinal);
         Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
     }
+
+    [Fact]
+    public void TransferDefaultsToGitAndAcceptsArchive()
+    {
+        Assert.All(T.Config().Machines, m => Assert.Equal(TransferMode.Git, m.Transfer));
+        var yaml = T.Yaml.Replace("os: linux", "os: linux\n    transfer: archive", StringComparison.Ordinal);
+        Assert.Equal(TransferMode.Archive, ConfigLoader.Parse(yaml).Machines[0].Transfer);
+        Assert.Equal(TransferMode.Git, ConfigLoader.Parse(yaml.Replace("transfer: archive", "transfer: git", StringComparison.Ordinal)).Machines[0].Transfer);
+    }
+
+    [Theory]
+    [InlineData("zip")]
+    [InlineData("rsync")]
+    [InlineData("\"\"")]
+    public void UnknownTransferIsRefused(string value)
+    {
+        var yaml = T.Yaml.Replace("os: linux", "os: linux\n    transfer: " + value, StringComparison.Ordinal);
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+    }
+
+    [Fact]
+    public void ExampleShowsBothTransferModes()
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "machines.example.yml")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        var c = ConfigLoader.Load(Path.Combine(dir!, "machines.example.yml"));
+        Assert.Contains(c.Machines, m => m.Transfer == TransferMode.Git);
+        Assert.Contains(c.Machines, m => m.Transfer == TransferMode.Archive);
+    }
 }
