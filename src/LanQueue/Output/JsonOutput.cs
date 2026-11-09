@@ -22,7 +22,7 @@ internal sealed record HealthJson(
     /// <summary>light, medium, heavy or unknown (see <see cref="Health.MachineSize"/>).</summary>
     public string Size { get; init; } = "unknown";
 
-    /// <summary>What the machine suits, for example "light: lint, type-check, unit-test shards + container builds".</summary>
+    /// <summary>What the machine suits, in lanq-makeready's words, for example "light: lint and unit-test shards + container builds".</summary>
     public string SuitedFor { get; init; } = "";
 }
 
@@ -97,16 +97,16 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
 internal sealed partial class LanqJson : JsonSerializerContext;
 
 /// <summary>One machine in <c>lanq makeready --all --json</c>.</summary>
-/// <param name="Verdict">OK, WARN or FAIL (from the report's checks), or unreachable, held or error (no report).</param>
-/// <param name="Warnings">The report's WARN checks (0 without a report).</param>
-/// <param name="Failures">The report's FAIL checks (0 without a report).</param>
+/// <param name="Verdict">FAIL (not worker-ready), WARN (something to look at) or OK, or unreachable, held or error (no report).</param>
+/// <param name="Warnings">What to look at that does not block the worker: the summary's warnings, else the WARN and non-blocking FAIL checks.</param>
+/// <param name="Failures">Blockers of a not-ready machine: the summary's blockers, else its FAIL checks (0 when ready or without a report).</param>
 /// <param name="ExitCode">What <c>lanq makeready &lt;machine&gt;</c> would exit with: 0, 1, 70 or 75.</param>
 /// <param name="Problem">The first FAIL check, else the first WARN (title: detail), or why there is no report; absent when there is nothing.</param>
 /// <param name="Report">The validated lanq-makeready/v1 report, exactly as <c>lanq makeready &lt;machine&gt; --json</c> prints it; absent without one.</param>
 internal sealed record MakereadyRowJson(
     string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReport? Report);
 
-/// <summary>The one object <c>lanq makeready --all --json</c> prints: Ok (0), Failing (1: a FAIL check), InfraError (70: unreachable or unusable) or Held (75), and every machine in config order.</summary>
+/// <summary>The one object <c>lanq makeready --all --json</c> prints: Ok (0), Failing (1: a machine is NOT READY), InfraError (70: unreachable or unusable) or Held (75), and every machine in config order.</summary>
 internal sealed record MakereadyAllJson(string Status, int ExitCode, IReadOnlyList<MakereadyRowJson> Machines);
 
 /// <summary>

@@ -20,14 +20,14 @@ public class MakereadyTests
 
     internal static string Report(
         string git = "OK", string archive = "OK", string schema = "lanq-makeready/v1", string caps = "\"dotnet\", \"java\"", string detail = "a restart is pending",
-        string advice = "Restart the PC when convenient.") => $$"""
+        string advice = "Restart the PC when convenient.", string extra = "", string docker = "SKIP", string extraChecks = "") => $$"""
         {
           "schema": "{{schema}}",
           "tool": { "name": "lanq-makeready", "version": "0.1.0" },
           "generatedAt": "2026-11-09T06:39:14Z",
           "host": { "hostname": "<redacted>", "user": "<redacted>", "os": "Ubuntu 24.04", "arch": "x64" },
-          "verdicts": { "worker_git": "{{git}}", "worker_archive": "{{archive}}", "dotnet10": "OK", "docker": "SKIP", "overnight": "WARN" },
-          "checks": [
+          "verdicts": { "worker_git": "{{git}}", "worker_archive": "{{archive}}", "dotnet10": "OK", "docker": "{{docker}}", "overnight": "WARN" },{{extra}}
+          "checks": [{{extraChecks}}
             { "id": "os.version", "title": "OS", "status": "OK", "detail": "Ubuntu 24.04", "advice": "", "needsAdmin": false },
             { "id": "reboot.pending", "title": "Pending reboot", "status": "WARN", "detail": "{{detail}}", "advice": "{{advice}}", "needsAdmin": false },
             { "id": "ssh.server", "title": "OpenSSH Server", "status": "{{(git == "FAIL" ? "FAIL" : "OK")}}", "detail": "sshd", "advice": "Install openssh-server yourself.", "needsAdmin": true }

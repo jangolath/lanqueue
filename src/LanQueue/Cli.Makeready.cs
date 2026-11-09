@@ -324,12 +324,9 @@ public static partial class Cli
     }
 
     /// <summary>
-    /// One --all row. The verdict comes from the report's checks (any FAIL: FAIL with their count, else any WARN: WARN, else OK); a report
-    /// whose transfer verdicts say not ready is FAIL even without a failing check. The top problem is the first FAIL check, else the first WARN.
-    /// </summary>
-    /// <summary>
-    /// The --all exit code: 70 when any machine was unreachable or sent an unusable report (the check is incomplete); else 1 when any has a
-    /// FAIL; else 75 when any was held; else 0. Warnings alone exit 0, as lanq makeready &lt;machine&gt; does; they stay in the table and JSON.
+    /// The --all exit code: 70 when any machine was unreachable or sent an unusable report (the check is incomplete); else 1 when any is NOT
+    /// READY (FAIL: lanq makeready &lt;machine&gt; exits 1 for it); else 75 when any was held; else 0. Warnings alone, including FAIL checks
+    /// that do not stop the PC being a worker (docker, dotnet), exit 0 as lanq makeready &lt;machine&gt; does; they stay in the table and JSON.
     /// </summary>
     private static int MakereadyAllExitCode(IReadOnlyCollection<MakereadyRowJson> rows) =>
         rows.Any(r => r.Verdict is "unreachable" or "error") ? 70
@@ -359,6 +356,13 @@ public static partial class Cli
         return kept.Append("...").ToString();
     }
 
+    /// <summary>
+    /// One --all row. FAIL only when the machine is not worker-ready (no transfer mode works: the same rule as the single-machine exit code
+    /// and the script's NOT READY); otherwise WARN when anything is left to look at, else OK. With the script's summary (0.2.0+), the counts
+    /// and the top problem (its first next step, blockers first) come from it; a summary that contradicts the transfer verdicts is ignored.
+    /// Without one (0.1), every FAIL check of a not-ready machine counts as a failure, and on a worker-ready machine every WARN or FAIL check
+    /// counts as a warning. <see cref="MakereadyRowJson.Failures"/> is the blocker count, <see cref="MakereadyRowJson.Warnings"/> the rest.
+    /// </summary>
     private static MakereadyRowJson MakereadyRow(Machine m, MakereadyScan scan)
     {
         var os = m.Os == MachineOs.Windows ? "windows" : "linux";
@@ -368,14 +372,29 @@ public static partial class Cli
             return new MakereadyRowJson(m.Name, os, verdict, 0, 0, scan.Code, scan.Reason is { } reason ? JobRunner.SafeLine(reason) : null, null);
         }
 
-        var checks = report.Checks!;
-        var failures = checks.Count(c => c.Status == "FAIL");
-        var warnings = checks.Count(c => c.Status == "WARN");
-        var top = checks.FirstOrDefault(c => c.Status == "FAIL") ?? checks.FirstOrDefault(c => c.Status == "WARN");
-        var problem = top is not null
-            ? JobRunner.SafeLine(string.IsNullOrWhiteSpace(top.Detail) ? top.Title ?? top.Id ?? "?" : $"{top.Title}: {top.Detail}")
-            : report.WorkerReady ? null : "no transfer mode works (worker_git and worker_archive are FAIL)";
-        var verdictText = failures > 0 || !report.WorkerReady ? "FAIL" : warnings > 0 ? "WARN" : "OK";
+        var ready = report.WorkerReady;
+        int failures, warnings;
+        string? title, detail;
+        if (report.Summary is { } s && (s.Verdict == "NOT_READY") != ready)
+        {
+            failures = ready ? 0 : s.Blockers;
+            warnings = s.Warnings;
+            var step = s.NextSteps!.FirstOrDefault();
+            (title, detail) = (step?.Title ?? step?.Id, step?.Detail);
+        }
+        else
+        {
+            var problems = report.Checks!.Where(c => c.Status is "WARN" or "FAIL").ToList();
+            failures = ready ? 0 : problems.Count(c => c.Status == "FAIL");
+            warnings = problems.Count - failures;
+            var top = problems.FirstOrDefault(c => c.Status == "FAIL") ?? problems.FirstOrDefault();
+            (title, detail) = (top?.Title ?? top?.Id, top?.Detail);
+        }
+
+        var problem = title is not null || !string.IsNullOrWhiteSpace(detail)
+            ? JobRunner.SafeLine(string.IsNullOrWhiteSpace(detail) ? title ?? "?" : $"{title}: {detail}")
+            : ready ? null : "no transfer mode works (worker_git and worker_archive are FAIL)";
+        var verdictText = !ready ? "FAIL" : warnings > 0 ? "WARN" : "OK";
         return new MakereadyRowJson(m.Name, os, verdictText, warnings, failures, scan.Code, problem, report);
     }
 
@@ -391,8 +410,42 @@ public static partial class Cli
             yield return $"  {key,-15} {value}";
         }
 
+        if (report.Summary is { } summary)
+        {
+            // The script's own verdict line and numbered next steps, worded as the script prints them (0.2.0+).
+            yield return "";
+            yield return $"VERDICT: {summary.Text}";
+            if (summary.NextSteps!.Count > 0)
+            {
+                yield return "Next steps (blockers first; nothing here is run for you):";
+                var linux = report.SuggestedMachine!.Os == "linux";
+                foreach (var st in summary.NextSteps)
+                {
+                    var who = (st.AdminToFix, linux) switch
+                    {
+                        (true, true) => "needs root",
+                        (false, true) => "no root needed",
+                        (true, false) => "needs admin: elevated PowerShell",
+                        (false, false) => "no admin needed",
+                    };
+                    yield return $"{st.Step.ToString(CultureInfo.InvariantCulture),2}. [{(st.Blocker ? "MUST FIX" : "should fix")}] {st.Title}: {st.Detail}";
+                    yield return $"    do ({who}): {(string.IsNullOrEmpty(st.Action) ? "see the detail above" : st.Action)}";
+                }
+            }
+        }
+
+        if (report.SuitedFor is { } suited)
+        {
+            if (report.Summary is null)
+            {
+                yield return "";
+            }
+
+            yield return $"Suited for: {suited.Text}";
+        }
+
         var problems = report.Checks!.Where(c => c.Status is "WARN" or "FAIL").ToList();
-        if (problems.Count > 0)
+        if (report.Summary is null && problems.Count > 0)
         {
             yield return "";
             yield return "Checks to look at";
@@ -425,7 +478,9 @@ public static partial class Cli
         }
 
         yield return "";
-        yield return report.WorkerReady ? "Ready: at least one transfer mode works." : "Not ready yet: fix the FAIL items above on that PC, then run lanq makeready again.";
+        yield return report.WorkerReady ? "Ready: at least one transfer mode works."
+            : report.Summary is not null ? "Not ready yet: fix the MUST FIX steps above on that PC, then run lanq makeready again."
+            : "Not ready yet: fix the FAIL items above on that PC, then run lanq makeready again.";
         yield return WorkerUntouched;
     }
 
@@ -450,10 +505,25 @@ public static partial class Cli
         yield return $"    work_root: {Yaml(configured?.WorkRoot ?? s.WorkRoot ?? "")}";
         yield return $"    capabilities: [{string.Join(", ", caps)}]";
         yield return $"    max_jobs: {Math.Clamp(s.MaxJobs, 1, 64).ToString(CultureInfo.InvariantCulture)}";
+        if (s.MinFreeMemGb is { } minFree && double.IsFinite(minFree) && minFree is >= 0 and <= 1024)
+        {
+            yield return $"    min_free_mem_gb: {minFree.ToString("0.##", CultureInfo.InvariantCulture)}   # LanQueue starts no new job while less memory than this is free";
+        }
+
         yield return s.Transfer is "git" or "archive" ? $"    transfer: {s.Transfer}" : "    # transfer: no transfer mode works yet (needs git, or tar for archive)";
         if (s.AllowedHours is { } hours && HoursRegex().IsMatch(hours))
         {
             yield return $"    allowed_hours: {Yaml(hours)}";
+        }
+
+        // Only when the script's Wake-on-LAN check passed; commented, so waking stays the owner's choice. A redacted MAC stays "<mac>",
+        // which ConfigLoader refuses until the real one is filled in.
+        if (s.Wake is { } wake)
+        {
+            yield return $"    # wake:   # Wake-on-LAN looks ready; uncomment to let lanq wake this PC (test: lanq wake {name} --wait)";
+            yield return MagicPacket.TryParseMac(wake.Mac, out _)
+                ? $"    #   mac: {Yaml(wake.Mac!)}"
+                : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address";
         }
     }
 

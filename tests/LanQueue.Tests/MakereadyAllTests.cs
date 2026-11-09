@@ -102,6 +102,62 @@ public class MakereadyAllTests
         Assert.Matches(@"^alpha\s+linux\s+WARN 1", Row(o, "alpha"));
     }
 
+    private const string DockerFail =
+        """{ "id": "docker", "title": "Docker", "status": "FAIL", "detail": "engine not answering", "advice": "Start Docker Desktop.", "needsAdmin": false },""";
+
+    /// <summary>
+    /// A 0.1 report (no summary): a FAIL check that does not stop the PC being a worker (docker, dotnet) is a warning, as the script's own
+    /// verdict has it, and `lanq makeready alpha` exits 0 for it, so --all must not exit 1.
+    /// </summary>
+    [Fact]
+    public async Task AFailThatDoesNotBlockTheWorkerIsAWarningAndExitsZero()
+    {
+        var report = MakereadyTests.Report(docker: "FAIL", extraChecks: DockerFail);
+        Assert.True(Makeready.MakereadyReport.Parse(report).WorkerReady);
+        var (code, o, _, _) = await Run([], _ => new SshResult(0, Healthy), _ => new SshResult(0, report));
+        Assert.Equal(0, code);
+        Assert.Matches(@"^alpha\s+linux\s+WARN 2\s+Docker: engine not answering$", Row(o, "alpha"));
+
+        (code, o, _, _) = await Run(["--json"], _ => new SshResult(0, Healthy), _ => new SshResult(0, report));
+        Assert.Equal(0, code);
+        using var doc = JsonDocument.Parse(o);
+        Assert.Equal("Ok", doc.RootElement.GetProperty("status").GetString());
+        var alpha = doc.RootElement.GetProperty("machines")[0];
+        Assert.Equal("WARN", alpha.GetProperty("verdict").GetString());
+        Assert.Equal(2, alpha.GetProperty("warnings").GetInt32());
+        Assert.Equal(0, alpha.GetProperty("failures").GetInt32());
+        Assert.Equal(0, alpha.GetProperty("exitCode").GetInt32());
+    }
+
+    /// <summary>A 0.2 report: the verdict, counts and top problem come from its summary (blockers first).</summary>
+    [Fact]
+    public async Task WithASummaryTheCountsAndTopProblemComeFromIt()
+    {
+        var report = MakereadyTests.Report(docker: "FAIL", extraChecks: DockerFail, extra: MakereadySummaryTests.Summary(
+            "READY_WITH_WARNINGS", "READY WITH WARNINGS (5)", 0, 5,
+            MakereadySummaryTests.Step(1, "reboot.pending", "Pending reboot", "WARN", false, "a restart is pending", "Restart.", false),
+            MakereadySummaryTests.Step(2, "docker", "Docker", "FAIL", false, "engine not answering", "Start Docker Desktop.", false)));
+        var (code, o, _, _) = await Run([], _ => new SshResult(0, Healthy), _ => new SshResult(0, report));
+        Assert.Equal(0, code);
+        Assert.Matches(@"^alpha\s+linux\s+WARN 5\s+Pending reboot: a restart is pending$", Row(o, "alpha"));
+
+        (code, o, _, _) = await Run([], _ => new SshResult(0, Healthy), _ => new SshResult(0, MakereadySummaryTests.V020));
+        Assert.Equal(1, code);
+        Assert.Matches(@"^bravo\s+windows\s+FAIL 1\s+OpenSSH Server: not installed$", Row(o, "bravo"));
+    }
+
+    /// <summary>A summary that contradicts the transfer verdicts is not believed: the machine is worker-ready, so --all does not exit 1.</summary>
+    [Fact]
+    public async Task ASummaryThatContradictsTheVerdictsNeverMakesAllExitOne()
+    {
+        var report = MakereadyTests.Report(extra: MakereadySummaryTests.Summary(
+            "NOT_READY", "NOT READY (1 blocker)", 1, 0,
+            MakereadySummaryTests.Step(1, "ssh.server", "OpenSSH Server", "FAIL", true, "not installed", "Install it.", true)));
+        var (code, o, _, _) = await Run([], _ => new SshResult(0, Healthy), _ => new SshResult(0, report));
+        Assert.Equal(0, code);
+        Assert.Matches(@"^alpha\s+linux\s+WARN 1\s+Pending reboot: a restart is pending$", Row(o, "alpha"));
+    }
+
     [Fact]
     public async Task UnreachableOutranksFailAndFailOutranksHeld()
     {
