@@ -11,7 +11,7 @@ public enum SizeClass
     /// <summary>Under 6 GB: lint, type-check, unit-test shards.</summary>
     Light,
 
-    /// <summary>6 to 16 GB (or 16 GB and more with fewer than 4 cores): test shards, builds.</summary>
+    /// <summary>6 to under 16 GB (or 16 GB and more with fewer than 4 cores): test shards, builds.</summary>
     Medium,
 
     /// <summary>16 GB or more and at least 4 cores: full test suites, large builds.</summary>

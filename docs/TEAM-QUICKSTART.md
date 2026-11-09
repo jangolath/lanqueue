@@ -326,16 +326,33 @@ job's own; `2` means refused by policy or bad arguments, `70` an infrastructure 
 machines with 2 GB available), `--timeout 60` (minutes), `--fetch 'TestResults/**/*.trx'` (bring results back),
 `--json` (one result object for scripts and coding agents). `lanq stats` sums the time each machine spent on jobs.
 
+Once several workers are ready, a long test suite that splits can run on all of them at once:
+`lanq run --needs node --shards auto -- npx jest --shard={shard}/{shards}` starts one piece per free slot.
+[SHARDING.md](SHARDING.md) has recipes for .NET, Node, Python, Go and Rust, and how to route work in a mixed pool.
+
 ## 8. Sizing micro PCs
 
-A micro PC with 4 to 8 GB of RAM can build and test, one job at a time:
+A micro PC with 4 to 8 GB of RAM can build and test. `lanq makeready` suggests `max_jobs` and `min_free_mem_gb` from
+its RAM and CPUs; the rule (the same table is in [SHARDING.md, Sizing machines](SHARDING.md#sizing-machines)):
 
-- **`max_jobs: 1`.** Two .NET builds at once on 8 GB swap or fail.
+| Total RAM | `max_jobs` | `min_free_mem_gb` |
+| --- | --- | --- |
+| under 6 GB | 1 | 1.5 |
+| 6 to under 12 GB | 2 | 2 |
+| 12 to under 24 GB | 3, or 4 with 8 or more logical CPUs | 2 |
+| 24 GB or more | 6, or 8 with 16 or more logical CPUs | 2 |
+
+`max_jobs` is never above the machine's logical CPU count. `lanq health` shows each machine's cores, total RAM, free
+slots and what it is suited for (**light** under 6 GB, **medium** 6 to under 16 GB, **heavy** 16 GB or more with 4+
+cores).
+
+- **`max_jobs`.** Under 6 GB, one job at a time: two .NET builds at once on 4 GB swap or fail. An 8 GB PC takes two
+  jobs only if each one stays small (`-m:1` and the heap caps below); lower it to 1 if it swaps.
 - **One build process.** `dotnet build` and `dotnet test` build several projects at once (MSBuild's `-maxcpucount`,
   short `-m`). Run them as `dotnet build -m:1` and `dotnet test -m:1` on a small PC: one MSBuild process, much less
   memory. The allowlist entries `dotnet build` and `dotnet test` already allow the extra argument.
 - **Memory holds.** `policy.min_free_mem_gb` holds every machine below that much available memory; set a higher
-  `min_free_mem_gb:` on the smallest PCs (2 is a good start). On Linux, `max_mem_pressure` also holds a machine that
+  `min_free_mem_gb:` on the smallest PCs (1.5 under 6 GB, 2 above, as in the table). On Linux, `max_mem_pressure` also holds a machine that
   is stalled on memory. A job that needs more asks for it with `lanq run --mem 4`.
 - **Cap the heaps** in the machine's `env:` (job only): `DOTNET_GCHeapHardLimitPercent: "0x32"` (each .NET process's
   GC heap at most 50% of RAM; the value is hexadecimal, see
@@ -401,7 +418,8 @@ The messages below are what lanq prints (`<...>` is filled in). `lanq doctor --r
 9. **`[lanq] NoCapacity: No eligible machine. <machine>: <reason>; ...`** (exit `75`). Each machine says why:
    `lacks <capability>` (no machine has every `--needs` tag), `busy (slots 1/1)`, `low memory (0.8 GB free)`,
    `outside allowed hours`, `paused on the machine`, `window closing (5 min left)`, or its ssh error. Add `--wait 300`
-   to wait for a free machine.
+   to wait for a free machine. A `--shards` run says the same for each machine (and `avoided` for one where an earlier
+   attempt of the shard lost the connection and may still be running).
 10. **`<tool>: '<tool> --version' failed in the job environment (...). If the tool is installed, a non-login ssh session does not see it: add its folder to path_prepend for this machine`**
     (from `lanq doctor --remote`), or **`git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)`**
     (from `lanq health`). Add the tool's folder under `path_prepend:`, or install git, or set `transfer: archive`.

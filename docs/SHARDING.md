@@ -10,7 +10,8 @@ lanq run --needs node --shards auto -- npx playwright test --shard={shard}/{shar
 ```
 
 This page covers how the option works, how to cut each ecosystem's tests into pieces, how to size machines, and how to
-route work in a pool of mixed machines.
+route work in a pool of mixed machines. Setting up the pool itself (lanq on the orchestrator, OpenSSH on Windows and
+Linux workers, `lanq init`, `lanq makeready --all`) is in [TEAM-QUICKSTART.md](TEAM-QUICKSTART.md).
 
 ## How `--shards` works
 
@@ -277,7 +278,8 @@ the same moment; that is why `max_jobs` must fit the RAM.
 Keep a shard under a few minutes: a short shard loses little when a machine goes away or its hours end, and spreads
 evenly. On a machine under 6 GB, run one shard at a time and cap tool memory with `env:` (`NODE_OPTIONS`,
 `DOTNET_GCHeapHardLimitPercent`, `CARGO_BUILD_JOBS`), and for .NET pass `-m:1` to `dotnet build` and `dotnet test`
-(one MSBuild node).
+(one MSBuild node). [TEAM-QUICKSTART.md, Sizing micro PCs](TEAM-QUICKSTART.md#8-sizing-micro-pcs) has the rest of the
+small-PC settings (heap caps, transfer mode, disk).
 
 `lanq health` shows each machine's cores, total RAM, free memory, free/total slots and what it suits, from the
 reported total memory, cores and capabilities, with the same thresholds as `lanq-makeready`: **light** under 6 GB

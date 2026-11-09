@@ -176,9 +176,14 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 
    ```
    $ lanq health
-   build-01       OK    load 0.12  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots 0/2
-   build-02       HOLD  load 0.05  disk free 90.1 GB  mem free 5.1 GB  slots 0/1 (outside allowed hours)
+   build-01       OK    load 0.12  cores 8  ram 15.6 GB  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots free 2/2  suited: medium: test shards, builds
+   build-02       HOLD  load 0.05  cores 4  ram 7.8 GB  disk free 90.1 GB  mem free 5.1 GB  slots free 1/1  suited: medium: test shards, builds (outside allowed hours)
+   build-03       DOWN  build-03.lan refused the connection: its SSH server is not running, or a firewall rejects the ssh port (Windows: Start-Service sshd and Set-Service sshd -StartupType Automatic; Linux: sudo systemctl enable --now ssh) (ssh: ssh: connect to host build-03.lan port 22: Connection refused)
    ```
+
+   Each line shows the machine's size (cores, total RAM, free/total slots, what it is suited for; see
+   [Sharding](#sharding-long-work-across-the-pool)), and a machine that does not answer says what to fix, quoting
+   ssh's own line.
 
 4. Run something from inside a git repository:
 
@@ -203,7 +208,7 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 
 | Command | What it does |
 | --- | --- |
-| `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. `--wake` also wakes machines that look asleep. |
+| `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, cores, RAM, disk, memory, free slots, what it is suited for, holds, and what to fix when ssh fails. `--wake` also wakes machines that look asleep. |
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
 | `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
@@ -389,12 +394,14 @@ The worker is treated as untrusted for this step; see [Security model](#security
 Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03"},
- {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null}]
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"medium","suitedFor":"medium: test shards, builds"},
+ {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"freeSlots":1,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
 ```
 
 `state` is `ok`, `hold` or `down`; `reasons` is empty when `ok`; `memFreeGb` and `localTime` (the worker's own clock)
-are `null` when the worker does not report them. `lanq run --json` streams the job's output to **stderr** and prints
+are `null` when the worker does not report them; so are `cores` and `memTotalGb` (then `size` is `unknown`).
+`freeSlots` is `maxJobs` minus `slotsUsed` (0 for a machine that is down), and `size` is `light`, `medium`, `heavy`
+or `unknown`. `lanq run --json` streams the job's output to **stderr** and prints
 one object on stdout when it is over:
 
 ```json
@@ -605,6 +612,12 @@ A machine that does not report memory (an older kernel, an unusual host) is not 
 of memory can ask: `lanq run --mem 6 ...` goes only to a machine that reports at least 6 GB available, and never to
 one that cannot report it.
 
+How many jobs a machine should take at once follows its RAM and CPUs: `max_jobs` 1 under 6 GB, 2 under 12 GB, 3
+under 24 GB (4 with 8+ CPUs), else 6 (8 with 16+ CPUs), never above the CPU count, and `min_free_mem_gb` 1.5 under
+6 GB, else 2. `lanq makeready` suggests exactly that; the table and the reasons are in
+[docs/SHARDING.md, Sizing machines](docs/SHARDING.md#sizing-machines), and the other small-PC settings in
+[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md#8-sizing-micro-pcs).
+
 Build tools size themselves to the machine, which on a 4 GB box usually means swapping. Cap them per machine with
 `env:` (set for the job only):
 
@@ -663,10 +676,11 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
   whose machine stopped answering, never a test failure. Ctrl+C cancels every shard and cleans each one up.
 
 `lanq health` also shows each machine's cores, total RAM, free/total slots and what it is suited for (light under
-6 GB, medium 6 to 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a `docker` capability);
+6 GB, medium 6 to under 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a `docker` capability);
 `health --json` adds `cores`, `memTotalGb`, `freeSlots`, `size` and `suitedFor`.
 [docs/SHARDING.md](docs/SHARDING.md) has per-ecosystem recipes (.NET, Node, Python, Go, Rust), a sizing table for
-`max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs.
+`max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs; setting up the pool itself is in
+[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md).
 
 ## Keeping your keys safe
 

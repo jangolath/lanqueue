@@ -45,10 +45,10 @@ public static partial class Cli
             ssh: build@10.20.30.11     # user@host
             work_root: /srv/lanq       # absolute, forward slashes, no spaces
             capabilities: [dotnet, linux]
-            max_jobs: 1                # one job at a time suits a PC with 8 GB of RAM or less
+            max_jobs: 1                # 1 under 6 GB of RAM, 2 under 12 GB; lanq makeready suggests it
             transfer: git              # git (default) needs git on the worker; archive needs only tar
 
-          # A Windows 10/11 micro PC with little RAM: one job at a time, a memory floor and a capped .NET heap.
+          # A Windows 10/11 micro PC with 4 GB of RAM: one job at a time, a memory floor and a capped .NET heap.
           # - name: micro-win-01
           #   os: windows
           #   ssh: build@10.20.30.21
@@ -57,7 +57,7 @@ public static partial class Cli
           #   capabilities: [dotnet, windows]
           #   max_jobs: 1
           #   transfer: archive          # the built-in tar.exe is enough; use git if git is installed
-          #   min_free_mem_gb: 2         # hold it below 2 GB available
+          #   min_free_mem_gb: 1.5       # hold it below 1.5 GB available (2 on a PC with 6 GB or more)
           #   env:
           #     DOTNET_GCHeapHardLimitPercent: "0x32"   # each .NET process: GC heap at most 50% of RAM (hexadecimal)
 

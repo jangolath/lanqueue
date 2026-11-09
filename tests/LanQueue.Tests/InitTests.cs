@@ -62,7 +62,6 @@ public sealed class InitTests : IDisposable
     [Fact]
     public void TheStarterUsesOnlyExampleAddressesAndLfLineEndings()
     {
-        Assert.DoesNotContain("192.168.1.", Cli.StarterConfig, StringComparison.Ordinal);
         Assert.DoesNotContain("\r", Cli.StarterConfig, StringComparison.Ordinal);
         foreach (Match m in Regex.Matches(Cli.StarterConfig, @"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", RegexOptions.None, TimeSpan.FromSeconds(1)))
         {
@@ -132,7 +131,7 @@ public sealed class InitTests : IDisposable
 
     [Fact]
     public void TheStarterRecommendsOnlyDocumentedMemorySettings() =>
-        Assert.DoesNotContain("MSBUILDNODECOUNT", Cli.StarterConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("NODECOUNT", Cli.StarterConfig, StringComparison.Ordinal); // MSBuild has no documented node-count variable
 
     [Fact]
     public async Task ConfigPathIsUsedAndItsFolderCreated()
