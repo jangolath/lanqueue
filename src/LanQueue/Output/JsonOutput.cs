@@ -74,7 +74,7 @@ internal sealed partial class LanqJson : JsonSerializerContext;
 internal sealed record MakereadyRowJson(
     string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReport? Report);
 
-/// <summary>The one object <c>lanq makeready --all --json</c> prints: Ok (0), Problems (1), InfraError (70) or Held (75), and every machine in config order.</summary>
+/// <summary>The one object <c>lanq makeready --all --json</c> prints: Ok (0), Failing (1: a FAIL check), InfraError (70: unreachable or unusable) or Held (75), and every machine in config order.</summary>
 internal sealed record MakereadyAllJson(string Status, int ExitCode, IReadOnlyList<MakereadyRowJson> Machines);
 
 /// <summary>

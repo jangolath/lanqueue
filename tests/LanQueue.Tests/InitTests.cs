@@ -83,6 +83,58 @@ public sealed class InitTests : IDisposable
     }
 
     [Fact]
+    public async Task RefusesAnExistingFolderWithAClearMessage()
+    {
+        Directory.CreateDirectory(Path.Combine(_dir, "machines.yml"));
+        var (code, o, e) = await Init("--json");
+        Assert.Equal(2, code);
+        Assert.Contains("is a folder", e, StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(o);
+        Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+    }
+
+    /// <summary>A link whose target does not exist is not "free": writing would create a file wherever the link points.</summary>
+    [Fact]
+    public async Task RefusesADanglingLink()
+    {
+        var path = Path.Combine(_dir, "machines.yml");
+        var nowhere = Path.Combine(_dir, "missing", "target.yml");
+        try
+        {
+            File.CreateSymbolicLink(path, nowhere);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Windows without the symlink privilege: a junction to a missing folder is a dangling link too.
+            FetchReceiverTests.MakeDirLink(path, nowhere);
+        }
+
+        var (code, _, e) = await Init();
+        Assert.Equal(2, code);
+        Assert.Contains("is a link", e, StringComparison.Ordinal);
+        Assert.False(File.Exists(nowhere));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(nowhere)));
+    }
+
+    [Fact]
+    public async Task AFileThatAppearsBeforeTheWriteIsNotOverwritten()
+    {
+        var path = Path.Combine(_dir, "machines.yml");
+        var o = new StringWriter();
+        var e = new StringWriter();
+        var code = await Cli.Init(ParsedArgs.Parse(["init", "--json"]), _dir, _ => null, windows: false, o, e, beforeWrite: () => File.WriteAllText(path, "theirs"));
+        Assert.Equal(2, code);
+        Assert.Equal("theirs", await File.ReadAllTextAsync(path));
+        Assert.Contains("already exists", e.ToString(), StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public void TheStarterRecommendsOnlyDocumentedMemorySettings() =>
+        Assert.DoesNotContain("MSBUILDNODECOUNT", Cli.StarterConfig, StringComparison.Ordinal);
+
+    [Fact]
     public async Task ConfigPathIsUsedAndItsFolderCreated()
     {
         var path = Path.Combine(_dir, "sub", "fleet.yml");

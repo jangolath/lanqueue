@@ -310,10 +310,11 @@ public static partial class Cli
         makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
         problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
         outside its allowed hours (--force scans anyway). lanq never changes a worker. makeready --all checks every machine in the config (four at a
-        time, same rules) and prints one table (machine, OS, verdict OK / WARN n / FAIL n / unreachable / held / error, top problem); exit 0 every
-        machine OK, 1 any WARN or FAIL, else 70 any unreachable or unusable report, else 75 any held.
-        init writes a commented starter machines.yml (default ./machines.yml, or --config FILE) and never overwrites a file; exit 0 written,
-        2 the file exists, 70 it could not be written.
+        time, same rules) and prints one table (machine, OS, verdict OK / WARN n / FAIL n / unreachable / held / error, top problem); exit 70 any
+        machine unreachable or its report unusable, else 1 any FAIL, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or
+        config; 130 Ctrl+C.
+        init writes a commented starter machines.yml (default ./machines.yml, or --config FILE) and never overwrites a file or writes through
+        a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
         inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.

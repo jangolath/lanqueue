@@ -78,6 +78,39 @@ public class SshErrorTests
             "ssh: connect to host 10.20.30.11 port 22: No route to host",
             SshErrors.Explain("\nssh: connect to host 10.20.30.11 port 22: No route to host\nmore", Target));
 
+    /// <summary>Only ssh's own lines count: text a remote command printed elsewhere on a line, or with another exit code, explains nothing.</summary>
+    [Theory]
+    [InlineData("echo: Host key verification failed.")]
+    [InlineData("job says: build@10.20.30.11: Permission denied (publickey).")]
+    [InlineData("log: ssh: connect to host 10.20.30.11 port 22: Connection refused")]
+    [InlineData("x Could not resolve hostname old-pc.lan")]
+    [InlineData("the file's Permissions for 'x' are too open.")]
+    public void TextThatIsNotSsh_sOwnLineIsNotExplained(string line) =>
+        Assert.Equal(line, SshErrors.Explain(line, Target));
+
+    [Fact]
+    public async Task HealthExplainsOnlyAnSshFailure()
+    {
+        // Exit 1 is the remote script's own failure, never ssh's: its output is shown as it is.
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(1, "Host key verification failed.") };
+        var h = await new HealthProbe(ssh, TimeProvider.System).ProbeAsync(T.Windows(), T.Config().Policy, CancellationToken.None);
+        Assert.False(h.Reachable);
+        Assert.Equal("Host key verification failed.", h.Error);
+    }
+
+    [Fact]
+    public async Task DoctorExplainsOnlyAnSshFailure()
+    {
+        var host = new DoctorHost((_, _) => Task.FromResult(new SshResult(0, "")), _ => null, _ => true, _ => Task.FromResult(false), Path.GetTempPath());
+        var config = T.Config();
+        config.Machines.RemoveAt(0);
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(124, "Host key verification failed.", TimedOut: true) };
+        var o = new StringWriter();
+        await Cli.Doctor(ParsedArgs.Parse(["doctor", "--remote", "--force"]), () => config, host, ssh, new HealthProbe(ssh, TimeProvider.System), o, CancellationToken.None);
+        Assert.Contains("unreachable: Host key verification failed.", o.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("StrictHostKeyChecking", o.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task HealthShowsTheExplanationForAMachineThatRefusesTheKey()
     {

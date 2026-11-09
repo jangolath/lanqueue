@@ -161,7 +161,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
 
         if (!result.Ok)
         {
-            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", JobRunner.SafeLine(SshErrors.Explain(result.Output, machine.Ssh))) { HoldKind = HoldKind.Unreachable, LooksAsleep = WakeService.LooksAsleep(result) };
+            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", JobRunner.SafeLine(result.IsSshFailure ? SshErrors.Explain(result.Output, machine.Ssh) : SshErrors.FirstLine(result.Output))) { HoldKind = HoldKind.Unreachable, LooksAsleep = WakeService.LooksAsleep(result) };
         }
 
         var values = Parse(result.Output);

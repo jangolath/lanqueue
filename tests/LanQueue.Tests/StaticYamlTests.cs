@@ -33,7 +33,7 @@ public sealed class StaticYamlTests
             min_free_mem_gb: 2
             env:
               NODE_OPTIONS: "--max-old-space-size=2048"
-              MSBUILDNODECOUNT: "1"
+              DOTNET_GCConserveMemory: "1"
             path_prepend:
               - /home/build/.nvm/versions/node/v22/bin
             priority: normal
@@ -75,7 +75,7 @@ public sealed class StaticYamlTests
         Assert.Equal(3, lin.MaxJobs);
         Assert.Equal(2, lin.MinFreeMemGb);
         Assert.Equal("--max-old-space-size=2048", lin.Env["NODE_OPTIONS"]);
-        Assert.Equal("1", lin.Env["MSBUILDNODECOUNT"]);
+        Assert.Equal("1", lin.Env["DOTNET_GCConserveMemory"]);
         Assert.Equal(["/home/build/.nvm/versions/node/v22/bin"], lin.PathPrepend);
         Assert.Equal(JobPriority.Normal, lin.Priority);
         Assert.Equal(["22:00-07:00"], lin.AllowedHours!);
@@ -190,7 +190,7 @@ public sealed class StaticYamlTests
     [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - \"  \"\n    - dotnet build", "allowed_commands")]
     [InlineData("allowed_directories: [\".\", src]", "allowed_directories: [\".\", ~]", "allowed_directories")]
     [InlineData("allowed_directories: [\".\", src]", "allowed_directories: ~", "allowed_directories")]
-    [InlineData("    env:\n      NODE_OPTIONS: \"--max-old-space-size=2048\"\n      MSBUILDNODECOUNT: \"1\"", "    env: ~", "env")]
+    [InlineData("    env:\n      NODE_OPTIONS: \"--max-old-space-size=2048\"\n      DOTNET_GCConserveMemory: \"1\"", "    env: ~", "env")]
     [InlineData("    path_prepend:\n      - /home/build/.nvm/versions/node/v22/bin", "    path_prepend: ~", "path_prepend")]
     [InlineData("    path_prepend:\n      - /home/build/.nvm/versions/node/v22/bin", "    path_prepend: [~]", "path_prepend")]
     [InlineData("      - \"Mon-Fri 22:00-07:00\"", "      - ~", "allowed_hours")]
@@ -297,7 +297,7 @@ public sealed class StaticYamlTests
         Assert.Equal(2, lin.MinFreeMemGb);
         Assert.Equal(TransferMode.Archive, lin.Transfer);
         Assert.Equal("build@lin.lan", lin.Ssh);
-        Assert.Equal("1", lin.Env["MSBUILDNODECOUNT"]);
+        Assert.Equal("1", lin.Env["DOTNET_GCConserveMemory"]);
     }
 
     /// <summary>The wake: block goes through the same tag stripping: standard tags load as the untagged value.</summary>
@@ -347,7 +347,7 @@ public sealed class StaticYamlTests
 
     /// <summary>A quoted scalar is a string, so a !!null on it would let the string "null" through as a value: refused.</summary>
     [Theory]
-    [InlineData("MSBUILDNODECOUNT: \"1\"", "MSBUILDNODECOUNT: !!null \"null\"")]
+    [InlineData("DOTNET_GCConserveMemory: \"1\"", "DOTNET_GCConserveMemory: !!null \"null\"")]
     [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - !!null \"null\"\n    - dotnet build")]
     [InlineData("capabilities: [dotnet, node]", "capabilities: [dotnet, !!null '~']")]
     public void ANullTagOnAQuotedScalarIsRefused(string from, string to)
@@ -391,9 +391,9 @@ public sealed class StaticYamlTests
     {
         var c = ConfigLoader.Parse(Everything
             .Replace("    key_env: LANQ_KEY_LIN", "    key_env: !!str true", StringComparison.Ordinal)
-            .Replace("MSBUILDNODECOUNT: \"1\"", "MSBUILDNODECOUNT: !!str yes", StringComparison.Ordinal));
+            .Replace("DOTNET_GCConserveMemory: \"1\"", "DOTNET_GCConserveMemory: !!str yes", StringComparison.Ordinal));
         Assert.Equal("true", c.Machines[0].KeyEnv);
-        Assert.Equal("yes", c.Machines[0].Env["MSBUILDNODECOUNT"]);
+        Assert.Equal("yes", c.Machines[0].Env["DOTNET_GCConserveMemory"]);
     }
 
     /// <summary>A tag that contradicts its node (or the non-specific '!') is refused with the tag and line, never silently ignored.</summary>

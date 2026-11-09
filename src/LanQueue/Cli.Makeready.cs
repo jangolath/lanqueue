@@ -252,8 +252,7 @@ public static partial class Cli
     /// <summary>
     /// lanq makeready --all: every machine in the config, <see cref="MakereadyParallelism"/> at a time, with the same rules as one machine
     /// (PAUSE and allowed_hours respected unless --force, the script on ssh stdin), then one summary table (or, with --json, one object).
-    /// Exit 0 when every machine is OK (no WARN or FAIL check); 1 when any machine has a WARN or FAIL; otherwise 70 when any machine was
-    /// unreachable or sent an unusable report, 75 when any was held; 2 bad arguments or config.
+    /// Exit codes: see <see cref="MakereadyAllExitCode"/>; 2 bad arguments or config; 130 Ctrl+C.
     /// </summary>
     private static async Task<int> MakereadyAll(
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
@@ -292,13 +291,10 @@ public static partial class Cli
 
         var scans = await Task.WhenAll(config.Machines.Select(Scanned)).ConfigureAwait(false);
         var rows = config.Machines.Zip(scans).Select(x => MakereadyRow(x.First, x.Second)).ToList();
-        var code = rows.Any(r => r.Verdict is "WARN" or "FAIL") ? 1
-            : rows.Any(r => r.Verdict is "unreachable" or "error") ? 70
-            : rows.Any(r => r.Verdict == "held") ? 75
-            : 0;
+        var code = MakereadyAllExitCode(rows);
         if (p.Json)
         {
-            var status = code switch { 0 => "Ok", 1 => "Problems", 75 => "Held", _ => "InfraError" };
+            var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
             await stdout.WriteLineAsync(JsonSerializer.Serialize(new MakereadyAllJson(status, code, rows), MakereadyAllJsonContext.Default.MakereadyAllJson))
                 .ConfigureAwait(false);
             return code;
@@ -317,7 +313,7 @@ public static partial class Cli
                 "FAIL" => r.Failures > 0 ? $"FAIL {r.Failures}" : "FAIL",
                 _ => r.Verdict,
             };
-            var problem = r.Problem is { Length: > MakereadyProblemWidth } text ? text[..(MakereadyProblemWidth - 3)] + "..." : r.Problem ?? "";
+            var problem = Truncate(r.Problem ?? "", MakereadyProblemWidth);
             await stdout.WriteLineAsync(JobRunner.SafeLine($"{r.Machine.PadRight(nameWidth)}{r.Os,-9}{verdict,-13}{problem}").TrimEnd()).ConfigureAwait(false);
         }
 
@@ -331,6 +327,38 @@ public static partial class Cli
     /// One --all row. The verdict comes from the report's checks (any FAIL: FAIL with their count, else any WARN: WARN, else OK); a report
     /// whose transfer verdicts say not ready is FAIL even without a failing check. The top problem is the first FAIL check, else the first WARN.
     /// </summary>
+    /// <summary>
+    /// The --all exit code: 70 when any machine was unreachable or sent an unusable report (the check is incomplete); else 1 when any has a
+    /// FAIL; else 75 when any was held; else 0. Warnings alone exit 0, as lanq makeready &lt;machine&gt; does; they stay in the table and JSON.
+    /// </summary>
+    private static int MakereadyAllExitCode(IReadOnlyCollection<MakereadyRowJson> rows) =>
+        rows.Any(r => r.Verdict is "unreachable" or "error") ? 70
+        : rows.Any(r => r.Verdict == "FAIL") ? 1
+        : rows.Any(r => r.Verdict == "held") ? 75
+        : 0;
+
+    /// <summary>Cuts <paramref name="text"/> to at most <paramref name="width"/> UTF-16 units with "...", never inside a surrogate pair.</summary>
+    internal static string Truncate(string text, int width)
+    {
+        if (text.Length <= width)
+        {
+            return text;
+        }
+
+        var kept = new System.Text.StringBuilder();
+        foreach (var rune in text.EnumerateRunes())
+        {
+            if (kept.Length + rune.Utf16SequenceLength > width - 3)
+            {
+                break;
+            }
+
+            kept.Append(rune.ToString());
+        }
+
+        return kept.Append("...").ToString();
+    }
+
     private static MakereadyRowJson MakereadyRow(Machine m, MakereadyScan scan)
     {
         var os = m.Os == MachineOs.Windows ? "windows" : "linux";

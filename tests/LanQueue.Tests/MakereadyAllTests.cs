@@ -71,7 +71,7 @@ public class MakereadyAllTests
     {
         var (code, o, _, ssh) = await Mixed();
 
-        Assert.Equal(1, code); // bravo has a WARN
+        Assert.Equal(70, code); // delta is unreachable
         Assert.Contains("MACHINE", o, StringComparison.Ordinal);
         Assert.Matches(@"^alpha\s+linux\s+OK\s*$", Row(o, "alpha"));
         Assert.Matches(@"^bravo\s+windows\s+WARN 1\s+Pending reboot: a restart is pending$", Row(o, "bravo"));
@@ -91,6 +91,64 @@ public class MakereadyAllTests
         var (code, o, _, _) = await Run([], _ => new SshResult(0, Healthy), _ => new SshResult(0, MakereadyTests.Report(git: "FAIL", archive: "FAIL")));
         Assert.Equal(1, code);
         Assert.Matches(@"^alpha\s+linux\s+FAIL 1\s+OpenSSH Server: sshd$", Row(o, "alpha"));
+    }
+
+    /// <summary>Warnings stay in the table but do not fail the run, as in the single-machine mode.</summary>
+    [Fact]
+    public async Task WarningsAloneExitZero()
+    {
+        var (code, o, _, _) = await Run([], _ => new SshResult(0, Healthy), _ => new SshResult(0, MakereadyTests.Report()));
+        Assert.Equal(0, code);
+        Assert.Matches(@"^alpha\s+linux\s+WARN 1", Row(o, "alpha"));
+    }
+
+    [Fact]
+    public async Task UnreachableOutranksFailAndFailOutranksHeld()
+    {
+        var fail = MakereadyTests.Report(git: "FAIL", archive: "FAIL");
+        var (code, _, _, _) = await Run(
+            [],
+            m => m.Name == "delta" ? new SshResult(255, "ssh: connect to host 10.20.30.14 port 22: No route to host") : new SshResult(0, Healthy),
+            _ => new SshResult(0, fail));
+        Assert.Equal(70, code);
+
+        (code, _, _, _) = await Run(
+            [],
+            m => new SshResult(0, m.Name == "charlie" ? Healthy.Replace("paused=0", "paused=1", StringComparison.Ordinal) : Healthy),
+            m => new SshResult(0, m.Name == "alpha" ? fail : Clean()));
+        Assert.Equal(1, code);
+
+        (code, _, _, _) = await Run(
+            ["--json"],
+            m => new SshResult(0, m.Name == "charlie" ? Healthy.Replace("paused=0", "paused=1", StringComparison.Ordinal) : Healthy),
+            _ => new SshResult(0, MakereadyTests.Report()));
+        Assert.Equal(75, code); // held plus warnings only
+    }
+
+    [Theory]
+    [InlineData(10)]
+    [InlineData(11)]
+    [InlineData(12)]
+    public void TruncationNeverSplitsASurrogatePair(int width)
+    {
+        var text = new string('a', 7) + string.Concat(Enumerable.Repeat("😀", 6));
+        var cut = Cli.Truncate(text, width);
+        Assert.True(cut.Length <= width);
+        Assert.EndsWith("...", cut, StringComparison.Ordinal);
+        for (var i = 0; i < cut.Length; i++)
+        {
+            if (char.IsHighSurrogate(cut[i]))
+            {
+                Assert.True(i + 1 < cut.Length && char.IsLowSurrogate(cut[i + 1]), $"lone high surrogate at {i} for width {width}");
+                i++;
+            }
+            else
+            {
+                Assert.False(char.IsLowSurrogate(cut[i]), $"lone low surrogate at {i} for width {width}");
+            }
+        }
+
+        Assert.Equal("short", Cli.Truncate("short", width));
     }
 
     [Fact]
@@ -139,12 +197,12 @@ public class MakereadyAllTests
     public async Task JsonIsOneObjectWithEveryMachineAndTheValidatedReports()
     {
         var (code, o, _, _) = await Mixed("--json");
-        Assert.Equal(1, code);
+        Assert.Equal(70, code);
 
         using var doc = JsonDocument.Parse(o);
         var root = doc.RootElement;
-        Assert.Equal("Problems", root.GetProperty("status").GetString());
-        Assert.Equal(1, root.GetProperty("exitCode").GetInt32());
+        Assert.Equal("InfraError", root.GetProperty("status").GetString());
+        Assert.Equal(70, root.GetProperty("exitCode").GetInt32());
         var machines = root.GetProperty("machines").EnumerateArray().ToList();
         Assert.Equal(["alpha", "bravo", "charlie", "delta"], machines.Select(m => m.GetProperty("machine").GetString()));
         Assert.Equal(["OK", "WARN", "held", "unreachable"], machines.Select(m => m.GetProperty("verdict").GetString()));
