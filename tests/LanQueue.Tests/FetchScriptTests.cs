@@ -294,6 +294,22 @@ public sealed class FetchScriptTests : IDisposable
         AssertRoundTrip(rx.Finish(), "TestResults/run.trx");
     }
 
+    /// <summary>The real process plumbing behind RunSplitAsync: stderr written between two stdout lines never reaches the stdout callback.</summary>
+    [ShFact]
+    public async Task StderrIsKeptApartFromStdoutLineByLine()
+    {
+        var stdout = new List<string>();
+        var stderr = new List<string>();
+        var result = await ProcessSshClient.Execute(
+            Shells.Sh!, ["-c", "echo one; echo warning >&2; sleep 0.2; echo two; echo late >&2"], stdout.Add, TimeSpan.FromMinutes(1), CancellationToken.None,
+            null, stderr.Add);
+
+        Assert.True(result.Ok);
+        Assert.Equal(["one", "two"], stdout);
+        Assert.Equal(["warning", "late"], stderr);
+        Assert.DoesNotContain("warning", result.Output, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheWindowsCommandLineStaysFarUnderTheCapWhateverThePatterns()
     {

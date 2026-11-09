@@ -453,9 +453,10 @@ public sealed class JobRunner(
         using (var receiver = new FetchReceiver(dir, fetch.Patterns, fetch.Limits, ignoreCase: machine.Os == MachineOs.Windows, anchor: fetch.Anchor ?? fetch.OutputRoot))
         {
             var script = FetchScripts.Fetch(machine, jobId, directory, fetch.Patterns, fetch.Limits);
+            // Only stdout carries frames; stderr (a shell or PowerShell warning) is kept apart, bounded and sanitised, for the summary.
             var r = machine.Os == MachineOs.Windows
-                ? await ssh.RunStreamingWithInputAsync(machine, FetchScripts.WindowsStdinCommand, FetchScripts.WindowsStdin(script), receiver.OnLine, timeout, ct).ConfigureAwait(false)
-                : await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, script), receiver.OnLine, timeout, ct).ConfigureAwait(false);
+                ? await ssh.RunSplitAsync(machine, FetchScripts.WindowsStdinCommand, FetchScripts.WindowsStdin(script), receiver.OnLine, receiver.OnStderr, timeout, ct).ConfigureAwait(false)
+                : await ssh.RunSplitAsync(machine, RemoteScripts.Wrap(machine, script), null, receiver.OnLine, receiver.OnStderr, timeout, ct).ConfigureAwait(false);
             var problem = r.TimedOut ? "fetch stopped after " + ProcessSshClient.Describe(timeout) + " (incomplete)"
                 : r.IsSshFailure && !receiver.Done ? "the SSH connection failed during the fetch (incomplete)"
                 : null;
@@ -501,6 +502,11 @@ public sealed class JobRunner(
         if (report.Error is not null)
         {
             onLine("[lanq] fetch problem: " + report.Error);
+        }
+
+        foreach (var e in report.Stderr)
+        {
+            onLine("[lanq] fetch stderr: " + e);
         }
     }
 

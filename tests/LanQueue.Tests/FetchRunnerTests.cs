@@ -138,6 +138,24 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Contains(lines, l => l.StartsWith("[lanq] fetch problem:", StringComparison.Ordinal));
     }
 
+    /// <summary>ssh merges nothing for the fetch: a stderr line (a shell warning) arriving mid-frame never breaks the file being received.</summary>
+    [Theory]
+    [InlineData("build-01")]
+    [InlineData("build-02")]
+    public async Task AStderrLineInsideAFrameDoesNotBreakIt(string target)
+    {
+        var stream = Stream(("out/x.log", "hello world, this is the content"));
+        var lines = stream.Split((char)10).ToList();
+        lines.Insert(2, "STDERR:warning: something odd \u001b[2J happened");
+        var (runner, _, output) = Make(target, 0, string.Join((char)10, lines));
+
+        var r = await runner.RunAsync(Req(["out/*.log"]), CancellationToken.None);
+
+        Assert.Equal("out/x.log", Assert.Single(r.Fetch!.Fetched).Path);
+        Assert.Empty(r.Fetch.Skipped);
+        Assert.Contains(output, l => l.StartsWith("[lanq] fetch stderr: warning: something odd ?[2J happened", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task AWindowsWorkerGetsTheFetchScriptOnStdin()
     {

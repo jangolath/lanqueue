@@ -18,6 +18,9 @@ public sealed record FetchSkip(string Path, string Reason);
 /// <param name="MoreSkipped">Skipped files beyond the ones listed in <see cref="Skipped"/>.</param>
 public sealed record FetchReport(string Directory, IReadOnlyList<FetchedFile> Fetched, IReadOnlyList<FetchSkip> Skipped, string? Error, int MoreSkipped = 0)
 {
+    /// <summary>The first few lines the worker wrote to stderr during the fetch, sanitised and shortened (diagnostics only, never frames).</summary>
+    public IReadOnlyList<string> Stderr { get; init; } = [];
+
     public long Bytes => Fetched.Sum(f => f.Bytes);
 }
 
@@ -84,6 +87,21 @@ public sealed class FetchReceiver : IDisposable
     }
 
     public bool Done => _done;
+
+    /// <summary>Stderr lines kept for the report.</summary>
+    internal const int MaxStderrLines = 10;
+
+    private readonly List<string> _stderr = [];
+
+    /// <summary>A stderr line from the worker: kept (sanitised, at most 300 characters, the first <see cref="MaxStderrLines"/>) as a diagnostic.</summary>
+    public void OnStderr(string line)
+    {
+        if (_stderr.Count < MaxStderrLines && line.Trim().Length > 0)
+        {
+            var safe = JobRunner.SafeLine(line);
+            _stderr.Add(safe.Length > 300 ? safe[..300] + "..." : safe);
+        }
+    }
 
     /// <summary>Deletes a partial file; false when it could not (tests stand in for a locked file).</summary>
     internal Func<string, bool> DeleteFile { get; init; } = TryDelete;
@@ -601,7 +619,7 @@ public sealed class FetchReceiver : IDisposable
             }
         }
 
-        return new FetchReport(_dir, _fetched.ToList(), _skipped.ToList(), error, _moreSkipped);
+        return new FetchReport(_dir, _fetched.ToList(), _skipped.ToList(), error, _moreSkipped) { Stderr = _stderr.ToList() };
     }
 
     public void Dispose()

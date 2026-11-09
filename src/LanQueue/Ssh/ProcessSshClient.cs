@@ -16,8 +16,9 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     public Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct) =>
         ExecuteWithInput("ssh", SshArgs.Ssh(machine, ResolveKey(machine), remoteCommand), input, maxOutputChars, timeout, ct);
 
-    public Task<SshResult> RunStreamingWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, Action<string> onLine, TimeSpan timeout, CancellationToken ct) =>
-        Execute("ssh", SshArgs.Ssh(machine, ResolveKey(machine), remoteCommand), onLine, timeout, ct, input);
+    public Task<SshResult> RunSplitAsync(
+        Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+        Execute("ssh", SshArgs.Ssh(machine, ResolveKey(machine), remoteCommand), onStdout, timeout, ct, input, onStderr);
 
     /// <summary>The most lanq ever sends on stdin (a script); a bigger input is a bug, not something to stream.</summary>
     internal const int MaxInputBytes = 1024 * 1024;
@@ -187,7 +188,9 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     }
 
     /// <param name="input">Written to stdin, which is then closed; null closes stdin at once (never wait for interactive input).</param>
-    internal static async Task<SshResult> Execute(string exe, List<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct, ReadOnlyMemory<byte>? input = null)
+    /// <param name="onError">When given, stderr lines go only here (not to <paramref name="onLine"/> or the result's output).</param>
+    internal static async Task<SshResult> Execute(
+        string exe, List<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct, ReadOnlyMemory<byte>? input = null, Action<string>? onError = null)
     {
         if (input is { Length: > MaxInputBytes })
         {
@@ -224,6 +227,17 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
             }
         }
 
+        void HandleError(string line)
+        {
+            lock (gate)
+            {
+                if (!closed)
+                {
+                    onError!(line);
+                }
+            }
+        }
+
         SshResult Finish(int exitCode, string? suffix, bool timedOut)
         {
             lock (gate)
@@ -247,7 +261,7 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
         var writer = input is { } bytes ? WriteAndClose(proc, bytes) : CloseInput(proc);
         var pumps = Task.WhenAll(
             LineReader.PumpAsync(proc.StandardOutput, Handle),
-            LineReader.PumpAsync(proc.StandardError, Handle),
+            LineReader.PumpAsync(proc.StandardError, onError is null ? Handle : HandleError),
             writer);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);

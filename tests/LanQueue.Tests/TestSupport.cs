@@ -208,23 +208,42 @@ internal sealed class FakeSsh : ISshClient
     public List<TimeSpan> StreamingTimeouts { get; } = [];
 
     /// <summary>
-    /// A streaming stdin run (the Windows fetch) goes through <see cref="Handler"/> and <see cref="Calls"/> like any command, as
-    /// "STDIN:" plus the script it carries (decoded from the base64 UTF-16 input when it is that).
+    /// A split run (the fetch) goes through <see cref="Handler"/> and <see cref="Calls"/> like any command; with stdin (the Windows fetch) as
+    /// "STDIN:" plus the script it carries (decoded from the base64 UTF-16 input when it is that). Output lines starting with "STDERR:" go to
+    /// <paramref name="onStderr"/> (without the marker), all others to <paramref name="onStdout"/>. <see cref="RunAsync"/> instead delivers
+    /// every line, markers included, to one callback, as ssh merging both streams would.
     /// </summary>
-    public Task<SshResult> RunStreamingWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, Action<string> onLine, TimeSpan timeout, CancellationToken ct)
+    public Task<SshResult> RunSplitAsync(
+        Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct)
     {
-        var text = Encoding.ASCII.GetString(input.Span).Trim();
-        try
+        var command = remoteCommand;
+        if (input is { } bytes)
         {
-            text = Encoding.Unicode.GetString(Convert.FromBase64String(text));
-        }
-        catch (FormatException)
-        {
-            // not base64: keep the raw text
+            var text = Encoding.ASCII.GetString(bytes.Span).Trim();
+            try
+            {
+                text = Encoding.Unicode.GetString(Convert.FromBase64String(text));
+            }
+            catch (FormatException)
+            {
+                // not base64: keep the raw text
+            }
+
+            StreamingTimeouts.Add(timeout);
+            command = "STDIN:" + text;
         }
 
-        StreamingTimeouts.Add(timeout);
-        return RunAsync(machine, "STDIN:" + text, onLine, timeout, ct);
+        return RunAsync(machine, command, l =>
+        {
+            if (l.StartsWith("STDERR:", StringComparison.Ordinal))
+            {
+                onStderr(l["STDERR:".Length..]);
+            }
+            else
+            {
+                onStdout(l);
+            }
+        }, timeout, ct);
     }
 
     /// <summary>Every stdin run: the target, the remote command, the bytes sent, the output limit and the timeout.</summary>
