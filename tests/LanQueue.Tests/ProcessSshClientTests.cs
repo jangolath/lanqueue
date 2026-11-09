@@ -3,8 +3,56 @@ using Xunit;
 
 namespace LanQueue.Tests;
 
+/// <summary>The allocation check reads a process-wide counter, so this class never runs alongside other test classes.</summary>
+[CollectionDefinition("alloc", DisableParallelization = true)]
+public sealed class AllocationCollection;
+
+[Collection("alloc")]
 public class ProcessSshClientTests
 {
+    private const char Cr = (char)13, Lf = (char)10;
+
+    /// <summary>Hands out the given chunks one ReadAsync call at a time, like a pipe.</summary>
+    private sealed class ChunkedReader(params string[] chunks) : TextReader
+    {
+        private int _next;
+
+        public override ValueTask<int> ReadAsync(Memory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_next >= chunks.Length)
+            {
+                return ValueTask.FromResult(0);
+            }
+
+            var c = chunks[_next++];
+            c.AsSpan().CopyTo(buffer.Span);
+            return ValueTask.FromResult(c.Length);
+        }
+    }
+
+    private static async Task<List<string>> Lines(params string[] chunks)
+    {
+        var lines = new List<string>();
+        await LineReader.PumpAsync(new ChunkedReader(chunks), lines.Add);
+        return lines;
+    }
+
+    [Fact]
+    public async Task ALoneCarriageReturnEndsALine() =>
+        Assert.Equal(["10%", "20%", "30%", "done"], await Lines($"10%{Cr}20%{Cr}30%{Cr}{Lf}done{Lf}"));
+
+    [Fact]
+    public async Task CrLfSplitAcrossReadsIsOneLineEnd() =>
+        Assert.Equal(["a", "b"], await Lines($"a{Cr}", $"{Lf}b"));
+
+    [Fact]
+    public async Task TrailingCarriageReturnAtEndOfStreamEndsTheLastLine() =>
+        Assert.Equal(["a", "b"], await Lines($"a{Lf}b{Cr}"));
+
+    [Fact]
+    public async Task BlankLinesAreKept() =>
+        Assert.Equal(["a", "", "b"], await Lines($"a{Lf}{Lf}b{Cr}{Lf}"));
+
     [Fact]
     public void StreamedOutputKeepsOnlyABoundedTail()
     {

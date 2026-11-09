@@ -137,7 +137,8 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
 
 /// <summary>
 /// Splits a stream into lines without ever holding more than <see cref="OutputCollector.MaxLineChars"/> of one line: the rest of an
-/// overlong line is discarded and the line ends with a marker. A newline-free flood therefore costs a fixed amount of memory.
+/// overlong line is discarded and the line ends with a marker. A newline-free flood therefore costs a fixed amount of memory. Like
+/// TextReader.ReadLine, LF, CR and CRLF each end a line, so a progress bar redrawn with CR shows as successive lines.
 /// </summary>
 internal static class LineReader
 {
@@ -148,14 +149,10 @@ internal static class LineReader
         var buffer = new char[4096];
         var line = new StringBuilder();
         var truncated = false;
+        var afterCr = false; // a CR just ended a line, so an LF right after it (even in the next read) is the same line end
 
         void Emit()
         {
-            if (!truncated && line.Length > 0 && line[^1] == (char)13)
-            {
-                line.Length--; // CRLF line ending
-            }
-
             if (truncated)
             {
                 if (char.IsHighSurrogate(line[^1]))
@@ -179,9 +176,16 @@ internal static class LineReader
                 for (var i = 0; i < n; i++)
                 {
                     var c = buffer[i];
-                    if (c == (char)10)
+                    if (c == (char)10 && afterCr)
                     {
-                        Emit();
+                        afterCr = false;
+                        continue;
+                    }
+
+                    afterCr = c == (char)13;
+                    if (c is (char)10 or (char)13)
+                    {
+                        Emit(); // LF, CR (progress bars) and CRLF all end a line
                     }
                     else if (line.Length < OutputCollector.MaxLineChars)
                     {
