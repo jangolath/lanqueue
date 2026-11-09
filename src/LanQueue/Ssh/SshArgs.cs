@@ -15,6 +15,15 @@ public static class SshArgs
             "-o", "PreferredAuthentications=publickey",
             "-o", "StrictHostKeyChecking=yes",
             "-o", "ConnectTimeout=10",
+            // No agent, port, X11 or tun forwarding, no TTY and no LocalCommand, whatever ~/.ssh/config says. scp accepts these too (OpenSSH scp
+            // already forces the same values for its own ssh), so one list serves both.
+            "-o", "ForwardAgent=no",
+            "-o", "ClearAllForwardings=yes",
+            "-o", "PermitLocalCommand=no",
+            "-o", "ForwardX11=no",
+            "-o", "ForwardX11Trusted=no",
+            "-o", "Tunnel=no",
+            "-o", "RequestTTY=no",
         };
         if (!string.IsNullOrEmpty(keyPath))
         {

@@ -29,6 +29,9 @@ public sealed class HoursWindow
         return true;
     }
 
+    /// <summary>True for a window like "22:00-22:00", which would match a single minute; config validation refuses it.</summary>
+    public bool IsSingleInstant => _start == _end;
+
     public bool Contains(TimeOnly t) =>
         _start <= _end ? t >= _start && t <= _end : t >= _start || t <= _end;
 

@@ -4,7 +4,8 @@ namespace LanQueue.Ssh;
 
 /// <param name="ExitCode">Remote exit code. 255 means ssh itself failed (unreachable, auth refused).</param>
 /// <param name="Output">Combined stdout and stderr.</param>
-public sealed record SshResult(int ExitCode, string Output)
+/// <param name="TimedOut">True when lanq stopped the command because it ran past its time limit.</param>
+public sealed record SshResult(int ExitCode, string Output, bool TimedOut = false)
 {
     public bool Ok => ExitCode == 0;
 

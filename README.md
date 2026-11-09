@@ -91,10 +91,13 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    ```
 
    The job's exit code becomes `lanq`'s exit code. `--wait 120` keeps retrying for up to 120 seconds when every
-   machine is busy or on hold. `lanq stats` sums wall-clock time from your local log.
+   machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `lanq stats` sums
+   wall-clock time from your local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
-`75` no eligible machine.
+`75` no eligible machine; `124` the job ran past `--timeout` and was stopped. A job that itself exits with `124`
+gives the same code; the last stderr line tells them apart (`[lanq] TimedOut: timed out after N min` versus
+`[lanq] Failed: exit 124`).
 
 ## How it works
 
@@ -221,6 +224,7 @@ Sources: [Microsoft, key-based authentication in OpenSSH for Windows](https://le
 lanq health                                                    # who is awake and idle?
 lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is the job's exit code
 lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
+lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
 lanq stats                                                     # wall-clock time per machine
 ```
 
@@ -338,8 +342,12 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   whole working snapshot each time, with no history and no cache.
 - A crashed orchestrator can leave a slot file behind; delete `locks/slot-N` (and any stale `locks/job-*.pid`) under
   the machine's `work_root`.
-- No persistent queue: `--wait` polls every 15 seconds. Windows arguments containing embedded double quotes can
-  be mangled by PowerShell 5.1 native-command argument passing.
+- No persistent queue: `--wait` polls every 15 seconds.
+- Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
+  embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through
+  `cmd.exe`, so such an argument could run a second command. Such a job skips Windows workers (hold reason
+  "arguments not safe for Windows cmd shims") and runs on a Linux worker; it is refused (exit 2) only when no Linux
+  worker has the needed capabilities.
 - `allowed_hours` uses the clock of the machine running `lanq`. In tests the generated Linux scripts are
   checked with `sh -n` and the Windows scripts with the PowerShell parser, but only when those shells exist on the
   machine running the tests (otherwise those checks are skipped), and the scripts have so far been exercised only

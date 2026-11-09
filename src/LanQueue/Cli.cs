@@ -7,8 +7,13 @@ using LanQueue.Ssh;
 
 namespace LanQueue;
 
-public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyList<string> Needs, string Directory, int WaitSeconds, bool Json, IReadOnlyList<string> Argv)
+public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyList<string> Needs, string Directory, int WaitSeconds, IReadOnlyList<string> Argv)
 {
+    public const int DefaultTimeoutMinutes = 240;
+
+    /// <summary>How long the job itself may run (lanq run --timeout, in minutes).</summary>
+    public int TimeoutMinutes { get; init; } = DefaultTimeoutMinutes;
+
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
     {
@@ -19,6 +24,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var needs = new List<string>();
         var dir = ".";
         var wait = 0;
+        var timeout = DefaultTimeoutMinutes;
         var command = own.Length > 0 ? own[0] : "help";
         for (var i = 1; i < own.Length; i++)
         {
@@ -36,12 +42,20 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--wait" when i + 1 < own.Length:
                     wait = int.Parse(own[++i], CultureInfo.InvariantCulture);
                     break;
+                case "--timeout" when i + 1 < own.Length:
+                    timeout = int.Parse(own[++i], CultureInfo.InvariantCulture);
+                    if (timeout is < 1 or > 10080)
+                    {
+                        throw new ArgumentException("--timeout must be a whole number of minutes from 1 to 10080 (one week).");
+                    }
+
+                    break;
                 default:
                     throw new ArgumentException($"Unknown or incomplete option '{own[i]}'.");
             }
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, false, argv);
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout };
     }
 }
 
@@ -51,12 +65,13 @@ public static class Cli
         lanq - headless job runner for your own LAN machines
 
           lanq health [--config FILE]
-          lanq run --needs dotnet,linux [--dir src] [--wait 120] [--config FILE] -- dotnet test
+          lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--config FILE] -- dotnet test
           lanq stats
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
-        Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine.
+        --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
+        Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out.
         """;
 
     public static async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct)
@@ -106,7 +121,7 @@ public static class Cli
         var scratch = Path.Combine(home, "tmp");
         var runner = new JobRunner(config, ssh, new GitPayloadBuilder(), probe, log, scratch, line => stdout.WriteLine(line));
         var result = await runner.RunAsync(
-            new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds)),
+            new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes)),
             ct).ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {result.Message}").ConfigureAwait(false);
         return result.CliExitCode;
@@ -163,16 +178,17 @@ public static class Cli
     private static string HomeDir(Func<string, string?> env) =>
         env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    private static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    internal static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
             await stderr.WriteLineAsync(w).ConfigureAwait(false);
         }
 
-        foreach (var m in config.Machines)
+        // Probe all machines concurrently, then print in config order.
+        var results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        foreach (var (m, h) in config.Machines.Zip(results))
         {
-            var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
                 ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  slots {h.SlotsUsed}/{m.MaxJobs}")

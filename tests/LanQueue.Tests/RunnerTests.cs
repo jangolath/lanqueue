@@ -10,6 +10,8 @@ public sealed class RunnerTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "lanq-test-" + Guid.NewGuid().ToString("N"));
 
+    private readonly List<string> _output = [];
+
     private sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
     {
         public int Built { get; private set; }
@@ -85,7 +87,7 @@ public sealed class RunnerTests : IDisposable
 
             return new SshResult(0, "ran");
         });
-        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), log, Path.Combine(_dir, "tmp"), _ => { });
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), log, Path.Combine(_dir, "tmp"), _output.Add);
         return (runner, ssh, payloads, log);
     }
 
@@ -422,5 +424,208 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(75, r.ExitCode);
         Assert.Contains("z-rule", r.Message, StringComparison.Ordinal);
         Assert.Equal(1, lines.Count(l => l.Contains("z-rule", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task RemoteControlCharactersNeverReachTheTerminalOrTheLog()
+    {
+        // The real reader splits on newlines and strips CRLF, so a hostile line carries ESC/OSC/CSI/DEL, a backspace and a bidi override.
+        const char Esc = (char)0x1b, Bel = (char)0x07, Csi = (char)0x9b, Del = (char)0x7f, Bs = (char)0x08, Rlo = (char)0x202e, Tab = (char)0x09;
+        var hostile = $"a{Esc}]0;pwned{Bel}b{Esc}[2Jc{Csi}d{Del}e{Bs}f{Rlo}g{Tab}h";
+        var (runner, _, _, log) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+            : DecodedContains(m, cmd, "LASTEXITCODE") || cmd.Contains("setsid -w", StringComparison.Ordinal) ? new SshResult(0, hostile)
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        var safe = $"a?]0;pwned?b?[2Jc?d?e?f?g{Tab}h";
+        Assert.Contains(safe, _output);
+        Assert.Contains(safe, File.ReadAllText(log.LogPathFor(r.JobId)), StringComparison.Ordinal);
+        Assert.DoesNotContain(_output, l => l.Contains(Esc, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task JobPastItsTimeLimitIsReportedAsTimedOutWithExit124()
+    {
+        var (runner, _, _, log) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+            : DecodedContains(m, cmd, "LASTEXITCODE") || cmd.Contains("setsid -w", StringComparison.Ordinal) ? new SshResult(124, "[lanq] timed out", TimedOut: true)
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { Timeout = TimeSpan.FromMinutes(5) }, CancellationToken.None);
+
+        Assert.Equal(JobStatus.TimedOut, r.Status);
+        Assert.Equal(124, r.CliExitCode);
+        Assert.Equal("timed out after 5 min", r.Message);
+        Assert.DoesNotContain("SSH", r.Message, StringComparison.Ordinal);
+        Assert.Equal("TimedOut", Assert.Single(log.ReadAll()).Status);
+    }
+
+    [Fact]
+    public async Task TheRequestedTimeoutIsPassedToTheJobAndDefaultsToFourHours()
+    {
+        var timeouts = new List<TimeSpan>();
+        var ssh = new RecordingSsh(timeouts);
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var runner = new JobRunner(config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+
+        await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { Timeout = TimeSpan.FromMinutes(7) }, CancellationToken.None);
+        Assert.Contains(TimeSpan.FromMinutes(7), timeouts);
+        timeouts.Clear();
+        await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Contains(TimeSpan.FromHours(4), timeouts);
+    }
+
+    private sealed class RecordingSsh(List<TimeSpan> timeouts) : ISshClient
+    {
+        public Task<SshResult> RunAsync(Config.Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+        {
+            timeouts.Add(timeout);
+            return Task.FromResult(
+                DecodedContains(machine, remoteCommand, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(machine, remoteCommand, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+                : new SshResult(0, ""));
+        }
+
+        public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(new SshResult(0, ""));
+    }
+
+    [Fact]
+    public async Task MachinesAreProbedConcurrentlyBeforeScheduling()
+    {
+        var ssh = new GatedProbeSsh();
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var runner = new JobRunner(config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-02", r.Machine); // ranking still uses each machine's own result
+        Assert.Equal(["build-02", "build-01"], ssh.Finished);
+    }
+
+    [Fact]
+    public async Task ALineArrivingAfterTheJobEndedIsDroppedNotACrash()
+    {
+        var ssh = new LateLineSsh();
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var runner = new JobRunner(config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _output.Add);
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        ssh.Release.SetResult();
+        await ssh.LateCall!;
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Null(ssh.LateError);
+        Assert.DoesNotContain("late", _output);
+    }
+
+    /// <summary>Calls the job's line callback once more after the job has already returned, as a slow pipe reader could.</summary>
+    private sealed class LateLineSsh : ISshClient
+    {
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task? LateCall { get; private set; }
+
+        public Exception? LateError { get; private set; }
+
+        public Task<SshResult> RunAsync(Config.Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+        {
+            if (DecodedContains(machine, remoteCommand, "SLOT="))
+            {
+                return Task.FromResult(new SshResult(0, "SLOT=1"));
+            }
+
+            if (DecodedContains(machine, remoteCommand, "disk_free_gb"))
+            {
+                return Task.FromResult(new SshResult(0, Healthy(0.1)));
+            }
+
+            if (onLine is not null && (DecodedContains(machine, remoteCommand, "LASTEXITCODE") || remoteCommand.Contains("setsid -w", StringComparison.Ordinal)))
+            {
+                LateCall = Task.Run(async () =>
+                {
+                    await Release.Task;
+                    try
+                    {
+                        onLine("late");
+                    }
+                    catch (Exception ex)
+                    {
+                        LateError = ex;
+                    }
+                });
+            }
+
+            return Task.FromResult(new SshResult(0, ""));
+        }
+
+        public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(new SshResult(0, ""));
+    }
+
+    [Fact]
+    public async Task CmdMetacharacterArgumentSkipsWindowsWorkersAndRunsOnLinux()
+    {
+        var (runner, ssh, _, _) = Make();
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None); // build-02 (Windows) is less loaded
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-01", r.Machine);
+        Assert.DoesNotContain(ssh.Calls, c => c.Machine == "build-02" && DecodedContains(T.Windows(), c.Command, "SLOT="));
+    }
+
+    [Fact]
+    public async Task CmdMetacharacterArgumentWithOnlyWindowsWorkersIsRejectedBeforeAnyNetworkWork()
+    {
+        var (_, ssh, payloads, _) = Make();
+        var config = T.Config();
+        config.Machines.RemoveAt(0); // only the Windows machine is left
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Equal(2, r.CliExitCode);
+        Assert.Contains("cmd.exe", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+        Assert.Empty(ssh.Uploads);
+    }
+
+    [Fact]
+    public async Task CmdMetacharacterArgumentWaitingForBusyLinuxShowsTheWindowsHoldReason()
+    {
+        var (runner, _, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=FULL")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("build-02: arguments not safe for Windows cmd shims", r.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0x202A)]
+    [InlineData(0x202E)]
+    [InlineData(0x2066)]
+    [InlineData(0x2069)]
+    [InlineData(0x200B)]
+    [InlineData(0x200F)]
+    [InlineData(0xFEFF)]
+    public void BidiAndZeroWidthCharactersAreReplaced(int codePoint) =>
+        Assert.Equal("a?b", JobRunner.SafeLine("a" + (char)codePoint + "b"));
+
+    [Fact]
+    public void OrdinaryUnicodeIsKept()
+    {
+        var text = "caf" + (char)0xe9 + " " + char.ConvertFromUtf32(0x1F600) + " " + (char)0x4e2d + (char)0x09 + "ok";
+        Assert.Equal(text, JobRunner.SafeLine(text));
     }
 }

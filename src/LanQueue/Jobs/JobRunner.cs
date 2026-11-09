@@ -16,16 +16,22 @@ public enum JobStatus
     Rejected,
     NoCapacity,
     InfraError,
+    TimedOut,
 }
 
-public sealed record JobRequest(IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait);
+/// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
+public sealed record JobRequest(IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null)
+{
+    public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
+}
 
 public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, string? Machine, string Message)
 {
-    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 70 for infra.</summary>
+    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
         JobStatus.Completed or JobStatus.Failed => ExitCode,
+        JobStatus.TimedOut => ProcessSshClient.TimedOutExitCode,
         JobStatus.NoCapacity => 75,
         JobStatus.Rejected => 2,
         _ => 70,
@@ -57,6 +63,14 @@ public sealed class JobRunner(
         if (commandFindings.Count > 0)
         {
             return Rejected(jobId, commandFindings);
+        }
+
+        // Arguments that cmd.exe shims would re-parse can still run on a Linux worker; refuse only when no non-Windows machine has
+        // the needed capabilities, before any network or git work.
+        var windows = JobPolicy.ValidateForWindows(req.Argv);
+        if (!windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        {
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!);
         }
 
         JobPayload payload;
@@ -92,19 +106,25 @@ public sealed class JobRunner(
         }
     }
 
+    internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
+
+    private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
+        needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
+
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
+        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
         // Static property of the config: can any git-transfer machine ever take this job (capabilities only; load, hours and slots are temporary)?
         var gitCanEverTakeIt = config.Machines.Any(m => m.Transfer == TransferMode.Git
             && req.Needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)));
         while (true)
         {
-            var health = new List<(Machine, MachineHealth)>();
-            foreach (var m in config.Machines)
-            {
-                health.Add((m, await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false)));
-            }
+            // Probe every machine at once; WhenAll keeps the config order whatever order the answers arrive in.
+            var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+            var health = config.Machines.Zip(probes)
+                .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold }) : h)
+                .ToList();
 
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
             foreach (var machine in ranked)
@@ -175,30 +195,53 @@ public sealed class JobRunner(
         output($"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-        await using var logFile = new StreamWriter(logPath, append: false);
+        var logFile = new StreamWriter(logPath, append: false);
+        var logGate = new object();
+        var logOpen = true;
         void OnLine(string line)
         {
-            logFile.WriteLine(line);
-            output(line);
-        }
-
-        JobResult result;
-        try
-        {
-            result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
-                .ConfigureAwait(false);
-            if (!cleanup.Ok)
+            line = SafeLine(line);
+            lock (logGate)
             {
-                output($"[lanq] warning: cleanup on {machine.Name} did not finish; check {machine.WorkRoot}/jobs/{jobId}");
+                if (!logOpen)
+                {
+                    return; // a line that arrives after the job ended is dropped, never written to a closed log
+                }
+
+                logFile.WriteLine(line);
+                output(line);
             }
         }
 
-        log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
-        return result;
+        try
+        {
+            JobResult result;
+            try
+            {
+                result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!cleanup.Ok)
+                {
+                    output($"[lanq] warning: cleanup on {machine.Name} did not finish; check {machine.WorkRoot}/jobs/{jobId}");
+                }
+            }
+
+            log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
+            return result;
+        }
+        finally
+        {
+            lock (logGate)
+            {
+                logOpen = false;
+            }
+
+            await logFile.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, Action<string> onLine, CancellationToken ct)
@@ -232,15 +275,22 @@ public sealed class JobRunner(
 
         if (!step.Ok)
         {
-            return new JobResult(jobId, JobStatus.InfraError, step.ExitCode, machine.Name, "Could not prepare the job on the machine.");
+            return new JobResult(jobId, JobStatus.InfraError, step.ExitCode, machine.Name,
+                "Could not prepare the job on the machine." + (step.TimedOut ? " (timed out)" : ""));
         }
 
+        var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
         var run = await ssh.RunAsync(
             machine,
             executeCommand,
             onLine,
-            TimeSpan.FromHours(4),
+            timeout,
             ct).ConfigureAwait(false);
+        if (run.TimedOut)
+        {
+            return new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
+        }
+
         if (run.IsSshFailure)
         {
             return new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.");
@@ -252,6 +302,30 @@ public sealed class JobRunner(
             run.ExitCode,
             machine.Name,
             $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+    }
+
+    /// <summary>
+    /// Remote output is untrusted: C0 controls (except tab), DEL, C1 controls, bidi controls and zero-width characters become '?', so a
+    /// worker cannot move the cursor, retitle the window, send other terminal escape sequences or disguise text in the console or job log.
+    /// </summary>
+    internal static string SafeLine(string line)
+    {
+        static bool Unsafe(char c) =>
+            (c < 0x20 && c != (char)0x09) || (c >= 0x7f && c <= 0x9f) // C0 (except tab), DEL, C1
+            || (c >= 0x200b && c <= 0x200f) || c == 0xfeff // zero-width characters and marks
+            || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069); // bidi embeddings, overrides and isolates
+        if (!line.Any(Unsafe))
+        {
+            return line;
+        }
+
+        return string.Create(line.Length, line, (span, src) =>
+        {
+            for (var i = 0; i < src.Length; i++)
+            {
+                span[i] = Unsafe(src[i]) ? '?' : src[i];
+            }
+        });
     }
 
     internal static string? ParseSlot(string output)

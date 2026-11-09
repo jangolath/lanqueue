@@ -128,9 +128,19 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': max_jobs must be >= 1.");
             }
 
-            if (m.AllowedHours is not null && !HoursWindow.TryParse(m.AllowedHours, out _))
+            if (m.AllowedHours is not null)
             {
-                throw new ConfigException($"Machine '{m.Name}': allowed_hours must look like '22:00-07:00'.");
+                if (!HoursWindow.TryParse(m.AllowedHours, out var hours))
+                {
+                    throw new ConfigException($"Machine '{m.Name}': allowed_hours must look like '22:00-07:00'.");
+                }
+
+                if (hours.IsSingleInstant)
+                {
+                    throw new ConfigException(
+                        $"Machine '{m.Name}': allowed_hours '{m.AllowedHours}' has the same start and end, so it would match a single minute. "
+                        + "Omit allowed_hours to allow all day, or give a real window like '22:00-07:00'.");
+                }
             }
         }
     }

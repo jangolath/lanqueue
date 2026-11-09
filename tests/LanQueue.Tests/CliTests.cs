@@ -77,4 +77,41 @@ public class CliTests
     [Fact]
     public void MissingExplicitConfigIsAnError() =>
         Assert.Throws<LanQueue.Config.ConfigException>(() => Cli.ResolveConfig("nope.yml", Env(), windows: false, exists: _ => false));
+
+    [Fact]
+    public void TimeoutDefaultsTo240MinutesAndCanBeSet()
+    {
+        Assert.Equal(240, ParsedArgs.Parse(["run", "--", "dotnet", "test"]).TimeoutMinutes);
+        Assert.Equal(30, ParsedArgs.Parse(["run", "--timeout", "30", "--", "dotnet", "test"]).TimeoutMinutes);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-5")]
+    [InlineData("100000")]
+    public void OutOfRangeTimeoutIsAnError(string minutes) =>
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--timeout", minutes, "--", "dotnet", "test"]));
+
+    [Fact]
+    public async Task BadTimeoutExitsWith2()
+    {
+        var err = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--timeout", "abc", "--", "dotnet", "test"], new StringWriter(), err, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task HealthProbesRunConcurrentlyAndPrintInConfigOrder()
+    {
+        var ssh = new GatedProbeSsh();
+        var o = new StringWriter();
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var code = await Cli.Health(config, new LanQueue.Health.HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), CancellationToken.None);
+
+        Assert.Equal(0, code);
+        Assert.Equal(["build-02", "build-01"], ssh.Finished); // build-02 answered first
+        var lines = o.ToString().Split((char)10, StringSplitOptions.RemoveEmptyEntries);
+        Assert.StartsWith("build-01", lines[0], StringComparison.Ordinal); // but output keeps config order
+        Assert.StartsWith("build-02", lines[1], StringComparison.Ordinal);
+    }
 }

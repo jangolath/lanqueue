@@ -80,4 +80,25 @@ public class PolicyTests
 
     [Fact]
     public void PowerShellQuotingDoublesQuotes() => Assert.Equal("'it''s'", ShellQuote.PowerShell("it's"));
+
+    [Theory]
+    [InlineData("&calc")]
+    [InlineData("a|b")]
+    [InlineData("<in")]
+    [InlineData(">out")]
+    [InlineData("^")]
+    [InlineData("%PATH%")]
+    [InlineData("say \"hi\"")]
+    public void WindowsWorkersRefuseCmdMetacharacters(string arg)
+    {
+        var r = JobPolicy.ValidateForWindows(["npm", "test", arg]);
+        Assert.False(r.Ok);
+        Assert.Contains("cmd.exe", r.Reason, StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => LanQueue.Jobs.RemoteScripts.Execute(T.Windows(), "job1", ".", ["npm", "test", arg]));
+        _ = LanQueue.Jobs.RemoteScripts.Execute(T.Linux(), "job1", ".", ["npm", "test", arg]); // Linux workers are unaffected
+    }
+
+    [Fact]
+    public void OrdinaryWindowsArgumentsAreAllowed() =>
+        Assert.True(JobPolicy.ValidateForWindows(["dotnet", "test", "--filter", "Category=Unit", "-c", "Release", "it's"]).Ok);
 }
