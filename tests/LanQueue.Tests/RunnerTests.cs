@@ -628,4 +628,39 @@ public sealed class RunnerTests : IDisposable
         var text = "caf" + (char)0xe9 + " " + char.ConvertFromUtf32(0x1F600) + " " + (char)0x4e2d + (char)0x09 + "ok";
         Assert.Equal(text, JobRunner.SafeLine(text));
     }
+
+    private (JobRunner Runner, FakeSsh Ssh) WithMemory(string build01Mem, string build02Mem)
+    {
+        var (runner, ssh, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.5 : 0.1) + (char)10 + (m.Name == "build-01" ? build01Mem : build02Mem))
+            : new SshResult(0, "ran"));
+        return (runner, ssh);
+    }
+
+    [Fact]
+    public async Task MemOptionSkipsMachinesWithLessAvailableMemory()
+    {
+        var (runner, _) = WithMemory("mem_free_gb=8", "mem_free_gb=2");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { MinMemGb = 4 }, CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-01", r.Machine); // build-02 is less loaded but has only 2 GB
+    }
+
+    [Fact]
+    public async Task MemOptionDoesNotTrustAMachineThatCannotReportMemory()
+    {
+        var (runner, _) = WithMemory("", "mem_free_gb=2");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { MinMemGb = 4 }, CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("build-01: free memory unknown", r.Message, StringComparison.Ordinal);
+        Assert.Contains("build-02: 2.0 GB free memory, --mem needs 4.0 GB", r.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WithoutMemOptionUnknownMemoryIsNoObstacle()
+    {
+        var (runner, _) = WithMemory("", "");
+        Assert.Equal(JobStatus.Completed, (await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None)).Status);
+    }
 }

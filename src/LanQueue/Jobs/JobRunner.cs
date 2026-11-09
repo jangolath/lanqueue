@@ -20,7 +20,9 @@ public enum JobStatus
 }
 
 /// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
-public sealed record JobRequest(IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null)
+/// <param name="MinMemGb">lanq run --mem: only machines that report at least this much available memory (GB).</param>
+public sealed record JobRequest(
+    IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null, double? MinMemGb = null)
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
@@ -108,6 +110,17 @@ public sealed class JobRunner(
 
     internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
 
+    /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
+    private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
+        needGb is not { } need || !h.Reachable || h.Hold is not null || h.MemFreeGb >= need
+            ? h
+            : h with
+            {
+                Hold = h.MemFreeGb is { } free
+                    ? string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, --mem needs {need:0.0} GB")
+                    : "free memory unknown (--mem needs the machine to report it)",
+            };
+
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
 
@@ -124,6 +137,7 @@ public sealed class JobRunner(
             var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
             var health = config.Machines.Zip(probes)
                 .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold }) : h)
+                .Select(h => (h.First, WithMemRequirement(h.Item2, req.MinMemGb)))
                 .ToList();
 
             var ranked = Scheduler.Rank(health, req.Needs).ToList();

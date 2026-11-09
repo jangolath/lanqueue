@@ -92,6 +92,16 @@ public static partial class ConfigLoader
             throw new ConfigException("policy.load_threshold must be in (0, 1].");
         }
 
+        if (!double.IsFinite(config.Policy.MinFreeMemGb) || config.Policy.MinFreeMemGb < 0)
+        {
+            throw new ConfigException("policy.min_free_mem_gb must be >= 0.");
+        }
+
+        if (!double.IsFinite(config.Policy.MaxMemPressure) || config.Policy.MaxMemPressure is < 0 or > 100)
+        {
+            throw new ConfigException("policy.max_mem_pressure must be from 0 to 100 (percent of time stalled on memory).");
+        }
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in config.Machines)
         {
@@ -121,6 +131,11 @@ public static partial class ConfigLoader
             if (!Enum.IsDefined(m.Transfer))
             {
                 throw new ConfigException($"Machine '{m.Name}': transfer must be 'git' or 'archive'.");
+            }
+
+            if (m.MinFreeMemGb is { } minMem && (!double.IsFinite(minMem) || minMem < 0))
+            {
+                throw new ConfigException($"Machine '{m.Name}': min_free_mem_gb must be >= 0.");
             }
 
             if (m.MaxJobs < 1)

@@ -114,4 +114,24 @@ public class CliTests
         Assert.StartsWith("build-01", lines[0], StringComparison.Ordinal); // but output keeps config order
         Assert.StartsWith("build-02", lines[1], StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void MemOptionIsParsedInGigabytes()
+    {
+        Assert.Null(ParsedArgs.Parse(["run", "--", "dotnet", "test"]).MemGb);
+        Assert.Equal(2.5, ParsedArgs.Parse(["run", "--mem", "2.5", "--", "dotnet", "test"]).MemGb);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("abc")]
+    [InlineData("NaN")]
+    [InlineData("100000")]
+    public async Task BadMemExitsWith2(string value)
+    {
+        var err = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--mem", value, "--", "dotnet", "test"], new StringWriter(), err, CancellationToken.None));
+        Assert.Contains("--mem", err.ToString(), StringComparison.Ordinal);
+    }
 }

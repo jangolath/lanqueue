@@ -19,6 +19,12 @@ public sealed class PolicyConfig
 {
     public double LoadThreshold { get; set; } = 0.80;
     public double MinFreeDiskGb { get; set; } = 5;
+
+    /// <summary>A machine with less available memory (GB) is held; a machine's own min_free_mem_gb overrides it.</summary>
+    public double MinFreeMemGb { get; set; } = 1.0;
+
+    /// <summary>Linux PSI memory "some avg10" (percent of time stalled) above this holds the machine.</summary>
+    public double MaxMemPressure { get; set; } = 20;
     public List<string> AllowedCommands { get; set; } = [];
     public List<string> AllowedDirectories { get; set; } = [];
 }
@@ -32,6 +38,9 @@ public sealed class Machine
     public string WorkRoot { get; set; } = "";
     public List<string> Capabilities { get; set; } = [];
     public int MaxJobs { get; set; } = 1;
+
+    /// <summary>Overrides policy.min_free_mem_gb for this machine.</summary>
+    public double? MinFreeMemGb { get; set; }
     public string? AllowedHours { get; set; }
     public TransferMode Transfer { get; set; } = TransferMode.Git;
 }

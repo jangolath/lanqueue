@@ -14,6 +14,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>How long the job itself may run (lanq run --timeout, in minutes).</summary>
     public int TimeoutMinutes { get; init; } = DefaultTimeoutMinutes;
 
+    /// <summary>lanq run --mem: minimum available memory in GB, or null.</summary>
+    public double? MemGb { get; init; }
+
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
     {
@@ -25,6 +28,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var dir = ".";
         var wait = 0;
         var timeout = DefaultTimeoutMinutes;
+        double? mem = null;
         var command = own.Length > 0 ? own[0] : "help";
         for (var i = 1; i < own.Length; i++)
         {
@@ -50,12 +54,20 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     }
 
                     break;
+                case "--mem" when i + 1 < own.Length:
+                    if (!double.TryParse(own[++i], NumberStyles.Float, CultureInfo.InvariantCulture, out var gb) || !double.IsFinite(gb) || gb is <= 0 or > 4096)
+                    {
+                        throw new ArgumentException("--mem must be the available memory a machine needs, in GB, above 0 and at most 4096 (for example --mem 4 or --mem 2.5).");
+                    }
+
+                    mem = gb;
+                    break;
                 default:
                     throw new ArgumentException($"Unknown or incomplete option '{own[i]}'.");
             }
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout };
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem };
     }
 }
 
@@ -65,12 +77,13 @@ public static class Cli
         lanq - headless job runner for your own LAN machines
 
           lanq health [--config FILE]
-          lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--config FILE] -- dotnet test
+          lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--config FILE] -- dotnet test
           lanq stats
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
+        --mem is in GB: only machines reporting at least that much available memory take the job.
         Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out.
         """;
 
@@ -121,7 +134,7 @@ public static class Cli
         var scratch = Path.Combine(home, "tmp");
         var runner = new JobRunner(config, ssh, new GitPayloadBuilder(), probe, log, scratch, line => stdout.WriteLine(line));
         var result = await runner.RunAsync(
-            new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes)),
+            new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
             ct).ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {result.Message}").ConfigureAwait(false);
         return result.CliExitCode;
@@ -191,13 +204,17 @@ public static class Cli
         {
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
-                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  slots {h.SlotsUsed}/{m.MaxJobs}")
+                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots {h.SlotsUsed}/{m.MaxJobs}")
                 : h.Error ?? "";
             await stdout.WriteLineAsync($"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd()).ConfigureAwait(false);
         }
 
         return 0;
     }
+
+    private static string Memory(MachineHealth h) =>
+        (h.MemFreeGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"mem free {mem:0.0} GB") : "mem free ?")
+        + (h.SwapFreeGb is { } swap ? string.Create(CultureInfo.InvariantCulture, $" (swap {swap:0.0} GB)") : "");
 
     private static int Stats(JobLog log, TextWriter stdout)
     {
