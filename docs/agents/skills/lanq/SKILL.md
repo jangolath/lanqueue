@@ -17,17 +17,26 @@ Do not use it for commands outside the allowlist, for interactive programs, or w
 
 ## Commands
 
+Prefer `--json`: it is stable to parse and keeps results apart from logs.
+
 Check who is available:
 
 ```bash
-lanq health
+lanq health --json
 ```
+
+One array, in config order: `name`, `state` (`ok`, `hold` or `down`), `reasons` (why held or down), `load`,
+`diskFreeGb`, `memFreeGb` (null if unknown), `slotsUsed`, `maxJobs`, `localTime` (the worker's clock, or null).
 
 Run a job (run from inside the git repository) and keep only a short result:
 
 ```bash
-lanq run --needs dotnet -- dotnet test -c Release > "${TMPDIR:-/tmp}/lanq-last.log" 2>&1; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
+lanq run --json --needs dotnet -- dotnet test -c Release 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
 ```
+
+stdout is one JSON object when the job is over: `status` (`Completed`, `Failed`, `Rejected`, `NoCapacity`,
+`InfraError`, `TimedOut`, `WindowClosed`), `exitCode` (lanq's exit code), `machine` (null if none took it), `jobId`,
+`durationSeconds`, `message`. The job's output and the `[lanq]` status line go to stderr (the log file above).
 
 - `--needs a,b` requires every listed capability on the machine (tags come from the developer's config).
 - `--dir <relative dir>` runs in a subdirectory, for example `--dir tests`.
@@ -40,12 +49,14 @@ lanq run --needs dotnet -- dotnet test -c Release > "${TMPDIR:-/tmp}/lanq-last.l
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from the tail; open
   the log file further only if the tail does not show them.
 - `2`: refused by policy (command, directory, secret scan, bad flag). Report the message and stop.
-- `70`: infrastructure error (ssh, git). Report it; do not retry in a loop.
+- `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. `lanq doctor` (local, no network) or
+  `lanq doctor --remote` (also each worker's tools in the job environment) shows what is wrong; report its FAIL lines.
 - `75`: no eligible machine. Retry once with `--wait 120`, then tell the developer.
 
 ## What not to do
 
 - Do not edit the lanq machines file, the allowlists, `known_hosts` or any ssh or key setting. The developer owns them.
 - Do not ssh to the machines yourself, and do not try to work around a refusal.
+- Do not run `lanq unlock` or `lanq makeready` unless the developer asks: they act on someone's PC.
 - Do not pass permission-skipping flags such as `--dangerously-skip-permissions`; lanq rejects them.
 - Do not paste whole logs into the conversation.

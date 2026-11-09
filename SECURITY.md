@@ -31,6 +31,15 @@ the content of `.npmrc` / `.pypirc` files, committed or uncommitted (refused onl
 references pass, and the value is never printed). It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history.
 
+`lanq makeready` runs the embedded lanq-makeready scripts, which are byte-identical to a GitHub release whose SHA-256
+values a test pins; they are updated only through `scripts/sync-makeready.sh`, which checks the release's
+`SHA256SUMS` and its build-provenance attestation first. The script is sent on ssh stdin and runs from memory, so
+nothing is written to the worker. Its JSON report is untrusted: read up to 1 MB, parsed by a source-generated
+deserializer (no reflection), validated against the `lanq-makeready/v1` schema, sanitised before display, and never
+executed. `lanq doctor --remote` writes and removes one empty temporary file in `work_root` and runs version
+commands (`go` with `GOTOOLCHAIN=local`) in the job environment; `lanq doctor` without `--remote` makes no network
+connection.
+
 On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off and
 all transports refused except reading the uploaded bundle.
 

@@ -21,8 +21,13 @@ Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, plus `gi
 ## Quick start
 
 1. List your machines in a private `machines.yml` (start from the [example](https://github.com/jangolath/lanqueue/blob/main/machines.example.yml)) and make sure key-based SSH login works.
-2. Check the fleet: `lanq health`
+2. Check your setup and the fleet: `lanq doctor --remote`, then `lanq health`
 3. Run a job from inside a git repository: `lanq run --needs dotnet,linux -- dotnet test -c Release`
+
+Onboarding a PC: `lanq makeready --ssh user@old-pc.lan --os windows` runs the read-only
+[lanq-makeready](https://github.com/jangolath/lanq-makeready) check over SSH (built in, sent on stdin, nothing written to
+the PC) and suggests a `machines.yml` entry. `lanq unlock <machine>` clears slots left by a crashed run. `lanq health
+--json` and `lanq run --json` print machine-readable results for scripts and coding agents.
 
 `lanq` picks the least loaded machine that has what the job needs, ships your current git state (including
 uncommitted changes) to a throw-away worktree, runs the one allowlisted command, streams the log back and cleans up.

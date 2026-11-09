@@ -73,6 +73,35 @@ Transfer and supply chain:
   release workflow attests the `.nupkg`'s build provenance (`actions/attest-build-provenance`, pinned by SHA, with
   `id-token`/`attestations` write granted to that one job). README: "Verify a release" with `gh attestation verify`.
 
+Command line:
+
+- **`lanq makeready <machine>`** and **`lanq makeready --ssh user@host --os windows|linux`** (for a PC not in
+  `machines.yml` yet) run the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) v0.1.0 check on a
+  worker. The two scripts are built in, byte-identical to that release (a test pins their SHA-256 from its
+  `SHA256SUMS`; `scripts/sync-makeready.sh <tag>` updates them only after `sha256sum -c` and `gh attestation verify`),
+  sent on ssh stdin with `-Redact`/`--redact` and run from memory: nothing is written to the worker. The JSON report
+  is treated as untrusted (1 MB cap, source-generated parsing, schema `lanq-makeready/v1`, every string sanitised,
+  nothing executed). Output: verdicts, each WARN/FAIL check with its advice, the capability diff against
+  `machines.yml`, a suggested entry, and "lanq never changes a worker". `--json` prints the validated report. Exit `0`
+  ready, `1` not ready, `2` bad arguments, `70` ssh or unusable report, `75` the machine is paused or outside its
+  allowed hours (`--force` scans anyway).
+- **`lanq doctor`** checks your own setup with no network: ssh/scp/git/ssh-keygen on PATH, the state folder, the
+  config, and per machine a `known_hosts` entry (resolved with `ssh -G`, `[host]:port` for other ports) and the
+  `key_env` file and passphrase. **`lanq doctor --remote`** adds one ssh call per machine (four at a time): `work_root`
+  writable, git or tar, and each capability's tool (`dotnet`, `node`, `npm`, `python`, `go`, `rust`, `java`, `docker`)
+  run in the job environment, so a tool missing from a non-login SSH session (fix: `path_prepend:`) shows up before a
+  job fails. Exit `0` when every line is OK.
+- **`--json`** for `lanq health` (one array: `name`, `state`, `reasons`, `load`, `diskFreeGb`, `memFreeGb`,
+  `slotsUsed`, `maxJobs`, `localTime`) and `lanq run` (the job's output goes to stderr, then one object on stdout:
+  `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it.
+- **`lanq unlock <machine>`** removes slot files past their recorded deadline at once and says what it removed and
+  kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running
+  job there would lose its slot. `--all` without `--yes` is refused.
+- Options are checked per command: an option the command does not use (for example `lanq health --needs x`) is now an
+  error (exit `2`) instead of being ignored.
+- Fixes: an uncommitted `.npmrc` / `.pypirc` gets the same content check as a committed one (it was refused by
+  name); the health probe no longer counts the transient `slot-N.stale.<pid>` file of a slot reclaim as a used slot.
+
 ## 0.3.1 (2026-11-09)
 
 - **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the

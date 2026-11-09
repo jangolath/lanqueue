@@ -9,3 +9,5 @@ Small, focused pull requests are welcome.
 - Never put real hostnames, IPs, key paths or credentials in code, tests, docs or issues. Use placeholders such as
   `build-01` and `user@build-01.lan`.
 - Format with `dotnet format` before pushing; follow `.editorconfig`.
+- `src/LanQueue/Makeready/lanq-makeready.*` are copies of a verified lanq-makeready release, pinned by hash. Do not
+  edit them; update them with `scripts/sync-makeready.sh <tag>` (see RELEASING.md).

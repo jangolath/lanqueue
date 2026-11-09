@@ -92,7 +92,7 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
    (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
-3. Check the fleet:
+3. Check your setup and the fleet (`lanq doctor --remote` also checks each worker's tools; see [Commands](#commands)):
 
    ```
    $ lanq health
@@ -116,6 +116,103 @@ Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` in
 the grace period, and was stopped. A job that itself exits with `124` gives the same code; the last stderr line tells
 them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stopped after N min: ...` versus
 `[lanq] Failed: exit 124`).
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `lanq health [--json]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. |
+| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code. |
+| `lanq stats` | Wall-clock time per machine, from your local job log. |
+| `lanq doctor [--remote]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
+| `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
+| `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
+
+Every command takes `--config FILE`. An option a command does not use is an error, not silently ignored.
+
+### lanq doctor
+
+Local by default (no network): `ssh` (with its version), `scp`, `git` and `ssh-keygen` on PATH; the state folder is
+writable; the config loads (the loader's own error otherwise); and for each machine a `known_hosts` entry (host and
+port resolved with `ssh -G`, so `~/.ssh/config` counts; a non-22 port is looked up as `[host]:port`), the `key_env`
+file and whether it has a passphrase. `--remote` adds one ssh call per machine, four at a time: is `work_root`
+writable (a temporary file, removed again; a missing `work_root` is a warning and is not created), is git or tar
+there for the machine's transfer mode, and does each capability's tool answer **in the job environment**, with the
+machine's `env:` and `path_prepend:` applied exactly as for a job:
+
+| Capability | Command run |
+| --- | --- |
+| `dotnet` / `node` / `npm` | `dotnet --version` / `node --version` / `npm --version` |
+| `python` | `python3 --version`, falling back to `python --version` |
+| `go` | `go version` with `GOTOOLCHAIN=local` (never downloads a toolchain) |
+| `rust` / `java` | `cargo --version` / `java -version` |
+| `docker` | `docker version --format '{{.Server.Version}}'` (the daemon must answer) |
+
+Other capability names are listed as `SKIP ... not checked`. This is how you find the classic "npm works when I log
+in, but `npm: not found` in a lanq job" problem: a non-login SSH session does not run your shell profile, so add the
+tool's folder to `path_prepend:`. Output is one `OK`, `WARN`, `FAIL` or `SKIP` line per check; the exit code is `0`
+when nothing is `WARN` or `FAIL`, otherwise `1`.
+
+```
+$ lanq doctor --remote
+OK    ssh: OpenSSH_9.6p1, OpenSSL 3.0.13 30 Jan 2024
+OK    git: git version 2.47.0
+OK    config: 2 machine(s)
+OK    build-01: known_hosts has build-01.lan
+OK    build-01 (remote): dotnet: 10.0.100
+FAIL  build-01 (remote): npm: 'npm --version' failed in the job environment (sh: 1: npm: not found). If the tool is installed, ...
+SKIP  build-01 (remote): gpu: not checked (no known tool command)
+```
+
+### lanq makeready
+
+Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
+.NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
+(v0.1.0, byte-identical to that release, whose SHA-256 a test pins), sent on ssh **stdin** and run from memory with
+`-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
+
+- `lanq makeready build-01` for a configured machine. It respects the machine's `PAUSE` file and `allowed_hours`
+  (exit `75`); `--force` scans anyway.
+- `lanq makeready --ssh user@old-pc.lan --os windows` for a PC that is not in `machines.yml` yet, once key-based
+  SSH works and its host key is in your `known_hosts` (same key-only, strict-host-key ssh options as every other call;
+  your agent or default key is used).
+
+It prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), each `WARN`/`FAIL` check
+with its advice, for a configured machine the capabilities detected but not configured and configured but not
+detected, and a suggested `machines.yml` entry. It ends with: *lanq never changes a worker. Fixes are for the PC's
+owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead. The report is
+treated as untrusted input: at most 1 MB, parsed without reflection, checked against the schema, every string
+sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-ready (git or archive transfer works),
+`1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours.
+
+### lanq unlock
+
+A slot file records its deadline; `lanq run` reclaims a slot 30 minutes after it. `lanq unlock build-01` removes
+the slots that are already past their deadline right away and says what it removed and what it kept (a live slot,
+or one written by a lanq before 0.4, which has no deadline). `lanq unlock build-01 --all --yes` removes every slot
+file on that machine, including those old ones; a job still running there keeps running but loses its slot, so
+another job may start beside it. `--all` without `--yes` is refused.
+
+### JSON output
+
+Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
+
+```json
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03"},
+ {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null}]
+```
+
+`state` is `ok`, `hold` or `down`; `reasons` is empty when `ok`; `memFreeGb` and `localTime` (the worker's own clock)
+are `null` when the worker does not report them. `lanq run --json` streams the job's output to **stderr** and prints
+one object on stdout when it is over:
+
+```json
+{"status":"Completed","exitCode":0,"machine":"build-02","jobId":"20261109-221503-a1b2c3","durationSeconds":84.2,"message":"exit 0"}
+```
+
+`status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut` or `WindowClosed`; `exitCode`
+is `lanq`'s own exit code; `machine` is `null` when no machine took the job. The `[lanq] ...` status line still goes
+to stderr.
 
 ## How it works
 
@@ -332,6 +429,8 @@ lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is th
 lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
 lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
 lanq stats                                                     # wall-clock time per machine
+lanq doctor --remote                                           # is my setup right, and does each worker find its tools?
+lanq makeready --ssh me@old-pc.lan --os windows                # can this PC be a worker? (read-only, changes nothing)
 ```
 
 You own `machines.yml` and the allowlists. Edit them yourself; nothing else should.
@@ -352,6 +451,13 @@ On Windows PowerShell:
 
 ```powershell
 $log = Join-Path $env:TEMP 'lanq-last.log'; lanq run --needs dotnet -- dotnet test -c Release *> $log; "exit=$LASTEXITCODE"; Get-Content $log -Tail 40
+```
+
+Better for agents, `--json` keeps the result apart from the log: the job's output goes to stderr (the file) and
+stdout carries one JSON object (see [JSON output](#json-output)):
+
+```bash
+lanq run --json --needs dotnet -- dotnet test -c Release 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
 ```
 
 The agent keeps the exit code and a short tail, and opens more of the log file only when the tail is not
@@ -454,7 +560,12 @@ Each default below is enforced in code and covered by a unit test.
   held), and Prepare then extracts exactly once with those flags, with no fallback or retry. Linux extraction runs
   with `--no-same-owner --no-same-permissions`. This is checked by tests that run the generated scripts against
   crafted hostile archives; it is a defence in depth for a trusted-network tool, not a sandbox.
-- **No telemetry**, no network access except the SSH hosts you configure.
+- **`lanq makeready` is read-only and leaves nothing behind.** The embedded lanq-makeready scripts are byte-identical
+  to a release whose SHA-256 a test pins (updated only through `scripts/sync-makeready.sh`, which checks the release's
+  `SHA256SUMS` and its build-provenance attestation). The script goes to the worker on ssh stdin and runs from memory.
+  Its report is untrusted input: capped at 1 MB, parsed by a source-generated deserializer, checked against the
+  `lanq-makeready/v1` schema, sanitised before display and never executed.
+- **No telemetry**, no network access except the SSH hosts you configure (`lanq doctor` without `--remote` uses none).
 
 See [SECURITY.md](SECURITY.md) for what this does not protect against.
 
