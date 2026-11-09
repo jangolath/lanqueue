@@ -23,6 +23,9 @@ public sealed record MachineHealth(
 
     /// <summary>Linux PSI memory "some avg10" (percent), or null when the kernel does not report it.</summary>
     public double? MemPressure { get; init; }
+
+    /// <summary>True when a PAUSE file exists in the machine's work_root.</summary>
+    public bool Paused { get; init; }
 }
 
 public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
@@ -62,48 +65,56 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
             return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (load, disk_free_gb or slots_used missing or invalid)", null);
         }
 
-        double? mem = OptionalNum(values, "mem_free_gb"), pressure = OptionalNum(values, "mem_pressure");
-        var hold = tool == "missing"
-            ? machine.Transfer == TransferMode.Archive
-                ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or bsdtar plus gzip on Linux, or a Windows built-in tar.exe that accepts --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions)"
-                : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)"
-            : Evaluate(machine, policy, outside, load, disk, mem, pressure);
-        return new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, hold, null)
+        var health = new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, null, null)
         {
-            MemFreeGb = mem,
+            MemFreeGb = OptionalNum(values, "mem_free_gb"),
             SwapFreeGb = OptionalNum(values, "swap_free_gb"),
-            MemPressure = pressure,
+            MemPressure = OptionalNum(values, "mem_pressure"),
+            Paused = values.TryGetValue("paused", out var paused) && paused == "1",
+        };
+        return health with
+        {
+            Hold = tool == "missing"
+                ? machine.Transfer == TransferMode.Archive
+                    ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or bsdtar plus gzip on Linux, or a Windows built-in tar.exe that accepts --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions)"
+                    : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)"
+                : Evaluate(machine, policy, health, outside),
         };
     }
 
     /// <summary>
-    /// "Hold short" rules: outside allowed hours, low disk, low memory, memory pressure, or load above the threshold. Memory that the
-    /// worker did not report (null) never holds: older kernels and odd hosts simply do not say.
+    /// "Hold short" rules: a PAUSE file, outside allowed hours, low disk, low memory, memory pressure, or load above the threshold.
+    /// Memory that the worker did not report (null) never holds: older kernels and odd hosts simply do not say.
     /// </summary>
-    public static string? Evaluate(Machine machine, PolicyConfig policy, bool outsideHours, double load, double diskFreeGb, double? memFreeGb, double? memPressure)
+    public static string? Evaluate(Machine machine, PolicyConfig policy, MachineHealth h, bool outsideHours)
     {
+        if (h.Paused)
+        {
+            return "paused on the machine";
+        }
+
         if (outsideHours)
         {
             return "outside allowed hours";
         }
 
-        if (diskFreeGb < policy.MinFreeDiskGb)
+        if (h.DiskFreeGb < policy.MinFreeDiskGb)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"disk free {diskFreeGb:0.#} GB below minimum {policy.MinFreeDiskGb:0.#} GB");
+            return string.Create(CultureInfo.InvariantCulture, $"disk free {h.DiskFreeGb:0.#} GB below minimum {policy.MinFreeDiskGb:0.#} GB");
         }
 
-        if (memFreeGb < (machine.MinFreeMemGb ?? policy.MinFreeMemGb))
+        if (h.MemFreeGb < (machine.MinFreeMemGb ?? policy.MinFreeMemGb))
         {
-            return string.Create(CultureInfo.InvariantCulture, $"low memory ({memFreeGb:0.0} GB free)");
+            return string.Create(CultureInfo.InvariantCulture, $"low memory ({h.MemFreeGb:0.0} GB free)");
         }
 
-        if (memPressure > policy.MaxMemPressure)
+        if (h.MemPressure > policy.MaxMemPressure)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"memory pressure (some avg10 {memPressure:0.#}% above {policy.MaxMemPressure:0.#}%)");
+            return string.Create(CultureInfo.InvariantCulture, $"memory pressure (some avg10 {h.MemPressure:0.#}% above {policy.MaxMemPressure:0.#}%)");
         }
 
-        return load > policy.LoadThreshold
-            ? string.Create(CultureInfo.InvariantCulture, $"load {load:0.00} above threshold {policy.LoadThreshold:0.00}")
+        return h.LoadRatio > policy.LoadThreshold
+            ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00} above threshold {policy.LoadThreshold:0.00}")
             : null;
     }
 

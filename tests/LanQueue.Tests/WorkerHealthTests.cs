@@ -139,6 +139,55 @@ public class WorkerHealthTests
         }
     }
 
+    [Fact]
+    public async Task PauseFileHoldsTheMachine()
+    {
+        var h = await Probe("load=0.95\ndisk_free_gb=50\nslots_used=0\ntool=ok\npaused=1");
+        Assert.True(h.Paused);
+        Assert.Equal("paused on the machine", h.Hold); // reported ahead of the high load
+    }
+
+    [Theory]
+    [InlineData("paused=0")]
+    [InlineData("")]
+    [InlineData("paused=yes")]
+    public async Task NoPauseFileOrOlderProbeOutputIsNotPaused(string extra)
+    {
+        var h = await Probe(Base + extra);
+        Assert.False(h.Paused);
+        Assert.Null(h.Hold);
+    }
+
+    [Fact]
+    public void ProbesLookForThePauseFileInTheWorkRoot()
+    {
+        Assert.Contains("\"$R/PAUSE\"", RemoteScripts.Probe(T.Linux()), StringComparison.Ordinal);
+        Assert.Contains("\"$root/PAUSE\"", RemoteScripts.Probe(T.Windows()), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RealProbeOnThisHostSeesThePauseFile()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "lanq-pause-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
+        Directory.CreateDirectory(root);
+        try
+        {
+            var before = RunProbe(root);
+            if (before is null)
+            {
+                return; // no suitable shell on this machine
+            }
+
+            Assert.Equal("0", HealthProbe.Parse(before).GetValueOrDefault("paused"));
+            File.WriteAllText(Path.Combine(root, "PAUSE"), "");
+            Assert.Equal("1", HealthProbe.Parse(RunProbe(root)!).GetValueOrDefault("paused"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     /// <summary>Runs the generated probe for a machine whose work_root is <paramref name="root"/>; null when no shell is available.</summary>
     internal static string? RunProbe(string root)
     {
