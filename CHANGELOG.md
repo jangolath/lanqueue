@@ -10,9 +10,14 @@
 - The worker is treated as untrusted: only regular files whose real path is inside the job folder are sent; symlinks,
   junctions and reparse points (never followed), hard links (Linux), devices, FIFOs and names with control characters
   are skipped and listed. Files come back as a framed text stream (header, base64 lines, SHA-256), never as an archive;
-  lanq re-checks every path (including Windows device names, trailing dots and spaces, length and case-insensitive
-  collisions), the caps, the exact size and the hash, deletes any partial file that fails, streams to disk, creates
-  files with `CreateNew` and never writes through an existing link.
+  lanq re-checks every path (including Windows device names, also as `NUL .txt`, trailing dots and spaces, length and
+  case-insensitive collisions; matched in linear time), the caps, the exact size and the hash. Each file streams to
+  `<name>.lanq-partial` (CreateNew) and is renamed only when complete, never over an existing file; a failed or
+  interrupted file is deleted. Nothing is written through a symlink or junction from the repository top (or
+  `--fetch-dir`) down, so a committed `.lanq` link is refused. Only stdout carries files; the worker's stderr is a
+  separate, sanitised diagnostic.
+- A job that timed out or was stopped by its window is stopped on the worker (recorded process group on Linux, pid
+  and start time on Windows) before its files are fetched.
 - Caps: 500 files and 200 MB by default, `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (up to 2G); what
   fits is fetched in sorted order and the rest is listed.
 - The fetch has its own 10-minute limit and never runs more than 2 minutes past a machine's allowed hours plus grace.

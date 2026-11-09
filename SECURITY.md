@@ -66,13 +66,20 @@ and never lets them choose where they land. The worker script lists only regular
 whose real path stays inside the job folder, never follows symlinks, junctions or other reparse points, skips
 hard-linked files (Linux; Windows hard links are not detected) and devices or FIFOs, and sends each file as a header
 line, base64 lines and its SHA-256. lanq does not trust any of that: it re-validates every path (relative, no `..`,
-no backslash or `:`, no control or invisible characters, no Windows device names, trailing dots or spaces, length
-limits, no case-insensitive collisions, and it must match a requested pattern), enforces the count and size caps on
-the bytes actually received, requires the exact announced size and a matching hash (otherwise the partial file is
-deleted), streams each file to disk, creates it with `CreateNew` below `<out>/<job id>/` only, and refuses to write
-through an existing symlink or junction on the way there. Names are sanitised before they are printed. Two limits
-remain. First, the worker-side checks and the reads are not atomic: a process the job left running could swap a
-checked file for a link to another file the build user can read, and that file's bytes would come back (still only
+no backslash or `:`, no control or invisible characters, no Windows device names (also with spaces before the
+extension, such as `NUL .txt`), trailing dots or spaces, length limits, no case-insensitive collisions, and it must
+match a requested pattern, checked with a non-backtracking matcher so a crafted name cannot make it hang), enforces
+the count and size caps on the bytes actually received, requires the exact announced size and a matching hash,
+streams each file to disk as `<name>.lanq-partial` (created with `CreateNew`, deleted on any failure or on Ctrl+C) and
+renames it to its name only when complete, never over an existing file. Only the worker's stdout is read as frames;
+its stderr is kept apart as a bounded, sanitised diagnostic, so a stray warning cannot corrupt a file. Every folder
+from the repository top (or the `--fetch-dir` you named) down to `<out>/<job id>/` is checked and created one level
+at a time, and a symlink, junction or other reparse point anywhere on that path (for example a `.lanq` link committed
+in a repository) refuses the fetch; `.lanq/.gitignore` is never written through such a link. Names are sanitised before
+they are printed. Before fetching from a job that timed out or was stopped by its machine's hours, lanq stops it with
+the same recorded-process kill as cleanup, so the files are no longer being written. Two limits remain. First, the
+worker-side checks and the reads are not atomic: a process the job left running outside its recorded process group
+could swap a checked file for a link to another file the build user can read, and that file's bytes would come back (still only
 as data, under its checked name, within the caps); a compromised worker can send any bytes it likes anyway, so treat
 fetched files like any download from that PC. Second, lanq checks the folders of the output path itself but a local
 process with your rights could still race it; that is outside this threat model.
