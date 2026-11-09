@@ -81,12 +81,16 @@ Transfer and supply chain:
   parallel `lanq` on Windows) is retried twice, then one warning line is printed and the job goes on. Bundles are now built when a git machine actually gets the job.
   Archive mode is unchanged.
 - **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
-  HEAD tree are checked against `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.pfx`, `*.p12`, `*.key`,
-  `credentials.json` and `*.kdbx`, because a bundle or archive would carry them. A match refuses the job before
-  anything is sent. `.npmrc` and `.pypirc` files, committed or uncommitted, are not refused by name (registry-only ones are common):
-  their content (up to 64 KB) is checked, and only a literal credential refuses the job (`.npmrc`: a non-empty
-  `_authToken`, `_auth`, `_password` or `password`, including `//host/:_authToken=`, unless it is just an environment
-  reference such as `${NPM_TOKEN}`; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
+  HEAD tree are checked against the same list as uncommitted files (one shared definition): `.env`, `.env.*`, `.envrc`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `secrets.json`, `credentials.json`,
+  `.git-credentials`, `.netrc`, `_netrc`, `terraform.tfstate` (and `.backup`), `*.pem`, `*.pfx`, `*.p12`, `*.key`,
+  `*.ppk`, `*.kdbx`, `*.tfvars`, `*.jks`, `*.keystore`
+  (`*.local.yml` / `*.local.yaml` only when uncommitted), because a bundle or archive would carry them. A match refuses
+  the job before anything is sent. `.npmrc`, `.pypirc` and `.yarnrc.yml` files, committed or uncommitted, are not
+  refused by name (registry-only ones are common): their content (up to 64 KB; lines end at CR, LF or CRLF) is checked,
+  and only a literal credential refuses the job (`.npmrc`: a non-empty `_authToken`, `_auth`, `_password` or
+  `password`, including `//host/:_authToken=`, unless it is just an environment reference such as `${NPM_TOKEN}`;
+  `.yarnrc.yml`: a non-empty `npmAuthToken` or `npmAuthIdent`, also under `npmScopes`, with the same environment
+  reference rule; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
   the value. Obvious samples pass: names ending in `.example` or `.sample`, names containing
   `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
   such a file (for example a test certificate outside those folders, or an `.npmrc` with a literal token) is now refused until the file is

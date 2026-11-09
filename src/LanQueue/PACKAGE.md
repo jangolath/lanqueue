@@ -61,8 +61,10 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
   workers never take arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
 - Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
 - Best-effort secret scan of the command and uncommitted changes, plus the names of committed files (`.env`,
-  `id_rsa`, `*.pem` and similar), before anything leaves your machine.
-- On git workers, git runs with hooks off and transports refused; later jobs send only new commits.
+  `id_rsa`, `*.pem` and similar) and the content of `.npmrc`, `.pypirc` and `.yarnrc.yml`, before anything leaves your
+  machine.
+- On git workers, git runs with hooks off, transports refused and the system and global git config ignored (git 2.32+),
+  and a tampered cache is recreated; later jobs send only new commits.
 - No daemon, no telemetry, and no network access except the SSH hosts you list.
 
 ## More

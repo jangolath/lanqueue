@@ -212,6 +212,7 @@ public sealed class GitPayloadBuilderTests : IDisposable
         Directory.CreateDirectory(Path.Combine(_repo, "web"));
         File.WriteAllText(Path.Combine(_repo, "web", ".npmrc"), "registry=https://r.example/\n");
         File.WriteAllText(Path.Combine(_repo, ".pypirc"), new string('#', 70 * 1024));
+        File.WriteAllText(Path.Combine(_repo, ".yarnrc.yml"), "npmRegistryServer: x");
         Git("add", "-A");
         Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "configs");
 
@@ -219,7 +220,8 @@ public sealed class GitPayloadBuilderTests : IDisposable
 
         Assert.Equal("registry=https://r.example/", p.CommittedConfigs!["web/.npmrc"]!.Trim());
         Assert.Null(p.CommittedConfigs[".pypirc"]); // over 64 KB: not read, and refused by the scan
-        Assert.Equal(2, p.CommittedConfigs.Count);
+        Assert.Equal("npmRegistryServer: x", p.CommittedConfigs[".yarnrc.yml"]!.Trim());
+        Assert.Equal(3, p.CommittedConfigs.Count);
     }
 
     [Fact]

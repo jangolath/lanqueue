@@ -68,6 +68,10 @@ public class SecretScannerTests
     [InlineData("infra/terraform.tfstate")]
     [InlineData("infra/terraform.tfstate.backup")]
     [InlineData("home/.aws/credentials")]
+    [InlineData("keys/id_dsa")]
+    [InlineData(".netrc")]
+    [InlineData("home/_netrc")]
+    [InlineData(".envrc")]
     public void SecretFileNamesAreFound(string path) =>
         Assert.NotEmpty(SecretScanner.ScanFileNames([path]));
 
@@ -130,6 +134,15 @@ public class SecretScannerTests
     [InlineData("credentials.json")]
     [InlineData("vault/passwords.kdbx")]
     [InlineData("fixturesX/server.pem")]
+    [InlineData(".git-credentials")]
+    [InlineData("infra/terraform.tfstate")]
+    [InlineData("infra/terraform.tfstate.backup")]
+    [InlineData("config/secrets.json")]
+    [InlineData("keys/id_ecdsa")]
+    [InlineData("keys/id_dsa")]
+    [InlineData(".netrc")]
+    [InlineData("home/_netrc")]
+    [InlineData(".envrc")]
     public void CommittedSecretLookingNamesAreFound(string path)
     {
         var finding = Assert.Single(SecretScanner.ScanCommittedFileNames([path]));
@@ -149,7 +162,6 @@ public class SecretScannerTests
     [InlineData("docs/keys.md")]
     [InlineData("src/keyboard.cs")]
     [InlineData("monkey")]
-    [InlineData(".envrc")]
     [InlineData("package.json")]
     [InlineData("web/.npmrc")]
     [InlineData(".pypirc")]
@@ -181,6 +193,66 @@ public class SecretScannerTests
         Assert.DoesNotContain("SuperSecretValue123", finding.Rule + finding.Where, StringComparison.Ordinal);
         Assert.DoesNotContain("dXNlcj", finding.Rule + finding.Where, StringComparison.Ordinal);
     }
+
+    /// <summary>The uncommitted and committed name checks come from one list: a name one of them refuses, the other refuses too.</summary>
+    [Theory]
+    [InlineData(".env")]
+    [InlineData("id_rsa")]
+    [InlineData("id_ed25519")]
+    [InlineData("id_ecdsa")]
+    [InlineData("id_dsa")]
+    [InlineData("secrets.json")]
+    [InlineData("credentials.json")]
+    [InlineData(".git-credentials")]
+    [InlineData("terraform.tfstate")]
+    [InlineData("terraform.tfstate.backup")]
+    [InlineData(".netrc")]
+    [InlineData("_netrc")]
+    [InlineData(".envrc")]
+    [InlineData("a.pem")]
+    [InlineData("a.pfx")]
+    [InlineData("a.p12")]
+    [InlineData("a.key")]
+    [InlineData("a.ppk")]
+    [InlineData("a.kdbx")]
+    [InlineData("a.tfvars")]
+    [InlineData("a.jks")]
+    [InlineData("a.keystore")]
+    public void UncommittedAndCommittedNameChecksAgree(string name)
+    {
+        Assert.NotEmpty(SecretScanner.ScanFileNames([name]));
+        Assert.NotEmpty(SecretScanner.ScanCommittedFileNames([name]));
+    }
+
+    [Fact]
+    public void NpmrcWithOnlyCarriageReturnLineEndingsIsStillChecked()
+    {
+        var content = "registry=https://r.example/" + (char)13 + "//r.example/:_authToken=npm_SuperSecretValue123" + (char)13;
+        Assert.Contains("key _authToken", Assert.Single(SecretScanner.ScanCommittedConfig(".npmrc", content)).Rule, StringComparison.Ordinal);
+        Assert.Single(SecretScanner.ScanCommittedConfig(".pypirc", "[pypi]" + (char)13 + "password = SuperSecretValue123" + (char)13));
+    }
+
+    /// <summary>Test contents use '|' for a line break.</summary>
+    private static string Yaml(string text) => text.Replace('|', (char)10);
+
+    [Theory]
+    [InlineData(".yarnrc.yml", "npmAuthToken: npm_SuperSecretValue123|")]
+    [InlineData("web/.yarnrc.yml", "npmRegistryServer: 'https://r.example'|npmScopes:|  acme:|    npmAuthToken: 'SuperSecretValue123'|")]
+    public void YarnrcWithALiteralNpmAuthTokenIsRefused(string path, string content)
+    {
+        Assert.True(SecretScanner.IsPackageConfig(path));
+        var finding = Assert.Single(SecretScanner.ScanCommittedConfig(path, Yaml(content)));
+        Assert.Contains("key npmAuthToken", finding.Rule, StringComparison.Ordinal);
+        Assert.DoesNotContain("SuperSecretValue123", finding.Rule + finding.Where, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("npmAuthToken: '${NPM_TOKEN}'|")]
+    [InlineData("npmAuthToken: ${NPM_TOKEN}|")]
+    [InlineData("npmRegistryServer: 'https://r.example'|# npmAuthToken: old-token-value|")]
+    [InlineData("npmAuthToken: ''|")]
+    public void YarnrcWithoutALiteralTokenPasses(string content) =>
+        Assert.Empty(SecretScanner.ScanCommittedConfig(".yarnrc.yml", Yaml(content)));
 
     [Fact]
     public void PackageConfigTooLargeToCheckIsRefused() =>

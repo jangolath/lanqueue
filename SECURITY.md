@@ -26,8 +26,9 @@ convenience for your machines, not a boundary against someone who can edit that 
 In git mode a worker receives the repository's history, not just the current files: the first job for a repository
 on a machine sends the full history of HEAD, later jobs only the new commits. The secret scan covers the command
 line, the uncommitted changes (content and names), the names of committed files in HEAD (`.env`, `id_rsa`,
-`*.pem` and similar, with samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, allowed), and
-the content of `.npmrc` / `.pypirc` files, committed or uncommitted (refused only for a literal token or password; `${NPM_TOKEN}`-style
+`.git-credentials`, `.netrc`, `terraform.tfstate`, `*.pem` and similar, from the same list as uncommitted files, with
+samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, allowed), and the content of `.npmrc` /
+`.pypirc` / `.yarnrc.yml` files, committed or uncommitted (refused only for a literal token or password; `${NPM_TOKEN}`-style
 references pass, and the value is never printed). It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history.
 
