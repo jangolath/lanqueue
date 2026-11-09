@@ -593,7 +593,12 @@ public static class RemoteScripts
                   $cp = [Diagnostics.Process]::Start($si)
                   Add-Content -LiteralPath $pf -Value @($cp.Id, $cp.StartTime.ToUniversalTime().Ticks)
                   if ($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})) { $cp.WaitForExit(); $code = $cp.ExitCode }
-                  else { & taskkill /PID $cp.Id /T /F 2>$null | Out-Null; $code = 124 }
+                  else {
+                    & taskkill /PID $cp.Id /T /F 2>$null | Out-Null; $code = 124
+                    # A process the child was starting at that very moment is not in the tree taskkill saw: stop any left whose parent was the child.
+                    Start-Sleep -Milliseconds 500
+                    Get-CimInstance Win32_Process -Filter "ParentProcessId=$($cp.Id)" -EA 0 | Where-Object { $_.CreationDate -ge $cp.StartTime } | ForEach-Object { & taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }
+                  }
                 } finally {
                   Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
                 }
