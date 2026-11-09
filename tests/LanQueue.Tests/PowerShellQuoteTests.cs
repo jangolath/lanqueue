@@ -28,19 +28,15 @@ public class PowerShellQuoteTests
     }
 
     /// <summary>Round trip through a real powershell.exe (Windows only): the literal must evaluate back to the exact input.</summary>
-    [Theory]
+    [PowerShellTheory]
     [MemberData(nameof(SingleQuotes))]
     public async Task RoundTripsVerbatimThroughRealPowerShell(string q)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return; // powershell.exe is only guaranteed on Windows
-        }
 
         var input = "a" + q + "; Write-Output INJECTED; " + q + "b" + q + q + "'";
         // Print code points, so no console encoding can blur the comparison.
         var script = "$s = " + ShellQuote.PowerShell(input) + "\n[Console]::Out.Write((($s.ToCharArray() | ForEach-Object { [int]$_ }) -join ','))";
-        var psi = new ProcessStartInfo("powershell.exe")
+        var psi = new ProcessStartInfo(PowerShellTheoryAttribute.Exe!)
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -59,5 +55,32 @@ public class PowerShellQuoteTests
         var expected = string.Join(',', input.Select(c => ((int)c).ToString(CultureInfo.InvariantCulture)));
         Assert.Equal(expected, stdout.Trim());
         Assert.DoesNotContain("INJECTED", stdout, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>Runs with powershell.exe on Windows, or pwsh where it is on PATH; otherwise the test is reported as skipped.</summary>
+public sealed class PowerShellTheoryAttribute : TheoryAttribute
+{
+    public static readonly string? Exe = Find();
+
+    public PowerShellTheoryAttribute()
+    {
+        if (Exe is null)
+        {
+            Skip = "No PowerShell on this machine (powershell.exe on Windows, or pwsh on PATH).";
+        }
+    }
+
+    private static string? Find()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return "powershell.exe";
+        }
+
+        return (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(d => Path.Combine(d, "pwsh"))
+            .FirstOrDefault(File.Exists);
     }
 }
