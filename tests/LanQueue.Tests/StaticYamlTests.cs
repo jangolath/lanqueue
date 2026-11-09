@@ -130,10 +130,93 @@ public sealed class StaticYamlTests
     [InlineData("capabilities: [dotnet, node]", "capabilities: dotnet", "")]
     [InlineData("max_jobs: 3", "max_jobs: three", "")]
     [InlineData("    os: linux", "    os: linux\n    password: x", "password")]
+    [InlineData("max_jobs: 3", "max_jobs: ~", "max_jobs")]
+    [InlineData("max_jobs: 3", "max_jobs:", "max_jobs")]
+    [InlineData("load_threshold: 0.75", "load_threshold: ~", "load_threshold")]
+    [InlineData("window_grace_minutes: 20", "window_grace_minutes: null", "window_grace_minutes")]
+    [InlineData("    os: linux", "    os:", "'machines.os' has no value")]
+    [InlineData("    os: linux", "    os: 7", "os must be the word 'windows' or 'linux'")]
+    [InlineData("    os: linux", "    os: 1", "os must be the word 'windows' or 'linux'")]
+    [InlineData("    os: linux", "    os: lin", "os must be the word 'windows' or 'linux'")]
+    [InlineData("transfer: archive", "transfer: ~", "'machines.transfer' has no value")]
+    [InlineData("priority: normal", "priority:", "'machines.priority' has no value")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: ~", "capabilities")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: [dotnet, ~]", "capabilities")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: [dotnet, \"\"]", "capabilities")]
+    [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - ~\n    - dotnet build", "allowed_commands")]
+    [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - \"\"\n    - dotnet build", "allowed_commands")]
+    [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - \"  \"\n    - dotnet build", "allowed_commands")]
+    [InlineData("allowed_directories: [\".\", src]", "allowed_directories: [\".\", ~]", "allowed_directories")]
+    [InlineData("allowed_directories: [\".\", src]", "allowed_directories: ~", "allowed_directories")]
+    [InlineData("    env:\n      NODE_OPTIONS: \"--max-old-space-size=2048\"\n      MSBUILDNODECOUNT: \"1\"", "    env: ~", "env")]
+    [InlineData("    path_prepend:\n      - /home/build/.nvm/versions/node/v22/bin", "    path_prepend: ~", "path_prepend")]
+    [InlineData("    path_prepend:\n      - /home/build/.nvm/versions/node/v22/bin", "    path_prepend: [~]", "path_prepend")]
+    [InlineData("      - \"Mon-Fri 22:00-07:00\"", "      - ~", "allowed_hours")]
     public void WrongShapesAreFriendlyConfigErrors(string from, string to, string mentions)
     {
-        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Everything.Replace(from, to, StringComparison.Ordinal)));
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml); // the case really changed something
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
         Assert.Contains(mentions, ex.Message, StringComparison.Ordinal);
+    }
+
+    private const string OneMachine = "machines:\n  - name: a\n    os: linux\n    ssh: u@h\n    work_root: /srv/l\n";
+
+    [Theory]
+    [InlineData("just a string\n", "Invalid config")]
+    [InlineData("- a\n- b\n", "Invalid config")]
+    [InlineData("machines: ~\npolicy:\n  allowed_commands: [dotnet test]\n", "'machines' has no value")]
+    [InlineData("machines:\n  - ~\npolicy:\n  allowed_commands: [dotnet test]\n", "machines")]
+    [InlineData("policy: ~\n" + OneMachine, "policy")]
+    [InlineData("policy:\n  allowed_commands: ~\n" + OneMachine, "allowed_commands")]
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    env: ~\n", "env")]
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    env:\n      A: ~\n", "env 'A' needs a value")]
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    name: b\n", "Duplicate key")] // ambiguous: refused
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    env:\n      A: x\n      A: y\n", "Duplicate key")]
+    public void WrongDocumentShapesAreFriendlyConfigErrors(string yaml, string mentions) =>
+        Assert.Contains(mentions, Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml)).Message, StringComparison.Ordinal);
+
+    /// <summary>The same shapes behind --json: exit 2 and exactly one JSON object on stdout, never a crash.</summary>
+    [Theory]
+    [InlineData("just a string\n")]
+    [InlineData("machines: ~\n")]
+    [InlineData("policy: ~\n" + OneMachine)]
+    [InlineData("policy:\n  allowed_commands: [x, ~]\n" + OneMachine)]
+    [InlineData("policy:\n  allowed_commands: [x]\nmachines:\n  - name: a\n    os: 7\n    ssh: u@h\n    work_root: /srv/l\n")]
+    [InlineData("policy:\n  allowed_commands: [x]\n" + OneMachine + "    max_jobs: ~\n")]
+    public async Task BadShapesStillGiveOneJsonObject(string yaml)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "lanq-shape-" + Guid.NewGuid().ToString("N") + ".yml");
+        File.WriteAllText(path, yaml);
+        try
+        {
+            foreach (var args in new[] { new[] { "health", "--json", "--config", path }, ["run", "--json", "--config", path, "--", "dotnet", "test"] })
+            {
+                var o = new StringWriter();
+                var code = await Cli.RunAsync(args, o, new StringWriter(), CancellationToken.None);
+                Assert.Equal(2, code);
+                var line = Assert.Single(o.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
+                using var doc = System.Text.Json.JsonDocument.Parse(line);
+                Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+            }
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>A YAML alias for allowed_hours is accepted and means the anchored value (pinned behaviour).</summary>
+    [Fact]
+    public void AllowedHoursAcceptsAnAlias()
+    {
+        var yaml = Everything
+            .Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: &night \"22:00-07:00\"", StringComparison.Ordinal)
+            .Replace("    allowed_hours:\n      - \"Mon-Fri 22:00-07:00\"\n      - \"Sat,Sun 01:00-09:00\"", "    allowed_hours: *night", StringComparison.Ordinal);
+        Assert.Contains("*night", yaml, StringComparison.Ordinal);
+        var c = ConfigLoader.Parse(yaml);
+        Assert.Equal(["22:00-07:00"], c.Machines[0].AllowedHours!);
+        Assert.Equal(["22:00-07:00"], c.Machines[1].AllowedHours!);
     }
 
     [Theory]

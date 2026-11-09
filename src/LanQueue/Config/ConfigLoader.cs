@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
+using YamlDotNet.RepresentationModel;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -109,11 +110,13 @@ public static partial class ConfigLoader
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
             .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
+            .WithTypeConverter(new WordEnumConverter<MachineOs>("os"))
             .WithTypeConverter(new StringOrListConverter())
             .Build();
         FleetConfig config;
         try
         {
+            CheckShape(yaml);
             config = deserializer.Deserialize<FleetConfig>(yaml) ?? new FleetConfig();
         }
         catch (YamlDotNet.Core.YamlException ex)
@@ -125,14 +128,93 @@ public static partial class ConfigLoader
         return config;
     }
 
+    /// <summary>Keys that may be given with no value (YAML null), by their path: they mean "not set".</summary>
+    private static readonly HashSet<string> NullableKeys = new(StringComparer.Ordinal)
+    {
+        "machines[].allowed_hours", "machines[].key_env", "machines[].min_free_mem_gb",
+    };
+
+    private static bool IsNull(YamlNode node) =>
+        node is YamlScalarNode { Style: ScalarStyle.Plain, Value: "" or "~" or "null" or "Null" or "NULL" or null };
+
+    /// <summary>
+    /// Shape checks that the deserializer would otherwise turn into a cryptic message or a crash: the file must be a mapping, a key may not
+    /// be left without a value (except the few that mean "not set"), and a list may not have an empty entry. Values under env: are checked
+    /// by <see cref="Validate"/>, which names the variable.
+    /// </summary>
+    private static void CheckShape(string yaml)
+    {
+        var stream = new YamlStream();
+        stream.Load(new StringReader(yaml));
+        if (stream.Documents.Count == 0 || IsNull(stream.Documents[0].RootNode))
+        {
+            return; // an empty file has no machines, which Validate reports
+        }
+
+        var root = stream.Documents[0].RootNode;
+        if (root is not YamlMappingNode)
+        {
+            throw new ConfigException($"Invalid config: the file must be a mapping with policy: and machines: keys (line {root.Start.Line}).");
+        }
+
+        Walk(root, "");
+
+        static string Shown(string path) => path.Replace("[]", "", StringComparison.Ordinal);
+
+        static void Walk(YamlNode node, string path)
+        {
+            switch (node)
+            {
+                case YamlMappingNode map:
+                    foreach (var (k, v) in map.Children)
+                    {
+                        var child = (path.Length == 0 ? "" : path + ".") + ((k as YamlScalarNode)?.Value ?? "");
+                        if (path == "env" || path.EndsWith(".env", StringComparison.Ordinal))
+                        {
+                            continue; // an env: value is checked, and its variable named, by Validate
+                        }
+
+                        if (IsNull(v) && !NullableKeys.Contains(child))
+                        {
+                            throw new ConfigException($"Invalid config: '{Shown(child)}' has no value (line {v.Start.Line}). Give it a value or leave the key out.");
+                        }
+
+                        Walk(v, child);
+                    }
+
+                    break;
+                case YamlSequenceNode list:
+                    foreach (var item in list.Children)
+                    {
+                        if (IsNull(item))
+                        {
+                            throw new ConfigException($"Invalid config: '{Shown(path)}' has an empty entry (line {item.Start.Line}).");
+                        }
+
+                        Walk(item, path + "[]");
+                    }
+
+                    break;
+            }
+        }
+    }
+
     public static FleetConfig Load(string path) => Parse(File.ReadAllText(path));
 
     public static void Validate(FleetConfig config)
     {
-        if (config.Machines.Count == 0)
+        if (config.Machines is null || config.Machines.Count == 0)
         {
             throw new ConfigException("No machines configured.");
         }
+
+        if (config.Policy is null || config.Machines.Any(m => m is null))
+        {
+            throw new ConfigException("policy: and every machines: entry must be a mapping of keys.");
+        }
+
+        RequireEntries("policy.allowed_commands", config.Policy.AllowedCommands);
+        RequireEntries("policy.allowed_directories", config.Policy.AllowedDirectories);
 
         if (config.Policy.AllowedCommands.Count == 0)
         {
@@ -195,6 +277,18 @@ public static partial class ConfigLoader
                     : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
             }
 
+            if (!Enum.IsDefined(m.Os))
+            {
+                throw new ConfigException($"Machine '{m.Name}': os must be 'windows' or 'linux'.");
+            }
+
+            RequireEntries($"Machine '{m.Name}': capabilities", m.Capabilities);
+            RequireEntries($"Machine '{m.Name}': path_prepend", m.PathPrepend);
+            if (m.Env is null)
+            {
+                throw new ConfigException($"Machine '{m.Name}': env must be a mapping of NAME: value.");
+            }
+
             if (!Enum.IsDefined(m.Transfer))
             {
                 throw new ConfigException($"Machine '{m.Name}': transfer must be 'git' or 'archive'.");
@@ -234,6 +328,15 @@ public static partial class ConfigLoader
                         + "Omit allowed_hours to allow all day, or give a real window like '22:00-07:00'.");
                 }
             }
+        }
+    }
+
+    /// <summary>A list key must be a list (not null), and every entry a non-blank string.</summary>
+    private static void RequireEntries(string what, List<string>? entries)
+    {
+        if (entries is null || entries.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ConfigException($"{what} must be a list without empty entries.");
         }
     }
 
