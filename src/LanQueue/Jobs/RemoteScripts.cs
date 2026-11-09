@@ -93,8 +93,16 @@ public static class RemoteScripts
     /// </summary>
     internal const string CacheConfigKeys = @"core\.(repositoryformatversion|filemode|bare|symlinks|ignorecase|precomposeunicode|logallrefupdates)|extensions\.(objectformat|refstorage)";
 
+    /// <summary>
+    /// The only top-level entries a worker cache may hold: what git init, fetch, worktree add and auto-gc create. Anything else, above all a
+    /// <c>commondir</c> or <c>gitdir</c> file (git follows them even in a main bare repository and then reads another directory's config,
+    /// info/attributes and objects), makes prepare recreate the cache. The worktrees/*/commondir files git writes per job are below this level.
+    /// </summary>
+    internal const string CacheTopLevel =
+        @"HEAD|config|description|hooks|info|objects|refs|branches|packed-refs|logs|worktrees|FETCH_HEAD|shallow|gc\.pid|gc\.log|(HEAD|config|packed-refs|shallow)\.lock";
+
     /// <summary>Printed by prepare when it recreated a worker cache whose config held anything but <see cref="CacheConfigKeys"/>.</summary>
-    internal const string CacheRecreated = "the worker cache had unexpected config keys; deleted and recreated it (this job sends a full bundle)";
+    internal const string CacheRecreated = "the worker cache had unexpected config keys or files; deleted and recreated it (this job sends a full bundle)";
 
     /// <inheritdoc cref="GitHardeningLinux"/>
     internal const string GitHardeningWindows = "-c core.longpaths=true -c core.hooksPath=NUL -c core.attributesFile=NUL -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
@@ -450,7 +458,8 @@ public static class RemoteScripts
             $ErrorActionPreference = 'Continue'
             if (Test-Path -LiteralPath $c) {
               $keys = @(Q config --file "$c/config" --name-only --list 2>$null); $read = $LASTEXITCODE -eq 0
-              if (-not $read -or @($keys | Where-Object { $_ -and $_ -cnotmatch '^({{CacheConfigKeys}})\z' }).Count -gt 0) {
+              $odd = @(Get-ChildItem -LiteralPath $c -Force -Name -ErrorAction SilentlyContinue | Where-Object { $_ -cnotmatch '^({{CacheTopLevel}})\z' })
+              if (-not $read -or $odd.Count -gt 0 -or @($keys | Where-Object { $_ -and $_ -cnotmatch '^({{CacheConfigKeys}})\z' }).Count -gt 0) {
                 'lanq: {{CacheRecreated}}'
                 cmd /c rd /s /q ($c.Replace('/', '\')) 2>$null | Out-Null
                 if (Test-Path -LiteralPath $c) { 'lanq: could not remove the worker cache'; exit 1 }
@@ -475,6 +484,7 @@ public static class RemoteScripts
             {{LinuxGitFunction}}
             if [ -d "$C" ]; then
               k=$(G config --file "$C/config" --name-only --list 2>/dev/null) && [ -z "$(printf '%s\n' "$k" | grep -v -x -E '{{CacheConfigKeys}}' | grep -v -x '')" ] \
+                && e=$(ls -A "$C") && [ -z "$(printf '%s\n' "$e" | grep -v -x -E '{{CacheTopLevel}}' | grep -v -x '')" ] \
                 || { echo 'lanq: {{CacheRecreated}}'; rm -rf "$C"; }
             fi
             [ -d "$C" ] || G init --bare -q "$C"

@@ -71,6 +71,67 @@ public sealed partial class GitHardeningTests
         }
     }
 
+    /// <summary>
+    /// git follows a "commondir" (or "gitdir") file even in a main bare repository and then takes its config, info/attributes and objects
+    /// from the directory it names: such a file planted in the cache must make prepare recreate the cache, and nothing may run.
+    /// </summary>
+    [Theory]
+    [InlineData("commondir", true)] // the evil repo's config defines the filter, its info/attributes applies it
+    [InlineData("commondir", false)] // only the evil repo's info/attributes; the filter comes from its config as well
+    [InlineData("gitdir", true)]
+    public async Task ACommonDirPlantedInTheCacheNeverRuns(string file, bool filterInConfig)
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var marker = Path.Combine(worker.Root, "commondir-ran").Replace('\\', '/');
+        var evil = Path.Combine(worker.Root, "evil.git").Replace('\\', '/');
+        repo.Git("init", "-q", "--bare", evil);
+        repo.Git("config", "--file", evil + "/config", "filter.evil.smudge", Smudge(marker));
+        if (filterInConfig)
+        {
+            repo.Git("config", "--file", evil + "/config", "filter.evil.required", "false");
+        }
+
+        Directory.CreateDirectory(evil + "/info");
+        File.WriteAllText(evil + "/info/attributes", "* filter=evil\n");
+
+        var (code, output, cache) = await PrepareWithPlantedCache(repo, worker, c => File.WriteAllText(c + "/" + file, evil + "\n"));
+
+        Assert.True(code == 0, output);
+        Assert.False(File.Exists(marker), "a filter reached through a planted " + file + " ran");
+        Assert.Contains("unexpected", output, StringComparison.Ordinal);
+        Assert.False(File.Exists(cache + "/" + file));
+    }
+
+    [Fact]
+    public async Task AnUnknownTopLevelEntryInTheCacheRecreatesIt()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var (code, output, cache) = await PrepareWithPlantedCache(repo, worker, c => File.WriteAllText(c + "/planted", "x"));
+        Assert.True(code == 0, output);
+        Assert.Contains("unexpected", output, StringComparison.Ordinal);
+        Assert.False(File.Exists(cache + "/planted"));
+    }
+
+    /// <summary>The cache's own worktrees/*/commondir files (written by git for every job worktree) are legitimate and keep the cache.</summary>
+    [Fact]
+    public async Task ACacheWithAJobWorktreeIsKept()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var (code, output, cache) = await PrepareWithPlantedCache(repo, worker, _ => { });
+        Assert.True(code == 0, output);
+        Assert.True(Directory.EnumerateFiles(cache + "/worktrees", "commondir", SearchOption.AllDirectories).Any());
+
+        const string Second = "20260101-120000-cccccc";
+        var sha = repo.Git("rev-parse", "HEAD").Trim();
+        File.Copy((await new GitPayloadBuilder().BuildBundleAsync(Second, repo.Dir, repo.Out, sha, null, CancellationToken.None)).Path, Path.Combine(worker.Root, "incoming", Second + ".bundle"));
+        (code, output) = Shells.Run(OperatingSystem.IsWindows() ? "windows" : "linux", RemoteScripts.Prepare(worker.Machine, Second, Path.GetFileName(cache)[..16]));
+        Assert.True(code == 0, output);
+        Assert.DoesNotContain("unexpected", output, StringComparison.Ordinal);
+    }
+
     /// <summary>Prepares a worker cache for <paramref name="repo"/>'s snapshot, lets <paramref name="plant"/> tamper with it, runs prepare.</summary>
     private static async Task<(int Code, string Output, string Cache)> PrepareWithPlantedCache(
         TempRepo repo, LocalWorker worker, Action<string> plant, IReadOnlyDictionary<string, string>? env = null)

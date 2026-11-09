@@ -51,8 +51,13 @@ On a git worker every git call runs with hooks disabled (`core.hooksPath` at the
 global config is still read, and `lanq doctor --remote` warns. Before each fetch the per-repository cache's own `config`
 is checked: anything but the keys `git init --bare` writes (`core.repositoryformatversion`, `core.filemode`,
 `core.bare`, `core.symlinks`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
-`extensions.objectformat`, `extensions.refstorage`) makes lanq delete and recreate that cache, and the cache's
-`info/attributes` is deleted. The repository's own committed `.gitattributes` still apply, but they can only name
+`extensions.objectformat`, `extensions.refstorage`), or any top-level entry besides the ones git itself creates there
+(`HEAD`, `config`, `description`, `hooks`, `info`, `objects`, `refs`, `branches`, `packed-refs`, `logs`, `worktrees`,
+`FETCH_HEAD`, `shallow`, gc and lock files), in particular a `commondir` or `gitdir` file that would make git read
+another directory's config and attributes, makes lanq delete and recreate that cache, and the cache's
+`info/attributes` is deleted. This check and the git calls that follow are not atomic: another process running as the
+same worker user could change the cache in between. That user is already trusted (it runs the jobs), so this is a
+guard against a planted cache, not against a concurrent attacker with the same rights. The repository's own committed `.gitattributes` still apply, but they can only name
 filter drivers, which are defined in config that lanq no longer reads.
 
 It does not:

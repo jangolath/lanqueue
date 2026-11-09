@@ -68,9 +68,10 @@ Transfer and supply chain:
   cache's `info/attributes` and checks the cache's own `config`: any key besides the ones `git init --bare` writes
   (`core.repositoryformatversion`, `filemode`, `bare`, `symlinks`, `ignorecase`, `precomposeunicode`,
   `logallrefupdates`, `extensions.objectformat`, `refstorage`), for example `filter.*`, `include.*`, `includeIf.*`,
-  `alias.*`, `remote.*`, `credential.*` or `url.*`, makes it delete and recreate that cache (one line in the job output;
-  that job sends a full bundle). Tests plant a smudge filter, an `include.path` and a global config filter and check
-  that none of them runs.
+  `alias.*`, `remote.*`, `credential.*` or `url.*`, or any top-level file git does not create there (above all a
+  `commondir` or `gitdir` file, which git follows even in a bare repository), makes it delete and recreate that cache (one line in the job output;
+  that job sends a full bundle). Tests plant a smudge filter, an `include.path`, a `commondir` to another repository
+  and a global config filter and check that none of them runs.
 - **Incremental bundles.** `lanq` records, per machine and repository, the last commit a worker has fetched
   (`<state>/bases.json`, written atomically, updated only after a successful fetch), and the worker cache keeps
   `refs/lanq/base` on the last fetched snapshot. The next job sends `git bundle create … --not <base>` when that commit
