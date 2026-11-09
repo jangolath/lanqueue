@@ -40,7 +40,9 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
 - **Window close.** On a machine with windows a job may run until the window ends plus `policy.window_grace_minutes`
   (default 15) or until `--timeout`, whichever is sooner. If the window limit stops it, the job is cleaned up like a
   timeout, exits `124`, and the status line is `[lanq] WindowClosed`. A machine whose window ends in less than
-  `policy.min_window_minutes` (default 10) takes no new job ("window closing").
+  `policy.min_window_minutes` (default 10) takes no new job ("window closing"). The same check runs again after upload
+  and prepare: if what is left of the window plus grace is then below `policy.min_window_minutes`, the job is not
+  started, the machine is cleaned up, and the result is `NoCapacity` (exit `75`, "window closing").
 
 Transfer and supply chain:
 

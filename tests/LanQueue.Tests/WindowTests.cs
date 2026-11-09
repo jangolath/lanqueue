@@ -412,6 +412,59 @@ public sealed class WindowTests : IDisposable
         Assert.Empty(timeouts);
     }
 
+    /// <summary>Upload and prepare took so long that too little of the window is left: the job is not started, it is held.</summary>
+    [Theory]
+    [InlineData(30)] // 5 min of window + grace left, below min_window_minutes (10)
+    [InlineData(40)] // past window end + grace
+    public async Task AWindowThatClosesDuringPrepareHoldsInsteadOfStartingTheJob(int prepareMinutes)
+    {
+        var config = T.Config();
+        config.Machines[1].AllowedHours = ["Fri 22:00-23:20"];
+        var clock = new SteppingClock(FridayElevenPmUtc);
+        var calls = new List<string>();
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) =>
+            {
+                var text = Decode(m, cmd);
+                lock (calls)
+                {
+                    calls.Add(text);
+                }
+
+                if (text.Contains("disk_free_gb", StringComparison.Ordinal))
+                {
+                    return new SshResult(0, (m.Name == "build-01" ? "load=0.99" : "load=0.1") + "\ndisk_free_gb=50\nslots_used=0\ntool=ok\nlocal_time=2026-01-02T23:00:00");
+                }
+
+                if (text.Contains("bundle verify", StringComparison.Ordinal))
+                {
+                    clock.Now += TimeSpan.FromMinutes(prepareMinutes);
+                }
+
+                return text.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "");
+            },
+        };
+        var runner = new JobRunner(config, ssh, new EmptyPayloads(), new HealthProbe(ssh, clock), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { }, clock: clock);
+
+        var r = await runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Equal(75, r.CliExitCode);
+        Assert.Contains("window closing", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(calls, c => c.Contains("Set-Content -LiteralPath $pf", StringComparison.Ordinal)); // Execute never ran
+        Assert.Contains(calls, c => c.Contains("locks/slot-1", StringComparison.Ordinal)); // the slot was cleaned up
+    }
+
+    private sealed class SteppingClock(DateTimeOffset start) : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = start;
+
+        public override DateTimeOffset GetUtcNow() => Now;
+
+        public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+    }
+
     [Fact]
     public async Task TheCliStatusLineNamesWindowClosed()
     {

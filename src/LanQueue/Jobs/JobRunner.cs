@@ -346,9 +346,17 @@ public sealed class JobRunner(
         var grace = TimeSpan.FromMinutes(config.Policy.WindowGraceMinutes);
         var windowLimit = windowEnds + grace - clock.GetUtcNow();
         var byWindow = windowLimit < timeout;
+        if (windowLimit is { } left && (left <= TimeSpan.Zero || left < TimeSpan.FromMinutes(config.Policy.MinWindowMinutes)))
+        {
+            // Upload and prepare used up the window: hold like a closing window (cleanup runs in the caller), never a job stopped after a second.
+            return new JobResult(jobId, JobStatus.NoCapacity, 75, machine.Name, string.Create(
+                CultureInfo.InvariantCulture,
+                $"{machine.Name}: window closing ({Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left of its allowed hours plus grace after upload and prepare); the job was not started"));
+        }
+
         if (byWindow)
         {
-            timeout = windowLimit > TimeSpan.FromSeconds(1) ? windowLimit.Value : TimeSpan.FromSeconds(1);
+            timeout = windowLimit!.Value;
             onLine($"[lanq] {machine.Name}: allowed hours end soon; the job will be stopped after {ProcessSshClient.Describe(timeout)} (window end + {grace.TotalMinutes:0} min grace)");
         }
 
