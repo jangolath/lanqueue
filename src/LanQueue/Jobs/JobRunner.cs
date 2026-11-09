@@ -73,6 +73,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>NoCapacity only: every machine that did not take the job and why, in config order. Null for every other status.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>The full path of the job's local log (see <see cref="JobLog.LogPathFor"/>), set once the job held a slot and the log was created; null otherwise.</summary>
+    public string? LogPath { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -483,7 +486,7 @@ public sealed partial class JobRunner(
             }
 
             log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
-            return result with { CleanedUp = cleanedUp };
+            return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
         finally
         {

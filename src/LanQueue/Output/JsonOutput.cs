@@ -97,6 +97,13 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>NoCapacity only (top level): every machine that did not take the job, with its reason.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>Always present: the full path of the job's local log (every line lanq printed for the job), or null when no job started.</summary>
+    public string? LogPath { get; init; }
+
+    /// <summary>--log-tail N only: the log's last N lines (sanitised, each at most 4000 characters); empty when no job started.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? LogTail { get; init; }
 }
 
 /// <summary>

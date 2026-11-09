@@ -53,6 +53,9 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
 
     /// <summary>NoCapacity only: see <see cref="JobResult.Excluded"/>.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>The full path of the local log of the shard's last attempt that got a slot (see <see cref="JobResult.LogPath"/>), or null.</summary>
+    public string? LogPath { get; init; }
 }
 
 /// <summary>A whole lanq run --shards: the overall status and exit code (see <see cref="JobRunner.Aggregate"/>) and every shard, in index order.</summary>
@@ -216,7 +219,8 @@ public sealed partial class JobRunner
     }
 
     /// <param name="HadSlot">The attempt held a slot on its machine at some point (null results never did).</param>
-    private sealed record Attempt(ShardState State, Machine Machine, JobResult? Result, TimeSpan Duration, bool Cancelled, bool HadSlot);
+    /// <param name="JobId">The attempt's job id (its log is <see cref="JobLog.LogPathFor"/> of it once it held a slot).</param>
+    private sealed record Attempt(ShardState State, Machine Machine, JobResult? Result, TimeSpan Duration, bool Cancelled, bool HadSlot, string JobId);
 
     /// <summary>One started attempt: its machine, whether it holds a slot yet and whether its command runs yet (set from the attempt's own thread).</summary>
     private sealed class Running(string machine)
@@ -268,23 +272,24 @@ public sealed partial class JobRunner
             st.Attempts++;
             var req = template with { Argv = st.Shard.Substitute(template.Argv), Shard = st.Shard };
             var prefix = $"[{st.Shard} {machine.Name}] ";
+            var jobId = NewId();
             return Task.Run(async () =>
             {
                 var clock = Stopwatch.StartNew();
                 try
                 {
-                    var r = await TryOnMachine(NewId(), req, prepared, machine, windowEnds, gitCanEverTakeIt, line => Emit(prefix + line), stop.Token, slot.Hold, slot.Start).ConfigureAwait(false);
-                    return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding);
+                    var r = await TryOnMachine(jobId, req, prepared, machine, windowEnds, gitCanEverTakeIt, line => Emit(prefix + line), stop.Token, slot.Hold, slot.Start).ConfigureAwait(false);
+                    return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding, jobId);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
                 {
-                    return new Attempt(st, machine, null, clock.Elapsed, true, slot.Holding);
+                    return new Attempt(st, machine, null, clock.Elapsed, true, slot.Holding, jobId);
                 }
                 catch (Exception ex)
                 {
                     // Anything else (an OperationCanceledException nobody asked for included) is this attempt's result: the other shards go on.
-                    var failed = new JobResult(NewId(), JobStatus.InfraError, 70, machine.Name, SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
-                    return new Attempt(st, machine, failed, clock.Elapsed, false, slot.Holding);
+                    var failed = new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
+                    return new Attempt(st, machine, failed, clock.Elapsed, false, slot.Holding, jobId);
                 }
             }, CancellationToken.None);
         }
@@ -461,7 +466,10 @@ public sealed partial class JobRunner
         var prefix = $"[{st.Shard} {a.Machine.Name}] ";
         if (a.Cancelled)
         {
-            st.Final = new ShardResult(st.Shard.Index, Cancelled, 130, a.Machine.Name, null, a.Duration, st.Attempts, "cancelled; its cleanup ran");
+            st.Final = new ShardResult(st.Shard.Index, Cancelled, 130, a.Machine.Name, null, a.Duration, st.Attempts, "cancelled; its cleanup ran")
+            {
+                LogPath = LogIfCreated(a),
+            };
             return false;
         }
 
@@ -503,7 +511,12 @@ public sealed partial class JobRunner
             Fetch = r.Fetch,
             Retryable = r.Retryable,
             Excluded = r.Excluded,
+            LogPath = r.LogPath ?? LogIfCreated(a),
         };
         return r.Status != JobStatus.Completed;
     }
+
+    /// <summary>The full path of an attempt's log when it got as far as creating one (cancelled, or ended by an unexpected error), else null.</summary>
+    private string? LogIfCreated(Attempt a) =>
+        a.HadSlot && log.LogPathFor(a.JobId) is var path && File.Exists(path) ? Path.GetFullPath(path) : null;
 }

@@ -93,23 +93,35 @@ public static partial class Cli
             await jobOutput.WriteAsync(ShardTable(result)).ConfigureAwait(false);
         }
 
+        // The logs of the shards that did not complete, for people (--json carries every shard's logPath); before the status line, which stays last.
+        if (!p.Json)
+        {
+            foreach (var s in result.Shards.Where(s => s.Status != nameof(JobStatus.Completed) && s.LogPath is not null))
+            {
+                await stderr.WriteLineAsync(string.Create(CultureInfo.InvariantCulture, $"[lanq] log: {JobRunner.SafeLine(s.LogPath!)} (shard {s.Index}/{result.Count})")).ConfigureAwait(false);
+            }
+        }
+
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null), LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail), LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
         }
 
         return result.ExitCode;
     }
 
-    internal static ShardRunJson ShardJson(ShardRunResult result, TimeSpan elapsed, bool fetch) => new(
+    internal static ShardRunJson ShardJson(ShardRunResult result, TimeSpan elapsed, bool fetch, int? logTail = null) => new(
         result.Status,
         result.ExitCode,
         result.Count,
         Math.Round(elapsed.TotalSeconds, 1),
         JobRunner.SafeLine(result.Message),
         [.. result.Shards.Select(s => WithFetch(
-            new RunJson(s.Status, s.ExitCode, s.Machine, s.JobId, Math.Round(s.Duration.TotalSeconds, 1), JobRunner.SafeLine(s.Message)) { Shard = s.Index, Attempts = s.Attempts },
+            WithLog(
+                new RunJson(s.Status, s.ExitCode, s.Machine, s.JobId, Math.Round(s.Duration.TotalSeconds, 1), JobRunner.SafeLine(s.Message)) { Shard = s.Index, Attempts = s.Attempts },
+                s.LogPath,
+                logTail),
             fetch,
             s.Fetch))])
     {

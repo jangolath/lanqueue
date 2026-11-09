@@ -18,6 +18,13 @@
   now, `--mem` counted per copy). Exit `0` when at least one machine is eligible, `75` when none is. Plain
   `lanq health` (text and `--json`) is unchanged and still exits `0`.
 
+- **`logPath` and `--log-tail N` on `lanq run`.** `lanq run --json` always carries `logPath`, the full path of the
+  job's local log (null when no job started); with `--shards` each entry of `shards` carries its own. `--log-tail N`
+  (1 to 200, `--json` only) adds `logTail`, the log's last N lines (sanitised, at most 4000 characters each, read from
+  at most the last 256 KB; empty when no job started). In text mode `lanq run` prints `[lanq] log: <path>` on stderr
+  just before the status line (`--shards`: one per shard that did not complete, ending `(shard i/N)`); the
+  `[lanq] <Status>: ...` line stays last.
+
 ### Behaviour changes
 
 - **`lanq run` ends at once when no machine can ever take the job** (exit `75`, `retryable: false`), instead of

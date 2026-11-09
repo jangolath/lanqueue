@@ -16,6 +16,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 {
     public const int DefaultTimeoutMinutes = 240;
 
+    /// <summary>The most lines --log-tail may ask for.</summary>
+    public const int MaxLogTail = 200;
+
     /// <summary>How long the job itself may run (lanq run --timeout, in minutes).</summary>
     public int TimeoutMinutes { get; init; } = DefaultTimeoutMinutes;
 
@@ -67,6 +70,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
     public bool NoWake { get; init; }
 
+    /// <summary>lanq run --log-tail N (1 to 200, --json only): the last N lines of the job's log in the JSON object; null without it.</summary>
+    public int? LogTail { get; init; }
+
     /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
     public ShardOptions? Shards { get; init; }
 
@@ -74,7 +80,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json", "--wake", "--needs", "--mem"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
@@ -115,6 +121,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         string? fetchDir = null;
         long? fetchMax = null;
         int? fetchMaxFiles = null;
+        int? logTail = null;
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -183,6 +190,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
                     fetchMaxFiles = files;
                     break;
+                case "--log-tail" when i + 1 < own.Length:
+                    if (!int.TryParse(own[++i], NumberStyles.None, CultureInfo.InvariantCulture, out var tail) || tail is < 1 or > MaxLogTail)
+                    {
+                        throw new ArgumentException($"--log-tail must be a whole number of lines from 1 to {MaxLogTail}.");
+                    }
+
+                    logTail = tail;
+                    break;
                 case "--shards" or "--shard-retries" when i + 1 < own.Length:
                     shards.Set(own[i], own[++i]);
                     break;
@@ -239,6 +254,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException("--needs must name at least one capability (for example --needs dotnet,linux).");
         }
 
+        if (logTail is not null && !json)
+        {
+            throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
+        }
+
         if (fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
         {
             throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
@@ -269,6 +289,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
             Shards = shards.Build(),
+            LogTail = logTail,
         };
     }
 
@@ -305,6 +326,7 @@ public static partial class Cli
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
           lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
+          lanq run ... --json [--log-tail 60] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
@@ -342,6 +364,9 @@ public static partial class Cli
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
         inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
+        Every job's output is also kept in a log in the state folder: run prints "[lanq] log: PATH" just before its status line (--shards: for
+        each shard that did not complete); run --json always carries logPath (null when no job started), and --log-tail N (1 to 200, --json
+        only) adds logTail, the log's last N lines (each shard its own with --shards).
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
@@ -384,7 +409,7 @@ public static partial class Cli
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && own.Contains("--shards")
                     ? WriteShardsJsonError("Rejected", 2, message, stdout)
-                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"))).ConfigureAwait(false);
+                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"), logTail: own.Contains("--log-tail"))).ConfigureAwait(false);
             }
 
             return 2;
@@ -442,7 +467,7 @@ public static partial class Cli
             {
                 await (p.Shards is not null
                     ? WriteShardsJsonError("Rejected", 2, message, stdout)
-                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0)).ConfigureAwait(false);
+                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0, logTail: p.LogTail is not null)).ConfigureAwait(false);
             }
 
             return 2;
@@ -503,26 +528,35 @@ public static partial class Cli
         {
             // Ctrl+C: an agent reading --json still gets its one object.
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
-            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed, fetch is not null).ConfigureAwait(false);
+            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed, fetch is not null, p.LogTail is not null).ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
             var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
             await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
-            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed, fetch is not null).ConfigureAwait(false);
+            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed, fetch is not null, p.LogTail is not null).ConfigureAwait(false);
             return 70;
+        }
+
+        // Where the whole log is, for people (--json carries it as logPath); always before the status line, which stays last.
+        if (!p.Json && result.LogPath is { } logPath)
+        {
+            await stderr.WriteLineAsync("[lanq] log: " + JobRunner.SafeLine(logPath)).ConfigureAwait(false);
         }
 
         await stderr.WriteLineAsync(StatusLine(result)).ConfigureAwait(false);
         if (p.Json)
         {
             var json = WithFetch(
-                new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message))
-                {
-                    Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
-                    Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
-                },
+                WithLog(
+                    new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message))
+                    {
+                        Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
+                        Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
+                    },
+                    result.LogPath,
+                    p.LogTail),
                 fetch is not null,
                 result.Fetch);
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.RunJson)).ConfigureAwait(false);
@@ -535,10 +569,12 @@ public static partial class Cli
     /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
-    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false) =>
+    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false, bool logTail = false) =>
         stdout.WriteLineAsync(command switch
         {
-            "run" => JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson),
+            "run" => JsonSerializer.Serialize(
+                WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { LogTail = logTail ? [] : null }, fetch, null),
+                LanqJson.Default.RunJson),
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message), LanqJson.Default.InitJson),
             _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson),
         });
@@ -546,6 +582,16 @@ public static partial class Cli
     /// <summary>The excluded list of a NoCapacity object (empty when the result named no machine), sanitised.</summary>
     internal static List<ExcludedJson> ExcludedJsons(IReadOnlyList<ExcludedMachine>? excluded) =>
         [.. (excluded ?? []).Select(x => new ExcludedJson(JobRunner.SafeLine(x.Machine), x.Reason, JobRunner.SafeLine(x.Why), x.Permanent))];
+
+    /// <summary>
+    /// logPath (always; null when no job started) and, with --log-tail N, logTail: the log's last N lines (<see cref="JobLog.Tail"/>), empty when
+    /// no job started.
+    /// </summary>
+    internal static RunJson WithLog(RunJson json, string? logPath, int? tail) => json with
+    {
+        LogPath = logPath is null ? null : JobRunner.SafeLine(logPath),
+        LogTail = tail is { } n ? logPath is null ? [] : JobLog.Tail(logPath, n) : null,
+    };
 
     /// <summary>
     /// With --fetch the run object always carries fetched and fetchSkipped (empty when nothing was fetched or the job never ran), plus fetchDir

@@ -35,6 +35,7 @@ public class CliTests
     [InlineData("[--fetch-max 200M]")]
     [InlineData("[--fetch-max-files 500]")]
     [InlineData("[--no-wake]")]
+    [InlineData("[--log-tail 60]")]
     [InlineData("lanq health [--json] [--wake]")]
     [InlineData("lanq health --needs dotnet,linux [--mem 4] [--json]")]
     [InlineData("lanq wake <machine> [--wait] [--json]")]
