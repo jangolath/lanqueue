@@ -62,7 +62,7 @@ public static partial class Cli
         {
             config = loadConfig();
         }
-        catch (Exception ex) when (ex is ConfigException or IOException)
+        catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             await Say("FAIL", "config: " + ex.Message).ConfigureAwait(false);
             return 1;

@@ -200,4 +200,66 @@ public sealed class JsonOutputTests : IDisposable
         Assert.Equal(70, code);
         Assert.Contains("disk on fire", OneObject(o.ToString(), "InfraError", 70).GetProperty("message").GetString(), StringComparison.Ordinal);
     }
+
+    /// <summary>A cancellation nobody asked for (ct not cancelled), for example an HttpClient-style timeout, is an infrastructure error.</summary>
+    private sealed class CancellingPayloads : Payload.IPayloadBuilder
+    {
+        public Task<Payload.JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, Payload.PayloadKinds kinds, CancellationToken ct) =>
+            throw new TaskCanceledException("a git call was cancelled");
+
+        public Task<Payload.ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct) => throw new IOException("no");
+
+        public Task<Payload.BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct) =>
+            throw new IOException("no");
+    }
+
+    [Fact]
+    public async Task RunJsonPrintsOneObjectForACancellationNobodyAskedFor()
+    {
+        var ssh = new FakeSsh();
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--needs", "dotnet", "--", "dotnet", "test"]), T.Config(), ssh, new CancellingPayloads(),
+            new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, "state")), _dir, _dir, o, new StringWriter(), CancellationToken.None);
+
+        Assert.Equal(70, code);
+        OneObject(o.ToString(), "InfraError", 70);
+    }
+
+    [Theory]
+    [InlineData("run")]
+    [InlineData("health")]
+    public async Task JsonPrintsOneObjectWhenTheConfigCannotBeRead(string command)
+    {
+        var o = new StringWriter();
+        string[] args = command == "run" ? ["run", "--json", "--", "dotnet", "test"] : ["health", "--json"];
+        var code = await Cli.RunAsync(args, o, new StringWriter(), CancellationToken.None, () => throw new UnauthorizedAccessException("Access to the path is denied."));
+        Assert.Equal(2, code);
+        Assert.Contains("denied", OneObject(o.ToString(), "Rejected", 2).GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>Probes that notice Ctrl+C.</summary>
+    private sealed class CancelAwareSsh : ISshClient
+    {
+        public Task<SshResult> RunAsync(Config.Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok"));
+        }
+
+        public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(new SshResult(0, ""));
+    }
+
+    [Fact]
+    public async Task HealthJsonPrintsOneObjectWhenCancelled()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var ssh = new CancelAwareSsh();
+        var o = new StringWriter();
+        var code = await Cli.Health(T.Config(), new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), cts.Token, json: true);
+        Assert.Equal(130, code);
+        OneObject(o.ToString(), "Cancelled", 130);
+    }
 }

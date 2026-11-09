@@ -196,7 +196,10 @@ public static partial class Cli
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
-    public static async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    public static Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct) => RunAsync(args, stdout, stderr, ct, null);
+
+    /// <param name="loadConfig">Stands in for reading the config file (tests); null reads it as usual.</param>
+    internal static async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct, Func<FleetConfig>? loadConfig)
     {
         ParsedArgs p;
         try
@@ -232,7 +235,7 @@ public static partial class Cli
             return asked ? 0 : 2;
         }
 
-        FleetConfig LoadConfig() => ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
+        FleetConfig LoadConfig() => loadConfig?.Invoke() ?? ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
         if (p.Command == "doctor")
         {
             var doctorSsh = new ProcessSshClient(Environment.GetEnvironmentVariable);
@@ -250,7 +253,7 @@ public static partial class Cli
         {
             config = LoadConfig();
         }
-        catch (Exception ex) when (ex is ConfigException or IOException)
+        catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             var message = JobRunner.SafeLine(ex.Message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
@@ -299,7 +302,7 @@ public static partial class Cli
             await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed).ConfigureAwait(false);
             return 130;
         }
-        catch (Exception ex) when (p.Json && ex is not OperationCanceledException)
+        catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
             var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
             await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
@@ -389,7 +392,21 @@ public static partial class Cli
         }
 
         // Probe all machines concurrently, then print in config order.
-        var results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        MachineHealth[] results;
+        try
+        {
+            results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (json && ct.IsCancellationRequested)
+        {
+            await WriteJsonError("health", "Cancelled", 130, "cancelled (Ctrl+C) before every machine answered", stdout).ConfigureAwait(false);
+            return 130;
+        }
+        catch (Exception ex) when (json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
+        {
+            await WriteJsonError("health", "InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), stdout).ConfigureAwait(false);
+            return 70;
+        }
         if (json)
         {
             var rows = config.Machines.Zip(results).Select(x => HealthRow(x.First, x.Second)).ToList();

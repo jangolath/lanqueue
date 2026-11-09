@@ -143,8 +143,9 @@ Command line:
   `slotsUsed`, `maxJobs`, `localTime`) and `lanq run` (the job's output goes to stderr, then one object on stdout:
   `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it. `run --json` prints
   exactly one object even when no job ran: a bad argument or config (`Rejected`, exit `2`, `jobId` null), Ctrl+C
-  (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`); `health --json` prints
-  `{"status":"Rejected","exitCode":2,"message":...}` for a bad argument or config. Usage text after an unknown command
+  (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`, also for a cancellation nobody asked for); `health
+  --json` prints `{"status":"Rejected","exitCode":2,"message":...}` for a bad argument or a config that cannot be read,
+  and a `Cancelled` (130) or `InfraError` (70) object instead of its array when interrupted or broken. Usage text after an unknown command
   goes to stderr (exit `2`); `lanq --help` still prints it on stdout.
 - **`lanq unlock <machine>`** removes slot files past their recorded deadline at once (the same locked reclaim, which
   also stops such a slot's job if it is somehow still running) and says what it removed and kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running

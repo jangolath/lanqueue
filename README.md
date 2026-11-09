@@ -219,7 +219,8 @@ one object on stdout when it is over:
 `exitCode` is `lanq`'s own exit code; `machine` is `null` when no machine took the job. Stdout always carries exactly
 one such object, also when the job never started: bad arguments or a config error (`Rejected`, `2`, `jobId` `null`),
 Ctrl+C (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`). `lanq health --json` with a bad argument or
-config prints `{"status":"Rejected","exitCode":2,"message":...}` instead of its array. The `[lanq] ...` status line
+config prints `{"status":"Rejected","exitCode":2,"message":...}` instead of its array, and `Cancelled` (`130`) or
+`InfraError` (`70`) objects of the same shape when interrupted or broken. The `[lanq] ...` status line
 and error messages still go to stderr, and so does the usage text after an unknown command (`lanq --help` prints it
 on stdout).
 
