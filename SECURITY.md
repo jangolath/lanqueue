@@ -80,7 +80,7 @@ no backslash or `:`, no control or invisible characters, no Windows device names
 extension, such as `NUL .txt`), trailing dots or spaces, length limits, no case-insensitive collisions, and it must
 match a requested pattern, checked with a non-backtracking matcher so a crafted name cannot make it hang), enforces
 the count and size caps on the bytes actually received, requires the exact announced size and a matching hash,
-streams each file to disk as `<name>.lanq-partial` (created with `CreateNew`, deleted on any failure or on Ctrl+C) and
+streams each file to disk as a short `.lanq-partial-N` file in the same folder (created with `CreateNew`, deleted on any failure or on Ctrl+C) and
 renames it to its name only when complete, never over an existing file. Only the worker's stdout is read as frames;
 its stderr is kept apart as a bounded, sanitised diagnostic, so a stray warning cannot corrupt a file. Every folder
 from the repository top (or the `--fetch-dir` you named) down to `<out>/<job id>/` is checked and created one level

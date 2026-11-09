@@ -305,7 +305,7 @@ when the job never started.
   itself a minute later), so before fetching `lanq` stops it the way cleanup does: the recorded process group on
   Linux, and on Windows only the recorded processes whose pid and start time still match. A job that completed or
   failed is not touched.
-- Each file is written as `<name>.lanq-partial` and renamed to its name only once its size and hash are right.
+- Each file is written as a short `.lanq-partial-N` file in the same folder and renamed to its name only once its size and hash are right.
   Anything the worker prints on stderr during the fetch is shown as `[lanq] fetch stderr: ...` (the first 10 lines,
   sanitised) and never mixed into the files.
 - **Fetch problems never change the exit code**: the job's result is what `lanq` reports, and a skipped or failed file
@@ -784,7 +784,7 @@ Each default below is enforced in code and covered by a unit test.
   differ only in case), that it matches a pattern you asked for (in linear time: a crafted name cannot make the matcher
   hang), the file count and size caps on the bytes actually received, the exact size announced and the hash. Only
   stdout carries files; stderr is a separate, sanitised diagnostic. A file that fails any check is deleted and listed.
-  Files are written under a `.lanq-partial` name, created new, and renamed (never overwriting) only below
+  Files are written under a short `.lanq-partial-N` name, created new, and renamed (never overwriting) only below
   `<out>/<job id>/` once complete; nothing is written through a symlink or junction anywhere from the repository top
   (or `--fetch-dir`) down, so a `.lanq` link committed in a repository is refused. Tests run the real
   scripts against links to `/etc/passwd`, symlink loops, junctions, names with newlines and FIFOs, and feed the
@@ -811,7 +811,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 - Cancellation and timeouts: cleanup kills the job's process group (Linux) or PowerShell process tree (Windows)
   recorded in `locks/job-<id>.pid` before removing the worktree. This is best effort: it needs the machine to be
   reachable when cleanup runs (on Windows the pid file also names the job's child process, and a process is killed only
-  when its start time matches the recorded one, so a reused pid is safe). If it is not, the worker stops the job itself one minute after its limit (Linux under
+  when its start time matches the recorded one, so a reused pid is safe; on Linux the pid file also records the group
+  leader's start time, and the group is signalled only when the leader still has that start time, or the leader is
+  gone but the group lives on, which Linux guarantees is still the job's group). If it is not, the worker stops the job itself one minute after its limit (Linux under
   `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
   deliberately detaches into a new session or process group can escape both.
 - Windows remote commands are passed as an encoded command line limited to 8000 characters; very long argument
