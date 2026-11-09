@@ -232,8 +232,11 @@ public static class RemoteScripts
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
     internal const int StaleSlotGraceSeconds = 1800;
 
-    /// <summary>Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback) and cleanup.</summary>
-    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(40);
+    /// <summary>
+    /// Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback), the --fetch step
+    /// (<see cref="JobRunner.FetchTimeout"/>) and cleanup.
+    /// </summary>
+    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(50);
 
     /// <summary>
     /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,

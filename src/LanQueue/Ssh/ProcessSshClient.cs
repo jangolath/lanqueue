@@ -16,6 +16,9 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     public Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct) =>
         ExecuteWithInput("ssh", SshArgs.Ssh(machine, ResolveKey(machine), remoteCommand), input, maxOutputChars, timeout, ct);
 
+    public Task<SshResult> RunStreamingWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, Action<string> onLine, TimeSpan timeout, CancellationToken ct) =>
+        Execute("ssh", SshArgs.Ssh(machine, ResolveKey(machine), remoteCommand), onLine, timeout, ct, input);
+
     /// <summary>The most lanq ever sends on stdin (a script); a bigger input is a bug, not something to stream.</summary>
     internal const int MaxInputBytes = 1024 * 1024;
 
@@ -183,8 +186,14 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
         return path;
     }
 
-    internal static async Task<SshResult> Execute(string exe, List<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+    /// <param name="input">Written to stdin, which is then closed; null closes stdin at once (never wait for interactive input).</param>
+    internal static async Task<SshResult> Execute(string exe, List<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct, ReadOnlyMemory<byte>? input = null)
     {
+        if (input is { Length: > MaxInputBytes })
+        {
+            throw new ArgumentException("Input too large.", nameof(input));
+        }
+
         var psi = new ProcessStartInfo(exe)
         {
             RedirectStandardOutput = true,
@@ -235,10 +244,11 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
             return new SshResult(255, $"Could not start {exe}: {ex.Message}");
         }
 
-        proc.StandardInput.Close(); // never wait for interactive input
+        var writer = input is { } bytes ? WriteAndClose(proc, bytes) : CloseInput(proc);
         var pumps = Task.WhenAll(
             LineReader.PumpAsync(proc.StandardOutput, Handle),
-            LineReader.PumpAsync(proc.StandardError, Handle));
+            LineReader.PumpAsync(proc.StandardError, Handle),
+            writer);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
@@ -265,6 +275,37 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
 
         await Drain(pumps).ConfigureAwait(false);
         return Finish(proc.ExitCode, null, timedOut: false);
+    }
+
+    private static Task CloseInput(Process proc)
+    {
+        proc.StandardInput.Close(); // never wait for interactive input
+        return Task.CompletedTask;
+    }
+
+    private static async Task WriteAndClose(Process proc, ReadOnlyMemory<byte> input)
+    {
+        try
+        {
+            var stream = proc.StandardInput.BaseStream;
+            await stream.WriteAsync(input, CancellationToken.None).ConfigureAwait(false);
+            await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            // the other side stopped reading (exited early or was killed); its exit code tells the rest
+        }
+        finally
+        {
+            try
+            {
+                proc.StandardInput.Close();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // already broken
+            }
+        }
     }
 
     /// <summary>Lets the readers finish what the process already wrote, but never waits forever (a grandchild may hold the pipe).</summary>

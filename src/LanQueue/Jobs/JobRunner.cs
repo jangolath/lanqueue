@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using LanQueue.Config;
+using LanQueue.Fetch;
 using LanQueue.Health;
 using LanQueue.Payload;
 using LanQueue.Policy;
@@ -24,14 +25,23 @@ public enum JobStatus
 
 /// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
 /// <param name="MinMemGb">lanq run --mem: only machines that report at least this much available memory (GB).</param>
+/// <param name="Fetch">lanq run --fetch: files to bring back from the job's working folder after the job, or null.</param>
 public sealed record JobRequest(
-    IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null, double? MinMemGb = null)
+    IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null, double? MinMemGb = null,
+    FetchRequest? Fetch = null)
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
+/// <param name="Patterns">Validated --fetch patterns (see <see cref="FetchPatterns"/>).</param>
+/// <param name="OutputRoot">The local folder; files land in OutputRoot/jobid/relpath.</param>
+public sealed record FetchRequest(IReadOnlyList<string> Patterns, string OutputRoot, FetchLimits Limits);
+
 public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, string? Machine, string Message)
 {
+    /// <summary>What --fetch brought back; null when no fetch was asked for or the job never ran. Never changes <see cref="CliExitCode"/>.</summary>
+    public FetchReport? Fetch { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -124,6 +134,15 @@ public sealed class JobRunner(
 
     /// <summary>The worker enforces the job limit itself (timeout on Linux, a deadline wait on Windows) this long after lanq would stop it.</summary>
     internal static readonly TimeSpan WorkerDeadlineMargin = TimeSpan.FromMinutes(1);
+
+    /// <summary>How long the --fetch step may take at most (it may get less near the end of a machine's allowed hours).</summary>
+    internal static readonly TimeSpan FetchTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>The --fetch step may run at most this long past a machine's allowed hours plus grace (where a window-closed job stopped).</summary>
+    internal static readonly TimeSpan FetchWindowMargin = TimeSpan.FromMinutes(2);
+
+    /// <summary>With less time than this left for the fetch (by the window), it is not started.</summary>
+    internal static readonly TimeSpan MinFetchTime = TimeSpan.FromSeconds(15);
 
     /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
     private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
@@ -376,29 +395,120 @@ public sealed class JobRunner(
             onLine,
             timeout,
             ct).ConfigureAwait(false);
+        JobResult result;
         if (run.TimedOut && byWindow)
         {
-            return new JobResult(jobId, JobStatus.WindowClosed, ProcessSshClient.TimedOutExitCode, machine.Name,
+            result = new JobResult(jobId, JobStatus.WindowClosed, ProcessSshClient.TimedOutExitCode, machine.Name,
                 $"stopped after {ProcessSshClient.Describe(timeout)}: {machine.Name}'s allowed hours ended (plus {grace.TotalMinutes:0} min grace)");
         }
-
-        if (run.TimedOut)
+        else if (run.TimedOut)
         {
-            return new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
+            result = new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
         }
-
-        if (run.IsSshFailure)
+        else if (run.IsSshFailure)
         {
             return new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.");
         }
+        else
+        {
+            result = new JobResult(
+                jobId,
+                run.Ok ? JobStatus.Completed : JobStatus.Failed,
+                run.ExitCode,
+                machine.Name,
+                $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+        }
 
-        return new JobResult(
-            jobId,
-            run.Ok ? JobStatus.Completed : JobStatus.Failed,
-            run.ExitCode,
-            machine.Name,
-            $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+        // The job ran (completed, failed, or was stopped): bring back what it produced, before the caller's cleanup deletes the job folder.
+        return req.Fetch is { } fetch
+            ? result with { Fetch = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false) }
+            : result;
     }
+
+    /// <summary>
+    /// lanq run --fetch. Runs the fetch script with its own timeout (<see cref="FetchTimeout"/>, cut to the machine's window end + grace +
+    /// <see cref="FetchWindowMargin"/>) and writes the files through a <see cref="FetchReceiver"/>. Every problem ends up in the report;
+    /// nothing here changes the job's own result or exit code.
+    /// </summary>
+    private async Task<FetchReport> FetchFiles(
+        string jobId, string directory, FetchRequest fetch, Machine machine, DateTimeOffset? windowEnds, TimeSpan grace, JobResult job, Action<string> onLine, CancellationToken ct)
+    {
+        var dir = Path.Combine(fetch.OutputRoot, jobId);
+        var timeout = FetchTimeout;
+        if (windowEnds is { } end)
+        {
+            var left = end + grace + FetchWindowMargin - clock.GetUtcNow();
+            if (left < MinFetchTime)
+            {
+                var late = new FetchReport(Path.GetFullPath(dir), [], [], $"not fetched: {machine.Name}'s allowed hours (plus grace) have ended");
+                Summarise(late, job, onLine);
+                return late;
+            }
+
+            timeout = left < timeout ? left : timeout;
+        }
+
+        FetchReport report;
+        using (var receiver = new FetchReceiver(dir, fetch.Patterns, fetch.Limits, ignoreCase: machine.Os == MachineOs.Windows))
+        {
+            var script = FetchScripts.Fetch(machine, jobId, directory, fetch.Patterns, fetch.Limits);
+            var r = machine.Os == MachineOs.Windows
+                ? await ssh.RunStreamingWithInputAsync(machine, FetchScripts.WindowsStdinCommand, FetchScripts.WindowsStdin(script), receiver.OnLine, timeout, ct).ConfigureAwait(false)
+                : await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, script), receiver.OnLine, timeout, ct).ConfigureAwait(false);
+            var problem = r.TimedOut ? "fetch stopped after " + ProcessSshClient.Describe(timeout) + " (incomplete)"
+                : r.IsSshFailure && !receiver.Done ? "the SSH connection failed during the fetch (incomplete)"
+                : null;
+            report = receiver.Finish(problem);
+        }
+
+        Summarise(report, job, onLine);
+        return report;
+    }
+
+    private static void Summarise(FetchReport report, JobResult job, Action<string> onLine)
+    {
+        const int Shown = 20;
+        var after = job.Status switch
+        {
+            JobStatus.Completed => "completed",
+            JobStatus.Failed => $"failed (exit {job.ExitCode.ToString(CultureInfo.InvariantCulture)})",
+            JobStatus.TimedOut => "timed out",
+            _ => "was stopped at the end of its machine's allowed hours",
+        };
+        onLine($"[lanq] fetch (the job {after}): {report.Fetched.Count.ToString(CultureInfo.InvariantCulture)} file(s), {Size(report.Bytes)} -> {report.Directory}");
+        foreach (var f in report.Fetched.Take(Shown))
+        {
+            onLine($"[lanq]   fetched {f.Path} ({Size(f.Bytes)})");
+        }
+
+        if (report.Fetched.Count > Shown)
+        {
+            onLine($"[lanq]   ... and {(report.Fetched.Count - Shown).ToString(CultureInfo.InvariantCulture)} more fetched");
+        }
+
+        foreach (var s in report.Skipped.Take(Shown))
+        {
+            onLine($"[lanq]   skipped {s.Path}: {s.Reason}");
+        }
+
+        var more = report.Skipped.Count - Math.Min(Shown, report.Skipped.Count) + report.MoreSkipped;
+        if (more > 0)
+        {
+            onLine($"[lanq]   ... and {more.ToString(CultureInfo.InvariantCulture)} more skipped");
+        }
+
+        if (report.Error is not null)
+        {
+            onLine("[lanq] fetch problem: " + report.Error);
+        }
+    }
+
+    internal static string Size(long bytes) => bytes switch
+    {
+        < 1024 => string.Create(CultureInfo.InvariantCulture, $"{bytes} B"),
+        < 1024 * 1024 => string.Create(CultureInfo.InvariantCulture, $"{bytes / 1024.0:0.#} KB"),
+        _ => string.Create(CultureInfo.InvariantCulture, $"{bytes / (1024.0 * 1024):0.#} MB"),
+    };
 
     /// <summary>
     /// bases.json can be briefly locked by a parallel lanq (a Windows sharing violation) or unwritable. A failing read or write is retried

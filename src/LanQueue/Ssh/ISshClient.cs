@@ -31,4 +31,11 @@ public interface ISshClient
     /// </summary>
     Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct) =>
         throw new NotSupportedException("This ssh client cannot send input.");
+
+    /// <summary>
+    /// Like <see cref="RunAsync"/> (every output line, stdout and stderr, goes to <paramref name="onLine"/> through the bounded line reader),
+    /// but with <paramref name="input"/> written to the command's stdin, which is then closed. For a script too long for a command line.
+    /// </summary>
+    Task<SshResult> RunStreamingWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, Action<string> onLine, TimeSpan timeout, CancellationToken ct) =>
+        throw new NotSupportedException("This ssh client cannot send input.");
 }

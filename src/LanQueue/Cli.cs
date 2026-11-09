@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using LanQueue.Config;
+using LanQueue.Fetch;
 using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Output;
@@ -43,11 +44,23 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
+    /// <summary>lanq run --fetch PATTERN (repeatable, validated): files to bring back from the job's working folder.</summary>
+    public IReadOnlyList<string> Fetch { get; init; } = [];
+
+    /// <summary>lanq run --fetch-dir: where fetched files go (out/jobid/...); null means .lanq/artifacts in the repository.</summary>
+    public string? FetchDir { get; init; }
+
+    /// <summary>lanq run --fetch-max: total bytes cap, or null for the default.</summary>
+    public long? FetchMaxBytes { get; init; }
+
+    /// <summary>lanq run --fetch-max-files: file count cap, or null for the default.</summary>
+    public int? FetchMaxFiles { get; init; }
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
@@ -77,6 +90,10 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         string? sshTarget = null;
         MachineOs? os = null;
         string? target = null;
+        var fetch = new List<string>();
+        string? fetchDir = null;
+        long? fetchMax = null;
+        int? fetchMaxFiles = null;
         var seen = new List<string>();
         var command = own.Length > 0 ? own[0] : "help";
         for (var i = 1; i < own.Length; i++)
@@ -119,6 +136,28 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--json":
                     json = true;
                     break;
+                case "--fetch" when i + 1 < own.Length:
+                    fetch.Add(own[++i]);
+                    break;
+                case "--fetch-dir" when i + 1 < own.Length:
+                    fetchDir = own[++i];
+                    if (fetchDir.Length == 0 || fetchDir.Any(char.IsControl))
+                    {
+                        throw new ArgumentException("--fetch-dir must be a folder path.");
+                    }
+
+                    break;
+                case "--fetch-max" when i + 1 < own.Length:
+                    fetchMax = ParseSize(own[++i]);
+                    break;
+                case "--fetch-max-files" when i + 1 < own.Length:
+                    if (!int.TryParse(own[++i], NumberStyles.None, CultureInfo.InvariantCulture, out var files) || files is < 1 or > FetchLimits.CeilingFiles)
+                    {
+                        throw new ArgumentException($"--fetch-max-files must be a whole number from 1 to {FetchLimits.CeilingFiles}.");
+                    }
+
+                    fetchMaxFiles = files;
+                    break;
                 case "--all":
                     all = true;
                     break;
@@ -158,12 +197,55 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
+        if (fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
+        {
+            throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
+        }
+
         if (split >= 0 && command != "run")
         {
             throw new ArgumentException($"lanq {command} does not take a command after --; only lanq run does.");
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote, Force = force, SshTarget = sshTarget, Os = os };
+        return new ParsedArgs(command, config, needs, dir, wait, argv)
+        {
+            TimeoutMinutes = timeout,
+            MemGb = mem,
+            Json = json,
+            Target = target,
+            All = all,
+            Yes = yes,
+            Remote = remote,
+            Force = force,
+            SshTarget = sshTarget,
+            Os = os,
+            Fetch = FetchPatterns.Validate(fetch),
+            FetchDir = fetchDir,
+            FetchMaxBytes = fetchMax,
+            FetchMaxFiles = fetchMaxFiles,
+        };
+    }
+
+    /// <summary>--fetch-max: a size in bytes with an optional K, M or G suffix (powers of 1024, an optional trailing B), from 1 KB to 2 GB.</summary>
+    internal static long ParseSize(string text)
+    {
+        var t = text.Trim().ToUpperInvariant();
+        if (t.EndsWith('B'))
+        {
+            t = t[..^1];
+        }
+
+        long unit = 1;
+        if (t.Length > 0 && t[^1] is 'K' or 'M' or 'G')
+        {
+            unit = t[^1] switch { 'K' => 1024L, 'M' => 1024L * 1024, _ => 1024L * 1024 * 1024 };
+            t = t[..^1];
+        }
+
+        return t.Length is > 0 and <= 12 && long.TryParse(t, NumberStyles.None, CultureInfo.InvariantCulture, out var n)
+            && n <= FetchLimits.CeilingBytes / unit && n * unit >= 1024
+            ? n * unit
+            : throw new ArgumentException("--fetch-max must be a size from 1K to 2G (for example 500M or 1G).");
     }
 }
 
@@ -174,6 +256,7 @@ public static partial class Cli
 
           lanq health [--json] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--json] [--config FILE] -- dotnet test
+          lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
@@ -184,6 +267,9 @@ public static partial class Cli
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
+        --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
+        DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
+        at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
@@ -286,35 +372,44 @@ public static partial class Cli
         TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
         var jobOutput = p.Json ? stderr : stdout;
+        FetchRequest? fetch = null;
+        if (p.Fetch.Count > 0)
+        {
+            var total = p.FetchMaxBytes ?? FetchLimits.DefaultMaxTotalBytes;
+            fetch = new FetchRequest(p.Fetch, FetchRoot(p.FetchDir, repoDir), new FetchLimits(p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total));
+        }
+
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
         var started = System.Diagnostics.Stopwatch.StartNew();
         JobResult result;
         try
         {
             result = await runner.RunAsync(
-                new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
+                new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch),
                 ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
         {
             // Ctrl+C: an agent reading --json still gets its one object.
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
-            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed).ConfigureAwait(false);
+            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed, fetch is not null).ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
             var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
             await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
-            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed).ConfigureAwait(false);
+            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed, fetch is not null).ConfigureAwait(false);
             return 70;
         }
 
         await stderr.WriteLineAsync(StatusLine(result)).ConfigureAwait(false);
         if (p.Json)
         {
-            var json = new RunJson(
-                result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message));
+            var json = WithFetch(
+                new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message)),
+                fetch is not null,
+                result.Fetch);
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.RunJson)).ConfigureAwait(false);
         }
 
@@ -325,10 +420,67 @@ public static partial class Cli
     /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
-    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null) =>
+    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false) =>
         stdout.WriteLineAsync(command == "run"
-            ? JsonSerializer.Serialize(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), LanqJson.Default.RunJson)
+            ? JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson)
             : JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson));
+
+    /// <summary>
+    /// With --fetch the run object always carries fetched and fetchSkipped (empty when nothing was fetched or the job never ran), plus fetchDir
+    /// and fetchError when a fetch happened. Without --fetch they are left out, so the object is exactly as before.
+    /// </summary>
+    internal static RunJson WithFetch(RunJson json, bool requested, FetchReport? report) => !requested
+        ? json
+        : json with
+        {
+            Fetched = report?.Fetched.Select(f => new FetchedJson(f.Path, f.Bytes, f.Sha256)).ToList() ?? [],
+            FetchSkipped = report?.Skipped.Select(s => new FetchSkipJson(JobRunner.SafeLine(s.Path), s.Reason)).ToList() ?? [],
+            FetchSkippedMore = report is { MoreSkipped: > 0 } ? report.MoreSkipped : null,
+            FetchDir = report?.Directory is { } d ? JobRunner.SafeLine(d) : null,
+            FetchError = report?.Error is { } e ? JobRunner.SafeLine(e) : null,
+        };
+
+    /// <summary>
+    /// The folder fetched files go to: --fetch-dir (relative to the current folder), else .lanq/artifacts in the repository's top folder (the
+    /// nearest folder up from <paramref name="repoDir"/> holding .git), else in <paramref name="repoDir"/>. The snapshot already leaves out
+    /// every .lanq folder, so fetched files never travel back to a worker; the default .lanq folder also gets a .gitignore of "*" so they
+    /// stay out of git status and commits.
+    /// </summary>
+    internal static string FetchRoot(string? fetchDir, string repoDir)
+    {
+        if (fetchDir is not null)
+        {
+            return Path.GetFullPath(fetchDir);
+        }
+
+        var top = Path.GetFullPath(repoDir);
+        for (var d = new DirectoryInfo(top); d is not null; d = d.Parent)
+        {
+            if (Directory.Exists(Path.Combine(d.FullName, ".git")) || File.Exists(Path.Combine(d.FullName, ".git")))
+            {
+                top = d.FullName;
+                break;
+            }
+        }
+
+        var lanq = Path.Combine(top, ".lanq");
+        try
+        {
+            Directory.CreateDirectory(lanq);
+            using var ignore = new FileStream(Path.Combine(lanq, ".gitignore"), FileMode.CreateNew, FileAccess.Write);
+            ignore.Write("*\n"u8);
+        }
+        catch (IOException)
+        {
+            // already there (or not writable: the fetch reports the write error itself)
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // likewise
+        }
+
+        return Path.Combine(lanq, "artifacts");
+    }
 
     /// <summary>The final line on stderr; TimedOut and WindowClosed (both exit 124) are told apart here.</summary>
     internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}: {result.Message}";

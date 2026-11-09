@@ -204,6 +204,29 @@ internal sealed class FakeSsh : ISshClient
         return Task.FromResult(new SshResult(0, ""));
     }
 
+    /// <summary>The timeout of every streaming stdin run, in order.</summary>
+    public List<TimeSpan> StreamingTimeouts { get; } = [];
+
+    /// <summary>
+    /// A streaming stdin run (the Windows fetch) goes through <see cref="Handler"/> and <see cref="Calls"/> like any command, as
+    /// "STDIN:" plus the script it carries (decoded from the base64 UTF-16 input when it is that).
+    /// </summary>
+    public Task<SshResult> RunStreamingWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, Action<string> onLine, TimeSpan timeout, CancellationToken ct)
+    {
+        var text = Encoding.ASCII.GetString(input.Span).Trim();
+        try
+        {
+            text = Encoding.Unicode.GetString(Convert.FromBase64String(text));
+        }
+        catch (FormatException)
+        {
+            // not base64: keep the raw text
+        }
+
+        StreamingTimeouts.Add(timeout);
+        return RunAsync(machine, "STDIN:" + text, onLine, timeout, ct);
+    }
+
     /// <summary>Every stdin run: the target, the remote command, the bytes sent, the output limit and the timeout.</summary>
     public List<(Machine Machine, string Command, byte[] Input, int MaxOutputChars, TimeSpan Timeout)> InputRuns { get; } = [];
 
@@ -274,4 +297,45 @@ internal sealed class FakeClock(DateTimeOffset now, TimeZoneInfo? zone = null) :
     public override DateTimeOffset GetUtcNow() => now;
 
     public override TimeZoneInfo LocalTimeZone => zone ?? TimeZoneInfo.Utc;
+}
+
+/// <summary>Test folders that may hold symlinks, junctions and symlink loops.</summary>
+internal static class TestTree
+{
+    /// <summary>
+    /// Removes every link first (the link itself, never what it points at; Windows refuses a recursive delete through a junction made by
+    /// mklink /J), walking without ever descending into one, so a planted symlink loop cannot make the walk endless. Then deletes the rest.
+    /// </summary>
+    public static void Delete(string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        var pending = new Stack<DirectoryInfo>([new DirectoryInfo(root)]);
+        while (pending.Count > 0)
+        {
+            foreach (var e in pending.Pop().EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0, RecurseSubdirectories = false }))
+            {
+                if (e.LinkTarget is not null || e.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    if (e is DirectoryInfo)
+                    {
+                        Directory.Delete(e.FullName);
+                    }
+                    else
+                    {
+                        File.Delete(e.FullName);
+                    }
+                }
+                else if (e is DirectoryInfo d)
+                {
+                    pending.Push(d);
+                }
+            }
+        }
+
+        Directory.Delete(root, recursive: true);
+    }
 }
