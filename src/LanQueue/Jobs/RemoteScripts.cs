@@ -213,6 +213,7 @@ public static class RemoteScripts
                   $p = $p.Parent
                 }
                 {{JobEnvironmentPowerShell(m)}}
+                {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
                 Set-Content -LiteralPath $pf -Value $PID
                 $code = 1
                 try {
@@ -230,12 +231,21 @@ public static class RemoteScripts
             case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
             P={{ShellQuote.Posix(pidFile)}}
             S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
-            $S {{JobEnvironmentPosix(m)}}sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$P" {{string.Join(' ', argv.Select(ShellQuote.Posix))}}
+            {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
+            $S {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m)}}sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$P" {{string.Join(' ', argv.Select(ShellQuote.Posix))}}
             rc=$?
             rm -f "$P"
             exit $rc
             """;
     }
+
+    /// <summary>
+    /// priority: low on Linux. nice and ionice are used only when present and when they actually work for this user (idle I/O class can be
+    /// refused on old kernels); otherwise the job simply runs at normal priority.
+    /// </summary>
+    private const string LinuxLowPriority =
+        "N=; if nice -n 10 true >/dev/null 2>&1; then N=\"nice -n 10\"; fi\n"
+        + "I=; if ionice -c3 true >/dev/null 2>&1; then I=\"ionice -c3\"; fi";
 
     /// <summary>
     /// env: and path_prepend: for the job's own process only, as one "env NAME=value ..." prefix right before the job's sh. Each assignment

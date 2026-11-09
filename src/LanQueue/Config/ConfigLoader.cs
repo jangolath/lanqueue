@@ -8,22 +8,25 @@ namespace LanQueue.Config;
 
 public sealed class ConfigException(string message) : Exception(message);
 
-/// <summary>Accepts only the exact words 'git' and 'archive' (any case); a number, bool or anything else is a friendly error.</summary>
-internal sealed class TransferModeConverter : IYamlTypeConverter
+/// <summary>
+/// Accepts only the enum's own names as words, in any case (for transfer: 'git' or 'archive'; for priority: 'low' or 'normal'); a number,
+/// bool or anything else is a friendly error instead of being read as an enum value.
+/// </summary>
+internal sealed class WordEnumConverter<TEnum>(string key) : IYamlTypeConverter
+    where TEnum : struct, Enum
 {
-    public bool Accepts(Type type) => type == typeof(TransferMode);
+    public bool Accepts(Type type) => type == typeof(TEnum);
 
     public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
     {
         var scalar = parser.Consume<Scalar>();
-        if (string.Equals(scalar.Value, "git", StringComparison.OrdinalIgnoreCase))
-        {
-            return TransferMode.Git;
-        }
-
-        return string.Equals(scalar.Value, "archive", StringComparison.OrdinalIgnoreCase)
-            ? TransferMode.Archive
-            : throw new YamlException(scalar.Start, scalar.End, $"transfer must be the word 'git' or 'archive' (got '{scalar.Value}').");
+        var name = Enum.GetNames<TEnum>().FirstOrDefault(n => string.Equals(n, scalar.Value, StringComparison.OrdinalIgnoreCase));
+        return name is not null
+            ? Enum.Parse<TEnum>(name)
+            : throw new YamlException(
+                scalar.Start,
+                scalar.End,
+                $"{key} must be the word {string.Join(" or ", Enum.GetNames<TEnum>().Select(n => "'" + n.ToLowerInvariant() + "'"))} (got '{scalar.Value}').");
     }
 
     public void WriteYaml(IEmitter emitter, object? value, Type type, ObjectSerializer serializer) =>
@@ -59,7 +62,8 @@ public static partial class ConfigLoader
         // Strict: unknown keys (for example "password") are an error, not ignored.
         var deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
-            .WithTypeConverter(new TransferModeConverter())
+            .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
+            .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
             .Build();
         FleetConfig config;
         try

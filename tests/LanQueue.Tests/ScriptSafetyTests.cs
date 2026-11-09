@@ -138,6 +138,7 @@ public class ScriptSafetyTests
             ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
+            ["execute-env"] = RemoteScripts.Execute(WithJobEnvironment(m), "j1", "src", ["dotnet", "test"]),
         };
         foreach (var (name, script) in scripts)
         {
@@ -175,6 +176,7 @@ public class ScriptSafetyTests
             ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
+            ["execute-env"] = RemoteScripts.Execute(WithJobEnvironment(m), "j1", "src", ["dotnet", "test"]),
         };
         var checker = Path.Combine(Path.GetTempPath(), "lanq-ps-check-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(
@@ -202,6 +204,15 @@ public class ScriptSafetyTests
         {
             File.Delete(checker);
         }
+    }
+
+    /// <summary>The same machine with env:, path_prepend: and priority: low, so the extra Execute lines are syntax-checked too.</summary>
+    private static LanQueue.Config.Machine WithJobEnvironment(LanQueue.Config.Machine m)
+    {
+        m.Env["NODE_OPTIONS"] = "--max-old-space-size=2048 'x' $(y)";
+        m.PathPrepend.Add(m.Os == LanQueue.Config.MachineOs.Windows ? "C:/tools/bin" : "/opt/tools/bin");
+        m.Priority = LanQueue.Config.JobPriority.Low;
+        return m;
     }
 
     private static LanQueue.Config.Machine Archive(LanQueue.Config.Machine m) => new()

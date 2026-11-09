@@ -15,6 +15,15 @@ public enum TransferMode
     Archive,
 }
 
+public enum JobPriority
+{
+    /// <summary>The default: the job runs below normal priority so the person using the machine keeps a responsive PC.</summary>
+    Low,
+
+    /// <summary>The job runs at the build user's normal priority.</summary>
+    Normal,
+}
+
 public sealed class PolicyConfig
 {
     public double LoadThreshold { get; set; } = 0.80;
@@ -47,6 +56,9 @@ public sealed class Machine
 
     /// <summary>Absolute directories put in front of PATH for the job (for example an nvm or pyenv bin folder).</summary>
     public List<string> PathPrepend { get; set; } = [];
+
+    /// <summary>low (default): nice/ionice on Linux, BelowNormal on Windows. normal: unchanged.</summary>
+    public JobPriority Priority { get; set; } = JobPriority.Low;
 
     public string? AllowedHours { get; set; }
     public TransferMode Transfer { get; set; } = TransferMode.Git;
