@@ -213,7 +213,10 @@ public sealed class DoctorTests : IDisposable
         Assert.True(watch.Elapsed < TimeSpan.FromMinutes(5), "took " + watch.Elapsed);
         Assert.Contains("cap.dotnet=timeout|", lines);
         Assert.Contains("cap.npm=0|9.9.9-fake", lines);
-        if (shell == "windows" || OperatingSystem.IsLinux()) // Git for Windows sh reports its own pids, not Windows ones
+        // The kill is proved by the recorded process being gone for PowerShell and for a real Linux sh. The Git for Windows sh variant does NOT
+        // prove the kill: its $$ is an emulated pid, not a Windows one, so it only checks the timeout line and the npm result. The Linux leg
+        // (CI and the sdk container) runs the sh script with the proof.
+        if (shell == "windows" || OperatingSystem.IsLinux())
         {
             Assert.True(File.Exists(hung), "the hanging tool never started");
             Assert.True(Recorded.Gone(hung, TimeSpan.FromSeconds(60)), "the hanging tool survived its check's limit");

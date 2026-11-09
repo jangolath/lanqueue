@@ -123,12 +123,11 @@ public sealed class WorkerScriptTests : IDisposable
     public void RealPowerShellJobPastItsDeadlineIsStoppedWithItsTree()
     {
         // The job starts a grandchild PowerShell with its stdout and stderr detached to files (so nothing depends on pipe inheritance); the
-        // grandchild records its pid and start time, then would sleep five minutes and leave a marker. The worker's deadline must stop the
+        // grandchild records its pid and start time, then would sleep five minutes. The worker's deadline must stop the
         // whole tree. The deadline (30 s) leaves room for both PowerShells to start on a busy machine, so the grandchild always exists before
         // it fires; the proof is that the recorded process is gone, not how long anything took.
-        var marker = Path.Combine(_root, "survivor").Replace('/', (char)92);
         var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
-        var inner = Recorded.PowerShellWrite(grandchild) + "; Start-Sleep -Seconds 300; New-Item -ItemType File '" + marker + "'";
+        var inner = Recorded.PowerShellWrite(grandchild) + "; Start-Sleep -Seconds 300";
         var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(inner));
         var detached = "Start-Process -Wait -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile -EncodedCommand " + encoded + "'"
             + " -RedirectStandardOutput '" + Path.Combine(_root, "gc.out").Replace('/', (char)92) + "'"
@@ -139,7 +138,6 @@ public sealed class WorkerScriptTests : IDisposable
         Assert.Equal(124, code);
         Assert.True(File.Exists(grandchild), "the grandchild never started: " + output);
         Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the deadline");
-        Assert.False(File.Exists(marker));
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
     }
 

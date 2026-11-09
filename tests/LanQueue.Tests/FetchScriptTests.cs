@@ -342,20 +342,106 @@ public sealed class FetchScriptTests : IDisposable
         using var other = System.Diagnostics.Process.Start(psi)!;
         try
         {
+            var id = other.Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
             foreach (var script in new[] { RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1"), RemoteScripts.Cleanup(Worker(MachineOs.Linux), "j1", "1", T.RepoId) })
             {
-                Directory.CreateDirectory(Job);
-                File.WriteAllText(pf, other.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n");
-                var (code, output) = Shells.Run("linux", script);
-                Assert.True(code == 0, output);
-                Assert.False(other.WaitForExit(TimeSpan.FromSeconds(3)), "an unrelated process group was killed");
-                Assert.False(File.Exists(pf));
+                foreach (var record in new[] { id + "\n", id + "\n1\n" }) // an old pid file (no start time), and one whose start time is not this process's
+                {
+                    Directory.CreateDirectory(Job);
+                    File.WriteAllText(pf, record);
+                    var (code, output) = Shells.Run("linux", script);
+                    Assert.True(code == 0, output);
+                    Assert.False(other.WaitForExit(TimeSpan.FromSeconds(3)), "an unrelated process group was killed");
+                    Assert.False(File.Exists(pf));
+                }
             }
         }
         finally
         {
             Shells.Exec("sh", ["-c", "kill -s KILL -- -" + other.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
         }
+    }
+
+    /// <summary>Records "pid" and "start time" (field 22 of /proc/PID/stat) of the shell itself into $1, as the job wrapper does.</summary>
+    private const string RecordSelf = "printf '%s\\n%s\\n' $$ \"$(sed -n 's/.*) //p' /proc/$$/stat | cut -d' ' -f20)\" > \"$1\"";
+
+    private static bool Alive(int pid) => Directory.Exists("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture))
+        && !File.ReadAllText("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/stat").Contains(") Z", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The wrapper died before removing its pid file and the group leader has exited, but a process of the job's group lives on. Cleanup must
+    /// still kill it: Linux never reuses a pid number while a process group of that number exists, so the live group is the job's.
+    /// </summary>
+    [LinuxFact]
+    public void CleanupKillsWhatIsLeftOfTheGroupAfterItsLeaderExited()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var pf = _root + "/locks/job-j1.pid";
+        var child = _root + "/child.pid";
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = Job };
+        foreach (var a in new[] { "sh", "-c", RecordSelf + "; sleep 300 </dev/null >/dev/null 2>&1 & echo $! > \"$2\"; exit 0", "sh", pf, child })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using (var leader = System.Diagnostics.Process.Start(psi)!)
+        {
+            Assert.True(leader.WaitForExit(TimeSpan.FromSeconds(30)));
+        }
+
+        var sleeper = int.Parse(File.ReadAllText(child).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            Assert.True(Alive(sleeper));
+            var (code, output) = Shells.Run("linux", RemoteScripts.Cleanup(Worker(MachineOs.Linux), "j1", "1", T.RepoId));
+            Assert.True(code == 0, output);
+            Assert.True(SpinWait.SpinUntil(() => !Alive(sleeper), TimeSpan.FromSeconds(30)), "the job's orphaned group member survived cleanup");
+        }
+        finally
+        {
+            Shells.Exec("sh", ["-c", "kill -s KILL " + sleeper.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
+        }
+    }
+
+    /// <summary>A job leader that changed its folder (cd /tmp) is still recognised by its recorded start time, and killed.</summary>
+    [LinuxFact]
+    public void AJobLeaderThatLeftItsFolderIsStillKilledByItsStartTime()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var pf = _root + "/locks/job-j1.pid";
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = Job };
+        foreach (var a in new[] { "sh", "-c", RecordSelf + "; cd /tmp; sleep 300 & wait", "sh", pf })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using var leader = System.Diagnostics.Process.Start(psi)!;
+        try
+        {
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(pf) && File.ReadAllLines(pf).Length >= 2, TimeSpan.FromSeconds(30)));
+            Thread.Sleep(500); // let it reach /tmp
+            var (code, output) = Shells.Run("linux", RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1"));
+            Assert.True(code == 0, output);
+            Assert.True(leader.WaitForExit(TimeSpan.FromSeconds(30)), "the job leader that left its folder survived");
+        }
+        finally
+        {
+            Shells.Exec("sh", ["-c", "kill -s KILL -- -" + leader.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
+        }
+    }
+
+    /// <summary>The Linux job wrapper records the job's process group and its leader's start time.</summary>
+    [LinuxFact]
+    public void TheLinuxWrapperRecordsTheLeadersStartTime()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var copy = _root + "/copy.pid";
+        var (code, output) = Shells.Run("linux", RemoteScripts.Execute(Worker(MachineOs.Linux), "j1", ".", ["sh", "-c", "cp \"$0\" \"$1\"", _root + "/locks/job-j1.pid", copy]));
+        Assert.True(code == 0, output);
+        var lines = File.ReadAllLines(copy);
+        Assert.Equal(2, lines.Length);
+        Assert.Matches("^[0-9]+$", lines[0]);
+        Assert.Matches("^[0-9]+$", lines[1]);
     }
 
     [WindowsFact]

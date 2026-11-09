@@ -158,8 +158,8 @@ public static class RemoteScripts
     /// replaced the old one in between), it is put back with its owner's token. Every lock holds its creator's unique token, and <c>drop</c>
     /// removes a lock only after renaming it away and finding its own token in it (otherwise it puts it back), so a reclaimer never removes
     /// another one's lock. sh has no atomic compare-and-delete, so a narrow window remains (see SECURITY.md). <c>stop_job</c> stops a stale slot's job if it is still
-    /// running: it reads locks/job-ID.pid and kills that process group only when /proc shows the process working inside that job's folder
-    /// (so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
+    /// running, through the shared <see cref="LinuxKillRecordedFunction"/> (the recorded group only while it is still the job's, matched by the
+    /// leader's start time, so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
     /// </summary>
     internal const string LinuxSlotFunctions = """
         deadline_of() { d=$(printf '%s\n' "$1" | sed -n 2p); case "$d" in ''|*[!0-9]*) return 1 ;; esac; [ ${#d} -le 18 ] || return 1; d=$(printf '%s' "$d" | sed 's/^0*//'); echo "${d:-0}"; }
@@ -179,18 +179,9 @@ public static class RemoteScripts
         }
         stop_job() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
-          kp="$R/locks/job-$1.pid"; [ -f "$kp" ] || return 0
-          g=$(sed -n 1p "$kp" 2>/dev/null)
-          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
-          if [ -d "/proc/$g" ]; then
-            jd=$(cd -P "$R/jobs/$1" 2>/dev/null && pwd -P) || jd="$R/jobs/$1"
-            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in
-              "$jd"|"$jd"/*|"$jd (deleted)") kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
-            esac
-          fi
-          rm -f "$kp"
+          kill_recorded "$R/locks/job-$1.pid" "$R/jobs/$1"
         }
-        """;
+        """ + "\n" + LinuxKillRecordedFunction;
 
     /// <summary>
     /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file the same way as the sh ones (CreateNew with a
@@ -628,7 +619,7 @@ public static class RemoteScripts
             exec 3<&0
             $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
-            echo "$j" > "$P"
+            printf '%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" > "$P"
             wait "$j"
             rc=$?
             rm -f "$P"
@@ -683,31 +674,39 @@ public static class RemoteScripts
     internal const string StopJobMarker = "# lanq: stop the job before fetching";
 
     /// <summary>
-    /// The Linux job wrapper records its process group in locks/job-ID.pid: TERM the group (and the pid), wait 2 s, KILL it, remove the file.
-    /// Shared by cleanup and <see cref="StopJob"/>; needs $R and $ID. The pid may have been reused by an unrelated process since, so it is
-    /// signalled only when it is still this job's: where /proc has cwd links, its cwd must be the job's folder or below it (as stale-slot
-    /// reclaim checks); without them (macOS, BSD) <c>ps -o pgid=</c> must show it still leads the recorded process group.
+    /// <c>kill_recorded PIDFILE JOBDIR</c>: the Linux job wrapper records its process group (line 1) and the group leader's start time
+    /// (line 2: field 22 of /proc/PID/stat, which stays the same across exec). The group is signalled (TERM, 2 s, KILL) only when it is still
+    /// the job's: the leader exists with that start time, or the leader is gone but the group is still alive (Linux never reuses a pid number
+    /// while a process group of that number exists, so a live group is the job's). Only for a pid file without a start time, or without
+    /// /proc, the older checks decide: the leader's cwd inside JOBDIR (via /proc), else <c>ps -o pgid=</c> showing it still leads that group.
+    /// The pid file is removed either way. Shared by cleanup, <see cref="StopJob"/> and stale-slot reclaim (stop_job).
     /// </summary>
-    internal const string LinuxKillRecordedJob = """
-        P="$R/locks/job-$ID.pid"
-        if [ -f "$P" ]; then
-          g=$(sed -n 1p "$P" 2>/dev/null)
-          case "$g" in
-            ''|*[!0-9]*) ;;
-            *)
-              mine=
-              if [ -e /proc/self/cwd ]; then
-                jd=$(cd -P "$R/jobs/$ID" 2>/dev/null && pwd -P) || jd="$R/jobs/$ID"
-                case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
-              elif [ "$(ps -o pgid= -p "$g" 2>/dev/null | tr -d ' ')" = "$g" ]; then
-                mine=1
-              fi
-              if [ -n "$mine" ]; then kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null; fi
-              ;;
-          esac
-          rm -f "$P"
-        fi
+    internal const string LinuxKillRecordedFunction = """
+        kill_recorded() {
+          kp="$1"; [ -f "$kp" ] || return 0
+          g=$(sed -n 1p "$kp" 2>/dev/null); st=$(sed -n 2p "$kp" 2>/dev/null)
+          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
+          case "$st" in *[!0-9]*) st= ;; esac
+          mine=
+          if [ -n "$st" ] && [ -d /proc/self ]; then
+            if [ -r "/proc/$g/stat" ]; then
+              [ "$(sed -n 's/.*) //p' "/proc/$g/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ] && mine=1
+            elif kill -s 0 -- "-$g" 2>/dev/null; then
+              mine=1
+            fi
+          elif [ -e /proc/self/cwd ]; then
+            jd=$(cd -P "$2" 2>/dev/null && pwd -P) || jd="$2"
+            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
+          elif [ "$(ps -o pgid= -p "$g" 2>/dev/null | tr -d ' ')" = "$g" ]; then
+            mine=1
+          fi
+          if [ -n "$mine" ]; then kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null; fi
+          rm -f "$kp"
+        }
         """;
+
+    /// <summary>Cleanup's and <see cref="StopJob"/>'s use of <see cref="LinuxKillRecordedFunction"/>; needs $R and $ID.</summary>
+    internal const string LinuxKillRecordedJob = LinuxKillRecordedFunction + "\n" + "kill_recorded \"$R/locks/job-$ID.pid\" \"$R/jobs/$ID\"";
 
     /// <summary>
     /// Stops a job lanq gave up on (timed out, or its machine's hours ended) before its files are fetched. The worker enforces the same limit
