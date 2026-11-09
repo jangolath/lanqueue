@@ -68,19 +68,16 @@ public static partial class MagicPacket
         return true;
     }
 
-    /// <summary>True for the limited broadcast, 10/8, 172.16/12, 192.168/16, 169.254/16 and loopback (a directed broadcast of anything else could leave the LAN).</summary>
-    public static bool IsLanAddress(IPAddress a)
+    /// <summary>
+    /// The only broadcast addresses config accepts: the limited broadcast 255.255.255.255, or a private (10/8, 172.16/12, 192.168/16) or
+    /// link-local (169.254/16) address. Public, multicast, 0.0.0.0 and loopback addresses are refused: this is a LAN tool.
+    /// </summary>
+    public static bool IsAllowedBroadcast(IPAddress a)
     {
         var b = a.GetAddressBytes();
-        return a.Equals(IPAddress.Broadcast) || IPAddress.IsLoopback(a)
+        return a.Equals(IPAddress.Broadcast)
             || b[0] == 10 || (b[0] == 172 && b[1] is >= 16 and <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254);
     }
-
-    /// <summary>A warning when the machine's broadcast address is not in a private or link-local range; null when it is fine (or invalid, which config validation refuses).</summary>
-    public static string? BroadcastWarning(Machine m) =>
-        m.Wake is { } w && TryParseBroadcast(w.Broadcast, out var a) && !IsLanAddress(a)
-            ? $"wake.broadcast {w.Broadcast} is not a private or link-local address: the magic packet could leave your LAN. Use your subnet's broadcast (for example 10.20.30.255) or leave it out"
-            : null;
 }
 
 /// <summary>Sends one magic packet; behind an interface so tests do not need a network.</summary>
@@ -118,19 +115,35 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
     internal static readonly TimeSpan FirstDelay = TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan MaxDelay = TimeSpan.FromSeconds(20);
 
-    private static readonly string[] AsleepMarkers =
-        ["Connection timed out", "Operation timed out", "No route to host", "Connection refused", "Network is unreachable", "Host is down"];
+    // ssh's own connection-phase error line: "ssh: connect to host H port P: REASON" (OpenSSH, also Win32-OpenSSH). Only that line is read, never
+    // anything a remote command printed, and "Connection refused" is deliberately absent: a refusing host is awake (sshd stopped or firewalled).
+    private const string ConnectPrefix = "ssh: connect to host ";
 
-    private static readonly string[] NotAsleepMarkers =
-        ["Permission denied", "Host key verification failed", "REMOTE HOST IDENTIFICATION HAS CHANGED", "Too many authentication failures", "Could not resolve hostname"];
+    private static readonly string[] AsleepReasons =
+    [
+        "Connection timed out",
+        "Operation timed out",
+        "No route to host",
+        "Host is unreachable",
+        "Network is unreachable",
+        "Host is down",
+        // Windows (Winsock error text, shown when the OpenSSH build does not map it to a POSIX one):
+        "A socket operation was attempted to an unreachable host",
+        "A socket operation was attempted to an unreachable network",
+        "A connection attempt failed because the connected party did not properly respond",
+        "connected host has failed to respond",
+    ];
 
     private readonly ConcurrentDictionary<string, DateTimeOffset> _woken = new(StringComparer.Ordinal);
 
-    /// <summary>Unreachable in the connection sense: ssh exit 255 with a timeout, no-route or refused error. Never an auth or host-key failure.</summary>
+    /// <summary>
+    /// Unreachable in the connection sense: ssh exit 255 and ssh's own "connect to host ..." line gives a timeout or an unreachable
+    /// host or network. Never an authentication, host-key or refused failure. A localized ssh does not match, which fails safe (no wake).
+    /// </summary>
     public static bool LooksAsleep(SshResult r) =>
         r.ExitCode == 255 && !r.TimedOut
-        && AsleepMarkers.Any(m => r.Output.Contains(m, StringComparison.OrdinalIgnoreCase))
-        && !NotAsleepMarkers.Any(m => r.Output.Contains(m, StringComparison.OrdinalIgnoreCase));
+        && r.Output.Split('\n').Select(l => l.Trim()).Any(l =>
+            l.StartsWith(ConnectPrefix, StringComparison.OrdinalIgnoreCase) && AsleepReasons.Any(m => l.Contains(m, StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>
     /// The decision table for the automatic wake. <paramref name="localNow"/> is this computer's clock: a sleeping worker cannot report its own,
@@ -165,10 +178,10 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
     public WakeDecision TryClaim(Machine machine, MachineHealth h, DateTime localNow)
     {
         var d = Evaluate(machine, h, localNow);
-        return d == WakeDecision.Wake && !_woken.TryAdd(machine.Name, DateTimeOffset.MaxValue) ? WakeDecision.AlreadyWoken : d;
+        return d == WakeDecision.Wake && !_woken.TryAdd(machine.Name, DateTimeOffset.MinValue) ? WakeDecision.AlreadyWoken : d;
     }
 
-    /// <summary>Sends the packet and records that the machine is coming up until its wait_seconds run out.</summary>
+    /// <summary>Sends the packet; the machine counts as coming up (pending) until its wait_seconds run out, but only after a successful send.</summary>
     public async Task SendAsync(Machine machine, CancellationToken ct)
     {
         var w = machine.Wake ?? throw new InvalidOperationException($"Machine '{machine.Name}' has no wake: setting.");
@@ -177,8 +190,10 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
             throw new InvalidOperationException($"Machine '{machine.Name}': wake settings are invalid.");
         }
 
-        _woken[machine.Name] = clock.GetUtcNow() + TimeSpan.FromSeconds(w.WaitSeconds);
         await sender.SendAsync(MagicPacket.Build(mac), broadcast, w.Port, ct).ConfigureAwait(false);
+
+        // Pending only once the packet really went out: a failed send leaves the machine claimed (no retry storm) but not waiting.
+        _woken[machine.Name] = clock.GetUtcNow() + TimeSpan.FromSeconds(w.WaitSeconds);
     }
 
     /// <summary>True while a machine woken in this invocation may still come up (so a waiting job should keep waiting).</summary>

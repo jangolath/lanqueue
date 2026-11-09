@@ -15,17 +15,18 @@ internal sealed class FakeSender : IMagicPacketSender
 
     public Exception? Failure { get; set; }
 
-    public Action? OnSend { get; set; }
+    public Action<byte[]>? OnSend { get; set; }
 
     public Task SendAsync(byte[] packet, IPAddress broadcast, int port, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (Failure is not null)
         {
             throw Failure;
         }
 
         Sent.Add((packet, broadcast, port));
-        OnSend?.Invoke();
+        OnSend?.Invoke(packet);
         return Task.CompletedTask;
     }
 }
@@ -201,11 +202,24 @@ public sealed class WakeTests
     [InlineData("172.32.0.255", false)]
     [InlineData("8.8.8.255", false)]
     [InlineData("203.0.113.255", false)]
-    public void OnlyPrivateAndLinkLocalBroadcastsAreQuiet(string text, bool lan)
+    [InlineData("224.0.0.1", false)]
+    [InlineData("0.0.0.0", false)]
+    [InlineData("127.0.0.1", false)]
+    public void OnlyTheLimitedBroadcastPrivateAndLinkLocalAddressesAreAllowed(string text, bool allowed)
     {
-        var m = Sleepy();
-        m.Wake!.Broadcast = text;
-        Assert.Equal(lan, MagicPacket.BroadcastWarning(m) is null);
+        Assert.True(MagicPacket.TryParseBroadcast(text, out var address));
+        Assert.Equal(allowed, MagicPacket.IsAllowedBroadcast(address));
+    }
+
+    [Theory]
+    [InlineData("8.8.8.255")]
+    [InlineData("224.0.0.251")]
+    [InlineData("0.0.0.0")]
+    [InlineData("127.0.0.1")]
+    public void ConfigRefusesAPublicMulticastZeroOrLoopbackBroadcast(string broadcast)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Yaml($"wake: {{ mac: \"aa:bb:cc:dd:ee:ff\", broadcast: \"{broadcast}\" }}")));
+        Assert.Contains("wake.broadcast", ex.Message, StringComparison.Ordinal);
     }
 
     // ---- config ----
@@ -257,15 +271,23 @@ public sealed class WakeTests
     [Theory]
     [InlineData(255, "ssh: connect to host h port 22: Connection timed out", true)]
     [InlineData(255, "ssh: connect to host h port 22: No route to host", true)]
-    [InlineData(255, "ssh: connect to host h port 22: Connection refused", true)]
+    [InlineData(255, "ssh: connect to host h port 22: Host is unreachable", true)]
+    [InlineData(255, "ssh: connect to host h port 22: A socket operation was attempted to an unreachable host.", true)]
+    [InlineData(255, "ssh: connect to host h port 22: A connection attempt failed because the connected party did not properly respond after a period of time", true)]
+    [InlineData(255, "ssh: connect to host h port 22: Operation timed out", true)]
+    [InlineData(255, "ssh: connect to host h port 22: Connection refused", false)]
+    [InlineData(255, "Connection timed out", false)]
+    [InlineData(255, "ssh: Connection timed out during banner exchange", false)]
+    [InlineData(255, "load=0.1\nsomething said: Connection timed out", false)]
+    [InlineData(255, "ssh: connect to host h port 22: Verbindungsaufbau abgelaufen", false)]
     [InlineData(255, "ssh: connect to host h port 22: Network is unreachable", true)]
     [InlineData(255, "user@h: Permission denied (publickey).", false)]
     [InlineData(255, "Host key verification failed.", false)]
     [InlineData(255, "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nConnection refused", false)]
     [InlineData(255, "ssh: Could not resolve hostname h: Name or service not known", false)]
     [InlineData(255, "", false)]
-    [InlineData(1, "Connection timed out", false)]
-    [InlineData(0, "Connection timed out", false)]
+    [InlineData(1, "ssh: connect to host h port 22: Connection timed out", false)]
+    [InlineData(0, "ssh: connect to host h port 22: Connection timed out", false)]
     public void OnlyConnectionTypeFailuresLookAsleep(int exit, string output, bool asleep) =>
         Assert.Equal(asleep, WakeService.LooksAsleep(new SshResult(exit, output)));
 
@@ -317,8 +339,8 @@ public sealed class WakeTests
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
         var m = Sleepy();
 
-        var first = await probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None);
-        await probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None);
+        var first = await probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, WakeMode.Send);
+        await probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, WakeMode.Send);
 
         var sent = Assert.Single(sender.Sent);
         Assert.Equal(102, sent.Packet.Length);
@@ -329,27 +351,27 @@ public sealed class WakeTests
     }
 
     [Fact]
-    public async Task NoWakeOutsideHoursOnAuthFailureWithoutWakeConfigOrWhenTheProbeIsNotAllowedToWake()
+    public async Task NoWakeOutsideHoursOnAuthFailureWithoutWakeConfigOrForAPlainProbe()
     {
         var (probe, sender, _, _) = Rig(Noon, (_, _) => new SshResult(255, TimedOut));
-        await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None);
+        await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.Send);
         Assert.Empty(sender.Sent);
 
         (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, "user@h: Permission denied (publickey)."));
-        await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None);
+        await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.Send);
         Assert.Empty(sender.Sent);
 
         (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
-        await probe.ProbeAsync(T.Windows(), T.Config().Policy, CancellationToken.None);
-        await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, allowWake: false);
+        await probe.ProbeAsync(T.Windows(), T.Config().Policy, CancellationToken.None, WakeMode.Send);
+        await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None);
         Assert.Empty(sender.Sent);
     }
 
     [Fact]
-    public async Task PausedMachineIsNeverWoken()
+    public async Task AReachablePausedMachineIsNeverWoken()
     {
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(0, Up + "\npaused=1"));
-        var h = await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None);
+        var h = await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.Send);
 
         Assert.True(h.Paused);
         Assert.Empty(sender.Sent);
@@ -359,7 +381,7 @@ public sealed class WakeTests
     public async Task ProbeWithoutAWakerNeverSendsAnything()
     {
         var ssh = new FakeSsh { Handler = (_, _) => new SshResult(255, TimedOut) };
-        var h = await new HealthProbe(ssh, new FakeClock(Night)).ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, waitForWake: true);
+        var h = await new HealthProbe(ssh, new FakeClock(Night)).ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.SendAndWait);
 
         Assert.False(h.Reachable);
         Assert.Single(ssh.Calls);
@@ -371,7 +393,7 @@ public sealed class WakeTests
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
         sender.Failure = new SocketException((int)SocketError.NetworkUnreachable);
 
-        var h = await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None);
+        var h = await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.Send);
 
         Assert.False(h.Reachable);
         Assert.Contains("could not be sent", h.Error, StringComparison.Ordinal);
@@ -398,7 +420,7 @@ public sealed class WakeTests
         var probe = new HealthProbe(ssh, time, waker);
         var m = Sleepy();
 
-        var h = await time.Drive(probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, waitForWake: true));
+        var h = await time.Drive(probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, WakeMode.SendAndWait));
 
         Assert.True(h.Reachable);
         Assert.Single(sender.Sent);
@@ -417,7 +439,7 @@ public sealed class WakeTests
         var probe = new HealthProbe(ssh, time, waker);
         var m = Sleepy(wait: 60);
 
-        var h = await time.Drive(probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, waitForWake: true));
+        var h = await time.Drive(probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, WakeMode.SendAndWait));
 
         Assert.False(h.Reachable);
         Assert.Contains("no ssh answer within 60 s", h.Error, StringComparison.Ordinal);
@@ -434,7 +456,7 @@ public sealed class WakeTests
         var waker = new WakeService(new FakeSender(), time);
         var probe = new HealthProbe(new FakeSsh { Handler = (_, _) => new SshResult(255, TimedOut) }, time, waker);
 
-        var h = await probe.ProbeAsync(Sleepy(wait: 30), T.Config().Policy, CancellationToken.None);
+        var h = await probe.ProbeAsync(Sleepy(wait: 30), T.Config().Policy, CancellationToken.None, WakeMode.Send);
 
         Assert.Contains("waking", h.Error, StringComparison.Ordinal);
         Assert.True(waker.AnyPending);
@@ -444,20 +466,42 @@ public sealed class WakeTests
 
     // ---- lanq run keeps going on the other machines and waits for the waking one ----
 
-    [Fact]
-    public async Task RunUsesAnotherMachineWhileOneWakesAndWaitsForItWhenItIsTheOnlyChoice()
+    private static Machine Box(string name, MachineOs os = MachineOs.Linux, string[]? caps = null, bool wake = true, string? hours = null) => new()
+    {
+        Name = name,
+        Os = os,
+        Ssh = $"u@{name}.lan",
+        WorkRoot = os == MachineOs.Windows ? "D:/lanq" : "/srv/lanq",
+        Capabilities = [.. caps ?? ["dotnet"]],
+        AllowedHours = hours is null ? null : [hours],
+        Wake = wake ? new WakeConfig { Mac = "aa:bb:cc:dd:ee:" + (10 + Math.Abs(name.GetHashCode(StringComparison.Ordinal) % 80)).ToString(System.Globalization.CultureInfo.InvariantCulture) } : null,
+    };
+
+    /// <summary>Runs one job over a fleet where only the machines in <paramref name="awake"/> answer ssh; a packet to a machine's MAC wakes it.</summary>
+    private static async Task<(JobResult Result, FakeSender Sender, List<string> Lines, HashSet<string> Awake)> RunFleet(
+        List<Machine> machines, IEnumerable<string> awake, TimeSpan wait, bool noWake = false, DateTimeOffset? at = null, string[]? argv = null, bool bootOnWake = true)
     {
         var dir = Path.Combine(Path.GetTempPath(), "lanq-wake-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
         {
             var config = T.Config();
-            config.Machines.RemoveAt(0); // only the sleepy windows machine
-            config.Machines[0].Wake = new WakeConfig { Mac = Mac };
-            var clock = new FakeClock(Night);
+            config.Machines = machines;
+            config.Policy.AllowedCommands.Add("dotnet");
+            var up = new HashSet<string>(awake, StringComparer.Ordinal);
+            var clock = new FakeClock(at ?? Night);
             var sender = new FakeSender();
-            var booted = false;
-            sender.OnSend = () => booted = true;
+            sender.OnSend = packet =>
+            {
+                var mac = Convert.ToHexString(packet.AsSpan(6, 6));
+                foreach (var m in machines.Where(x => x.Wake is { } w && MagicPacket.TryParseMac(w.Mac, out var b) && Convert.ToHexString(b) == mac))
+                {
+                    if (bootOnWake)
+                    {
+                        up.Add(m.Name);
+                    }
+                }
+            };
             var ssh = new FakeSsh
             {
                 Handler = (m, cmd) =>
@@ -465,26 +509,108 @@ public sealed class WakeTests
                     var text = cmd.Contains("-EncodedCommand ", StringComparison.Ordinal)
                         ? System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(cmd[(cmd.LastIndexOf(' ') + 1)..]))
                         : cmd;
-                    return !booted ? new SshResult(255, TimedOut)
+                    return !up.Contains(m.Name) ? new SshResult(255, $"ssh: connect to host {m.Name}.lan port 22: Connection timed out")
                         : text.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1")
                         : text.Contains("disk_free_gb", StringComparison.Ordinal) ? new SshResult(0, Up)
                         : new SshResult(0, "ran");
                 },
             };
+            var lines = new List<string>();
             var probe = new HealthProbe(ssh, clock, new WakeService(sender, clock));
             var runner = new JobRunner(
-                config, ssh, new RunnerTests.FakePayloads(""), probe, new JobLog(Path.Combine(dir, ".lanq")), Path.Combine(dir, "tmp"), _ => { }, (_, _) => Task.CompletedTask, clock);
-
-            var r = await runner.RunAsync(new JobRequest(["dotnet"], ["dotnet", "test"], ".", dir, TimeSpan.Zero), CancellationToken.None);
-
-            Assert.Equal(JobStatus.Completed, r.Status); // --wait 0 still waited for the machine it had just woken
-            Assert.Equal("build-02", r.Machine);
-            Assert.Single(sender.Sent);
+                config, ssh, new RunnerTests.FakePayloads(""), probe, new JobLog(Path.Combine(dir, ".lanq")), Path.Combine(dir, "tmp"), lines.Add, (_, _) => Task.CompletedTask, clock);
+            var result = await runner.RunAsync(new JobRequest(["dotnet"], argv ?? ["dotnet", "test"], ".", dir, wait) { NoWake = noWake }, CancellationToken.None);
+            return (result, sender, lines, up);
         }
         finally
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    private static readonly TimeSpan LongWait = TimeSpan.FromMinutes(5);
+
+    [Fact]
+    public async Task RunWakesNothingWhileAnAwakeMachineCanTakeTheJob()
+    {
+        List<Machine> fleet = [Box("awake-1"), Box("sleep-1"), Box("sleep-2"), Box("sleep-3")];
+
+        var (r, sender, _, _) = await RunFleet(fleet, ["awake-1"], LongWait);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("awake-1", r.Machine);
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task RunWakesExactlyOneOfThreeEligibleSleepersTheFirstByNameAndThenUsesIt()
+    {
+        List<Machine> fleet = [Box("sleep-3"), Box("sleep-1"), Box("sleep-2")];
+
+        var (r, sender, lines, up) = await RunFleet(fleet, [], LongWait);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("sleep-1", r.Machine);
+        Assert.Single(sender.Sent);
+        Assert.Equal(["sleep-1"], up);
+        Assert.Contains(lines, l => l.Contains("Wake-on-LAN packet to sleep-1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RunWithWaitZeroNeverWakesAndNeverBlocks()
+    {
+        List<Machine> fleet = [Box("sleep-1"), Box("sleep-2")];
+
+        var (r, sender, _, _) = await RunFleet(fleet, [], TimeSpan.Zero);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task RunWithNoWakeNeverWakes()
+    {
+        var (r, sender, _, _) = await RunFleet([Box("sleep-1")], [], TimeSpan.FromMilliseconds(150), noWake: true);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task RunWhoseWokenMachineNeverComesUpEndsWithNoCapacityWithinTheWaitAndWakesItOnlyOnce()
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        var (r, sender, _, _) = await RunFleet([Box("sleep-1"), Box("sleep-2")], [], TimeSpan.FromMilliseconds(300), bootOnWake: false);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Equal(75, r.CliExitCode);
+        Assert.Single(sender.Sent); // pending machine: no second one is woken, and the first is never woken twice
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), "took " + watch.Elapsed);
+    }
+
+    [Fact]
+    public async Task RunSkipsSleepersThatCouldNotTakeTheJobAnyway()
+    {
+        // wrong capability, outside its hours (Noon vs 22:00-07:00), and no wake: setting
+        List<Machine> fleet = [Box("a-node", caps: ["node"]), Box("b-late", hours: "22:00-07:00"), Box("c-nowake", wake: false)];
+
+        var (r, sender, _, _) = await RunFleet(fleet, [], TimeSpan.FromMilliseconds(150), at: Noon);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task RunDoesNotWakeAWindowsSleeperForArgumentsWindowsCannotTake()
+    {
+        List<Machine> fleet = [Box("win-1", MachineOs.Windows), Box("lin-1")];
+
+        var (r, sender, _, up) = await RunFleet(fleet, [], LongWait, argv: ["dotnet", "test", "--filter", "a&b"]);
+
+        Assert.Equal("lin-1", r.Machine);
+        Assert.Single(sender.Sent);
+        Assert.DoesNotContain("win-1", up);
     }
 
     // ---- lanq wake ----
@@ -682,13 +808,139 @@ public sealed class WakeTests
     }
 
     [Fact]
-    public async Task DoctorWarnsOnAPublicBroadcastAndSaysNothingWithoutWake()
+    public async Task DoctorSaysNothingAboutWakeWithoutASetting()
     {
-        var o = await DoctorOut(m => m.Wake = new WakeConfig { Mac = Mac, Broadcast = "8.8.8.255" });
-        Assert.Contains(o.Split('\n'), l => l.StartsWith("WARN", StringComparison.Ordinal) && l.Contains("wake.broadcast 8.8.8.255", StringComparison.Ordinal));
-
-        o = await DoctorOut(_ => { });
+        var o = await DoctorOut(_ => { });
         Assert.DoesNotContain("wake", o, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- item-by-item guarantees ----
+
+    [Fact]
+    public async Task TwoParallelProbesOfOneMachineSendExactlyOnePacket()
+    {
+        var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
+        var m = Sleepy();
+
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => probe.ProbeAsync(m, T.Config().Policy, CancellationToken.None, WakeMode.Send)));
+
+        Assert.Single(sender.Sent);
+    }
+
+    [Theory]
+    [InlineData(typeof(SocketException))]
+    [InlineData(typeof(InvalidOperationException))]
+    [InlineData(typeof(ObjectDisposedException))]
+    public async Task AFailedSendIsReportedOnThatMachineNeverLeavesItPendingAndNeverFailsTheFleetProbe(Type failure)
+    {
+        var (probe, sender, waker, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
+        sender.Failure = failure == typeof(SocketException) ? new SocketException((int)SocketError.NetworkUnreachable)
+            : failure == typeof(ObjectDisposedException) ? new ObjectDisposedException("udp")
+            : new InvalidOperationException("boom");
+        var other = T.Linux();
+
+        var results = await Task.WhenAll(
+            probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.Send),
+            probe.ProbeAsync(other, T.Config().Policy, CancellationToken.None, WakeMode.Send));
+
+        Assert.Contains("could not be sent", results[0].Error, StringComparison.Ordinal);
+        Assert.False(waker.AnyPending);
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task CancellationDuringTheWaitPropagatesAsCancellation()
+    {
+        var time = new ManualTime(Night);
+        using var cts = new CancellationTokenSource();
+        var ssh = new FakeSsh
+        {
+            Handler = (_, _) =>
+            {
+                cts.Cancel();
+                return new SshResult(255, TimedOut);
+            },
+        };
+        var waker = new WakeService(new FakeSender(), time);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            time.Drive(waker.WaitForUpAsync(Sleepy(), async token => (await new HealthProbe(ssh, time).ProbeOnceAsync(Sleepy(), T.Config().Policy, token)).Reachable, cts.Token)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WakeCancelledBeforeTheSendIsExit130WithOneJsonObject(bool json)
+    {
+        var config = T.Config();
+        config.Machines[1].Wake = new WakeConfig { Mac = Mac };
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var o = new StringWriter();
+        var args = json ? new[] { "wake", "build-02", "--json" } : ["wake", "build-02"];
+
+        var code = await Cli.Wake(ParsedArgs.Parse(args), config, new WakeService(new FakeSender(), TimeProvider.System), new HealthProbe(new FakeSsh(), TimeProvider.System), o, new StringWriter(), cts.Token);
+
+        Assert.Equal(130, code);
+        AssertOneErrorObject(o.ToString(), json, "Cancelled", 130);
+    }
+
+    [Fact]
+    public async Task WakeCancelledWhileWaitingIsExit130WithOneJsonObject()
+    {
+        var time = new ManualTime(Noon);
+        var config = T.Config();
+        config.Machines[1].Wake = new WakeConfig { Mac = Mac };
+        using var cts = new CancellationTokenSource();
+        var ssh = new FakeSsh
+        {
+            Handler = (_, _) =>
+            {
+                cts.Cancel();
+                return new SshResult(255, TimedOut);
+            },
+        };
+        var o = new StringWriter();
+
+        var code = await time.Drive(Cli.Wake(ParsedArgs.Parse(["wake", "build-02", "--wait", "--json"]), config, new WakeService(new FakeSender(), time), new HealthProbe(ssh, time), o, new StringWriter(), cts.Token));
+
+        Assert.Equal(130, code);
+        AssertOneErrorObject(o.ToString(), true, "Cancelled", 130);
+    }
+
+    [Fact]
+    public async Task HealthDoesNotWakeByDefaultAndWakesAndWaitsWithTheWakeOption()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(0);
+        config.Machines[0].AllowedHours = null;
+        config.Machines[0].Wake = new WakeConfig { Mac = Mac, WaitSeconds = 30 };
+        var time = new ManualTime(Night);
+        var sender = new FakeSender();
+        var awake = false;
+        sender.OnSend = _ => awake = true;
+        var ssh = new FakeSsh { Handler = (_, _) => awake ? new SshResult(0, Up) : new SshResult(255, TimedOut) };
+        var probe = new HealthProbe(ssh, time, new WakeService(sender, time));
+
+        var o = new StringWriter();
+        await Cli.Health(config, probe, o, new StringWriter(), CancellationToken.None);
+        Assert.Empty(sender.Sent);
+        Assert.Contains("DOWN", o.ToString(), StringComparison.Ordinal);
+
+        o = new StringWriter();
+        await time.Drive(Cli.Health(config, probe, o, new StringWriter(), CancellationToken.None, wake: true));
+        Assert.Single(sender.Sent);
+        Assert.Contains("OK", o.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HealthWakeAndRunNoWakeFlagsParseAndAreRefusedElsewhere()
+    {
+        Assert.True(ParsedArgs.Parse(["health", "--wake"]).WakeSleepers);
+        Assert.False(ParsedArgs.Parse(["health"]).WakeSleepers);
+        Assert.True(ParsedArgs.Parse(["run", "--no-wake", "--", "dotnet", "test"]).NoWake);
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--wake", "--", "dotnet", "test"]));
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--no-wake"]));
     }
 
     // ---- the one real socket test ----

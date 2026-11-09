@@ -57,6 +57,6 @@ stdout is one JSON object when the job is over: `status` (`Completed`, `Failed`,
 
 - Do not edit the lanq machines file, the allowlists, `known_hosts` or any ssh or key setting. The developer owns them.
 - Do not ssh to the machines yourself, and do not try to work around a refusal.
-- Do not run `lanq unlock`, `lanq makeready` or `lanq wake` unless the developer asks: they act on someone's PC.
+- Do not run `lanq unlock`, `lanq makeready`, `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
 - Do not pass permission-skipping flags such as `--dangerously-skip-permissions`; lanq rejects them.
 - Do not paste whole logs into the conversation.

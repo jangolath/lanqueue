@@ -58,8 +58,21 @@ public sealed record MachineHealth(
     /// <summary>The worker's own local time as it reported it (yyyy-MM-ddTHH:mm:ss), or null when it did not.</summary>
     public string? LocalTime { get; init; }
 
-    /// <summary>True when the probe failed the way a sleeping or powered-off host does (connect timeout, no route, refused); never for an auth or host-key failure.</summary>
+    /// <summary>True when the probe failed the way a sleeping or powered-off host does (connect timeout, no route or unreachable host); never for an auth or host-key failure.</summary>
     public bool LooksAsleep { get; init; }
+}
+
+/// <summary>Whether a probe may wake a machine that looks asleep.</summary>
+public enum WakeMode
+{
+    /// <summary>Never send anything.</summary>
+    None,
+
+    /// <summary>Send the packet and return at once.</summary>
+    Send,
+
+    /// <summary>Send the packet and wait (with backoff) for ssh.</summary>
+    SendAndWait,
 }
 
 /// <param name="waker">Wake-on-LAN for machines with a wake: setting; null (doctor, makeready, tests) never sends a packet.</param>
@@ -69,26 +82,30 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
     public WakeService? Waker => waker;
 
     /// <summary>
-    /// Probes the machine; when it looks asleep, has a wake: setting and is inside its allowed hours, sends one magic packet (at most one per
-    /// machine per invocation). With <paramref name="waitForWake"/> it then probes again with backoff until the machine answers or its
-    /// wake.wait_seconds run out (health); without it, it returns at once, saying the machine is waking, and later probes find it up
-    /// (run, which meanwhile uses the other machines). <paramref name="allowWake"/> false (a machine the job cannot use) never wakes.
+    /// Probes the machine once and, only when asked (<paramref name="wake"/>), wakes it as <see cref="WakeAsync"/> describes. The default
+    /// never sends anything, so a plain probe (health, doctor, makeready, run's first look) stays read-only and quick.
     /// </summary>
-    public async Task<MachineHealth> ProbeAsync(Machine machine, PolicyConfig policy, CancellationToken ct, bool waitForWake = false, bool allowWake = true)
+    public async Task<MachineHealth> ProbeAsync(Machine machine, PolicyConfig policy, CancellationToken ct, WakeMode wake = WakeMode.None)
     {
         var h = await ProbeOnceAsync(machine, policy, ct).ConfigureAwait(false);
-        if (waker is null || machine.Wake is not { } wake || !allowWake)
-        {
-            return h;
-        }
-
-        if (h.Reachable)
+        if (waker is not null && h.Reachable)
         {
             waker.MarkUp(machine);
-            return h;
         }
 
-        if (waker.TryClaim(machine, h, clock.GetLocalNow().DateTime) != WakeDecision.Wake)
+        return wake == WakeMode.None ? h : await WakeAsync(machine, policy, h, wake == WakeMode.SendAndWait, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Given a probe result: when the machine looks asleep, has a wake: setting and is inside its allowed hours (this computer's clock), sends
+    /// one magic packet (at most one per machine per invocation, also across parallel calls). With <paramref name="wait"/> it then probes
+    /// again with backoff until the machine answers or its wake.wait_seconds run out; without it, it returns at once saying the machine is
+    /// waking. A send that fails for any reason is reported on this machine and never thrown (one machine cannot fail a whole fleet probe).
+    /// Whether the machine is paused cannot be known while it sleeps; a reachable paused machine is never woken.
+    /// </summary>
+    public async Task<MachineHealth> WakeAsync(Machine machine, PolicyConfig policy, MachineHealth h, bool wait, CancellationToken ct)
+    {
+        if (waker is null || machine.Wake is not { } wake || waker.TryClaim(machine, h, clock.GetLocalNow().DateTime) != WakeDecision.Wake)
         {
             return h;
         }
@@ -97,17 +114,17 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
         {
             await waker.SendAsync(machine, ct).ConfigureAwait(false);
         }
-        catch (System.Net.Sockets.SocketException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return h with { Error = $"asleep, but the magic packet could not be sent: {JobRunner.SafeLine(ex.Message)}" };
         }
 
-        if (!waitForWake)
+        if (!wait)
         {
             return h with { Error = $"waking: magic packet sent, waiting up to {wake.WaitSeconds} s for ssh" };
         }
 
-        MachineHealth latest = h;
+        var latest = h;
         var up = await waker.WaitForUpAsync(machine, async token =>
         {
             latest = await ProbeOnceAsync(machine, policy, token).ConfigureAwait(false);

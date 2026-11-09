@@ -220,9 +220,7 @@ public static partial class Cli
         if (m.Wake is { } wake)
         {
             const string Note = "Wake-on-LAN must also be enabled in the BIOS/UEFI and the network card driver, and usually only works on wired Ethernet (docs/WORKERS.md)";
-            lines.Add(MagicPacket.BroadcastWarning(m) is { } warning
-                ? ("WARN", $"{warning}. {Note}")
-                : ("OK", $"wake: magic packet to {wake.Broadcast}:{wake.Port} for {wake.Mac}, waits up to {wake.WaitSeconds} s. {Note}"));
+            lines.Add(("OK", $"wake: magic packet to {wake.Broadcast}:{wake.Port} for {wake.Mac}, waits up to {wake.WaitSeconds} s. {Note}"));
         }
         return lines;
     }

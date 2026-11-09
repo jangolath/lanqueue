@@ -3,15 +3,17 @@
 ## Unreleased (0.5.0)
 
 - **Wake-on-LAN for sleeping workers.** An optional per-machine `wake:` setting (`mac` required as `aa:bb:cc:dd:ee:ff`
-  or `aa-bb-cc-dd-ee-ff`; `broadcast` an IPv4 literal, default `255.255.255.255`; `port` 7 or 9, default 9;
-  `wait_seconds` 1 to 600, default 120). `lanq run` and `lanq health` send one magic packet when such a machine is
-  unreachable (connect timeout, no route, refused; never an auth or host-key failure) and its `allowed_hours` window is
-  open, then probe again with backoff until it answers or `wait_seconds` run out. At most once per machine per
-  invocation, never outside its hours, never for a machine the job cannot use. `lanq run` keeps using other machines
-  while one wakes and waits for it when it is the only choice.
+  or `aa-bb-cc-dd-ee-ff`; `broadcast` an IPv4 literal, `255.255.255.255` (default) or a private or link-local address, anything else is refused; `port` 7 or 9, default 9;
+  `wait_seconds` 1 to 600, default 120). `lanq run` sends one magic packet only as a last resort: when no awake machine can take the
+  job, `--wait` is above 0 and `--no-wake` is not given, to the first-by-name machine that looks asleep (ssh's own
+  connect timeout or unreachable-host error; never refused, auth or host-key failures), has the capabilities the job
+  needs and is inside its `allowed_hours` on this computer's clock. The wake happens inside `--wait`, at most once per
+  machine per invocation. `lanq health` stays read-only; `lanq health --wake` wakes sleepers and waits for them, probing
+  with backoff until they answer or `wait_seconds` run out. A localized ssh message disables the automatic wake (fails
+  safe).
 - **`lanq wake <machine> [--wait] [--json]`** sends the packet even outside `allowed_hours` (you asked by name) and says
   so; `--wait` waits for ssh. `--json` prints exactly one object on every path.
-- `lanq doctor` reports the wake setting (OK, or WARN for a broadcast address that is not private or link-local) and
+- `lanq doctor` reports the wake setting and
   reminds that Wake-on-LAN must be enabled in the BIOS/UEFI and the network card driver and usually needs wired Ethernet.
 - Docs: Windows and Linux Wake-on-LAN setup in `docs/WORKERS.md`; the magic packet is unauthenticated and LAN-only,
   which is why it is opt-in per machine (SECURITY.md).

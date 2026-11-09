@@ -48,9 +48,11 @@ Wake-on-LAN is opt-in per machine (`wake:` in the config). The magic packet is a
 that only works inside the LAN: anyone on the LAN who knows a machine's MAC address can send the same packet, so
 treat it as a convenience that does nothing but power a PC on, not as access control. `broadcast` must be an IPv4
 literal (no host names, no IPv6), the MAC must be a strict `aa:bb:cc:dd:ee:ff` / `aa-bb-cc-dd-ee-ff` value, the port is
-7 or 9, and `lanq doctor` warns when the broadcast address is not private or link-local. `lanq` never wakes a machine
-outside its `allowed_hours` on its own, and at most once per machine per run; only `lanq wake <machine>` does, because
-you named the machine.
+7 or 9, and config loading refuses a broadcast address that is not 255.255.255.255 or private or link-local (no public,
+multicast, loopback or 0.0.0.0 address). `lanq` never wakes a machine on its own outside its `allowed_hours` (judged on
+this computer's clock), at most once per machine per run, never from `lanq health` unless you pass `--wake`, and from
+`lanq run` only as a last resort when no awake machine can take the job and `--wait` is above 0; only
+`lanq wake <machine>` ignores the hours, because you named the machine.
 
 On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off,
 `core.attributesFile` at the null device, all transports refused except reading the uploaded bundle, and with

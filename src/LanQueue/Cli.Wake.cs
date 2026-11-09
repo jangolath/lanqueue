@@ -46,11 +46,6 @@ public static partial class Cli
             return await Fail("Rejected", 2, $"Machine '{machine.Name}' has no wake: setting in the config (see the README, \"Wake-on-LAN\").").ConfigureAwait(false);
         }
 
-        if (MagicPacket.BroadcastWarning(machine) is { } warning)
-        {
-            await stderr.WriteLineAsync("[lanq] WARN " + warning).ConfigureAwait(false);
-        }
-
         try
         {
             await info.WriteLineAsync(
@@ -58,13 +53,13 @@ public static partial class Cli
                 + (machine.AllowedHours is { Count: > 0 } ? " (sent even outside allowed hours: you asked for it)" : "")).ConfigureAwait(false);
             await waker.SendAsync(machine, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is SocketException or InvalidOperationException)
-        {
-            return await Fail("InfraError", 70, $"{machine.Name}: could not send the magic packet: {ex.Message}").ConfigureAwait(false);
-        }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             return await Fail("Cancelled", 130, "cancelled (Ctrl+C) before the packet was sent").ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return await Fail("InfraError", 70, $"{machine.Name}: could not send the magic packet: {ex.Message}").ConfigureAwait(false);
         }
 
         if (!p.WaitForSsh)
