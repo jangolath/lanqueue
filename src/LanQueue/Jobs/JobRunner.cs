@@ -96,6 +96,7 @@ public sealed class JobRunner(
             var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
                 .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
                 .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
+                .Concat((payload.CommittedConfigs ?? new Dictionary<string, string?>()).SelectMany(c => SecretScanner.ScanCommittedConfig(c.Key, c.Value)))
                 .ToList();
             if (findings.Count > 0)
             {

@@ -14,7 +14,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         Directory.CreateDirectory(outputDir);
         var top = (await Git(repoDir, null, ct, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim();
         var head = (await Git(top, null, ct, "rev-parse", "HEAD").ConfigureAwait(false)).Trim();
-        var tmpIndex = Path.Combine(Path.GetTempPath(), $"lanq-index-{jobId}");
+        var tmpIndex = Path.Combine(Path.GetTempPath(), $"lanq-index-{jobId}-{Guid.NewGuid():N}");
         var env = new Dictionary<string, string>
         {
             ["GIT_INDEX_FILE"] = tmpIndex,
@@ -45,6 +45,13 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             var repoId = kinds.HasFlag(PayloadKinds.Bundle) ? await RepoIdAsync(top, ct).ConfigureAwait(false) : null;
             var committed = (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", "HEAD").ConfigureAwait(false))
                 .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            var configs = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var path in committed.Where(Policy.SecretScanner.IsPackageConfig))
+            {
+                // Read only small blobs (a bigger one is refused unread by the scan); the content never leaves this process.
+                var size = long.Parse((await Git(top, null, ct, "cat-file", "-s", "HEAD:" + path).ConfigureAwait(false)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                configs[path] = size > Policy.SecretScanner.MaxConfigBytes ? null : await Git(top, null, ct, "cat-file", "-p", "HEAD:" + path).ConfigureAwait(false);
+            }
 
             ArchiveBuild? built = null;
             if (kinds.HasFlag(PayloadKinds.Archive))
@@ -52,7 +59,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 built = await WriteArchiveAsync(top, tree, Path.Combine(outputDir, jobId + ".tar.gz"), ct).ConfigureAwait(false);
             }
 
-            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed);
+            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed, configs);
         }
         finally
         {

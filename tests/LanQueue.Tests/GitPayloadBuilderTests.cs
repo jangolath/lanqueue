@@ -205,4 +205,20 @@ public sealed class GitPayloadBuilderTests : IDisposable
 
         Assert.Equal(["a.txt", "deploy/with space/prod.pem"], p.CommittedFiles!.Order(StringComparer.Ordinal));
     }
+
+    [Fact]
+    public async Task CommittedPackageConfigsAreReadForTheCredentialScan()
+    {
+        Directory.CreateDirectory(Path.Combine(_repo, "web"));
+        File.WriteAllText(Path.Combine(_repo, "web", ".npmrc"), "registry=https://r.example/\n");
+        File.WriteAllText(Path.Combine(_repo, ".pypirc"), new string('#', 70 * 1024));
+        Git("add", "-A");
+        Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "configs");
+
+        var p = await new GitPayloadBuilder().BuildAsync("j8", _repo, Path.Combine(_repo, ".out"), PayloadKinds.None, CancellationToken.None);
+
+        Assert.Equal("registry=https://r.example/", p.CommittedConfigs!["web/.npmrc"]!.Trim());
+        Assert.Null(p.CommittedConfigs[".pypirc"]); // over 64 KB: not read, and refused by the scan
+        Assert.Equal(2, p.CommittedConfigs.Count);
+    }
 }

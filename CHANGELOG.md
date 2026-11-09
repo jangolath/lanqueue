@@ -20,10 +20,14 @@
   Archive mode is unchanged.
 - **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
   HEAD tree are checked against `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.pfx`, `*.p12`, `*.key`,
-  `credentials.json`, `.npmrc`, `.pypirc` and `*.kdbx`, because a bundle or archive would carry them. A match refuses
-  the job before anything is sent. Obvious samples pass: names ending in `.example` or `.sample`, names containing
+  `credentials.json` and `*.kdbx`, because a bundle or archive would carry them. A match refuses the job before
+  anything is sent. Committed `.npmrc` and `.pypirc` files are not refused by name (registry-only ones are common):
+  their content (up to 64 KB) is checked, and only a literal credential refuses the job (`.npmrc`: a non-empty
+  `_authToken`, `_auth`, `_password` or `password`, including `//host/:_authToken=`, unless it is just an environment
+  reference such as `${NPM_TOKEN}`; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
+  the value. Obvious samples pass: names ending in `.example` or `.sample`, names containing
   `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
-  such a file (for example a `.npmrc` or a test certificate outside those folders) is now refused until the file is
+  such a file (for example a test certificate outside those folders, or an `.npmrc` with a literal token) is now refused until the file is
   renamed or moved. A long list of findings is cut to the first ten.
 - **Stale slots are reclaimed.** A slot file now records its own deadline (worker clock: now + the job's `--timeout`
   + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline

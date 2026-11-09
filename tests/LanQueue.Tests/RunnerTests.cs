@@ -32,12 +32,14 @@ public sealed class RunnerTests : IDisposable
                 File.WriteAllText(archive, "x");
             }
 
-            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null, Head: Head, CommittedFiles: Committed));
+            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null, Head: Head, CommittedFiles: Committed, CommittedConfigs: Configs));
         }
 
         public string Sha { get; set; } = "abc";
 
         public List<string> Committed { get; } = ["src/app.cs", ".env.example"];
+
+        public Dictionary<string, string?> Configs { get; } = [];
 
         public string Head { get; set; } = new('1', 40);
 
@@ -207,6 +209,30 @@ public sealed class RunnerTests : IDisposable
         Assert.Contains("committed", r.Message, StringComparison.Ordinal);
         Assert.Empty(ssh.Uploads);
         Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public async Task CommittedNpmrcWithALiteralTokenIsRefusedWithoutEchoingIt()
+    {
+        var (runner, ssh, payloads, _) = Make();
+        payloads.Committed.Add("web/.npmrc");
+        payloads.Configs["web/.npmrc"] = "registry=https://r.example/\n//r.example/:_authToken=npm_SuperSecretValue123\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("web/.npmrc", r.Message, StringComparison.Ordinal);
+        Assert.Contains("_authToken", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SuperSecretValue123", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public async Task CommittedNpmrcWithAnEnvReferenceRuns()
+    {
+        var (runner, _, payloads, _) = Make();
+        payloads.Committed.Add(".npmrc");
+        payloads.Configs[".npmrc"] = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
     }
 
     [Fact]

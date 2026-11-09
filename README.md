@@ -331,11 +331,14 @@ Each default below is enforced in code and covered by a unit test.
   YAML, `.env` and `Password=...;` connection strings). Files named like `.env`, `*.pem`, `*.pfx`, `*.jks`,
   `id_rsa`, `*.tfvars`, `terraform.tfstate`, `.git-credentials`, `.aws/credentials` or `*.local.yml` are refused by
   name. The **names** of all committed files in HEAD are checked too (`.env`, `.env.*`, `id_rsa`, `id_ed25519`,
-  `*.pem`, `*.pfx`, `*.p12`, `*.key`, `credentials.json`, `.npmrc`, `.pypirc`, `*.kdbx`), because a bundle or archive
-  carries them; obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
+  `*.pem`, `*.pfx`, `*.p12`, `*.key`, `credentials.json`, `*.kdbx`), because a bundle or archive carries them. Committed
+  `.npmrc` and `.pypirc` files are read instead (up to 64 KB; larger ones are refused unchecked) and refused only when
+  they hold a literal credential: in `.npmrc` a non-empty `_authToken`, `_auth`, `_password` or `password` (also the
+  registry-scoped `//host/:_authToken=` form) that is not just an environment reference like `${NPM_TOKEN}`, in
+  `.pypirc` a non-empty `password`; the refusal names the file and key, never the value. Obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
   anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
   never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
-  guarantee: it does not read the content of committed files, it does not look at files that were committed and later
+  guarantee: apart from `.npmrc` and `.pypirc` it does not read the content of committed files, it does not look at files that were committed and later
   deleted (they are still in the history a bundle carries), and it cannot recognise every secret format.
 - **No permission-skipping agent flags.** Any argument containing `dangerously`, `skip-permissions`,
   `bypassPermissions`, `--yolo`, `bypass-approvals`, `danger-full-access`, `approval_policy=never` or
@@ -363,7 +366,7 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 ## Limitations
 
 - The secret scan is pattern-based and best effort. Committed files are checked by name only (in HEAD), not by
-  content, and older commits are not scanned at all. **A git bundle carries the repository's full history** the first
+  content (except `.npmrc` and `.pypirc`), and older commits are not scanned at all. **A git bundle carries the repository's full history** the first
   time a machine sees the repository (later bundles carry only new commits), so a secret that was ever committed and
   then deleted still reaches the worker; rewrite that history (and rotate the secret) or use `transfer: archive`,
   which sends only the current files. It is a safety net, not a guarantee.
