@@ -323,19 +323,21 @@ internal sealed class GatedProbeSsh : ISshClient
     {
         if (IsProbe(machine, remoteCommand))
         {
+            // build-01 is probed first but can only finish after build-02 has finished: a sequential probe would block here until
+            // the timeout and fail, while concurrent probes finish build-02 then build-01 on any machine load (no timing window).
             if (machine.Name == "build-01")
             {
-                await _secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
-                await Task.Delay(50, ct);
-            }
-            else
-            {
-                _secondStarted.TrySetResult();
+                await _secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
             }
 
             lock (Finished)
             {
                 Finished.Add(machine.Name);
+            }
+
+            if (machine.Name != "build-01")
+            {
+                _secondStarted.TrySetResult();
             }
 
             var load = machine.Name == "build-01" ? "0.5" : "0.1";
