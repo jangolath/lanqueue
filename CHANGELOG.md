@@ -6,6 +6,10 @@
   `<work_root>/repos/<repoid>.git`, where `<repoid>` is the first 16 hex digits of the repository's root commit (the
   ordinally smallest one if the history has several roots). Different projects no longer share one object store. An
   existing `repo.git` is left alone and no longer used; delete it whenever convenient.
+- **Hardened git on workers.** Every git call in the worker scripts (init, fetch, worktree add/remove/prune,
+  update-ref) runs with `-c core.hooksPath=<null device> -c core.fsmonitor=false -c protocol.allow=never
+  -c protocol.file.allow=never` (`/dev/null` on Linux, `NUL` on Windows); only the bundle fetch re-allows reading
+  that one local file. A hook planted in a worker cache, or a hooks path in the worker's git config, no longer runs.
 
 ## 0.3.1 (2026-11-09)
 

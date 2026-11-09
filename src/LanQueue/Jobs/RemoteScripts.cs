@@ -50,6 +50,16 @@ public static class RemoteScripts
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
             """;
 
+    /// <summary>
+    /// Options for every git call on a worker (hooks in the cache or a hooks path in the worker's git config must never run
+    /// anything). Hooks are pointed at the null device, the fsmonitor daemon is off, and every transport is refused; only the
+    /// bundle fetch re-allows reading a local file, with <c>-c protocol.file.allow=always</c> on that one call.
+    /// </summary>
+    internal const string GitHardeningLinux = "-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+
+    /// <inheritdoc cref="GitHardeningLinux"/>
+    internal const string GitHardeningWindows = "-c core.longpaths=true -c core.hooksPath=NUL -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+
     private const string GitProbeWindows = "'tool=' + $(if (Get-Command git -ErrorAction SilentlyContinue) { 'ok' } else { 'missing' })";
 
     private const string GitProbeLinux = "if git --version >/dev/null 2>&1; then echo tool=ok; else echo tool=missing; fi";
@@ -158,19 +168,20 @@ public static class RemoteScripts
             $ErrorActionPreference = 'Stop'
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $c = "$root/repos/{{repoId}}.git"
-            function G { & git -c core.longpaths=true @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+            function G { & git {{GitHardeningWindows}} @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
             New-Item -ItemType Directory -Force -Path "$root/jobs", "$root/repos" | Out-Null
             if (-not (Test-Path -LiteralPath $c)) { G init --bare -q $c }
-            G -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
+            G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
             G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
             set -e
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}; C="$R/repos/{{repoId}}.git"
             mkdir -p "$R/jobs" "$R/repos"
-            [ -d "$C" ] || git init --bare -q "$C"
-            git -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
-            git -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
+            G() { git {{GitHardeningLinux}} "$@"; }
+            [ -d "$C" ] || G init --bare -q "$C"
+            G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
+            G -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
@@ -291,10 +302,11 @@ public static class RemoteScripts
               Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
             }
             $c = "$root/repos/{{repoId}}.git"
-            & git -C $c worktree remove --force "$root/jobs/$id" 2>$null
+            function Q { & git {{GitHardeningWindows}} @args 2>$null }
+            Q -C $c worktree remove --force "$root/jobs/$id"
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
-            & git -C $c worktree prune 2>$null
-            & git -C $c update-ref -d "refs/lanq/$id" 2>$null
+            Q -C $c worktree prune
+            Q -C $c update-ref -d "refs/lanq/$id"
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
             exit 0
@@ -311,10 +323,11 @@ public static class RemoteScripts
               rm -f "$P"
             fi
             C="$R/repos/{{repoId}}.git"
-            git -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
+            G() { git {{GitHardeningLinux}} "$@"; }
+            G -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
             rm -rf "$R/jobs/$ID"
-            git -C "$C" worktree prune 2>/dev/null
-            git -C "$C" update-ref -d "refs/lanq/$ID" 2>/dev/null
+            G -C "$C" worktree prune 2>/dev/null
+            G -C "$C" update-ref -d "refs/lanq/$ID" 2>/dev/null
             rm -f "$R/incoming/$ID.bundle" "$R/locks/slot-{{SafeSlot(slot)}}"
             exit 0
             """;

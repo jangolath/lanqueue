@@ -312,6 +312,10 @@ Each default below is enforced in code and covered by a unit test.
   `--ask-for-approval never` is rejected, even for an allowlisted command.
 - **Isolation.** One detached worktree (git mode) or one fresh extracted folder (archive mode) per job, removed
   afterwards. Gitignored files are never shipped.
+- **git on the worker runs no hooks and no transports.** Every git call in the worker scripts passes
+  `-c core.hooksPath=/dev/null` (`NUL` on Windows), `-c core.fsmonitor=false`, `-c protocol.allow=never` and
+  `-c protocol.file.allow=never`; only the fetch of the uploaded bundle re-allows reading that local file. Tests plant
+  hooks in a worker cache and check that none of them runs.
 - **Archive extraction is checked before it happens.** `lanq` refuses to create an archive with an absolute path, a
   `..` segment, a backslash or a name Windows cannot store; non-regular entries (symlinks, submodules) are skipped
   and reported, never archived. The worker uses only GNU tar or bsdtar (busybox tar is refused, because it hides hard
