@@ -106,11 +106,9 @@ public sealed class JobRunner(
             && req.Needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)));
         while (true)
         {
-            var health = new List<(Machine, MachineHealth)>();
-            foreach (var m in config.Machines)
-            {
-                health.Add((m, await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false)));
-            }
+            // Probe every machine at once; WhenAll keeps the config order whatever order the answers arrive in.
+            var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+            var health = config.Machines.Zip(probes).ToList();
 
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
             foreach (var machine in ranked)

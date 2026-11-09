@@ -60,6 +60,53 @@ internal sealed class FakeSsh : ISshClient
     }
 }
 
+/// <summary>
+/// Health probes of build-01 block until build-02's probe has started, then finish after it. Sequential probing (build-01 first)
+/// cannot get past build-01 and fails with a TimeoutException; concurrent probing completes, with build-02 finishing first.
+/// </summary>
+internal sealed class GatedProbeSsh : ISshClient
+{
+    private readonly TaskCompletionSource _secondStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public List<string> Finished { get; } = [];
+
+    public async Task<SshResult> RunAsync(Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+    {
+        if (IsProbe(machine, remoteCommand))
+        {
+            if (machine.Name == "build-01")
+            {
+                await _secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+                await Task.Delay(50, ct);
+            }
+            else
+            {
+                _secondStarted.TrySetResult();
+            }
+
+            lock (Finished)
+            {
+                Finished.Add(machine.Name);
+            }
+
+            var load = machine.Name == "build-01" ? "0.5" : "0.1";
+            return new SshResult(0, string.Join((char)10, "load=" + load, "disk_free_gb=50", "slots_used=0", "tool=ok"));
+        }
+
+        return Decode(machine, remoteCommand).Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "");
+    }
+
+    public Task<SshResult> UploadAsync(Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
+        Task.FromResult(new SshResult(0, ""));
+
+    private static bool IsProbe(Machine m, string cmd) => Decode(m, cmd).Contains("disk_free_gb", StringComparison.Ordinal);
+
+    private static string Decode(Machine m, string cmd) =>
+        m.Os == MachineOs.Windows && cmd.Contains("-EncodedCommand ", StringComparison.Ordinal)
+            ? System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(cmd[(cmd.LastIndexOf(' ') + 1)..]))
+            : cmd;
+}
+
 internal sealed class FakeClock(DateTimeOffset now) : TimeProvider
 {
     public override DateTimeOffset GetUtcNow() => now;

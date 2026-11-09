@@ -492,4 +492,19 @@ public sealed class RunnerTests : IDisposable
         public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
             Task.FromResult(new SshResult(0, ""));
     }
+
+    [Fact]
+    public async Task MachinesAreProbedConcurrentlyBeforeScheduling()
+    {
+        var ssh = new GatedProbeSsh();
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var runner = new JobRunner(config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-02", r.Machine); // ranking still uses each machine's own result
+        Assert.Equal(["build-02", "build-01"], ssh.Finished);
+    }
 }

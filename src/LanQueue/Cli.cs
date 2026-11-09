@@ -178,16 +178,17 @@ public static class Cli
     private static string HomeDir(Func<string, string?> env) =>
         env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    private static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    internal static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
             await stderr.WriteLineAsync(w).ConfigureAwait(false);
         }
 
-        foreach (var m in config.Machines)
+        // Probe all machines concurrently, then print in config order.
+        var results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        foreach (var (m, h) in config.Machines.Zip(results))
         {
-            var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
                 ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  slots {h.SlotsUsed}/{m.MaxJobs}")
