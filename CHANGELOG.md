@@ -23,6 +23,9 @@ Native binaries: `lanq` without the .NET SDK.
   the normal `-warnaserror` build. `allowed_hours` now has its own type (`HoursList`) because the static generator
   does not carry a property's `[YamlConverter]` attribute; a test loads every config key in every accepted shape.
   State files written by 0.4 read unchanged.
+- **Config:** a duplicate key, such as two `name:` lines in one machine or the same name twice under `env:`, is now an
+  error instead of the last one silently winning. Explicit standard YAML tags (`!!str`, `!!int`, `!!float`, `!!null`,
+  `!!seq`, `!!map`) still load as in 0.4; any other tag (`!custom`, `!!binary`, `!!timestamp`) is refused by name.
 - **Release order:** nothing is published unless every binary built and passed its smoke test. The publish job puts
   all assets on a draft GitHub release, pushes the package to nuget.org, then makes the release public; a re-run after
   a failure reuses the draft only when it is empty or holds the same `SHA256SUMS` (`scripts/release-draft.sh`); a

@@ -206,6 +206,55 @@ public sealed class StaticYamlTests
         }
     }
 
+    /// <summary>Explicit standard YAML tags load as they did in 0.4 (the tag is ignored, the value read as if untagged).</summary>
+    [Theory]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!str \"22:00-07:00\"")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!seq [\"22:00-07:00\"]")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: [!!str \"22:00-07:00\"]")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: ! \"22:00-07:00\"")]
+    [InlineData("max_jobs: 3", "max_jobs: !!str 3")]
+    [InlineData("max_jobs: 3", "max_jobs: !!int \"3\"")]
+    [InlineData("max_jobs: 3", "max_jobs: !!float 3.0")]
+    [InlineData("min_free_mem_gb: 2", "min_free_mem_gb: !!int 2")]
+    [InlineData("min_free_mem_gb: 2", "min_free_mem_gb: !!float 2.0")]
+    [InlineData("transfer: archive", "transfer: !!str archive")]
+    [InlineData("    ssh: build@lin.lan", "    ssh: !!str build@lin.lan")]
+    [InlineData("    env:\n", "    env: !!map\n")]
+    public void StandardTagsLoadAsIn04(string from, string to)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        var lin = ConfigLoader.Parse(yaml).Machines[0];
+        Assert.Equal(["22:00-07:00"], lin.AllowedHours!);
+        Assert.Equal(3, lin.MaxJobs);
+        Assert.Equal(2, lin.MinFreeMemGb);
+        Assert.Equal(TransferMode.Archive, lin.Transfer);
+        Assert.Equal("build@lin.lan", lin.Ssh);
+        Assert.Equal("1", lin.Env["MSBUILDNODECOUNT"]);
+    }
+
+    [Fact]
+    public void ATaggedNullIsTreatedAsIn04()
+    {
+        // 0.4: a bare !!null means "not set"; !!null '' is an empty (invalid) entry.
+        Assert.Null(ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null", StringComparison.Ordinal)).Machines[0].AllowedHours);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null ''", StringComparison.Ordinal)));
+        Assert.Contains("allowed_hours entry ''", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !custom \"22:00-07:00\"", "!custom")]
+    [InlineData("max_jobs: 3", "max_jobs: !!timestamp 2001-12-14", "tag:yaml.org,2002:timestamp")]
+    [InlineData("max_jobs: 3", "max_jobs: !!binary aGk=", "tag:yaml.org,2002:binary")]
+    [InlineData("    env:\n", "    env: !<tag:example.com,2026:env>\n", "tag:example.com,2026:env")]
+    public void UnknownTagsAreRefusedByName(string from, string to, string tag)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+        Assert.Contains($"tag '{tag}' is not supported", ex.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>A YAML alias for allowed_hours is accepted and means the anchored value (pinned behaviour).</summary>
     [Fact]
     public void AllowedHoursAcceptsAnAlias()

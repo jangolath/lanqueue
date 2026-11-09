@@ -117,7 +117,7 @@ public static partial class ConfigLoader
         try
         {
             CheckShape(yaml);
-            config = deserializer.Deserialize<FleetConfig>(yaml) ?? new FleetConfig();
+            config = deserializer.Deserialize<FleetConfig>(StandardTagParser.For(yaml)) ?? new FleetConfig();
         }
         catch (YamlDotNet.Core.YamlException ex)
         {
@@ -145,7 +145,7 @@ public static partial class ConfigLoader
     private static void CheckShape(string yaml)
     {
         var stream = new YamlStream();
-        stream.Load(new StringReader(yaml));
+        stream.Load(StandardTagParser.For(yaml));
         if (stream.Documents.Count == 0 || IsNull(stream.Documents[0].RootNode))
         {
             return; // an empty file has no machines, which Validate reports
