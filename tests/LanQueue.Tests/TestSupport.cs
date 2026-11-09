@@ -110,6 +110,17 @@ public sealed class ShFactAttribute : FactAttribute
     }
 }
 
+public sealed class ShTheoryAttribute : TheoryAttribute
+{
+    public ShTheoryAttribute()
+    {
+        if (Shells.Sh is null)
+        {
+            Skip = Shells.NoSh;
+        }
+    }
+}
+
 /// <summary>Runs only where PowerShell is available; otherwise reported as skipped.</summary>
 public sealed class PowerShellFactAttribute : FactAttribute
 {
@@ -149,6 +160,20 @@ public sealed class WindowsFactAttribute : FactAttribute
 internal static class T
 {
     public const string RepoId = "0123456789abcdef";
+
+    /// <summary>The repository root (the folder holding LanQueue.slnx).</summary>
+    public static readonly string RepoRoot = FindRepoRoot();
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "LanQueue.slnx")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new InvalidOperationException("Repository root (LanQueue.slnx) not found.");
+    }
 
     public const string Yaml = """
         policy:

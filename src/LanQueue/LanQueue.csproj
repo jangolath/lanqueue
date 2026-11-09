@@ -32,7 +32,7 @@
     <None Include="../../assets/lanqueue-icon.png" Pack="true" PackagePath="icon.png" />
   </ItemGroup>
   <!--
-    The .NET runtime patch used for NativeAOT (ILCompiler) and the trim/AOT analyzers (ILLink), pinned so that builds
+    The .NET runtime patch that ships inside the native binaries (ILCompiler) and the trim/AOT analyzers (ILLink), pinned so that builds
     and the committed lock files do not move with whichever SDK patch a machine has. Bump it deliberately (see RELEASING.md).
   -->
   <PropertyGroup>
@@ -42,6 +42,26 @@
     <KnownILLinkPack Update="Microsoft.NET.ILLink.Tasks" ILLinkPackVersion="$(LanqRuntimePackVersion)" />
     <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="$(LanqRuntimePackVersion)" />
   </ItemGroup>
+  <!--
+    NativeAOT single-file binaries for GitHub Releases: only with -p:LanqNative=true on dotnet publish (never build or pack, so the NuGet
+    tool stays framework-dependent). Restores against its own lock file covering every release RID.
+  -->
+  <PropertyGroup Condition="'$(LanqNative)' == 'true'">
+    <PublishAot>true</PublishAot>
+    <!-- The framework libraries compiled in come from this runtime pack: the same pinned patch as ILCompiler. -->
+    <RuntimeFrameworkVersion>$(LanqRuntimePackVersion)</RuntimeFrameworkVersion>
+    <RuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-arm64</RuntimeIdentifiers>
+    <NuGetLockFilePath>packages.native.lock.json</NuGetLockFilePath>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StripSymbols>true</StripSymbols>
+    <DebuggerSupport>false</DebuggerSupport>
+    <EventSourceSupport>false</EventSourceSupport>
+    <!-- Kept (the default false): framework exception messages such as "Could not find file" are shown to users. -->
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
+  </PropertyGroup>
+  <Target Name="LanqNativeIsPublishOnly" BeforeTargets="GenerateNuspec;Pack" Condition="'$(LanqNative)' == 'true'">
+    <Error Text="LanqNative is for dotnet publish only; the NuGet tool package must stay framework-dependent." />
+  </Target>
   <ItemGroup>
     <InternalsVisibleTo Include="LanQueue.Tests" />
   </ItemGroup>
