@@ -8,18 +8,25 @@
   time, with the same rules as `lanq makeready <machine>` (a `PAUSE` file or `allowed_hours` holds a machine unless
   `--force`; the script goes on ssh stdin), and prints one table: machine, OS, verdict (`OK`, `WARN n`, `FAIL n`,
   `unreachable`, `held`, or `error` for an unusable report) and the top problem, then points at
-  `lanq makeready <machine>` for details. The counts come from the report's checks. Exit `0` every machine OK, `1`
-  any WARN or FAIL, otherwise `70` any unreachable or unusable, `75` any held. `--json` prints one object
+  `lanq makeready <machine>` for details. The counts come from the report's checks. Exit `70` any machine
+  unreachable or unusable, else `1` any FAIL, else `75` any held, else `0` (warnings alone exit `0`, as for one
+  machine); `2` bad arguments or config, `130` Ctrl+C. `--json` prints one object
   (`status`, `exitCode`, `machines`), each machine carrying the validated report exactly as the single-machine
   `--json` prints it.
 - **`lanq init`** writes a commented, minimal starter `machines.yml` (current folder, or `--config FILE`) that loads
   as written: memory holds suited to low-RAM PCs, one example machine to replace, and commented Windows and Linux
-  examples covering `key_env`, heap caps, `allowed_hours` and `wake:`. It never overwrites a file, prints the next
+  examples covering `key_env`, a .NET heap cap, `allowed_hours` and `wake:`. It never overwrites a file or writes
+  through a link (an existing file, folder or link, even a dangling one, is refused with exit 2), prints the next
   steps (OpenSSH on the workers, connect once, `lanq makeready --ssh`, paste, `lanq doctor --remote`), and with
   `--json` prints one object (`status`, `exitCode`, `path`, `message`).
 - **[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md):** one orchestrator plus Windows 10/11 and Linux workers, from
   install to the first job: Windows OpenSSH Server, the `administrators_authorized_keys` trap, a non-admin build user,
   the firewall, sizing micro PCs, overnight family PCs, and the ten errors you are most likely to see.
+
+### Docs
+
+- `MSBUILDNODECOUNT` is gone from `machines.example.yml`, the README and the starter config: it is not a documented
+  MSBuild setting. Small PCs run `dotnet build -m:1` / `dotnet test -m:1` (one MSBuild process) instead.
 
 ### Clearer first-run errors
 
@@ -27,7 +34,8 @@
   once with `ssh user@host`, because lanq uses `StrictHostKeyChecking=yes`), a changed host key, `Permission denied
   (publickey)` (load the key, or put it in `authorized_keys`, or `administrators_authorized_keys` for a Windows
   administrator), a private key with loose permissions, an unknown host name, a refused connection, and a missing
-  ssh client. Shown by `lanq health`, `lanq run`'s "no eligible machine", `lanq makeready` and `lanq doctor --remote`.
+  ssh client. Only when ssh itself failed (exit 255) and only on lines in ssh's own formats, so a remote command's output
+  cannot produce one. Shown by `lanq health`, `lanq run`'s "no eligible machine", `lanq makeready` and `lanq doctor --remote`.
 - `key_env` errors tell an unset variable apart from a path that does not exist, and say how to set it or use
   ssh-agent instead.
 - A missing config points at `lanq init --config <path>`.

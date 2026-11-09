@@ -166,8 +166,8 @@ Before your first job, each worker needs an SSH server, git (or only `tar` in ar
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
 [docs/WORKERS.md](docs/WORKERS.md).
 
-1. Write a starter config with `lanq init --config ~/.config/lanq/machines.yml` (on Windows
-   `lanq init --config %APPDATA%\lanq\machines.yml`; plain `lanq init` writes `./machines.yml`), or copy
+1. Write a starter config with `lanq init --config ~/.config/lanq/machines.yml` (bash; in PowerShell
+   `lanq init --config "$env:APPDATA\lanq\machines.yml"`; plain `lanq init` writes `./machines.yml`), or copy
    `machines.example.yml` to one of those places, and edit it. A config in the current directory is never picked up
    implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
@@ -298,9 +298,10 @@ lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
 The verdict counts the report's checks: `FAIL n` when any check fails (also `FAIL` when no transfer mode works),
 else `WARN n`, else `OK`; `unreachable` (the probe or ssh failed), `held` or `error` (the report was unusable) when
 there is no report. The top problem is the first failing check, else the first warning, else why there is no report.
-Exit codes: `0` every machine is OK; `1` any machine has a WARN or FAIL; otherwise `70` any machine was unreachable or
-its report unusable, `75` any was held; `2` bad arguments or config; `130` Ctrl+C. With `--json` it prints exactly one
-object, `{"status":"Ok|Problems|InfraError|Held","exitCode":...,"machines":[...]}`, where each machine has `machine`,
+Exit codes, first match wins: `70` any machine was unreachable or its report unusable (the check is incomplete); `1`
+any machine has a FAIL; `75` any was held; `0` otherwise. Warnings alone exit `0`, as `lanq makeready <machine>` does;
+they stay in the table and the JSON. `2` means bad arguments or config, `130` Ctrl+C. With `--json` it prints exactly
+one object, `{"status":"Ok|Failing|InfraError|Held","exitCode":...,"machines":[...]}`, where each machine has `machine`,
 `os`, `verdict` (`OK`, `WARN`, `FAIL`, `unreachable`, `held` or `error`), `warnings`, `failures`, `exitCode` (what
 `lanq makeready <machine>` would exit with), `problem` (absent when there is none) and `report`: the validated
 `lanq-makeready/v1` report exactly as `lanq makeready <machine> --json` prints it (absent without one). A bad argument
@@ -309,7 +310,8 @@ or config prints the usual `{"status":"Rejected","exitCode":2,"message":...}` ob
 ### lanq init
 
 `lanq init` writes a commented, minimal `machines.yml` to the current folder (or to `--config FILE`, creating its
-folder) and refuses to overwrite an existing file (exit `2`). The file loads as written: policy defaults suited to
+folder). It never overwrites a file and never writes through a link: an existing file, folder or link (even one
+pointing nowhere) at that path is refused (exit `2`). The file loads as written: policy defaults suited to
 small PCs (`min_free_mem_gb: 1.5`, `max_jobs: 1`), one live example machine to replace, and commented examples of a
 Windows micro PC (`key_env`, a memory floor, heap caps) and a Linux family PC (`allowed_hours`, `wake:`). It then
 prints the next steps: set up OpenSSH on each worker ([docs/WORKERS.md](docs/WORKERS.md)), connect once with `ssh`,
@@ -609,9 +611,13 @@ Build tools size themselves to the machine, which on a 4 GB box usually means sw
 env:
   DOTNET_GCHeapHardLimitPercent: "0x32"        # .NET: GC heap at most 50% of RAM (the value is hexadecimal)
   NODE_OPTIONS: "--max-old-space-size=2048"    # Node: 2 GB heap
-  MSBUILDNODECOUNT: "1"                        # MSBuild: one worker node
   CARGO_BUILD_JOBS: "2"                        # Rust: two parallel compile jobs
 ```
+
+For .NET builds the parallelism is a command-line switch, not an environment variable: `dotnet build` and
+`dotnet test` build several projects at once by default (MSBuild's `-maxcpucount`, `-m`); on a small machine run
+them as `dotnet build -m:1` and `dotnet test -m:1` (one build process). The allowlist entry `dotnet build` already
+allows the extra argument.
 
 Tools installed per user (nvm, pyenv, rustup, sdkman) are often missing in a non-login SSH session, because they put
 themselves on `PATH` from `.bashrc` or `.profile`. List their folders under `path_prepend:` and the job finds them:
