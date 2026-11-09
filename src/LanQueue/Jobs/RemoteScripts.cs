@@ -652,7 +652,8 @@ public static class RemoteScripts
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
         if (jobId is not null)
         {
-            words.Insert(0, ShellQuote.Posix(JobMarker + "=" + SafeJobId(jobId)));
+            // After the machine's own env: words, so the marker wins even if one named it (config refuses LANQ_* names anyway).
+            words.Add(ShellQuote.Posix(JobMarker + "=" + SafeJobId(jobId)));
         }
 
         if (m.PathPrepend.Count > 0)
@@ -718,7 +719,7 @@ public static class RemoteScripts
             elif kill -s 0 -- "-$g" 2>/dev/null; then
               for f in /proc/[0-9]*/stat; do
                 [ "$(sed -n 's/.*) //p' "$f" 2>/dev/null | cut -d' ' -f3)" = "$g" ] || continue
-                if tr '\000' '\n' < "${f%/stat}/environ" 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
+                if { tr '\000' '\n' < "${f%/stat}/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
               done
             fi
           elif [ -e /proc/self/cwd ]; then

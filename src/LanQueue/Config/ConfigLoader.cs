@@ -280,6 +280,11 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused because it can hijack the program loader or a shell.");
             }
 
+            if (name.StartsWith("LANQ_", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused: names starting with LANQ_ are reserved for lanq itself (it sets LANQ_JOB for every job).");
+            }
+
             if (!names.Add(name))
             {
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is listed twice (names are compared ignoring case, as on Windows).");

@@ -20,7 +20,7 @@
   and start time on Windows) before its files are fetched.
 - The Linux job wrapper now records the group leader's start time (field 22 of `/proc/PID/stat`) and the boot id
   (`/proc/sys/kernel/random/boot_id`) next to its process group, and every job runs with `LANQ_JOB=<job id>` in its
-  environment (Windows jobs get it too). Cleanup, that stop and stale-slot reclaim share one kill. It acts only in the
+  environment (Windows jobs get it too; `env:` names starting with `LANQ_` are now refused as reserved). Cleanup, that stop and stale-slot reclaim share one kill. It acts only in the
   boot the pid file was written in, and then signals the group only when the leader still has that start time, or the
   leader is gone and a live member of the group carries this job's `LANQ_JOB`. So leftover job processes are killed,
   and a pid or group number reused by another program (after a reboot, say) is left alone. A pid file without a start
