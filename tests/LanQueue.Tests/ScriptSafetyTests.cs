@@ -70,14 +70,9 @@ public class ScriptSafetyTests
         Assert.True(c.IndexOf("taskkill", StringComparison.Ordinal) < c.IndexOf("worktree remove", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [LinuxFact]
     public void LinuxCleanupKillsTheRunningJobProcessGroup()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return; // real process-group behaviour is exercised on the Linux CI leg
-        }
-
         var root = Path.Combine(Path.GetTempPath(), "lanq-kill-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(root, "jobs", "jk", "src"));
         Directory.CreateDirectory(Path.Combine(root, "locks"));
@@ -118,14 +113,9 @@ public class ScriptSafetyTests
     public void ShortWindowsCommandsWrapFine() =>
         Assert.NotEmpty(RemoteScripts.Wrap(T.Windows(), RemoteScripts.Execute(T.Windows(), "j", ".", ["dotnet", "test"])));
 
-    [Fact]
+    [ShFact]
     public void GeneratedLinuxScriptsPassShSyntaxCheck()
     {
-        if (!OnPath("sh"))
-        {
-            return; // no POSIX shell on this machine; nothing to check with
-        }
-
         var m = T.Linux();
         var scripts = new Dictionary<string, string>
         {
@@ -155,15 +145,10 @@ public class ScriptSafetyTests
         }
     }
 
-    [Fact]
+    [PowerShellFact]
     public void GeneratedPowerShellScriptsParseCleanly()
     {
-        var host = OnPath("pwsh") ? "pwsh" : OnPath("powershell") ? "powershell" : null;
-        if (host is null)
-        {
-            return; // no PowerShell on this machine; nothing to check with
-        }
-
+        var host = Shells.PowerShell!;
         var m = T.Windows();
         var scripts = new Dictionary<string, string>
         {

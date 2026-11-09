@@ -186,9 +186,13 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains(Lines(o, "FAIL"), l => l.Contains("git", StringComparison.Ordinal));
     }
 
-    [Theory]
-    [MemberData(nameof(StaleSlotTests.Shells), MemberType = typeof(StaleSlotTests))]
-    public void TheRealScriptRunsToolsWithPathPrependLikeAJob(string shell)
+    [ShFact]
+    public void TheRealShScriptRunsToolsWithPathPrependLikeAJob() => TheRealScriptRunsToolsWithPathPrependLikeAJob("linux");
+
+    [WindowsFact] // the Windows script's PATH handling and .cmd shims are Windows behaviour, not something pwsh on Linux has
+    public void TheRealPowerShellScriptRunsToolsWithPathPrependLikeAJob() => TheRealScriptRunsToolsWithPathPrependLikeAJob("windows");
+
+    private static void TheRealScriptRunsToolsWithPathPrependLikeAJob(string shell)
     {
         using var worker = new LocalWorker();
         var bin = Path.Combine(worker.Root, "fake-bin");
@@ -214,11 +218,6 @@ public sealed class DoctorTests : IDisposable
         m.Env = new Dictionary<string, string> { ["CARGO_HOME"] = Path.Combine(worker.Root, "no-cargo") };
         m.Transfer = TransferMode.Archive;
         var output = StaleSlotTests.RunScript(shell, RemoteScripts.Doctor(m));
-        if (output is null)
-        {
-            return;
-        }
-
         var lines = output.Replace("\r", "", StringComparison.Ordinal).Split('\n');
         Assert.Contains("root=ok", lines);
         Assert.Contains(lines, l => l.StartsWith("tool=", StringComparison.Ordinal));

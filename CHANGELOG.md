@@ -83,8 +83,13 @@ Transfer and supply chain:
   renamed or moved. A long list of findings is cut to the first ten.
 - **Stale slots are reclaimed.** A slot file now records its own deadline (worker clock: now + the job's `--timeout`
   + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline
-  (left by a crashed or killed `lanq`) is renamed away atomically and reused; a live slot, or one without a deadline
-  (written by an older lanq), is never touched.
+  (left by a crashed or killed `lanq`) is reclaimed: under an exclusive lock file `slot-N.reclaim` (one older than ten
+  minutes, left by a reclaimer that died, is cleared) the slot is read again, and only if it is still that stale file
+  is it renamed away to a unique name, deleted and created afresh like a free slot (if another job wins it, the next
+  slot is tried; nothing is ever put back, and no hard links are needed). If the stale slot's job is somehow still
+  running (its `locks/job-<id>.pid` names a live process: on Linux one whose working folder is in that job's folder,
+  on Windows a PowerShell process), its process group or tree is killed first. A live slot, or one without a valid
+  deadline (written by an older lanq, or not 1 to 18 decimal digits; `08` is read as 8), is never touched.
 - **Supply chain.** Every project commits a `packages.lock.json` and CI restores in locked mode
   (`RestoreLockedMode` when `CI=true`); Dependabot proposes grouped weekly NuGet and GitHub Actions updates; the
   release workflow attests the `.nupkg`'s build provenance (`actions/attest-build-provenance`, pinned by SHA, with
@@ -111,8 +116,8 @@ Command line:
 - **`--json`** for `lanq health` (one array: `name`, `state`, `reasons`, `load`, `diskFreeGb`, `memFreeGb`,
   `slotsUsed`, `maxJobs`, `localTime`) and `lanq run` (the job's output goes to stderr, then one object on stdout:
   `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it.
-- **`lanq unlock <machine>`** removes slot files past their recorded deadline at once and says what it removed and
-  kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running
+- **`lanq unlock <machine>`** removes slot files past their recorded deadline at once (the same locked reclaim, which
+  also stops such a slot's job if it is somehow still running) and says what it removed and kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running
   job there would lose its slot. `--all` without `--yes` is refused.
 - Options are checked per command: an option the command does not use (for example `lanq health --needs x`) is now an
   error (exit `2`) instead of being ignored.

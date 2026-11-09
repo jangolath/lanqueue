@@ -325,10 +325,6 @@ public sealed class WindowTests : IDisposable
         var root = Path.Combine(_dir, "root").Replace('\\', '/');
         Directory.CreateDirectory(root);
         var output = WorkerHealthTests.RunProbe(root);
-        if (output is null)
-        {
-            return;
-        }
 
         Assert.True(
             DateTime.TryParseExact(HealthProbe.Parse(output).GetValueOrDefault("local_time"), "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var t),

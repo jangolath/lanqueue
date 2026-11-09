@@ -123,10 +123,6 @@ public class WorkerHealthTests
         try
         {
             var output = RunProbe(root);
-            if (output is null)
-            {
-                return; // no suitable shell on this machine
-            }
 
             var v = HealthProbe.Parse(output);
             Assert.True(
@@ -173,10 +169,6 @@ public class WorkerHealthTests
         try
         {
             var before = RunProbe(root);
-            if (before is null)
-            {
-                return; // no suitable shell on this machine
-            }
 
             Assert.Equal("0", HealthProbe.Parse(before).GetValueOrDefault("paused"));
             File.WriteAllText(Path.Combine(root, "PAUSE"), "");
@@ -188,8 +180,8 @@ public class WorkerHealthTests
         }
     }
 
-    /// <summary>Runs the generated probe for a machine whose work_root is <paramref name="root"/>; null when no shell is available.</summary>
-    internal static string? RunProbe(string root)
+    /// <summary>Runs the generated probe for a machine whose work_root is <paramref name="root"/>: PowerShell on Windows, sh elsewhere.</summary>
+    internal static string RunProbe(string root)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -205,11 +197,6 @@ public class WorkerHealthTests
             {
                 File.Delete(file);
             }
-        }
-
-        if (!OperatingSystem.IsLinux())
-        {
-            return null;
         }
 
         var linux = T.Linux();

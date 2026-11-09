@@ -190,14 +190,10 @@ public sealed class JobEnvironmentTests : IDisposable
     }
 
     /// <summary>Runs the generated Linux script in a real sh: the job sees the hostile value verbatim and nothing else runs.</summary>
-    [Fact]
+    [LinuxFact]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
     public void RealShJobSeesTheHostileValueVerbatimAndThePrependedTool()
     {
-        if (!OnPath("sh") || OperatingSystem.IsWindows())
-        {
-            return; // the Linux CI leg runs this
-        }
-
         var bin = Path.Combine(_root, "bin");
         Directory.CreateDirectory(bin);
         File.WriteAllText(Path.Combine(bin, "lanq-test-tool"), "#!/bin/sh\nprintf '%s|' \"$FOO\"\n");
@@ -211,14 +207,9 @@ public sealed class JobEnvironmentTests : IDisposable
     }
 
     /// <summary>Runs the generated Windows script in a real Windows PowerShell: same guarantees.</summary>
-    [Fact]
+    [WindowsFact]
     public void RealPowerShellJobSeesTheHostileValueVerbatimAndThePrependedTool()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var bin = Path.Combine(_root, "bin");
         Directory.CreateDirectory(bin);
         File.WriteAllText(Path.Combine(bin, "lanqtesttool.cmd"), "@echo found\r\n");

@@ -68,14 +68,9 @@ public sealed class JobPriorityTests : IDisposable
     }
 
     /// <summary>A real Windows PowerShell: the job's child process inherits BelowNormal.</summary>
-    [Fact]
+    [WindowsFact]
     public void RealPowerShellJobChildRunsBelowNormal()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
         var m = T.Windows();
         m.WorkRoot = _root;
         var script = RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write((Get-Process -Id $PID).PriorityClass)"]);
@@ -92,14 +87,9 @@ public sealed class JobPriorityTests : IDisposable
     }
 
     /// <summary>A real sh (Linux CI leg): the job runs at niceness 10.</summary>
-    [Fact]
+    [LinuxFact]
     public void RealShJobRunsNiced()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            return;
-        }
-
         var m = T.Linux();
         m.WorkRoot = _root;
         var before = int.Parse(WorkerHealthTests.Capture("nice").Trim(), System.Globalization.CultureInfo.InvariantCulture);

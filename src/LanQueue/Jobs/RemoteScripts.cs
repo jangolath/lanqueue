@@ -105,6 +105,56 @@ public static class RemoteScripts
         + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
         + "'tool=' + $(if ($ok) { 'ok' } else { 'missing' })";
 
+    /// <summary>
+    /// sh helpers for reclaim and unlock (they need $R). <c>deadline_of</c> prints a slot file's deadline as plain base-10 (leading zeros
+    /// stripped, so "08" is 8 and never octal) and fails unless it is 1 to 18 digits. <c>take</c> creates the slot's lock file exclusively
+    /// (set -C), first clearing one older than ten minutes (a reclaimer that died). <c>stop_job</c> stops a stale slot's job if it is still
+    /// running: it reads locks/job-ID.pid and kills that process group only when /proc shows the process working inside that job's folder
+    /// (so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
+    /// </summary>
+    internal const string LinuxSlotFunctions = """
+        deadline_of() { d=$(printf '%s\n' "$1" | sed -n 2p); case "$d" in ''|*[!0-9]*) return 1 ;; esac; [ ${#d} -le 18 ] || return 1; d=$(printf '%s' "$d" | sed 's/^0*//'); echo "${d:-0}"; }
+        take() { find "$1.reclaim" -mmin +10 -exec rm -f {} \; 2>/dev/null; ( set -C; : > "$1.reclaim" ) 2>/dev/null; }
+        stop_job() {
+          case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+          kp="$R/locks/job-$1.pid"; [ -f "$kp" ] || return 0
+          g=$(sed -n 1p "$kp" 2>/dev/null)
+          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
+          if [ -d "/proc/$g" ]; then
+            jd=$(cd -P "$R/jobs/$1" 2>/dev/null && pwd -P) || jd="$R/jobs/$1"
+            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in
+              "$jd"|"$jd"/*|"$jd (deleted)") kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
+            esac
+          fi
+          rm -f "$kp"
+        }
+        """;
+
+    /// <summary>
+    /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file (CreateNew; one older than ten minutes is
+    /// cleared first), and <c>StopJob</c>, which kills a stale slot's still-running job tree (taskkill /T /F) when locks/job-ID.pid names a
+    /// live PowerShell process, the way cleanup does.
+    /// </summary>
+    internal const string WindowsSlotFunctions = """
+        function Take([string]$f) {
+          $k = "$f.reclaim"
+          try { if ((Test-Path -LiteralPath $k) -and [IO.File]::GetLastWriteTimeUtc($k) -lt [DateTime]::UtcNow.AddMinutes(-10)) { [IO.File]::Delete($k) } } catch { }
+          try { [IO.File]::Open($k, 'CreateNew', 'Write', 'None').Close(); $true } catch { $false }
+        }
+        function Drop([string]$f) { try { [IO.File]::Delete("$f.reclaim") } catch { } }
+        function StopJob([string]$j) {
+          if ($j -cnotmatch '^[A-Za-z0-9_-]{1,64}\z') { return }
+          $kp = "$root/locks/job-$j.pid"
+          if (-not (Test-Path -LiteralPath $kp)) { return }
+          $jp = "$(Get-Content -LiteralPath $kp -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+          if ($jp -match '^[0-9]{1,9}\z') {
+            $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
+            if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
+          }
+          Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $kp
+        }
+        """;
+
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
     internal const int StaleSlotGraceSeconds = 1800;
 
@@ -114,8 +164,11 @@ public static class RemoteScripts
     /// <summary>
     /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
     /// its deadline in the worker's own epoch seconds (now + <paramref name="jobTimeout"/> + <see cref="SlotTransferAllowance"/>). A slot
-    /// more than <see cref="StaleSlotGraceSeconds"/> past its deadline was left by a crashed run and is reclaimed: it is renamed away
-    /// (atomic), and put back if what was renamed is not the stale file that was read. A slot without a deadline is never reclaimed.
+    /// more than <see cref="StaleSlotGraceSeconds"/> past its deadline was left by a crashed run and is reclaimed under that slot's lock
+    /// file (<c>slot-N.reclaim</c>, created exclusively): the slot is read again there and only if it is still the stale file, its job is
+    /// stopped if it is somehow still running (see <see cref="LinuxSlotFunctions"/>), then it is renamed away to a unique name and deleted,
+    /// and the slot is created afresh like any free one (another claimer may win it; then the next slot is tried). There is no step that
+    /// puts a file back. A slot without a deadline, or with a deadline that is not 1 to 18 decimal digits, is never reclaimed.
     /// </summary>
     public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout)
     {
@@ -128,14 +181,13 @@ public static class RemoteScripts
                 New-Item -ItemType Directory -Force -Path "$root/locks" | Out-Null
                 $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
                 $deadline = $now + {{lease}}
+                {{WindowsSlotFunctions}}
                 for ($i = 1; $i -le {{max}}; $i++) {
                   $f = "$root/locks/slot-$i"
                   try {
                     $c = [IO.File]::ReadAllText($f); $l = $c -split "`n"
-                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}$' -and $now -gt ([long]$l[1].Trim() + {{grace}})) {
-                      $t = "$f.stale.$PID"
-                      [IO.File]::Move($f, $t)
-                      if ([IO.File]::ReadAllText($t) -ceq $c) { [IO.File]::Delete($t) } else { try { [IO.File]::Move($t, $f) } catch { [IO.File]::Delete($t) } }
+                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}$' -and $now -gt ([long]$l[1].Trim() + {{grace}}) -and (Take $f)) {
+                      try { if ([IO.File]::ReadAllText($f) -ceq $c) { StopJob $l[0].Trim(); $t = "$f.stale.$PID"; [IO.File]::Move($f, $t); [IO.File]::Delete($t) } } catch { } finally { Drop $f }
                     }
                   } catch { }
                   try {
@@ -150,18 +202,19 @@ public static class RemoteScripts
                 R={{ShellQuote.Posix(m.WorkRoot)}}
                 mkdir -p "$R/locks"
                 now=$(date +%s); D=$((now + {{lease}}))
+                {{LinuxSlotFunctions}}
                 i=1
                 while [ "$i" -le {{max}} ]; do
                   f="$R/locks/slot-$i"
                   if [ -f "$f" ]; then
-                    c=$(cat "$f" 2>/dev/null); d=$(printf '%s\n' "$c" | sed -n 2p)
-                    case "$d" in
-                      ''|*[!0-9]*) ;;
-                      *) if [ "$now" -gt $((d + {{grace}})) ] && mv "$f" "$f.stale.$$" 2>/dev/null; then
-                           if [ "$(cat "$f.stale.$$")" != "$c" ]; then ln "$f.stale.$$" "$f" 2>/dev/null; fi
-                           rm -f "$f.stale.$$"
-                         fi ;;
-                    esac
+                    c=$(cat "$f" 2>/dev/null)
+                    if d=$(deadline_of "$c") && [ "$now" -gt $((d + {{grace}})) ] && take "$f"; then
+                      if [ "$(cat "$f" 2>/dev/null)" = "$c" ]; then
+                        stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
+                        mv "$f" "$f.stale.$$" 2>/dev/null && rm -f "$f.stale.$$"
+                      fi
+                      rm -f "$f.reclaim"
+                    fi
                   fi
                   if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
                   i=$((i+1))
@@ -233,7 +286,7 @@ public static class RemoteScripts
     /// <summary>
     /// lanq unlock. Prints <c>REMOVED=&lt;file&gt; &lt;job id&gt;</c> or <c>KEPT=&lt;file&gt; live|nodeadline|changed</c> per slot file.
     /// Without <paramref name="all"/> only a <c>slot-N</c> past its recorded deadline is removed, the same way a stale slot is reclaimed
-    /// (renamed away atomically, put back if it changed meanwhile); no grace period, since a person asked. With <paramref name="all"/>
+    /// (under its lock, re-checked, its job stopped if somehow still running, renamed away and deleted); no grace period, since a person asked. With <paramref name="all"/>
     /// every <c>slot-*</c> file is removed, including one without a deadline and a reclaim's transient file.
     /// </summary>
     public static string Unlock(Machine m, bool all) => (m.Os, all) switch
@@ -249,17 +302,19 @@ public static class RemoteScripts
         (MachineOs.Windows, false) => $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
             $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            {{WindowsSlotFunctions}}
             foreach ($f in @(Get-ChildItem -LiteralPath "$root/locks" -Filter 'slot-*' -File -ErrorAction SilentlyContinue)) {
               $n = $f.Name; $p = $f.FullName
-              if ($n -notmatch '^slot-[0-9]+$') { continue }
+              if ($n -notmatch '^slot-[0-9]+\z') { continue }
               try { $c = [IO.File]::ReadAllText($p) } catch { continue }
               $l = $c -split "`n"
-              if ($l.Count -lt 2 -or $l[1].Trim() -notmatch '^[0-9]{1,18}$') { "KEPT=$n nodeadline"; continue }
+              if ($l.Count -lt 2 -or $l[1].Trim() -notmatch '^[0-9]{1,18}\z') { "KEPT=$n nodeadline"; continue }
               if ($now -le [long]$l[1].Trim()) { "KEPT=$n live"; continue }
-              $t = "$p.stale.$PID"
-              try { [IO.File]::Move($p, $t) } catch { continue }
-              if ([IO.File]::ReadAllText($t) -ceq $c) { [IO.File]::Delete($t); 'REMOVED=' + $n + ' ' + $l[0].Trim() }
-              else { try { [IO.File]::Move($t, $p) } catch { }; "KEPT=$n changed" }
+              if (-not (Take $p)) { "KEPT=$n changed"; continue }
+              try {
+                if ([IO.File]::ReadAllText($p) -ceq $c) { StopJob $l[0].Trim(); $t = "$p.stale.$PID"; [IO.File]::Move($p, $t); [IO.File]::Delete($t); 'REMOVED=' + $n + ' ' + $l[0].Trim() }
+                else { "KEPT=$n changed" }
+              } catch { "KEPT=$n changed" } finally { Drop $p }
             }
             """,
         (_, true) => $$"""
@@ -274,19 +329,23 @@ public static class RemoteScripts
         _ => $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
             now=$(date +%s)
+            {{LinuxSlotFunctions}}
             for f in "$R"/locks/slot-*; do
               [ -f "$f" ] || continue
               n=${f##*/}
               case "$n" in slot-|slot-*[!0-9]*) continue ;; esac
-              c=$(cat "$f" 2>/dev/null); d=$(printf '%s\n' "$c" | sed -n 2p)
-              case "$d" in ''|*[!0-9]*) echo "KEPT=$n nodeadline"; continue ;; esac
+              c=$(cat "$f" 2>/dev/null)
+              d=$(deadline_of "$c") || { echo "KEPT=$n nodeadline"; continue; }
               if [ "$now" -le "$d" ]; then echo "KEPT=$n live"; continue; fi
-              mv "$f" "$f.stale.$$" 2>/dev/null || continue
-              if [ "$(cat "$f.stale.$$")" = "$c" ]; then
-                rm -f "$f.stale.$$"; echo "REMOVED=$n $(printf '%s\n' "$c" | sed -n 1p)"
+              take "$f" || { echo "KEPT=$n changed"; continue; }
+              if [ "$(cat "$f" 2>/dev/null)" = "$c" ]; then
+                stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
+                mv "$f" "$f.stale.$$" 2>/dev/null && rm -f "$f.stale.$$"
+                echo "REMOVED=$n $(printf '%s\n' "$c" | sed -n 1p)"
               else
-                ln "$f.stale.$$" "$f" 2>/dev/null; rm -f "$f.stale.$$"; echo "KEPT=$n changed"
+                echo "KEPT=$n changed"
               fi
+              rm -f "$f.reclaim"
             done
             """,
     };

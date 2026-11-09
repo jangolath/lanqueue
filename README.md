@@ -595,7 +595,7 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   no cache.
 - A crashed orchestrator can leave a slot file behind. Each slot file records its own deadline (the job's
   `--timeout` plus 40 minutes for transfer and cleanup, on the worker's clock), and a slot more than 30 minutes past it
-  is reclaimed by the next job that needs a slot. Slot files written by lanq before 0.4 carry no deadline and are never
+  is reclaimed by the next job that needs a slot (its job is killed first if it is somehow still running). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
 - Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
