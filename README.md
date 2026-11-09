@@ -599,7 +599,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   account on the remote machines.
 - Cancellation and timeouts: cleanup kills the job's process group (Linux) or PowerShell process tree (Windows)
   recorded in `locks/job-<id>.pid` before removing the worktree. This is best effort: it needs the machine to be
-  reachable when cleanup runs. If it is not, the worker stops the job itself one minute after its limit (Linux under
+  reachable when cleanup runs (on Windows the pid file also names the job's child process, and a process is killed only
+  when its start time matches the recorded one, so a reused pid is safe). If it is not, the worker stops the job itself one minute after its limit (Linux under
   `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
   deliberately detaches into a new session or process group can escape both.
 - Windows remote commands are passed as an encoded command line limited to roughly 8000 characters; very long

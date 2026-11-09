@@ -244,7 +244,7 @@ public sealed class StaleSlotTests : IDisposable
     public void AStaleSlotsStillRunningJobIsKilledBeforeTheSlotIsReusedPowerShell()
     {
         using var orphan = Process.Start(new ProcessStartInfo(Shells.PowerShell!) { ArgumentList = { "-NoProfile", "-Command", "Start-Sleep -Seconds 120" }, UseShellExecute = false })!;
-        File.WriteAllText(Path.Combine(_root, "locks", "job-orphan-job.pid"), orphan.Id.ToString(CultureInfo.InvariantCulture) + "\r\n");
+        File.WriteAllText(Path.Combine(_root, "locks", "job-orphan-job.pid"), PidRecord(orphan));
         WriteSlot(1, Lines("orphan-job", Now - RemoteScripts.StaleSlotGraceSeconds - 60));
 
         var output = Acquire("windows", "new-job", TimeSpan.FromMinutes(10), maxJobs: 1);
@@ -252,6 +252,39 @@ public sealed class StaleSlotTests : IDisposable
         Assert.Equal("1", JobRunner.ParseSlot(output));
         Assert.True(orphan.WaitForExit(10000), "the orphan job is still running");
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-orphan-job.pid")));
+    }
+
+    /// <summary>What the Windows job wrapper records: the pid, then the process start time in UTC ticks.</summary>
+    internal static string PidRecord(Process p, long? ticks = null) =>
+        p.Id.ToString(CultureInfo.InvariantCulture) + "\r\n" + (ticks ?? p.StartTime.ToUniversalTime().Ticks).ToString(CultureInfo.InvariantCulture) + "\r\n";
+
+    /// <summary>
+    /// A pid file whose pid now belongs to another PowerShell (the reclaim runs 30+ minutes after the deadline, so Windows may have reused
+    /// it, for example for the owner's own shell): the start time does not match, so that process is never killed.
+    /// </summary>
+    [WindowsFact]
+    public void AReusedPidOfAnotherPowerShellIsNotKilledPowerShell()
+    {
+        using var other = Process.Start(new ProcessStartInfo(Shells.PowerShell!) { ArgumentList = { "-NoProfile", "-Command", "Start-Sleep -Seconds 120" }, UseShellExecute = false })!;
+        try
+        {
+            File.WriteAllText(Path.Combine(_root, "locks", "job-orphan-job.pid"), PidRecord(other, other.StartTime.ToUniversalTime().Ticks - TimeSpan.TicksPerHour));
+            WriteSlot(1, Lines("orphan-job", Now - RemoteScripts.StaleSlotGraceSeconds - 60));
+
+            Assert.Equal("1", JobRunner.ParseSlot(Acquire("windows", "new-job", TimeSpan.FromMinutes(10), maxJobs: 1)));
+            Thread.Sleep(500);
+            Assert.False(other.HasExited, "a PowerShell that merely reused the recorded pid was killed");
+
+            File.WriteAllText(Path.Combine(_root, "locks", "job-legacy.pid"), other.Id.ToString(CultureInfo.InvariantCulture) + "\r\n"); // no start time
+            WriteSlot(1, Lines("legacy", Now - RemoteScripts.StaleSlotGraceSeconds - 60));
+            Assert.Equal("1", JobRunner.ParseSlot(Acquire("windows", "newer-job", TimeSpan.FromMinutes(10), maxJobs: 1)));
+            Thread.Sleep(500);
+            Assert.False(other.HasExited, "a reclaim killed on a pid file without a start time");
+        }
+        finally
+        {
+            other.Kill(entireProcessTree: true);
+        }
     }
 
     // ---- the slot file itself ----

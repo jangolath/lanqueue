@@ -163,8 +163,8 @@ public static class RemoteScripts
 
     /// <summary>
     /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file (CreateNew; one older than ten minutes is
-    /// cleared first), and <c>StopJob</c>, which kills a stale slot's still-running job tree (taskkill /T /F) when locks/job-ID.pid names a
-    /// live PowerShell process, the way cleanup does.
+    /// cleared first), and <c>StopJob</c>, which kills a stale slot's still-running job (wrapper and child, with their trees) through
+    /// <see cref="WindowsKillRecorded"/>: only processes whose pid AND start time match what the job recorded.
     /// </summary>
     internal const string WindowsSlotFunctions = """
         function Take([string]$f) {
@@ -176,13 +176,34 @@ public static class RemoteScripts
         function StopJob([string]$j) {
           if ($j -cnotmatch '^[A-Za-z0-9_-]{1,64}\z') { return }
           $kp = "$root/locks/job-$j.pid"
-          if (-not (Test-Path -LiteralPath $kp)) { return }
-          $jp = "$(Get-Content -LiteralPath $kp -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
-          if ($jp -match '^[0-9]{1,9}\z') {
-            $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
-            if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
+          if (Test-Path -LiteralPath $kp) { KillRecorded $kp $false }
+        }
+        """ + "\n" + WindowsKillRecorded;
+
+    /// <summary>
+    /// <c>KillRecorded $pf $legacy</c>: the Windows job wrapper records pairs of "pid" and "process start time (UTC ticks)" in
+    /// locks/job-ID.pid, first its own PowerShell, then the child that runs the job. Each recorded process (child first) is killed with
+    /// its tree (taskkill /T /F) only when a process with that pid exists AND started at that very instant, so a pid that Windows has
+    /// since given to another process (for example the owner's own PowerShell) is never touched, and an orphaned child whose wrapper
+    /// died is still reached. A pid file without start times (an older lanq) is honoured only by cleanup right after its job
+    /// (<paramref name="legacy"/>), with the old "is a PowerShell process" check; a stale-slot reclaim never kills on it.
+    /// </summary>
+    internal const string WindowsKillRecorded = """
+        function KillRecorded([string]$pf, [bool]$legacy) {
+          $l = @(Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | ForEach-Object { "$_".Trim() })
+          $timed = $false
+          for ($i = $l.Count - ($l.Count % 2) - 2; $i -ge 0; $i -= 2) {
+            if ($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i + 1] -notmatch '^[0-9]{1,19}\z') { continue }
+            $timed = $true
+            $p = Get-Process -Id ([int]$l[$i]) -ErrorAction SilentlyContinue
+            $t = $null; if ($p) { try { $t = "$($p.StartTime.ToUniversalTime().Ticks)" } catch { } }
+            if ($t -and $t -eq $l[$i + 1]) { & taskkill /PID $l[$i] /T /F 2>$null | Out-Null }
           }
-          Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $kp
+          if (-not $timed -and $legacy -and $l.Count -ge 1 -and $l[0] -match '^[0-9]{1,9}\z') {
+            $p = Get-Process -Id ([int]$l[0]) -ErrorAction SilentlyContinue
+            if ($p -and ($p.ProcessName -like 'powershell*' -or $p.ProcessName -like 'pwsh*')) { & taskkill /PID $l[0] /T /F 2>$null | Out-Null }
+          }
+          Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
         }
         """;
 
@@ -543,7 +564,7 @@ public static class RemoteScripts
                 }
                 {{JobEnvironmentPowerShell(m)}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
-                Set-Content -LiteralPath $pf -Value $PID
+                Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
                 $job = {
                 & {{parts}}
                 }
@@ -555,6 +576,7 @@ public static class RemoteScripts
                 $code = 1
                 try {
                   $cp = [Diagnostics.Process]::Start($si)
+                  Add-Content -LiteralPath $pf -Value @($cp.Id, $cp.StartTime.ToUniversalTime().Ticks)
                   if ($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})) { $cp.WaitForExit(); $code = $cp.ExitCode }
                   else { & taskkill /PID $cp.Id /T /F 2>$null | Out-Null; $code = 124 }
                 } finally {
@@ -638,14 +660,8 @@ public static class RemoteScripts
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $pf = "$root/locks/job-$id.pid"
-            if (Test-Path -LiteralPath $pf) {
-              $jp = (Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
-              if ("$jp" -match '^[0-9]+\z') {
-                $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
-                if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
-              }
-              Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
-            }
+            {{WindowsKillRecorded}}
+            if (Test-Path -LiteralPath $pf) { KillRecorded $pf $true }
             $rc = 0
             $jd = "$root/jobs/$id"
             if (Test-Path -LiteralPath $jd) {
@@ -677,14 +693,8 @@ public static class RemoteScripts
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $pf = "$root/locks/job-$id.pid"
-            if (Test-Path -LiteralPath $pf) {
-              $jp = (Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
-              if ("$jp" -match '^[0-9]+\z') {
-                $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
-                if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
-              }
-              Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
-            }
+            {{WindowsKillRecorded}}
+            if (Test-Path -LiteralPath $pf) { KillRecorded $pf $true }
             {{(repoId is null ? "" : WindowsCacheCleanupBefore(repoId))}}
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
             {{(repoId is null ? "" : WindowsCacheCleanupAfter)}}

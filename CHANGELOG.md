@@ -29,7 +29,9 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
 - **The worker enforces the job limit itself.** A job's own limit (`--timeout`, or the window end plus grace) plus one
   minute is enforced on the worker too, so a job outlives a vanished `lanq` by at most that minute: on Linux the job runs
   under `timeout -k 30 <seconds>` when `timeout` works there (exit `124`, children included); on Windows it runs in a
-  child PowerShell that is killed with its whole tree (`taskkill /T /F`) when the wait runs out (exit `124`). The Linux
+  child PowerShell that is killed with its whole tree (`taskkill /T /F`) when the wait runs out (exit `124`). The
+  Windows wrapper records both its own and the child's pid with their start times in `locks/job-<id>.pid`, so cleanup
+  and a stale-slot reclaim also reach a child whose wrapper died, and kill only processes whose start time matches. The Linux
   job wrapper now runs `/bin/sh` by absolute path, so a `path_prepend:` folder cannot supply its own `sh`.
 - **Availability windows v2.** `allowed_hours` still accepts one string (a bare `allowed_hours:` or `~` still means any
   time), and now also a list of entries
@@ -103,7 +105,8 @@ Transfer and supply chain:
   is it renamed away to a unique name, deleted and created afresh like a free slot (if another job wins it, the next
   slot is tried; nothing is ever put back, and no hard links are needed). If the stale slot's job is somehow still
   running (its `locks/job-<id>.pid` names a live process: on Linux one whose working folder is in that job's folder,
-  on Windows a PowerShell process), its process group or tree is killed first. A live slot, or one without a valid
+  on Windows a process whose start time also matches the one recorded with its pid), its process group or tree is
+  killed first; a pid Windows has since given to another process is never touched. A live slot, or one without a valid
   deadline (written by an older lanq, or not 1 to 18 decimal digits; `08` is read as 8), is never touched.
 - **Supply chain.** Every project commits a `packages.lock.json` and CI restores in locked mode
   (`RestoreLockedMode` when `CI=true`); Dependabot proposes grouped weekly NuGet and GitHub Actions updates; the

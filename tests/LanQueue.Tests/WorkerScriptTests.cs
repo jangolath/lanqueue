@@ -148,4 +148,52 @@ public sealed class WorkerScriptTests : IDisposable
         var (code, _) = Shells.Run("windows", RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["lanq-no-such-program-xyz"], TimeSpan.FromMinutes(5)));
         Assert.Equal(1, code);
     }
+
+    /// <summary>
+    /// The wrapper dies (killed, or its session dropped) while the job child runs on: the pid file also names the child with its start time,
+    /// so cleanup still stops it, although taskkill /T on the dead wrapper's pid would not reach it.
+    /// </summary>
+    [WindowsFact]
+    public void CleanupStopsTheJobChildEvenWhenItsWrapperIsGone()
+    {
+        var m = Worker(MachineOs.Windows);
+        var script = Path.Combine(Path.GetTempPath(), "lanq-orphan-" + Guid.NewGuid().ToString("N") + ".ps1");
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 120"], TimeSpan.FromMinutes(10)));
+        var pidFile = Path.Combine(_root, "locks", "job-j1.pid");
+        using var wrapper = Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
+        try
+        {
+            string[] lines = [];
+            for (var i = 0; i < 200 && lines.Length < 4; i++)
+            {
+                Thread.Sleep(100);
+                try
+                {
+                    lines = File.ReadAllLines(pidFile).Where(l => l.Trim().Length > 0).ToArray();
+                }
+                catch (IOException)
+                {
+                }
+            }
+
+            Assert.True(lines.Length >= 4, "the wrapper did not record its child: " + string.Join("|", lines));
+            using var child = Process.GetProcessById(int.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture));
+            wrapper.Kill(entireProcessTree: false);
+            Assert.True(wrapper.WaitForExit(10000));
+            Assert.False(child.HasExited);
+
+            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
+            Assert.True(code == 0, output);
+            Assert.True(child.WaitForExit(10000), "the orphaned job child is still running");
+        }
+        finally
+        {
+            if (!wrapper.HasExited)
+            {
+                wrapper.Kill(entireProcessTree: true);
+            }
+
+            File.Delete(script);
+        }
+    }
 }
