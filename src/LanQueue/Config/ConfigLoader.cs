@@ -413,7 +413,7 @@ public static partial class ConfigLoader
     /// <summary>
     /// A Windows worker gets each script as one encoded command line of at most 8000 characters. The machine's env: and path_prepend: go
     /// into the job script, so if they alone, with no job arguments at all, already pass the cap, every job there would fail: refuse the
-    /// config now and say by how much. Only the job script gates loading; lanq doctor checks (and reports) its own script's size.
+    /// config now and say by how much (measured with the largest LANQ_SHARD / LANQ_SHARDS, so a sharded run fits too). Only the job script gates loading; lanq doctor checks (and reports) its own script's size.
     /// </summary>
     private static void ValidateWindowsCommandLength(Machine m)
     {
@@ -422,7 +422,7 @@ public static partial class ConfigLoader
             return;
         }
 
-        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], Jobs.JobRequest.DefaultTimeout)).Length;
+        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], Jobs.JobRequest.DefaultTimeout, new Jobs.ShardInfo(Jobs.ShardInfo.MaxShards, Jobs.ShardInfo.MaxShards))).Length;
         var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
         if (size > limit)
         {

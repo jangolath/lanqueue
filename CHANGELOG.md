@@ -24,14 +24,41 @@
   through a link (an existing file, folder or link, even a dangling one, is refused with exit 2), prints the next
   steps (OpenSSH on the workers, connect once, `lanq makeready --ssh`, paste, `lanq doctor --remote`), and with
   `--json` prints one object (`status`, `exitCode`, `path`, `message`).
-- **[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md):** one orchestrator plus Windows 10/11 and Linux workers, from
-  install to the first job: Windows OpenSSH Server, the `administrators_authorized_keys` trap, a non-admin build user,
-  the firewall, sizing micro PCs, overnight family PCs, and the ten errors you are most likely to see.
 
-### Docs
+### Sharding across a mixed pool
 
-- `MSBUILDNODECOUNT` is gone from `machines.example.yml`, the README and the starter config: it is not a documented
-  MSBuild setting. Small PCs run `dotnet build -m:1` / `dotnet test -m:1` (one MSBuild process) instead.
+- **`lanq run --shards N|auto -- CMD`** runs N jobs of one command at once (1 to 64), each its own lanq job with its
+  own id, slot, log and cleanup. `{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only (no
+  other expansion), and each job also gets `LANQ_SHARD` and `LANQ_SHARDS` next to `LANQ_JOB` (Linux env prefix and
+  Windows wrapper). Every shard's substituted command line passes the allowlist, permission-flag ban, secret scan and
+  Windows argument rule before anything is built or sent.
+- **`--shards auto`** sets N to the free slots on the machines that can take the job now (capabilities, hours, `--mem`,
+  holds), at least 1, at most 64, and prints the choice and why.
+- **Placement:** shards are dealt round-robin over free slots, so a machine with `max_jobs: 4` runs up to four at once.
+  Shards beyond the free slots wait for a sibling to finish; `--wait` counts only while no shard of the run holds a
+  slot (an attempt whose slot claim fails never extends it). `--mem` is per shard: a machine takes at most
+  floor(free memory / `--mem`) shards at once, also when `--shards auto` counts.
+- **One payload:** the snapshot is taken and scanned once, and each bundle (full or incremental) or archive is built at
+  most once for the whole run, one build at a time (a failed build is tried once more). The bundle carries the
+  snapshot under a shared ref that each shard's prepare fetches into its own; lanq prepares (and cleans up) one job at a time per machine within a run, so shards on one worker do not race
+  on its repository cache.
+- **Results:** lines prefixed `[i/N machine]`, a summary table (shard, machine, status, exit, duration), exit 0 only if
+  every shard passed (otherwise the failing shard's own code, then 2, 124, 70, 75; Ctrl+C 130). `--json` prints one
+  object with `status`, `exitCode`, `shardCount`, `durationSeconds`, `message` and a `shards` array of run objects with
+  `shard` and `attempts`. `--fetch` puts each shard's files in its own job-id folder.
+- **`--fail-fast`** cancels the other shards after the first one that does not complete; **`--shard-retries R`** (0 to
+  3) re-runs only a shard whose machine stopped answering ssh (never a test failure or a job that exited 255 itself),
+  and never where it could run twice: if the connection dropped mid-run and the cleanup did not finish, the re-run goes
+  to another machine, or does not happen when none can take it. An unexpected error ends only its own shard.
+  Ctrl+C cancels every shard and still cleans each one up; Ctrl+C after every shard has finished keeps the real result.
+- **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (light under 6 GB, medium 6 to under 16 GB,
+  heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; the Linux core count tries
+  getconf, nproc, then /proc/cpuinfo and is left out (unknown) when none works; the same thresholds as
+  lanq-makeready); the probe now reports `mem_total_gb` and `cores` on
+  Linux and Windows (unknown values are shown as `?`, never a hold). `health --json` adds `cores`, `memTotalGb`,
+  `freeSlots`, `size` and `suitedFor`; earlier fields are unchanged. The text line now says `slots free F/M` instead
+  of `slots U/M`.
+- The Windows env cap checked at config load now includes the largest shard variables.
 
 ### Clearer first-run errors
 
@@ -45,7 +72,19 @@
   ssh-agent instead.
 - A missing config points at `lanq init --config <path>`.
 - "No eligible machine" says why each machine was passed over: the capability it lacks, its slots in use, or no free
-  slot when the job tried to start, instead of "no match / full".
+  slot when the job tried to start, instead of "no match / full"; `lanq run --shards` says the same per machine.
+
+### Docs
+
+- **[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md):** one orchestrator plus Windows 10/11 and Linux workers, from
+  install to the first job: Windows OpenSSH Server, the `administrators_authorized_keys` trap, a non-admin build user,
+  the firewall, sizing micro PCs, overnight family PCs, and the ten errors you are most likely to see.
+- **[docs/SHARDING.md](docs/SHARDING.md):** per-ecosystem recipes (.NET helper scripts for sh and PowerShell, Jest,
+  Vitest, Playwright, pytest-split, Go, cargo-nextest), what to keep local, sizing `max_jobs` and `min_free_mem_gb`,
+  routing in a mixed pool, a worked 2 dev boxes + 4 micro PCs plan, and guidance for coding agents. The agent snippet and
+  skill gained a "Shard long work across the pool" section.
+- The MSBuild node-count environment variable is gone from `machines.example.yml`, the README, SHARDING.md and the
+  starter config: it is not a documented MSBuild setting. Small PCs run `dotnet build -m:1` / `dotnet test -m:1` (one MSBuild process) instead.
 
 ### Dependencies
 

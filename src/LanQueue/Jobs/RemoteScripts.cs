@@ -49,6 +49,8 @@ public static class RemoteScripts
             'slots_used=' + $slots
             $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
             if ($os -and $os.FreePhysicalMemory) { 'mem_free_gb=' + ([double]$os.FreePhysicalMemory / 1MB).ToString('0.##', $inv) }
+            if ($os -and $os.TotalVisibleMemorySize) { 'mem_total_gb=' + ([double]$os.TotalVisibleMemorySize / 1MB).ToString('0.##', $inv) }
+            'cores=' + [Environment]::ProcessorCount
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
             $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $s = $e - ($e % 900)
@@ -59,13 +61,16 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
-            cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+            pos() { case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac; }
+            n=$(getconf _NPROCESSORS_ONLN 2>/dev/null); pos "$n" || n=$(nproc 2>/dev/null); pos "$n" || n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null); pos "$n" || n=
+            cpus=${n:-1}
             l=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
             d="$R"; [ -d "$d" ] || d=/
             echo "load=$(awk -v l="$l" -v c="$cpus" 'BEGIN{printf "%.3f", l/c}')"
             echo "disk_free_gb=$(df -Pk "$d" | awk 'NR==2{printf "%.1f", $4/1048576}')"
             echo "slots_used=$(ls "$R/locks" 2>/dev/null | grep -c '^slot-[0-9][0-9]*$')"
-            awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
+            awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^MemTotal:/{print "mem_total_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
+            if [ -n "$n" ]; then echo "cores=$n"; fi
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
             if [ -e "$R/PAUSE" ] || [ -e "$R/pause" ]; then echo paused=1; else echo paused=0; fi
             echo "local_time=$(date '+%Y-%m-%dT%H:%M:%S')"
@@ -436,8 +441,10 @@ public static class RemoteScripts
     /// <see cref="BundleNotUsable"/> and failing if its prerequisites are missing), fetches it, moves <c>refs/lanq/base</c> to the snapshot
     /// (keeping it alive as the next incremental base) and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
     /// </summary>
-    public static string Prepare(Machine m, string jobId, string? repoId = null) =>
-        m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId, SafeRepoId(repoId));
+    /// <param name="bundleRef">The id the bundle carries the snapshot under (refs/lanq/&lt;bundleRef&gt;): the payload id shared by every shard of one
+    /// run; null means <paramref name="jobId"/>. The job's own ref in the cache is always refs/lanq/&lt;jobId&gt;.</param>
+    public static string Prepare(Machine m, string jobId, string? repoId = null, string? bundleRef = null) =>
+        m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId, SafeRepoId(repoId), SafeJobId(bundleRef ?? jobId));
 
     /// <summary>
     /// Extracts the uploaded tar.gz into a fresh per-job folder with the platform's own tar. Only GNU tar or bsdtar is accepted. The archive is
@@ -487,10 +494,10 @@ public static class RemoteScripts
             tar -xzf "$A" -C "$J" --no-same-owner --no-same-permissions
             """;
 
-    private static string PrepareGit(Machine m, string jobId, string repoId) => m.Os == MachineOs.Windows
+    private static string PrepareGit(Machine m, string jobId, string repoId, string bundleRef) => m.Os == MachineOs.Windows
         ? $$"""
             $ErrorActionPreference = 'Stop'
-            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}; $b = {{ShellQuote.PowerShell(bundleRef)}}
             $c = "$root/repos/{{repoId}}.git"
             function Q { $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = 'NUL'; & git {{GitHardeningWindows}} @args }
             function G { Q @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
@@ -513,13 +520,13 @@ public static class RemoteScripts
             $ok = $LASTEXITCODE -eq 0
             $ErrorActionPreference = 'Stop'
             if (-not $ok) { '{{BundleNotUsable}}'; exit 3 }
-            G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
+            G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${b}:refs/lanq/${id}"
             G -C $c update-ref refs/lanq/base "refs/lanq/$id"
             G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
             set -e
-            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}; C="$R/repos/{{repoId}}.git"
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}; B={{ShellQuote.Posix(bundleRef)}}; C="$R/repos/{{repoId}}.git"
             mkdir -p "$R/jobs" "$R/repos"
             {{LinuxGitFunction}}
             if [ -d "$C" ]; then
@@ -530,7 +537,7 @@ public static class RemoteScripts
             [ -d "$C" ] || G init --bare -q "$C"
             rm -rf "$C/info/attributes"
             G -C "$C" bundle verify "$R/incoming/$ID.bundle" >/dev/null 2>&1 || { echo '{{BundleNotUsable}}'; exit 3; }
-            G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
+            G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$B:refs/lanq/$ID"
             G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
             G -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
@@ -554,7 +561,8 @@ public static class RemoteScripts
     /// <paramref name="limit"/> the worker also stops the job itself: on Linux under <c>timeout -k 30</c> when that works (exit 124), on
     /// Windows by running it in a child PowerShell and killing that tree (taskkill /T /F) when the wait runs out (exit 124).
     /// </summary>
-    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null)
+    /// <param name="shard">lanq run --shards: sets LANQ_SHARD and LANQ_SHARDS for the job (next to LANQ_JOB), or null.</param>
+    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null)
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
@@ -583,6 +591,7 @@ public static class RemoteScripts
                 }
                 {{JobEnvironmentPowerShell(m)}}
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
+                {{ShardEnvironmentPowerShell(shard)}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
                 Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
                 $job = {
@@ -622,7 +631,7 @@ public static class RemoteScripts
             T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
-            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
             printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
@@ -652,13 +661,18 @@ public static class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    internal static string JobEnvironmentPosix(Machine m, string? jobId = null)
+    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
         if (jobId is not null)
         {
             // After the machine's own env: words, so the marker wins even if one named it (config refuses LANQ_* names anyway).
             words.Add(ShellQuote.Posix(JobMarker + "=" + SafeJobId(jobId)));
+        }
+
+        if (shard is not null)
+        {
+            words.AddRange(ShardVariables(shard).Select(v => ShellQuote.Posix(v.Name + "=" + v.Value)));
         }
 
         if (m.PathPrepend.Count > 0)
@@ -687,6 +701,21 @@ public static class RemoteScripts
         jobId.Length is > 0 and <= 64 && jobId.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
             ? jobId
             : throw new ArgumentException("Invalid job id.", nameof(jobId));
+
+    /// <summary>LANQ_SHARD (1-based index) and LANQ_SHARDS (count): whole numbers lanq formats itself, checked against the shard cap again here.</summary>
+    internal static IEnumerable<(string Name, string Value)> ShardVariables(ShardInfo shard)
+    {
+        if (shard.Count is < 1 or > ShardInfo.MaxShards || shard.Index < 1 || shard.Index > shard.Count)
+        {
+            throw new ArgumentException("Invalid shard.", nameof(shard));
+        }
+
+        yield return ("LANQ_SHARD", shard.Index.ToString(CultureInfo.InvariantCulture));
+        yield return ("LANQ_SHARDS", shard.Count.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static string ShardEnvironmentPowerShell(ShardInfo? shard) =>
+        shard is null ? "" : string.Join('\n', ShardVariables(shard).Select(v => $"$env:{v.Name} = '{v.Value}'"));
 
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
     internal static string JobEnvironmentPowerShell(Machine m)
