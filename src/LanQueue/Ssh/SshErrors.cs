@@ -18,8 +18,8 @@ internal static partial class SshErrors
     [GeneratedRegex(@"^No [A-Z0-9-]+ host key is known for ", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex UnknownHostKeyRegex();
 
-    // "Permissions for 'FILE' are too open." (OpenSSH, after its UNPROTECTED PRIVATE KEY FILE banner)
-    [GeneratedRegex(@"^Permissions for '.*' are too open\.\z", RegexOptions.CultureInvariant, 1000)]
+    // "Permissions for 'FILE' are too open." (Win32-OpenSSH) or "Permissions 0644 for 'FILE' are too open." (upstream OpenSSH)
+    [GeneratedRegex(@"^Permissions (?:0[0-7]{3} )?for '.*' are too open\.\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex TooOpenRegex();
 
     /// <summary>The first non-empty line, trimmed, or "no output".</summary>

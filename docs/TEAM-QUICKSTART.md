@@ -42,7 +42,7 @@ scoop install https://github.com/jangolath/lanqueue/releases/latest/download/lan
 # bash: the native Linux x64 binary, no .NET needed; download, verify, put it on your PATH
 gh release download --repo jangolath/lanqueue --pattern 'lanq-linux-x64.tar.gz' --pattern SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf lanq-linux-x64.tar.gz lanq && install -m 755 lanq ~/.local/bin/lanq
+tar -xzf lanq-linux-x64.tar.gz lanq && install -D -m 755 lanq ~/.local/bin/lanq   # ~/.local/bin must be on PATH (most distros add it at next login)
 ```
 
 `lanq --version` confirms it works. Every download, and how to verify it on Windows: [README, Install](../README.md#install).

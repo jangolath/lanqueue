@@ -88,7 +88,7 @@ quarantined; `xattr -d com.apple.quarantine lanq` clears that (the binary is ad-
 gh release download --repo jangolath/lanqueue --pattern 'lanq-linux-x64.tar.gz' --pattern SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 gh attestation verify lanq-linux-x64.tar.gz --repo jangolath/lanqueue
-tar -xzf lanq-linux-x64.tar.gz lanq && install -m 755 lanq ~/.local/bin/lanq
+tar -xzf lanq-linux-x64.tar.gz lanq && install -D -m 755 lanq ~/.local/bin/lanq   # ~/.local/bin must be on PATH (most distros add it at next login)
 lanq --version
 ```
 

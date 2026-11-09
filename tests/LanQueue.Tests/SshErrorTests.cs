@@ -57,6 +57,17 @@ public class SshErrorTests
     }
 
     [Fact]
+    public void TheLinuxUnprotectedKeyLineWithItsModeAlsoSaysToFixItsPermissions()
+    {
+        // Upstream OpenSSH (Linux, macOS) prints the octal mode; Win32-OpenSSH does not.
+        var text = SshErrors.Explain(
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@         WARNING: UNPROTECTED PRIVATE KEY FILE!          @\n"
+            + "Permissions 0644 for '/home/me/.ssh/id_ed25519' are too open.\nbuild@10.20.30.11: Permission denied (publickey).", Target);
+        Assert.Contains("chmod 600", text, StringComparison.Ordinal);
+        Assert.Contains("Permissions 0644 for", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AnUnknownHostNameAndARefusedConnectionAreExplained()
     {
         var name = SshErrors.Explain("ssh: Could not resolve hostname old-pc.lan: Name or service not known", "build@old-pc.lan");
