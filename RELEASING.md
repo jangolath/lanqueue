@@ -21,7 +21,11 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
 
 1. Make sure `main` is green.
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0` (the version is the tag without `v`).
-3. Watch the `release` run in the Actions tab. It builds with warnings as errors, tests, packs, then (after any environment approval) pushes to nuget.org with `--skip-duplicate` and creates a GitHub Release with the `.nupkg` attached.
+3. Watch the `release` run in the Actions tab. It builds with warnings as errors, tests, packs, attests the `.nupkg`'s build provenance (`attest` job, the only one with `id-token: write` and `attestations: write`), then (after any environment approval) pushes to nuget.org with `--skip-duplicate` and creates a GitHub Release with the attested `.nupkg` attached. Check it with `gh attestation verify LanQueue.<version>.nupkg --repo jangolath/lanqueue` (see "Verify a release" in the README).
+
+## Dependencies
+
+Every project commits a `packages.lock.json`, and restores on CI (`CI=true`, which GitHub Actions sets) run in locked mode, so a build fails if the resolved packages drift. After changing a package reference run `dotnet restore --force-evaluate` and commit the updated lock files. Dependabot (`.github/dependabot.yml`) proposes grouped weekly updates for NuGet packages and GitHub Actions; actions stay pinned to full commit SHAs.
 
 Once a release is indexed, users install it with `dotnet tool install --global LanQueue` and upgrade with `dotnet tool update --global LanQueue`. The package page uses the dedicated `src/LanQueue/PACKAGE.md` (NuGet renders limited Markdown: no mermaid, HTML or relative links), so keep its links absolute and update it when the README changes materially.
 

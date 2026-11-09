@@ -29,6 +29,10 @@
   + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline
   (left by a crashed or killed `lanq`) is renamed away atomically and reused; a live slot, or one without a deadline
   (written by an older lanq), is never touched.
+- **Supply chain.** Every project commits a `packages.lock.json` and CI restores in locked mode
+  (`RestoreLockedMode` when `CI=true`); Dependabot proposes grouped weekly NuGet and GitHub Actions updates; the
+  release workflow attests the `.nupkg`'s build provenance (`actions/attest-build-provenance`, pinned by SHA, with
+  `id-token`/`attestations` write granted to that one job). README: "Verify a release" with `gh attestation verify`.
 
 ## 0.3.1 (2026-11-09)
 

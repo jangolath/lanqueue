@@ -65,6 +65,22 @@ dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
 
+### Verify a release
+
+From 0.4.0 on, the release workflow attests the build provenance of the `.nupkg` it builds (GitHub artifact
+attestations, signed with the workflow's OIDC identity). The `.nupkg` attached to the GitHub Release is that exact
+file, so you can check it was built from this repository by the release workflow, then install it:
+
+```bash
+gh release download v0.4.0 --repo jangolath/lanqueue --pattern '*.nupkg'
+gh attestation verify LanQueue.0.4.0.nupkg --repo jangolath/lanqueue
+dotnet tool install --global --add-source . LanQueue --version 0.4.0
+```
+
+(The copy on nuget.org carries nuget.org's own repository signature, so its bytes differ from the attested file;
+verify the GitHub Release asset.) Dependencies are pinned too: every project commits a `packages.lock.json`, CI
+restores in locked mode, and every GitHub Action is pinned to a full commit SHA.
+
 ## Quick start
 
 Before your first job, each worker needs an SSH server, git (or only `tar` in archive mode) and the toolchain your jobs use; it does **not** need
