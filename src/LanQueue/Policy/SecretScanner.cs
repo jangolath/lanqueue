@@ -7,9 +7,16 @@ public sealed record SecretFinding(string Rule, string Where);
 /// <summary>Refuses obvious secrets. Findings never echo the matched value.</summary>
 public static partial class SecretScanner
 {
-    /// <summary>An environment reference and nothing else: <c>${NAME}</c>. <c>${NAME:-default}</c> carries a literal and does not count.</summary>
-    [GeneratedRegex(@"^\$\{[A-Za-z_][A-Za-z0-9_]*\}\z", RegexOptions.None, 1000)]
+    /// <summary>
+    /// An environment reference and nothing else: <c>${NAME}</c>, or npm's optional form <c>${NAME?}</c>. <c>${NAME:-default}</c> or
+    /// <c>${NAME?message}</c> carry a literal and do not count.
+    /// </summary>
+    [GeneratedRegex(@"^\$\{[A-Za-z_][A-Za-z0-9_]*\??\}\z", RegexOptions.None, 1000)]
     private static partial Regex EnvReferenceRegex();
+
+    /// <summary>Where a YAML comment starts: whitespace followed by '#'.</summary>
+    [GeneratedRegex(@"\s#", RegexOptions.None, 1000)]
+    private static partial Regex YamlCommentRegex();
 
     private static readonly (string Name, Regex Pattern)[] Rules =
     [
@@ -160,7 +167,13 @@ public static partial class SecretScanner
 
             var key = line[..sep].Trim().Trim('"', '\'');
             key = npm ? key[(key.LastIndexOf(':') + 1)..] : key; // "//registry.example/:_authToken" -> "_authToken"
-            var value = line[(sep + 1)..].Trim().Trim('"', '\'').Trim();
+            var rest = line[(sep + 1)..];
+            if (yarn && YamlCommentRegex().Match(rest) is { Success: true } comment)
+            {
+                rest = rest[..comment.Index]; // a YAML comment: whitespace, then '#' to the end of the line
+            }
+
+            var value = rest.Trim().Trim('"', '\'').Trim();
             var envReference = (npm || yarn) && EnvReferenceRegex().IsMatch(value);
             var canonical = keys.FirstOrDefault(k => k.Equals(key, StringComparison.OrdinalIgnoreCase));
             if (canonical is not null && value.Length > 0 && !envReference)
@@ -169,7 +182,8 @@ public static partial class SecretScanner
             }
             else if (canonical is null && yarnKey is not null)
             {
-                found.Add(new SecretFinding($"{CommittedConfigRule} (key {yarnKey})", path));
+                // Flow style ({acme: {npmAuthToken: ...}}) is refused whatever the value, even a plain reference.
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {yarnKey} in YAML flow style; write it as a block mapping with a ${{NAME}} reference)", path));
             }
         }
 

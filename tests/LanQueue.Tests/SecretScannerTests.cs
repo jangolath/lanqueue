@@ -175,6 +175,7 @@ public class SecretScannerTests
     [InlineData(".npmrc", "//npm.acme.dev/:_authToken=\n; _authToken=commented-out-token\n# password=commented\n")]
     [InlineData("tools/.pypirc", "[distutils]\nindex-servers = pypi\n\n[pypi]\nusername = __token__\n")]
     [InlineData(".pypirc", "[pypi]\nusername = me\npassword =\n")]
+    [InlineData(".npmrc", "//registry.npmjs.org/:_authToken=${NPM_TOKEN?}\n")] // npm's optional form: still just a reference
     public void PackageConfigsWithoutLiteralCredentialsPass(string path, string content) =>
         Assert.Empty(SecretScanner.ScanCommittedConfig(path, content));
 
@@ -184,6 +185,7 @@ public class SecretScannerTests
     [InlineData(".npmrc", "//npm.acme.dev/:_password=\"SuperSecretValue123\"", "_password")]
     [InlineData(".npmrc", "password=SuperSecretValue123", "password")]
     [InlineData(".npmrc", "//r.example/:_authToken=${NPM_TOKEN:-SuperSecretValue123}", "_authToken")]
+    [InlineData(".npmrc", "//r.example/:_authToken=${NPM_TOKEN}?SuperSecretValue123", "_authToken")]
     [InlineData(".pypirc", "[pypi]\nusername = __token__\npassword = pypi-SuperSecretValue123\n", "password")]
     [InlineData(".pypirc", "[testpypi]\r\nPassword: SuperSecretValue123\r\n", "password")]
     public void PackageConfigsWithALiteralCredentialAreRefusedWithoutEchoingIt(string path, string content, string key)
@@ -242,6 +244,9 @@ public class SecretScannerTests
     [InlineData(".yarnrc.yml", "npmAuthToken: ${NPM_TOKEN:-SuperSecretValue123}|")] // a default value is a literal
     [InlineData(".yarnrc.yml", "npmAuthToken: '${NPM_TOKEN}SuperSecretValue123'|")]
     [InlineData(".yarnrc.yml", "npmScopes: {acme: {npmAuthToken: SuperSecretValue123}}|")] // flow style
+    [InlineData(".yarnrc.yml", "npmAuthToken: SuperSecretValue123 # ci|")] // a comment does not hide a literal
+    [InlineData(".yarnrc.yml", "npmAuthToken: ${NPM_TOKEN?SuperSecretValue123}|")] // an error message is a literal too
+    [InlineData(".yarnrc.yml", "npmAuthToken: SuperSecret#Value123|")] // '#' without whitespace before it is part of the value
     [InlineData(".yarnrc.yml", "npmScopes: {acme: {npmAlwaysAuth: true, npmAuthToken: '${NPM_TOKEN}'}}|")] // flow style, even with a reference
     [InlineData(".yarnrc.yml", "\"npmAuthToken\": \"SuperSecretValue123\"|")]
     public void YarnrcWithALiteralNpmAuthTokenIsRefused(string path, string content)
@@ -257,8 +262,19 @@ public class SecretScannerTests
     [InlineData("npmAuthToken: ${NPM_TOKEN}|")]
     [InlineData("npmRegistryServer: 'https://r.example'|# npmAuthToken: old-token-value|")]
     [InlineData("npmAuthToken: ''|")]
+    [InlineData("npmAuthToken: ${NPM_TOKEN} # ci|")] // a YAML comment after the reference
+    [InlineData("npmScopes:|  acme:|    npmAuthToken: '${NPM_TOKEN}'   # set in CI|")]
+    [InlineData("npmAuthToken: ${NPM_TOKEN?}|")]
     public void YarnrcWithoutALiteralTokenPasses(string content) =>
         Assert.Empty(SecretScanner.ScanCommittedConfig(".yarnrc.yml", Yaml(content)));
+
+    /// <summary>Flow style is refused even for a plain reference, and the refusal says why (and how to write it instead).</summary>
+    [Fact]
+    public void AFlowStyleYarnTokenIsRefusedWithAnExplanation()
+    {
+        var finding = Assert.Single(SecretScanner.ScanCommittedConfig(".yarnrc.yml", "npmScopes: {acme: {npmAuthToken: ${NPM_TOKEN}}}\n"));
+        Assert.Contains("flow style", finding.Rule, StringComparison.Ordinal);
+    }
 
     [Fact]
     public void PackageConfigTooLargeToCheckIsRefused() =>
