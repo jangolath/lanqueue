@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.4.0)
+## 0.4.0 (2026-11-09)
 
 Workers and windows: making old and shared PCs safe to lend to the queue.
 
