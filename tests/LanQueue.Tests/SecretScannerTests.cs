@@ -277,6 +277,24 @@ public class SecretScannerTests
     public void YarnrcWithoutALiteralTokenPasses(string content) =>
         Assert.Empty(SecretScanner.ScanCommittedConfig(".yarnrc.yml", Yaml(content)));
 
+    /// <summary>A double-quoted YAML key with an escape can spell npmAuthToken without containing it: any key with a backslash is refused.</summary>
+    [Theory]
+    [InlineData("\"npm\\x41uthToken\": npm_SuperSecretValue123\n")]
+    [InlineData("\"npm\\u0041uthToken\": npm_SuperSecretValue123\n")]
+    [InlineData("npmScopes:\n  acme:\n    \"npmAuth\\x54oken\": npm_SuperSecretValue123\n")]
+    public void AYarnKeyWithAnEscapeIsRefused(string content)
+    {
+        var finding = Assert.Single(SecretScanner.ScanCommittedConfig(".yarnrc.yml", content));
+        Assert.Contains("backslash", finding.Rule, StringComparison.Ordinal);
+        Assert.DoesNotContain("SuperSecretValue123", finding.Rule, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("cacheFolder: 'C:\\yarn\\cache'\n")]
+    [InlineData("npmRegistryServer: \"https://r.example/a\\\\b\"\nnpmAuthToken: ${NPM_TOKEN}\n")]
+    public void ABackslashInAnOrdinaryYarnValueIsFine(string content) =>
+        Assert.Empty(SecretScanner.ScanCommittedConfig(".yarnrc.yml", content));
+
     [Fact]
     public void AYarnLiteralBlockScalarTokenIsRefused()
     {

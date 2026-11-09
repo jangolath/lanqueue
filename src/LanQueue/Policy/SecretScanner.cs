@@ -169,6 +169,13 @@ public static partial class SecretScanner
 
             var key = line[..sep].Trim().Trim('"', '\'');
             key = npm ? key[(key.LastIndexOf(':') + 1)..] : key; // "//registry.example/:_authToken" -> "_authToken"
+            if (yarn && key.Contains('\\', StringComparison.Ordinal))
+            {
+                // A double-quoted YAML key decodes escapes ("npm\x41uthToken" is npmAuthToken), so a key with any backslash is refused.
+                found.Add(new SecretFinding($"{CommittedConfigRule} (a key with a backslash escape; write key names plainly)", path));
+                continue;
+            }
+
             var rest = line[(sep + 1)..];
             if (yarn && YamlCommentRegex().Match(rest) is { Success: true } comment)
             {
