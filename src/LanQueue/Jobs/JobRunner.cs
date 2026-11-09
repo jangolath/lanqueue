@@ -152,11 +152,30 @@ public sealed partial class JobRunner(
         }
 
         // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
-        if (!config.Machines.Any(m => HasCapabilities(m, req.Needs)))
+        return NeverByConfig(req) is { } never ? NoCapacity(jobId, never, "") : null;
+    }
+
+    /// <summary>
+    /// When no machine in the config has every capability the job needs: each machine judged from the config alone (never probed), all
+    /// permanently ruled out. Null when at least one machine has them.
+    /// </summary>
+    private List<Assessment>? NeverByConfig(JobRequest req) =>
+        config.Machines.Any(m => HasCapabilities(m, req.Needs))
+            ? null
+            : [.. config.Machines.Select(m => new Assessment(m, Unprobed(m), Exclusion.MissingCapability, Eligibility.Lacks(m, Eligibility.Missing(m, req.Needs)), true, 0, 0))];
+
+    /// <summary>
+    /// The per-shard command-line checks of lanq run --shards (<see cref="Precheck"/> on each shard's substituted arguments, in index order):
+    /// the first refusal with its message ("shard i/N: ..."), or null when every shard may run.
+    /// </summary>
+    private (string Message, JobResult Refused)? PrecheckShards(JobRequest template, IReadOnlyList<ShardInfo> shards)
+    {
+        foreach (var s in shards)
         {
-            var needs = new JobNeeds(req.Needs, null, false);
-            return NoCapacity(jobId, [.. config.Machines.Select(m => new Assessment(m, Unprobed(m), Exclusion.MissingCapability,
-                Eligibility.Lacks(m, Eligibility.Missing(m, needs.Capabilities)), true, 0, 0))], "");
+            if (Precheck("shard", template with { Argv = s.Substitute(template.Argv), Shard = s }) is { } refused)
+            {
+                return ($"shard {s}: {refused.Message}", refused);
+            }
         }
 
         return null;
@@ -171,11 +190,34 @@ public sealed partial class JobRunner(
     /// </summary>
     private async Task<(PreparedPayload? Prepared, JobResult? Failed)> PrepareAsync(string payloadId, JobRequest req, Action<string> emit, CancellationToken ct)
     {
+        // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
+        var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
+        var (payload, failed) = await SnapshotAndScanAsync(payloadId, req, kinds, ct).ConfigureAwait(false);
+        if (payload is null)
+        {
+            return (null, failed);
+        }
+
+        var builds = new SemaphoreSlim(1, 1);
+        return (new PreparedPayload(
+            payloadId,
+            payload,
+            new LazyArchive(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, emit, builds),
+            new LazyBundles(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, builds),
+            builds), null);
+    }
+
+    /// <summary>
+    /// Snapshots the repository (under <paramref name="payloadId"/>, through a throw-away index: the user's index, branches and working tree
+    /// are never touched, though git writes the snapshot's objects to the repository's object store) and scans the uncommitted changes, the
+    /// changed and committed file names and the package-manager configs for secrets. Builds no bundle, and an archive only when
+    /// <paramref name="kinds"/> asks for one up front. The payload, or the InfraError (70) or Rejected (2) result; nothing is left behind on a refusal.
+    /// </summary>
+    private async Task<(JobPayload? Payload, JobResult? Failed)> SnapshotAndScanAsync(string payloadId, JobRequest req, PayloadKinds kinds, CancellationToken ct)
+    {
         JobPayload payload;
         try
         {
-            // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
-            var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
             payload = await payloads.BuildAsync(payloadId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex)
@@ -183,13 +225,6 @@ public sealed partial class JobRunner(
             return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message));
         }
 
-        var builds = new SemaphoreSlim(1, 1);
-        var prepared = new PreparedPayload(
-            payloadId,
-            payload,
-            new LazyArchive(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, emit, builds),
-            new LazyBundles(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, builds),
-            builds);
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
@@ -197,11 +232,11 @@ public sealed partial class JobRunner(
             .ToList();
         if (findings.Count > 0)
         {
-            await prepared.DisposeAsync().ConfigureAwait(false);
+            TryDelete(payload.ArchivePath);
             return (null, Rejected(payloadId, findings));
         }
 
-        return (prepared, null);
+        return (payload, null);
     }
 
     /// <summary>A snapshot shared by the jobs of one lanq run (one job, or every shard): deleting it removes the snapshot files and every bundle and archive built.</summary>
@@ -363,7 +398,7 @@ public sealed partial class JobRunner(
     /// </summary>
     private async Task WakeBestSleeperAsync(JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, CancellationToken ct)
     {
-        foreach (var i in Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal))
+        foreach (var i in WakeOrder())
         {
             var m = config.Machines[i];
             if (!CouldWakeFor(m, probes[i], needs, archive.Failure is not null))
@@ -386,6 +421,9 @@ public sealed partial class JobRunner(
             }
         }
     }
+
+    /// <summary>The order sleepers are considered for a wake: the indexes of the config's machines, by name (ordinal).</summary>
+    private IEnumerable<int> WakeOrder() => Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal);
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
     /// <param name="emit">Where this job's lines go (lanq's own and the job's output, already sanitised).</param>

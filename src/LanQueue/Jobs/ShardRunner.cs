@@ -107,12 +107,9 @@ public sealed partial class JobRunner
         }
 
         var shards = Enumerable.Range(1, count).Select(i => new ShardInfo(i, count)).ToList();
-        foreach (var s in shards)
+        if (PrecheckShards(template, shards) is { } refusal)
         {
-            if (Precheck("shard", template with { Argv = s.Substitute(template.Argv), Shard = s }) is { } refused)
-            {
-                return Refused(count, $"shard {s}: {refused.Message}", refused);
-            }
+            return Refused(count, refusal.Message, refusal.Refused);
         }
 
         var payloadId = NewId();
@@ -140,16 +137,30 @@ public sealed partial class JobRunner
     /// </summary>
     private async Task<int> AutoShardCountAsync(JobRequest template, CancellationToken ct)
     {
-        var argv = new ShardInfo(1, 1).Substitute(template.Argv);
-        var (_, assessed) = await ProbeForJobAsync(new JobNeeds(template.Needs, template.MinMemGb, !JobPolicy.ValidateForWindows(argv).Ok), ct).ConfigureAwait(false);
+        var (_, assessed) = await ProbeForJobAsync(ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
         var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards);
-        var why = total == 0
-            ? "no machine can take the job right now; 1 shard waits under --wait like a single job"
-            : string.Join(", ", free.Select(f => string.Create(CultureInfo.InvariantCulture, $"{f.Machine.Name} {f.Free}")))
-                + (total > ShardInfo.MaxShards ? string.Create(CultureInfo.InvariantCulture, $"; capped at {ShardInfo.MaxShards}") : "");
-        output(string.Create(CultureInfo.InvariantCulture, $"[lanq] --shards auto: {n} shard(s) ({(total == 0 ? why : "free slots: " + why)})"));
+        output(string.Create(CultureInfo.InvariantCulture, $"[lanq] --shards auto: {n} shard(s) ({AutoShardWhy(total, free)})"));
         return n;
     }
+
+    /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
+    private static JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
+        new(template.Needs, template.MinMemGb, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
+
+    /// <summary>
+    /// The machines shards can go to now, in rank order, each with its free slots for this job (<see cref="Scheduler.FreeFor"/>, counting
+    /// this run's own shards there: <paramref name="ours"/> placed, <paramref name="oursNotRunning"/> placed but not running yet); only those above 0.
+    /// </summary>
+    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, double? memGb, Func<string, int> ours, Func<string, int> oursNotRunning) =>
+        [.. Scheduler.Rank(assessed)
+            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, memGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name))))
+            .Where(x => x.Item2 > 0)];
+
+    /// <summary>Why --shards auto picked its N: "free slots: build-01 2, micro-02 1" (and the cap), or that no machine can take the job right now.</summary>
+    internal static string AutoShardWhy(int total, IEnumerable<(Machine Machine, int Free)> free) => total == 0
+        ? "no machine can take the job right now; 1 shard waits under --wait like a single job"
+        : "free slots: " + string.Join(", ", free.Select(f => string.Create(CultureInfo.InvariantCulture, $"{f.Machine.Name} {f.Free}")))
+            + (total > ShardInfo.MaxShards ? string.Create(CultureInfo.InvariantCulture, $"; capped at {ShardInfo.MaxShards}") : "");
 
     /// <summary>
     /// The overall result. All shards completed: Completed, 0. Cancelled by the caller (Ctrl+C) while shards were unfinished: Cancelled, 130.
@@ -251,7 +262,7 @@ public sealed partial class JobRunner
             }
         }
 
-        var needs = new JobNeeds(template.Needs, template.MinMemGb, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
+        var needs = ShardNeeds(template, shards);
         var gitCanEverTakeIt = GitCanEverTakeIt(template);
         var states = shards.Select(s => new ShardState(s)).ToList();
         var pending = new List<ShardState>(states);
@@ -337,10 +348,8 @@ public sealed partial class JobRunner
                     // Free slots per machine (see FreeFor; a shard just launched may not hold its slot yet when the probe looks, so this run's
                     // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
-                    List<(Assessment Machine, int Free)> free = [.. Scheduler.Rank(assessed)
-                        .Select(x => (x, Scheduler.FreeFor(
-                            x.Machine, x.Health, template.MinMemGb, running.Values.Count(r => r.Machine == x.Machine.Name), running.Values.Count(r => r.Machine == x.Machine.Name && !r.Started))))
-                        .Where(x => x.Item2 > 0)];
+                    var free = Placeable(
+                        assessed, template.MinMemGb, m => running.Values.Count(r => r.Machine == m), m => running.Values.Count(r => r.Machine == m && !r.Started));
                     foreach (var (st, at) in Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name)))
                     {
                         pending.Remove(st);
