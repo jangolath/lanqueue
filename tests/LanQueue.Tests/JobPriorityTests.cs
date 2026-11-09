@@ -44,7 +44,7 @@ public sealed class JobPriorityTests : IDisposable
         var s = RemoteScripts.Execute(T.Linux(), "j1", ".", ["dotnet", "test"]);
         Assert.Contains("if nice -n 10 true >/dev/null 2>&1; then N=\"nice -n 10\"; fi", s, StringComparison.Ordinal);
         Assert.Contains("if ionice -c3 true >/dev/null 2>&1; then I=\"ionice -c3\"; fi", s, StringComparison.Ordinal);
-        Assert.Contains("$S $T $N $I /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("$S $T $N $I env 'LANQ_JOB=j1' /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]

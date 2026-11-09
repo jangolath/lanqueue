@@ -362,8 +362,12 @@ public sealed class FetchScriptTests : IDisposable
         }
     }
 
-    /// <summary>Records "pid" and "start time" (field 22 of /proc/PID/stat) of the shell itself into $1, as the job wrapper does.</summary>
-    private const string RecordSelf = "printf '%s\\n%s\\n' $$ \"$(sed -n 's/.*) //p' /proc/$$/stat | cut -d' ' -f20)\" > \"$1\"";
+    /// <summary>
+    /// Records "pid", "start time" (field 22 of /proc/PID/stat) and the boot id of the shell itself into $1, as the job wrapper does, and marks
+    /// the shell's later children as job j1 (LANQ_JOB, as the wrapper's env does).
+    /// </summary>
+    private const string RecordSelf =
+        "printf '%s\\n%s\\n%s\\n' $$ \"$(sed -n 's/.*) //p' /proc/$$/stat | cut -d' ' -f20)\" \"$(cat /proc/sys/kernel/random/boot_id)\" > \"$1\"; export LANQ_JOB=j1";
 
     private static bool Alive(int pid) => Directory.Exists("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture))
         && !File.ReadAllText("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/stat").Contains(") Z", StringComparison.Ordinal);
@@ -403,6 +407,78 @@ public sealed class FetchScriptTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The job's group is long dead and its number now belongs to an unrelated group (its leader gone, a member alive, no LANQ_JOB marker): the
+    /// stale pid file must not make cleanup or stale-slot reclaim kill it.
+    /// </summary>
+    [LinuxFact]
+    public void AReusedGroupNumberWithoutTheJobMarkerIsNotKilled()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var pf = _root + "/locks/job-j1.pid";
+        var child = _root + "/child.pid";
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = _root };
+        foreach (var a in new[] { "sh", "-c", "echo $$ > \"$1\"; sleep 300 </dev/null >/dev/null 2>&1 & echo $! > \"$2\"; exit 0", "sh", _root + "/other.pid", child })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using (var leader = System.Diagnostics.Process.Start(psi)!)
+        {
+            Assert.True(leader.WaitForExit(TimeSpan.FromSeconds(30)));
+        }
+
+        var group = File.ReadAllText(_root + "/other.pid").Trim();
+        var sleeper = int.Parse(File.ReadAllText(child).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        var boot = File.ReadAllText("/proc/sys/kernel/random/boot_id").Trim();
+        try
+        {
+            foreach (var script in new[] { RemoteScripts.Cleanup(Worker(MachineOs.Linux), "j1", "1", T.RepoId), RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1") })
+            {
+                Directory.CreateDirectory(Job);
+                File.WriteAllText(pf, group + "\n12345\n" + boot + "\n"); // the dead job's start time, this boot
+                var (code, output) = Shells.Run("linux", script);
+                Assert.True(code == 0, output);
+                Thread.Sleep(3000);
+                Assert.True(Alive(sleeper), "an unrelated group that reused the job's number was killed");
+                Assert.False(File.Exists(pf));
+            }
+        }
+        finally
+        {
+            Shells.Exec("sh", ["-c", "kill -s KILL " + sleeper.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
+        }
+    }
+
+    /// <summary>A pid file from before a reboot (another boot id) never kills anything, even if the pid and start time happen to match.</summary>
+    [LinuxFact]
+    public void APidFileFromAnotherBootKillsNothing()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var pf = _root + "/locks/job-j1.pid";
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = Job };
+        foreach (var a in new[] { "sh", "-c", RecordSelf + "; sleep 300 & wait", "sh", pf })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using var leader = System.Diagnostics.Process.Start(psi)!;
+        try
+        {
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(pf) && File.ReadAllLines(pf).Length >= 3, TimeSpan.FromSeconds(30)));
+            var lines = File.ReadAllLines(pf);
+            File.WriteAllText(pf, lines[0] + "\n" + lines[1] + "\n00000000-0000-0000-0000-000000000000\n");
+            var (code, output) = Shells.Run("linux", RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1"));
+            Assert.True(code == 0, output);
+            Assert.False(leader.WaitForExit(TimeSpan.FromSeconds(3)), "a job recorded under another boot was killed");
+            Assert.False(File.Exists(pf));
+        }
+        finally
+        {
+            Shells.Exec("sh", ["-c", "kill -s KILL -- -" + leader.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
+        }
+    }
+
     /// <summary>A job leader that changed its folder (cd /tmp) is still recognised by its recorded start time, and killed.</summary>
     [LinuxFact]
     public void AJobLeaderThatLeftItsFolderIsStillKilledByItsStartTime()
@@ -418,7 +494,7 @@ public sealed class FetchScriptTests : IDisposable
         using var leader = System.Diagnostics.Process.Start(psi)!;
         try
         {
-            Assert.True(SpinWait.SpinUntil(() => File.Exists(pf) && File.ReadAllLines(pf).Length >= 2, TimeSpan.FromSeconds(30)));
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(pf) && File.ReadAllLines(pf).Length >= 3, TimeSpan.FromSeconds(30)));
             Thread.Sleep(500); // let it reach /tmp
             var (code, output) = Shells.Run("linux", RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1"));
             Assert.True(code == 0, output);
@@ -430,18 +506,22 @@ public sealed class FetchScriptTests : IDisposable
         }
     }
 
-    /// <summary>The Linux job wrapper records the job's process group and its leader's start time.</summary>
+    /// <summary>The Linux job wrapper records the job's process group, its leader's start time and the boot id, and marks the job with LANQ_JOB.</summary>
     [LinuxFact]
     public void TheLinuxWrapperRecordsTheLeadersStartTime()
     {
         Directory.CreateDirectory(_root + "/locks");
         var copy = _root + "/copy.pid";
-        var (code, output) = Shells.Run("linux", RemoteScripts.Execute(Worker(MachineOs.Linux), "j1", ".", ["sh", "-c", "cp \"$0\" \"$1\"", _root + "/locks/job-j1.pid", copy]));
+        var (code, output) = Shells.Run(
+            "linux",
+            RemoteScripts.Execute(Worker(MachineOs.Linux), "j1", ".", ["sh", "-c", "cp \"$0\" \"$1\" && printf '%s' \"$LANQ_JOB\" > \"$1.job\"", _root + "/locks/job-j1.pid", copy]));
         Assert.True(code == 0, output);
         var lines = File.ReadAllLines(copy);
-        Assert.Equal(2, lines.Length);
+        Assert.Equal(3, lines.Length);
         Assert.Matches("^[0-9]+$", lines[0]);
         Assert.Matches("^[0-9]+$", lines[1]);
+        Assert.Equal(File.ReadAllText("/proc/sys/kernel/random/boot_id").Trim(), lines[2]);
+        Assert.Equal("j1", File.ReadAllText(copy + ".job"));
     }
 
     [WindowsFact]

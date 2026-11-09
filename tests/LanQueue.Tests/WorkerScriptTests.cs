@@ -89,7 +89,7 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var s = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], TimeSpan.FromSeconds(90.5));
         Assert.Contains("if timeout -k 1 5 true >/dev/null 2>&1; then T=\"timeout -k 30 91\"; fi", s, StringComparison.Ordinal);
-        Assert.Contains("$S $T $N $I /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("$S $T $N $I env 'LANQ_JOB=j1' /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]

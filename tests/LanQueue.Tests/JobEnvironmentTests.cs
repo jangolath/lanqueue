@@ -215,12 +215,16 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("NODE_OPTIONS", "--max-old-space-size=2048"));
         m.PathPrepend.AddRange(["/home/u/.nvm/bin", "/opt/x"]);
         var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
-        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("env 'LANQ_JOB=j1' 'NODE_OPTIONS=--max-old-space-size=2048' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void LinuxJobWithoutEnvHasNoEnvPrefix() =>
-        Assert.DoesNotContain(" env ", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+    public void LinuxJobWithoutEnvGetsOnlyTheJobMarker() =>
+        Assert.Contains(" env 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+
+    [Fact]
+    public void AnUnsafeJobIdNeverReachesTheEnvironment() =>
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1'; touch x", ".", ["npm", "test"]));
 
     [Fact]
     public void LinuxHostileValueIsOneSingleQuotedWord()

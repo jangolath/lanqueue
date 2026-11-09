@@ -84,6 +84,15 @@ as data, under its checked name, within the caps); a compromised worker can send
 fetched files like any download from that PC. Second, lanq checks the folders of the output path itself but a local
 process with your rights could still race it; that is outside this threat model.
 
+A job's processes are identified before lanq signals them (cleanup, the stop before a fetch, stale-slot reclaim). On
+Windows a recorded process is killed only when its pid and start time both match. On Linux the job wrapper records the
+process group, the group leader's start time and the boot id, and every job process carries `LANQ_JOB=<job id>` in its
+environment. Nothing is signalled when the boot id differs (a pid file that survived a reboot); otherwise the group is
+signalled when its leader still has the recorded start time, or when the leader is gone and at least one live member of
+the group carries this job's `LANQ_JOB`, so a group number reused by another program is left alone. A job that clears
+its own environment and outlives its leader is not found this way. Without /proc (macOS, BSD) the older checks apply:
+the leader's working folder inside the job folder, or `ps` showing it still leads the recorded group.
+
 Slot files on a worker are coordinated with per-slot lock files that each hold their creator's unique token; a
 lanq process removes a lock only after renaming it away and finding its own token in it. On Linux this is done with
 `mv`, `cat` and `set -C`, which give no atomic compare-and-delete: if a reclaimer that held a lock for more than ten

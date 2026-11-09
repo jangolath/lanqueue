@@ -62,6 +62,13 @@ sudo systemctl enable --now ssh
 
 Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
 
+## What a job sees
+
+Every job runs with `LANQ_JOB=<job id>` in its environment (on Linux and Windows), besides the machine's own `env:`
+and `path_prepend:`. A build script may read it, for example to tag its output. On Linux lanq also uses it to recognise
+the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
+the environment of long-running helper processes you want stopped with the job.
+
 ## Then, on your PC
 
 1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,

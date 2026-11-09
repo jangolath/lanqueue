@@ -674,8 +674,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   recorded in `locks/job-<id>.pid` before removing the worktree. This is best effort: it needs the machine to be
   reachable when cleanup runs (on Windows the pid file also names the job's child process, and a process is killed only
   when its start time matches the recorded one, so a reused pid is safe; on Linux the pid file also records the group
-  leader's start time, and the group is signalled only when the leader still has that start time, or the leader is
-  gone but the group lives on, which Linux guarantees is still the job's group). If it is not, the worker stops the job itself one minute after its limit (Linux under
+  leader's start time and the boot id, every job process carries `LANQ_JOB=<job id>` in its environment, and the
+  group is signalled only in the same boot and only when the leader still has that start time, or the leader is gone
+  and a live member of the group carries this job's `LANQ_JOB`). If it is not, the worker stops the job itself one minute after its limit (Linux under
   `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
   deliberately detaches into a new session or process group can escape both.
 - Windows remote commands are passed as an encoded command line limited to 8000 characters; very long argument
