@@ -163,7 +163,7 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("NODE_OPTIONS", "--max-old-space-size=2048"));
         m.PathPrepend.AddRange(["/home/u/.nvm/bin", "/opt/x"]);
         var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
-        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]

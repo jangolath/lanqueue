@@ -325,7 +325,8 @@ settings keep `lanq` a polite guest there (a full example is the "family PC" ent
   - Linux: `touch /srv/lanq/PAUSE` to pause, `rm /srv/lanq/PAUSE` to resume.
 
   The person needs write access to the `work_root` folder (grant it once, or make the shortcuts for an account that
-  has it). Only the file's existence counts; its content is ignored.
+  has it). Only the file's existence counts; its content is ignored. On Linux the name is `PAUSE` or `pause` (those two
+  spellings only, since Linux file names are case-sensitive); on Windows any case works.
 
   **A job that is already running is not affected**: PAUSE only stops new jobs from starting there. To end a running
   job now, stop `lanq run` on your PC (Ctrl+C), which cleans the job up on the worker.
@@ -584,8 +585,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   account on the remote machines.
 - Cancellation and timeouts: cleanup kills the job's process group (Linux) or PowerShell process tree (Windows)
   recorded in `locks/job-<id>.pid` before removing the worktree. This is best effort: it needs the machine to be
-  reachable when cleanup runs (if the network is down, the job may keep running until it ends on its own), and a
-  job that deliberately detaches into a new session or process group can escape it.
+  reachable when cleanup runs. If it is not, the worker stops the job itself one minute after its limit (Linux under
+  `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
+  deliberately detaches into a new session or process group can escape both.
 - Windows remote commands are passed as an encoded command line limited to roughly 8000 characters; very long
   argument lists are refused with a clear message.
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not

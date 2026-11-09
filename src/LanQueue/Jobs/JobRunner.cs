@@ -122,6 +122,9 @@ public sealed class JobRunner(
 
     internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
 
+    /// <summary>The worker enforces the job limit itself (timeout on Linux, a deadline wait on Windows) this long after lanq would stop it.</summary>
+    internal static readonly TimeSpan WorkerDeadlineMargin = TimeSpan.FromMinutes(1);
+
     /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
     private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
         needGb is not { } need || !h.Reachable || h.Hold is not null || h.MemFreeGb >= need
@@ -278,7 +281,8 @@ public sealed class JobRunner(
         string executeCommand;
         try
         {
-            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv));
+            // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
+            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout));
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -360,6 +364,8 @@ public sealed class JobRunner(
             onLine($"[lanq] {machine.Name}: allowed hours end soon; the job will be stopped after {ProcessSshClient.Describe(timeout)} (window end + {grace.TotalMinutes:0} min grace)");
         }
 
+        // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
+        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin));
         var run = await ssh.RunAsync(
             machine,
             executeCommand,

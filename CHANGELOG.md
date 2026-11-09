@@ -24,7 +24,13 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
   Windows jobs run at BelowNormal priority, inherited by their child processes. **This changes the default for
   existing configs**; set `priority: normal` on a dedicated build box.
 - **PAUSE file.** If `<work_root>/PAUSE` exists on a worker, the machine is held ("paused on the machine"). Anyone at
-  that PC can create or delete it. A job that is already running is not affected.
+  that PC can create or delete it. On Linux `PAUSE` or `pause` counts (those two spellings), on Windows any case. A job
+  that is already running is not affected.
+- **The worker enforces the job limit itself.** A job's own limit (`--timeout`, or the window end plus grace) plus one
+  minute is enforced on the worker too, so a job outlives a vanished `lanq` by at most that minute: on Linux the job runs
+  under `timeout -k 30 <seconds>` when `timeout` works there (exit `124`, children included); on Windows it runs in a
+  child PowerShell that is killed with its whole tree (`taskkill /T /F`) when the wait runs out (exit `124`). The Linux
+  job wrapper now runs `/bin/sh` by absolute path, so a `path_prepend:` folder cannot supply its own `sh`.
 - **Availability windows v2.** `allowed_hours` still accepts one string (a bare `allowed_hours:` or `~` still means any
   time), and now also a list of entries
   `[Days ]HH:mm-HH:mm` with days `Mon`..`Sun`, ranges (`Mon-Fri`) and lists (`Sat,Sun`). A window that crosses

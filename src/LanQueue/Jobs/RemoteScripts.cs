@@ -56,7 +56,7 @@ public static class RemoteScripts
             echo "slots_used=$(ls "$R/locks" 2>/dev/null | grep -c '^slot-[0-9][0-9]*$')"
             awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
-            if [ -e "$R/PAUSE" ]; then echo paused=1; else echo paused=0; fi
+            if [ -e "$R/PAUSE" ] || [ -e "$R/pause" ]; then echo paused=1; else echo paused=0; fi
             echo "local_time=$(date '+%Y-%m-%dT%H:%M:%S')"
             {{LinuxOffsetTable}}
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
@@ -218,7 +218,7 @@ public static class RemoteScripts
 
         var env = JobEnvironmentPosix(m);
         var lines = caps.Select(c =>
-            $"o=$({env}sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; echo \"cap.{c.ToLowerInvariant()}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"");
+            $"o=$({env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; echo \"cap.{c.ToLowerInvariant()}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"");
         return $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
             if [ -d "$R" ]; then
@@ -392,9 +392,11 @@ public static class RemoteScripts
     /// <summary>
     /// Runs the allowlisted argv inside the job worktree. Each argument is individually quoted. The directory is the
     /// normalized one (never the raw input) and its real path must stay inside the worktree. The job's process group
-    /// (Linux, via setsid) or PowerShell PID (Windows) is recorded in locks/job-ID.pid so cleanup can kill it.
+    /// (Linux, via setsid) or PowerShell PID (Windows) is recorded in locks/job-ID.pid so cleanup can kill it. With a
+    /// <paramref name="limit"/> the worker also stops the job itself: on Linux under <c>timeout -k 30</c> when that works (exit 124), on
+    /// Windows by running it in a child PowerShell and killing that tree (taskkill /T /F) when the wait runs out (exit 124).
     /// </summary>
-    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv)
+    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null)
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
@@ -424,10 +426,19 @@ public static class RemoteScripts
                 {{JobEnvironmentPowerShell(m)}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
                 Set-Content -LiteralPath $pf -Value $PID
+                $job = {
+                & {{parts}}
+                }
+                $inner = '$ProgressPreference = ''SilentlyContinue''; $global:LASTEXITCODE = 0' + "`n" + 'try {' + "`n" + $job.ToString() + "`n" + 'exit $LASTEXITCODE' + "`n" + '} catch { Write-Output "$_"; exit 1 }'
+                $si = New-Object System.Diagnostics.ProcessStartInfo ((Get-Process -Id $PID).Path)
+                $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+                $si.UseShellExecute = $false
+                $si.WorkingDirectory = $here
                 $code = 1
                 try {
-                  & {{parts}}
-                  $code = $LASTEXITCODE
+                  $cp = [Diagnostics.Process]::Start($si)
+                  if ($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})) { $cp.WaitForExit(); $code = $cp.ExitCode }
+                  else { & taskkill /PID $cp.Id /T /F 2>$null | Out-Null; $code = 124 }
                 } finally {
                   Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
                 }
@@ -435,18 +446,31 @@ public static class RemoteScripts
                 """;
         }
 
+        // The job runs in the background so its pid (with setsid: its session and process group; with timeout alone: timeout's own group)
+        // is known here and recorded for cleanup; stdin is handed through on fd 3 since a background command would otherwise get /dev/null.
         return $$"""
             cd -P {{ShellQuote.Posix(dir)}} || exit 126
             case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
             P={{ShellQuote.Posix(pidFile)}}
             S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
+            T={{(limit is { } l ? $"; if timeout -k 1 5 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
-            $S {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m)}}sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$P" {{string.Join(' ', argv.Select(ShellQuote.Posix))}}
+            exec 3<&0
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            j=$!
+            echo "$j" > "$P"
+            wait "$j"
             rc=$?
             rm -f "$P"
             exit $rc
             """;
     }
+
+    private static string WholeSeconds(TimeSpan t) => ((long)Math.Ceiling(Math.Max(t.TotalSeconds, 1))).ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Process.WaitForExit milliseconds for the job's own deadline; -1 waits for ever (no limit given).</summary>
+    private static string WindowsWaitMilliseconds(TimeSpan? limit) =>
+        limit is { } l ? (long.Parse(WholeSeconds(l), CultureInfo.InvariantCulture) * 1000).ToString(CultureInfo.InvariantCulture) : "-1";
 
     /// <summary>
     /// priority: low on Linux. nice and ionice are used only when present and when they actually work for this user (idle I/O class can be

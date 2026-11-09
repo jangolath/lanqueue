@@ -46,8 +46,8 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 
 - `allowed_hours` per machine, by day: `["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]`, on the worker's own clock.
   A job still running when the window ends is stopped after a grace period (exit 124, `[lanq] WindowClosed`).
-- A `PAUSE` file in the worker's `work_root` holds the machine; anyone at that PC can create or delete it. A job
-  already running is not affected.
+- A `PAUSE` file (Linux: `PAUSE` or `pause`) in the worker's `work_root` holds the machine; anyone at that PC can create
+  or delete it. A job already running is not affected.
 - Jobs run at low priority by default (`nice`/`ionice` on Linux, BelowNormal on Windows); `priority: normal` turns it off.
 - Machines with little free memory are held (`min_free_mem_gb`, Linux memory pressure), and `lanq run --mem 4` asks
   for a machine with at least 4 GB available.
