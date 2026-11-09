@@ -85,7 +85,11 @@
   The slot lease allowance grows from 40 to 50 minutes to cover it.
 - Fetch problems never change the exit code. `lanq run --json` gains `fetched` (`path`, `bytes`, `sha256`) and
   `fetchSkipped` (`path`, `reason`), present on every path when `--fetch` is given, plus `fetchDir`, `fetchError` and
-  `fetchSkippedMore`; without `--fetch` the object is unchanged.
+  `fetchSkippedMore`; without `--fetch` the object is unchanged. That includes the early exits: a refused command line
+  (a bad `--wait` value or `--fetch` pattern) and a missing or invalid config.
+- A job whose ssh connection drops mid-run is stopped and its files fetched on a fresh connection, before cleanup (which
+  would kill it anyway); if the machine does not answer that either, `fetchError` says "not fetched: the SSH connection
+  failed during the job".
 - Windows workers receive the fetch script on ssh stdin (as base64 of its UTF-16 text), so patterns do not count
   toward the 8000-character command line.
 
@@ -96,8 +100,10 @@
   `wait_seconds` 1 to 600, default 120). `lanq run` sends one magic packet only as a last resort: when no awake machine can take the
   job, `--wait` is above 0 and `--no-wake` is not given, to the first-by-name machine that looks asleep (ssh's own
   connect timeout or unreachable-host error; never refused, auth or host-key failures), has the capabilities the job
-  needs and is inside its `allowed_hours` on this computer's clock. The wake happens inside `--wait`, at most once per
-  machine per invocation. `lanq health` stays read-only; `lanq health --wake` wakes sleepers and waits for them, probing
+  needs and is inside its `allowed_hours` on this computer's clock with at least `policy.min_window_minutes` plus its
+  `wake.wait_seconds` of the window left (otherwise it would only be held as "window closing" once awake; the reason is
+  shown instead). The wake happens inside `--wait`, at most once per
+  machine per invocation. `lanq health` stays read-only; `lanq health --wake` wakes sleepers (same rule) and waits for them, probing
   with backoff until they answer or `wait_seconds` run out. A localized ssh message disables the automatic wake (fails
   safe).
 - **`lanq wake <machine> [--wait] [--json]`** sends the packet even outside `allowed_hours` (you asked by name) and says
@@ -109,7 +115,8 @@
   load as the untagged value, and `wake: ~`, a bare `wake:` or a `wake:` key without a value is an error naming the key
   (leave `wake:` out for no Wake-on-LAN). A test fails when a config class is missing from the static context.
 - Docs: Windows and Linux Wake-on-LAN setup in `docs/WORKERS.md`; the magic packet is unauthenticated and LAN-only,
-  which is why it is opt-in per machine (SECURITY.md).
+  which is why it is opt-in per machine (SECURITY.md). The agent snippet and skill recommend `--wait 120 --no-wake`
+  unless the developer has allowed waking machines, since any `--wait` above 0 can wake one.
 
 ## 0.4.0 (2026-11-09)
 

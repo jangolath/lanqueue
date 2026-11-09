@@ -182,7 +182,8 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    ```
 
    The job's exit code becomes `lanq`'s exit code. `--wait 120` keeps retrying for up to 120 seconds when every
-   machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
+   machine is busy or on hold, and may wake a sleeping machine that has a `wake:` setting as a last resort
+   (`--no-wake` prevents that; see [Wake-on-LAN](#waking-a-sleeping-worker-wake-on-lan)). `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
    only to a machine that reports at least 4 GB of available memory. `--fetch 'TestResults/**/*.trx'` brings test
    results, coverage or build output back after the job (see [Fetching results](#fetching-results-fetch)). `lanq stats`
    sums wall-clock time from your local log.
@@ -305,6 +306,9 @@ when the job never started.
   itself a minute later), so before fetching `lanq` stops it the way cleanup does: the recorded process group on
   Linux, and on Windows only the recorded processes whose pid and start time still match. A job that completed or
   failed is not touched.
+- A job whose ssh connection dropped while it ran (`InfraError`) may also still be running there: `lanq` stops it the
+  same way on a fresh connection and fetches what it left (cleanup would kill it next anyway). If the machine does not
+  answer that either, nothing is fetched and `fetchError` is "not fetched: the SSH connection failed during the job".
 - Each file is written as a short `.lanq-partial-N` file in the same folder and renamed to its name only once its size and hash are right.
   Anything the worker prints on stderr during the fetch is shown as `[lanq] fetch stderr: ...` (the first 10 lines,
   sanitised) and never mixed into the files.
@@ -342,8 +346,8 @@ one object on stdout when it is over:
 
 With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","bytes":1363148,"sha256":"..."}]`) and
 `fetchSkipped` (`[{"path":"TestResults/latest.trx","reason":"..."}]`), both present and possibly empty on every path
-(also when the job never started), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
-problem (timed out, cut short, the machine's hours ended) and `fetchSkippedMore` when more than 200 files were skipped.
+(also when the job never started, the command line was refused or the config could not be read), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
+problem (timed out, cut short, the machine's hours ended, the ssh connection was lost) and `fetchSkippedMore` when more than 200 files were skipped.
 Without `--fetch` none of these keys appear.
 
 `status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut`, `WindowClosed` or `Cancelled`;
@@ -501,15 +505,17 @@ interface: set `broadcast` to the directed broadcast of the worker's own subnet*
 - **`lanq run` wakes a machine only as a last resort.** If no awake machine can take the job now, and you gave a real
   `--wait` (above 0), `lanq` wakes **one** machine: the first by name among those that look asleep, have a `wake:`
   setting, have the capabilities the job needs, could take its arguments (a Windows machine is skipped for arguments
-  Windows cannot take) and are inside their `allowed_hours`. Nothing is woken while an awake machine can take the job,
+  Windows cannot take) and are inside their `allowed_hours` with at least `policy.min_window_minutes` plus the machine's
+  `wake.wait_seconds` of the window left (10 min + 120 s by default): a machine with less left would be held as "window
+  closing" once awake, so it is left asleep and the reason is shown. Nothing is woken while an awake machine can take the job,
   with `--wait 0` (the default), or with `--no-wake`. The wake happens inside `--wait`: it never makes `lanq run`
   wait longer than you asked, and the other machines keep being tried meanwhile. At most once per machine per `lanq`
   invocation, and not another machine while one is still coming up.
   When every awake machine that fits the job is merely busy, `lanq` may therefore wake a sleeper for extra capacity; use
   `--no-wake` to avoid that. If a woken machine never answers, the next eligible sleeper (by name) may be tried once the
-  first one'"'"'s `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run.
+  first one's `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run.
 - **`lanq health` stays read-only and quick.** It never wakes anything by itself. `lanq health --wake` sends a packet
-  to every machine that looks asleep and is inside its hours, then waits for each (probing again after 5 s, 10 s, then
+  to every machine that looks asleep and is inside its hours with that much of its window left, then waits for each (probing again after 5 s, 10 s, then
   every 20 s, up to `wait_seconds`).
 - **What counts as asleep:** ssh itself said, on its own `ssh: connect to host ...` line, that the connection timed out
   or the host or network is unreachable (the Windows OpenSSH wordings are recognised too). A refused connection (the PC

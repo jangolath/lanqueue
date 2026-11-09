@@ -20,7 +20,8 @@
   `diskFreeGb`, `memFreeGb`, `slotsUsed`, `maxJobs`, `localTime`). If a tool is "not found" on a worker, `lanq doctor
   --remote` shows which one; tell the developer (the fix is `path_prepend:` in their config, not yours to make).
 - Exit codes: the job's own code; `2` refused by policy or bad arguments; `70` infrastructure error (ssh, git);
-  `75` no eligible machine (retry with `--wait 120`, or tell the developer).
+  `75` no eligible machine (retry once with `--wait 120 --no-wake`, or tell the developer). `--wait` above 0 can
+  wake a sleeping PC as a last resort; leave out `--no-wake` only if the developer has said waking is fine.
 - Never edit the lanq machines file, the allowlists or any ssh/key configuration. The developer owns them. If a
   command is refused, say so and stop; do not look for a way around it.
 - Do not run `lanq unlock`, `lanq makeready`, `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
