@@ -369,6 +369,41 @@ public sealed class ShardReviewTests : IDisposable
         Assert.Contains("may still be running on big-01", r.Shards[0].Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A shard that must avoid a machine (its job may still run there) and finds no other slot ends NoCapacity, and the message says why
+    /// each machine was passed over: the avoided one by name, the other with lanq run's own per-machine reason.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task NoCapacityAfterARetrySaysWhichMachineWasAvoided()
+    {
+        var ssh = new PoolSsh
+        {
+            OnExecute = (e, _) => Task.FromResult(e.Machine.Name == "big-01" ? new SshResult(255, "Connection to 10.20.30.12 closed by remote host.") : e.Exit(0)),
+            OnCleanup = m => m.Name == "big-01" ? new SshResult(255, "ssh: connect to host 10.20.30.12 port 22: No route to host") : new SshResult(0, ""),
+            RefuseSlot = m => m.Name == "tiny-01",
+        };
+
+        var r = await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest(), new ShardOptions(1, Retries: 2), CancellationToken.None);
+
+        Assert.Equal(("NoCapacity", 75), (r.Status, r.ExitCode));
+        var message = r.Shards[0].Message;
+        Assert.Contains("big-01: avoided", message, StringComparison.Ordinal);
+        Assert.Contains("tiny-01: no free slot when the job tried to start", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no match / full", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A sharded run's NoCapacity message names the capability each machine lacks, as a single job's does.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ShardNoCapacitySaysWhatEachMachineLacks()
+    {
+        var ssh = new PoolSsh();
+        var r = await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest("gpu"), new ShardOptions(2), CancellationToken.None);
+
+        Assert.Equal(("NoCapacity", 75), (r.Status, r.ExitCode));
+        Assert.All(r.Shards, s => Assert.Contains("big-01: lacks gpu", s.Message, StringComparison.Ordinal));
+        Assert.All(r.Shards, s => Assert.DoesNotContain("no match / full", s.Message, StringComparison.Ordinal));
+    }
+
     /// <summary>An exception nobody expected (here an OperationCanceledException that no cancel caused) ends that shard only.</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task AStrayExceptionEndsOnlyItsOwnShard()

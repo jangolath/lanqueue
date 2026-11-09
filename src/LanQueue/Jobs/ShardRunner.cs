@@ -172,6 +172,15 @@ public sealed partial class JobRunner
         };
     }
 
+    /// <summary>
+    /// <see cref="WhyNot"/> for a sharded run's NoCapacity message, plus the one reason only shards have: a machine every waiting
+    /// shard must avoid because an earlier attempt of it lost the connection there and its cleanup did not finish.
+    /// </summary>
+    private static string ShardWhyNot(Machine m, MachineHealth h, IReadOnlyList<string> needs, IReadOnlyCollection<ShardState> waiting) =>
+        h.Reachable && h.Hold is null && HasCapabilities(m, needs) && waiting.Count > 0 && waiting.All(p => p.Avoid.Contains(m.Name))
+            ? "avoided: an earlier attempt of the waiting shard(s) lost the connection there and may still be running"
+            : WhyNot(m, h, needs);
+
     private sealed class ShardState(ShardInfo shard)
     {
         public ShardInfo Shard => shard;
@@ -226,7 +235,6 @@ public sealed partial class JobRunner
         // failing to claim a slot (the probe said free, the machine said full) cannot hold the run open for ever.
         var idle = Stopwatch.StartNew();
         var backoff = false;
-        var held = "";
         Exception? loopError = null;
 
         // The latest probe (with this job's holds), for choosing another machine for a re-run by the same rules as placement.
@@ -308,7 +316,6 @@ public sealed partial class JobRunner
                     }
 
                     lastHealth = health;
-                    held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
                     if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
                     {
                         await WakeBestSleeperAsync(template, probes, health, windowsUnsafe, prepared.Archive, stop.Token).ConfigureAwait(false);
@@ -323,6 +330,7 @@ public sealed partial class JobRunner
                 else if (pending.Count > 0 && running.Count == 0 && idle.Elapsed >= template.Wait)
                 {
                     var archiveNote = prepared.Archive.Failure is null ? "" : " Archive build failed: " + prepared.Archive.Failure;
+                    var held = string.Join("; ", lastHealth.Select(h => $"{h.Item1.Name}: {ShardWhyNot(h.Item1, h.Item2, template.Needs, pending)}"));
                     foreach (var st in pending)
                     {
                         st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, "No eligible machine. " + held + archiveNote);
