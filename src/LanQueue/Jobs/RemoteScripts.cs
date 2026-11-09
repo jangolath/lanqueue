@@ -568,9 +568,12 @@ public static class RemoteScripts
         return string.Join('\n', lines);
     }
 
-    /// <summary>Best-effort teardown: worktree, ref, bundle, slot. Never fails the job.</summary>
+    /// <summary>
+    /// Best-effort teardown: worktree, ref, bundle, slot. Never fails the job. In git mode without a repository id (nothing was fetched
+    /// into a cache) only the cache steps are left out: the job's process, folder, bundle and slot are still removed.
+    /// </summary>
     public static string Cleanup(Machine m, string jobId, string slot, string? repoId = null) =>
-        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot, SafeRepoId(repoId));
+        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot, repoId is null ? null : SafeRepoId(repoId));
 
     private static string CleanupArchive(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
         ? $$"""
@@ -611,7 +614,7 @@ public static class RemoteScripts
             exit 0
             """;
 
-    private static string CleanupGit(Machine m, string jobId, string slot, string repoId) => m.Os == MachineOs.Windows
+    private static string CleanupGit(Machine m, string jobId, string slot, string? repoId) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $pf = "$root/locks/job-$id.pid"
@@ -623,12 +626,9 @@ public static class RemoteScripts
               }
               Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
             }
-            $c = "$root/repos/{{repoId}}.git"
-            function Q { & git {{GitHardeningWindows}} @args 2>$null }
-            Q -C $c worktree remove --force "$root/jobs/$id"
+            {{(repoId is null ? "" : WindowsCacheCleanupBefore(repoId))}}
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
-            Q -C $c worktree prune
-            Q -C $c update-ref -d "refs/lanq/$id"
+            {{(repoId is null ? "" : WindowsCacheCleanupAfter)}}
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
             exit 0
@@ -644,15 +644,34 @@ public static class RemoteScripts
               esac
               rm -f "$P"
             fi
-            C="$R/repos/{{repoId}}.git"
-            G() { git {{GitHardeningLinux}} "$@"; }
-            G -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
+            {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
-            G -C "$C" worktree prune 2>/dev/null
-            G -C "$C" update-ref -d "refs/lanq/$ID" 2>/dev/null
+            {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}
             rm -f "$R/incoming/$ID.bundle" "$R/locks/slot-{{SafeSlot(slot)}}"
             exit 0
             """;
+
+    private static string WindowsCacheCleanupBefore(string repoId) => $$"""
+        $c = "$root/repos/{{repoId}}.git"
+        function Q { & git {{GitHardeningWindows}} @args 2>$null }
+        Q -C $c worktree remove --force "$root/jobs/$id"
+        """;
+
+    private const string WindowsCacheCleanupAfter = """
+        Q -C $c worktree prune
+        Q -C $c update-ref -d "refs/lanq/$id"
+        """;
+
+    private static string LinuxCacheCleanupBefore(string repoId) => $$"""
+        C="$R/repos/{{repoId}}.git"
+        G() { git {{GitHardeningLinux}} "$@"; }
+        G -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
+        """;
+
+    private const string LinuxCacheCleanupAfter = """
+        G -C "$C" worktree prune 2>/dev/null
+        G -C "$C" update-ref -d "refs/lanq/$ID" 2>/dev/null
+        """;
 
     /// <summary>A repository id is exactly 16 lowercase hex digits, so it can never carry a path or shell syntax into a script.</summary>
     internal static string SafeRepoId(string? repoId) =>

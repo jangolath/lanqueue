@@ -7,12 +7,12 @@ namespace LanQueue.Payload;
 /// that machine can be incremental. Writes are atomic (temp file, then rename). A missing or unreadable file means "no base", which only
 /// costs a full bundle. A null path keeps everything in memory.
 /// </summary>
-public sealed class BaseStore(string? path)
+public class BaseStore(string? path)
 {
     private readonly Lock _gate = new();
     private Dictionary<string, Dictionary<string, string>>? _memory;
 
-    public string? Get(string machine, string repoId)
+    public virtual string? Get(string machine, string repoId)
     {
         lock (_gate)
         {
@@ -22,7 +22,7 @@ public sealed class BaseStore(string? path)
         }
     }
 
-    public void Set(string machine, string repoId, string sha)
+    public virtual void Set(string machine, string repoId, string sha)
     {
         lock (_gate)
         {

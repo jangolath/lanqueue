@@ -253,7 +253,9 @@ public sealed class JobRunner(
             }
             finally
             {
-                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot, payload.RepoId)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
+                // Never throw from here (that would leak the slot): an unusable repository id only drops the cache steps.
+                var repoId = payload.RepoId is { } id && IsRepoId(id) ? id : null;
+                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot, repoId)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
                     .ConfigureAwait(false);
                 if (!cleanup.Ok)
                 {
@@ -296,7 +298,8 @@ public sealed class JobRunner(
         {
             try
             {
-                var bundle = await bundles.GetAsync(bases.Get(machine.Name, payload.RepoId), ct).ConfigureAwait(false);
+                var known = await BaseStoreCall(() => bases.Get(machine.Name, payload.RepoId), "read", machine, onLine, ct).ConfigureAwait(false);
+                var bundle = await bundles.GetAsync(known, ct).ConfigureAwait(false);
                 (local, incrementalBase) = (bundle.Path, bundle.Base);
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
@@ -335,7 +338,7 @@ public sealed class JobRunner(
         if (step.Ok && git)
         {
             // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
-            bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha);
+            await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
         }
 
         if (!step.Ok)
@@ -396,6 +399,32 @@ public sealed class JobRunner(
             $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
     }
 
+    /// <summary>
+    /// bases.json can be briefly locked by a parallel lanq (a Windows sharing violation) or unwritable. A failing read or write is retried
+    /// twice, then reported in one line and ignored: losing a base only means the next job sends a full bundle.
+    /// </summary>
+    private async Task<string?> BaseStoreCall(Func<string?> call, string verb, Machine machine, Action<string> onLine, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return call();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 3)
+                {
+                    onLine($"[lanq] warning: could not {verb} the incremental-bundle base for {machine.Name} ({ex.Message}); "
+                        + (verb == "read" ? "sending a full bundle" : "the next job there sends a full bundle"));
+                    return null;
+                }
+
+                await delay(TimeSpan.FromMilliseconds(100 * attempt), ct).ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task<SshResult> UploadAndPrepare(string jobId, JobPayload payload, Machine machine, string local, Action<string> onLine, CancellationToken ct)
     {
         var step = await ssh.UploadAsync(machine, local, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
@@ -435,6 +464,18 @@ public sealed class JobRunner(
         return value is not null && int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0
             ? n.ToString(CultureInfo.InvariantCulture)
             : null;
+    }
+
+    private static bool IsRepoId(string id)
+    {
+        try
+        {
+            return RemoteScripts.SafeRepoId(id) == id;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static JobResult Rejected(string jobId, IReadOnlyList<SecretFinding> findings)

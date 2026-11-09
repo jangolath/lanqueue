@@ -68,7 +68,8 @@ Transfer and supply chain:
   is still a local ancestor of the snapshot, so usually only the new commits and the uncommitted overlay travel. The
   worker checks the bundle with `git bundle verify` before fetching; if its cache lost the base, the job falls back
   once to a full bundle automatically (one log line says so). Rewritten history, a pruned base or a missing or
-  unreadable `bases.json` simply mean a full bundle. Bundles are now built when a git machine actually gets the job.
+  unreadable `bases.json` simply mean a full bundle. A `bases.json` that cannot be read or written (for example locked by a
+  parallel `lanq` on Windows) is retried twice, then one warning line is printed and the job goes on. Bundles are now built when a git machine actually gets the job.
   Archive mode is unchanged.
 - **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
   HEAD tree are checked against `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.pfx`, `*.p12`, `*.key`,

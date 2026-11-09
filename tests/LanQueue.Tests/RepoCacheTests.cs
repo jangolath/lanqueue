@@ -70,7 +70,10 @@ public sealed class RepoCacheTests : IDisposable
     {
         Assert.Throws<ArgumentException>(() => RemoteScripts.Prepare(T.Linux(), "j", repoId));
         Assert.Throws<ArgumentException>(() => RemoteScripts.Prepare(T.Windows(), "j", repoId));
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", "1", repoId));
+        if (repoId is not null)
+        {
+            Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", "1", repoId)); // null: cleanup without the cache steps
+        }
     }
 
     [Fact]

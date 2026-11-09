@@ -12,7 +12,7 @@ public sealed class RunnerTests : IDisposable
 
     private readonly List<string> _output = [];
 
-    private readonly BaseStore _bases = new(null);
+    private BaseStore _bases = new(null);
 
     internal sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
     {
@@ -32,10 +32,12 @@ public sealed class RunnerTests : IDisposable
                 File.WriteAllText(archive, "x");
             }
 
-            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null, Head: Head, CommittedFiles: Committed, CommittedConfigs: Configs));
+            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) && !NoRepoId ? T.RepoId : null, Head: Head, CommittedFiles: Committed, CommittedConfigs: Configs));
         }
 
         public string Sha { get; set; } = "abc";
+
+        public bool NoRepoId { get; set; }
 
         public List<string> Committed { get; } = ["src/app.cs", ".env.example"];
 
@@ -843,6 +845,99 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(1, prepares);
         Assert.Single(ssh.Uploads);
         Assert.DoesNotContain(_output, l => l.Contains("full bundle", StringComparison.Ordinal));
+    }
+
+    /// <summary>bases.json shared with a parallel lanq (Windows sharing violation): a failing store is retried, then only costs a full bundle.</summary>
+    private sealed class FlakyBaseStore(int failingSets, int failingGets, Exception? error = null) : BaseStore(null)
+    {
+        private readonly Exception _error = error ?? new IOException("The process cannot access the file because it is being used by another process.");
+
+        public int Sets { get; private set; }
+
+        public int Gets { get; private set; }
+
+        public override string? Get(string machine, string repoId) => ++Gets <= failingGets ? throw _error : base.Get(machine, repoId);
+
+        public override void Set(string machine, string repoId, string sha)
+        {
+            if (++Sets <= failingSets)
+            {
+                throw _error;
+            }
+
+            base.Set(machine, repoId, sha);
+        }
+    }
+
+    [Fact]
+    public async Task ABaseStoreThatCannotBeWrittenNeverFailsTheJob()
+    {
+        var store = new FlakyBaseStore(failingSets: 99, failingGets: 0, new UnauthorizedAccessException("Access to the path is denied."));
+        _bases = store;
+        var (runner, _, _, _) = Make();
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal(3, store.Sets);
+        Assert.Single(_output, l => l.Contains("could not record", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ABriefSharingViolationOnTheBaseStoreIsRetried()
+    {
+        var store = new FlakyBaseStore(failingSets: 2, failingGets: 2);
+        _bases = store;
+        var (runner, _, payloads, _) = Make();
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal((3, 3), (store.Sets, store.Gets));
+        Assert.Equal(payloads.Head, store.Get("build-02", T.RepoId));
+        Assert.DoesNotContain(_output, l => l.Contains("warning", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ABaseStoreThatCannotBeReadMeansAFullBundle()
+    {
+        var store = new FlakyBaseStore(failingSets: 0, failingGets: 99);
+        store.Set("build-02", T.RepoId, new string('1', 40));
+        _bases = store;
+        var (runner, _, payloads, _) = Make();
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal([null], payloads.BundleBases);
+        Assert.Single(_output, l => l.Contains("could not read", StringComparison.Ordinal));
+    }
+
+    /// <summary>A git payload without a repository id must not make cleanup throw in its finally (that leaked the slot).</summary>
+    [Fact]
+    public async Task AGitPayloadWithoutARepositoryIdStillCleansUpTheSlot()
+    {
+        var (runner, ssh, payloads, _) = Make();
+        payloads.NoRepoId = true;
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "locks/slot-1"));
+    }
+
+    [Fact]
+    public void CleanupWithoutARepositoryIdSkipsOnlyTheCacheSteps()
+    {
+        foreach (var m in new[] { T.Linux(), T.Windows() })
+        {
+            var s = RemoteScripts.Cleanup(m, "j1", "1", null);
+            Assert.Contains("locks/slot-1", s, StringComparison.Ordinal);
+            Assert.Contains("jobs/", s, StringComparison.Ordinal);
+            Assert.DoesNotContain("repos/", s, StringComparison.Ordinal);
+        }
+
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j1", "1", "../../etc"));
     }
 
     [Fact]
