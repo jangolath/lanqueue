@@ -161,7 +161,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
 
         if (!result.Ok)
         {
-            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", FirstLine(result.Output)) { HoldKind = HoldKind.Unreachable, LooksAsleep = WakeService.LooksAsleep(result) };
+            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", JobRunner.SafeLine(result.IsSshFailure ? SshErrors.Explain(result.Output, machine.Ssh) : SshErrors.FirstLine(result.Output))) { HoldKind = HoldKind.Unreachable, LooksAsleep = WakeService.LooksAsleep(result) };
         }
 
         var values = Parse(result.Output);
@@ -283,7 +283,4 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
     /// <summary>A non-negative finite number, or null when the key is missing or garbled (treated as unknown).</summary>
     private static double? OptionalNum(Dictionary<string, string> v, string key) =>
         TryNum(v, key, out var value) && value >= 0 ? value : null;
-
-    private static string FirstLine(string text) => JobRunner.SafeLine(
-        text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "no output");
 }

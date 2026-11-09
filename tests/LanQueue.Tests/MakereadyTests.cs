@@ -18,7 +18,7 @@ public class MakereadyTests
 
     private const char Esc = (char)27;
 
-    private static string Report(
+    internal static string Report(
         string git = "OK", string archive = "OK", string schema = "lanq-makeready/v1", string caps = "\"dotnet\", \"java\"", string detail = "a restart is pending",
         string advice = "Restart the PC when convenient.") => $$"""
         {

@@ -74,7 +74,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all"],
+        ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
         ["version"] = [],
@@ -290,6 +291,8 @@ public static partial class Cli
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--json]
+          lanq makeready --all [--json] [--force] [--config FILE]
+          lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
           lanq --version
 
@@ -306,12 +309,18 @@ public static partial class Cli
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
         makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
         problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
-        outside its allowed hours (--force scans anyway). lanq never changes a worker.
+        outside its allowed hours (--force scans anyway). lanq never changes a worker. makeready --all checks every machine in the config (four at a
+        time, same rules) and prints one table (machine, OS, verdict OK / WARN n / FAIL n / unreachable / held / error, top problem); exit 70 any
+        machine unreachable or its report unusable, else 1 any FAIL, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or
+        config; 130 Ctrl+C.
+        init writes a commented starter machines.yml (default ./machines.yml, or --config FILE) and never overwrites a file or writes through
+        a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
         inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
-        makeready prints the validated report; wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
+        makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
+        exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
@@ -343,7 +352,7 @@ public static partial class Cli
             var message = JobRunner.SafeLine(ex.Message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch")).ConfigureAwait(false);
@@ -356,6 +365,11 @@ public static partial class Cli
         {
             await stdout.WriteLineAsync(VersionText()).ConfigureAwait(false);
             return 0;
+        }
+
+        if (p.Command == "init")
+        {
+            return await Init(p, Directory.GetCurrentDirectory(), Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), stdout, stderr).ConfigureAwait(false);
         }
 
         var home = ResolveHome(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
@@ -480,9 +494,12 @@ public static partial class Cli
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
     private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false) =>
-        stdout.WriteLineAsync(command == "run"
-            ? JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson)
-            : JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson));
+        stdout.WriteLineAsync(command switch
+        {
+            "run" => JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson),
+            "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message), LanqJson.Default.InitJson),
+            _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson),
+        });
 
     /// <summary>
     /// With --fetch the run object always carries fetched and fetchSkipped (empty when nothing was fetched or the job never ran), plus fetchDir
@@ -582,9 +599,20 @@ public static partial class Cli
         var path = explicitPath ?? env("LANQ_CONFIG");
         if (!string.IsNullOrEmpty(path))
         {
-            return exists(path) ? path : throw new ConfigException($"Config file not found: {path}");
+            return exists(path) ? path : throw new ConfigException($"Config file not found: {path}. Check the path, or write a starter file with: lanq init --config {path}");
         }
 
+        var userFile = UserConfigPath(env, windows);
+        return exists(userFile)
+            ? userFile
+            : throw new ConfigException(
+                $"No config found. Pass --config FILE, set LANQ_CONFIG, or create {userFile} (a starter file: lanq init --config {userFile}). "
+                + "A machines file in the current directory is never picked up implicitly.");
+    }
+
+    /// <summary>The per-user config file lanq reads when neither --config nor $LANQ_CONFIG is given.</summary>
+    internal static string UserConfigPath(Func<string, string?> env, bool windows)
+    {
         string userDir;
         if (windows)
         {
@@ -597,10 +625,7 @@ public static partial class Cli
             userDir = Path.Combine(!string.IsNullOrEmpty(xdg) ? xdg : Path.Combine(HomeDir(env), ".config"), "lanq");
         }
 
-        var userFile = Path.Combine(userDir, "machines.yml");
-        return exists(userFile)
-            ? userFile
-            : throw new ConfigException($"No config found. Pass --config FILE, set LANQ_CONFIG, or create {userFile}. (A machines file in the current directory is never picked up implicitly.)");
+        return Path.Combine(userDir, "machines.yml");
     }
 
     private static string HomeDir(Func<string, string?> env) =>

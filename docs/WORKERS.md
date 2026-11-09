@@ -18,7 +18,11 @@ checklist, what would break an overnight job (sleep, pending reboot, update rest
   `PAUSE` file and `allowed_hours` unless you add `--force`.
 - **On the PC itself**, before SSH is set up: download the script from its release page and run it there.
 
-Either way, lanq never changes a worker: every fix it suggests is for the PC's owner to run on that PC.
+Either way, lanq never changes a worker: every fix it suggests is for the PC's owner to run on that PC. Once the
+machines are in `machines.yml`, `lanq makeready --all` checks them all (four at a time) and prints one summary table.
+
+Setting up several workers for a team at once? [TEAM-QUICKSTART.md](TEAM-QUICKSTART.md) walks through it step by step,
+including Windows 10 build users, low-RAM micro PCs and overnight family PCs.
 
 ## Checklist
 
@@ -40,27 +44,51 @@ agent such as Claude Code, or admin rights for the build user.
 
 ## Setting up SSH on a worker
 
-**Windows** (elevated PowerShell; see Microsoft's
+**Windows** (see Microsoft's
 [Get started with OpenSSH for Windows](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)):
 
 ```powershell
+# PowerShell (as admin), on the worker
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
 Start-Service sshd
 Set-Service -Name sshd -StartupType 'Automatic'
 ```
 
-Put your public key in the build user's `C:\Users\<user>\.ssh\authorized_keys` (for an administrator account,
-Windows reads `C:\ProgramData\ssh\administrators_authorized_keys` instead; a dedicated non-admin build user is
-simpler and safer). See "Keeping your keys safe" in the README for `restrict` and `from=` options.
+Use a dedicated non-admin build user. Create it so that Windows creates its profile **before** you add the key: a
+`C:\Users\<user>` folder made by hand makes Windows put the real profile elsewhere (`C:\Users\<user>.PCNAME`), where
+sshd never looks. Then put your public key in `<profile>\.ssh\authorized_keys`, readable only by the user, SYSTEM and
+Administrators (SIDs, so it works on a Windows in any language):
+
+```powershell
+# PowerShell (as admin), on the worker
+New-LocalUser -Name lanqbuild -Password (Read-Host -AsSecureString -Prompt 'Password for lanqbuild') -PasswordNeverExpires
+Add-LocalGroupMember -SID S-1-5-32-545 -Member lanqbuild     # the built-in Users group, by SID
+runas /user:lanqbuild "cmd /c exit"                          # logs on once: creates the profile
+$p = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq (Get-LocalUser lanqbuild).SID.Value).LocalPath
+Test-Path "$p\NTUSER.DAT"                                    # must print True; if not, see TEAM-QUICKSTART.md
+New-Item -ItemType Directory -Force "$p\.ssh" | Out-Null
+Set-Content -Path "$p\.ssh\authorized_keys" -Value 'ssh-ed25519 AAAA...your key... lanq' -Encoding ascii
+icacls "$p\.ssh\authorized_keys" /inheritance:r /grant 'lanqbuild:F' /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
+```
+
+For an administrator account, Windows reads `C:\ProgramData\ssh\administrators_authorized_keys` instead, which must
+grant only Administrators and SYSTEM (`icacls` with `/inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'`); a
+non-admin build user avoids that. Once the key login works, turn password logins off and limit the firewall rule to
+private networks and your subnet: [TEAM-QUICKSTART.md, Windows worker](TEAM-QUICKSTART.md#windows-1011-worker),
+steps 2 and 6. See "Keeping your keys safe" in the README for `restrict` and `from=` options.
 
 **Linux** (Debian/Ubuntu shown):
 
 ```sh
+# bash, on the worker
+sudo apt update
 sudo apt install openssh-server git    # git is optional with `transfer: archive`; tar is already there
 sudo systemctl enable --now ssh
 ```
 
-Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
+Add your public key to `~/.ssh/authorized_keys` of the build user (`.ssh` mode `700`, the file `600`). A build user
+created with `useradd` and no password cannot log in with one; to turn password logins off for every account, see
+[TEAM-QUICKSTART.md, Linux worker](TEAM-QUICKSTART.md#linux-worker).
 
 ## Wake-on-LAN for a sleeping worker
 
@@ -105,7 +133,7 @@ the environment of long-running helper processes you want stopped with the job.
 
 ## Then, on your PC
 
-1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
+1. Add the worker to your `machines.yml` (`lanq init` writes a starter file; see also `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
    `capabilities`, `max_jobs`, optional `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for
    a worker without git). For a PC someone else also uses, see the "family PC" example: hours by day, low priority
    (the default), a memory floor, heap caps in `env:`, and a `PAUSE` file the people at that PC can create to hold it.
