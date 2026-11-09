@@ -186,27 +186,31 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains(Lines(o, "FAIL"), l => l.Contains("git", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void TheRealScriptRunsToolsWithPathPrependLikeAJob()
+    [Theory]
+    [MemberData(nameof(StaleSlotTests.Shells), MemberType = typeof(StaleSlotTests))]
+    public void TheRealScriptRunsToolsWithPathPrependLikeAJob(string shell)
     {
-        var shell = OperatingSystem.IsWindows() ? "windows" : "linux";
         using var worker = new LocalWorker();
         var bin = Path.Combine(worker.Root, "fake-bin");
         Directory.CreateDirectory(bin);
-        if (OperatingSystem.IsWindows())
+        File.WriteAllText(Path.Combine(bin, "npm.cmd"), "@echo 9.9.9-fake" + (char)13 + (char)10);
+        var npm = Path.Combine(bin, "npm");
+        File.WriteAllText(npm, "#!/bin/sh" + (char)10 + "echo 9.9.9-fake" + (char)10);
+        if (!OperatingSystem.IsWindows())
         {
-            File.WriteAllText(Path.Combine(bin, "npm.cmd"), "@echo 9.9.9-fake\r\n");
-        }
-        else
-        {
-            var npm = Path.Combine(bin, "npm");
-            File.WriteAllText(npm, "#!/bin/sh\necho 9.9.9-fake\n");
             File.SetUnixFileMode(npm, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
+        var dir = bin.Replace('\\', '/');
+        if (shell == "linux" && OperatingSystem.IsWindows())
+        {
+            dir = "/" + char.ToLowerInvariant(dir[0]) + dir[2..]; // Git for Windows sh: a PATH entry cannot contain "C:"
+        }
+
         var m = worker.Machine;
+        m.Os = shell == "windows" ? MachineOs.Windows : MachineOs.Linux;
         m.Capabilities = ["npm", "rust"];
-        m.PathPrepend = [bin.Replace('\\', '/')];
+        m.PathPrepend = [dir];
         m.Env = new Dictionary<string, string> { ["CARGO_HOME"] = Path.Combine(worker.Root, "no-cargo") };
         m.Transfer = TransferMode.Archive;
         var output = StaleSlotTests.RunScript(shell, RemoteScripts.Doctor(m));
