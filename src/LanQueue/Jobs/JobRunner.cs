@@ -179,31 +179,53 @@ public sealed class JobRunner(
         output($"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-        await using var logFile = new StreamWriter(logPath, append: false);
+        var logFile = new StreamWriter(logPath, append: false);
+        var logGate = new object();
+        var logOpen = true;
         void OnLine(string line)
         {
             line = SafeLine(line);
-            logFile.WriteLine(line);
-            output(line);
-        }
-
-        JobResult result;
-        try
-        {
-            result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
-                .ConfigureAwait(false);
-            if (!cleanup.Ok)
+            lock (logGate)
             {
-                output($"[lanq] warning: cleanup on {machine.Name} did not finish; check {machine.WorkRoot}/jobs/{jobId}");
+                if (!logOpen)
+                {
+                    return; // a line that arrives after the job ended is dropped, never written to a closed log
+                }
+
+                logFile.WriteLine(line);
+                output(line);
             }
         }
 
-        log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
-        return result;
+        try
+        {
+            JobResult result;
+            try
+            {
+                result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!cleanup.Ok)
+                {
+                    output($"[lanq] warning: cleanup on {machine.Name} did not finish; check {machine.WorkRoot}/jobs/{jobId}");
+                }
+            }
+
+            log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
+            return result;
+        }
+        finally
+        {
+            lock (logGate)
+            {
+                logOpen = false;
+            }
+
+            await logFile.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, Action<string> onLine, CancellationToken ct)

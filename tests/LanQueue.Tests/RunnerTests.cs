@@ -507,4 +507,65 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal("build-02", r.Machine); // ranking still uses each machine's own result
         Assert.Equal(["build-02", "build-01"], ssh.Finished);
     }
+
+    [Fact]
+    public async Task ALineArrivingAfterTheJobEndedIsDroppedNotACrash()
+    {
+        var ssh = new LateLineSsh();
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var runner = new JobRunner(config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _output.Add);
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        ssh.Release.SetResult();
+        await ssh.LateCall!;
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Null(ssh.LateError);
+        Assert.DoesNotContain("late", _output);
+    }
+
+    /// <summary>Calls the job's line callback once more after the job has already returned, as a slow pipe reader could.</summary>
+    private sealed class LateLineSsh : ISshClient
+    {
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task? LateCall { get; private set; }
+
+        public Exception? LateError { get; private set; }
+
+        public Task<SshResult> RunAsync(Config.Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+        {
+            if (DecodedContains(machine, remoteCommand, "SLOT="))
+            {
+                return Task.FromResult(new SshResult(0, "SLOT=1"));
+            }
+
+            if (DecodedContains(machine, remoteCommand, "disk_free_gb"))
+            {
+                return Task.FromResult(new SshResult(0, Healthy(0.1)));
+            }
+
+            if (onLine is not null && (DecodedContains(machine, remoteCommand, "LASTEXITCODE") || remoteCommand.Contains("setsid -w", StringComparison.Ordinal)))
+            {
+                LateCall = Task.Run(async () =>
+                {
+                    await Release.Task;
+                    try
+                    {
+                        onLine("late");
+                    }
+                    catch (Exception ex)
+                    {
+                        LateError = ex;
+                    }
+                });
+            }
+
+            return Task.FromResult(new SshResult(0, ""));
+        }
+
+        public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(new SshResult(0, ""));
+    }
 }

@@ -52,24 +52,34 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
             psi.ArgumentList.Add(a);
         }
 
-        var sb = new OutputCollector(keepTailOnly: onLine is not null);
+        var collected = new OutputCollector(keepTailOnly: onLine is not null);
         var gate = new object();
-        void Handle(string? line)
+        var closed = false;
+        void Handle(string line)
         {
-            if (line is null)
-            {
-                return;
-            }
-
             lock (gate)
             {
-                onLine?.Invoke(sb.Add(line));
+                if (closed)
+                {
+                    return; // the result was already built: a straggling line is dropped, never delivered late
+                }
+
+                collected.Add(line);
+                onLine?.Invoke(line);
+            }
+        }
+
+        SshResult Finish(int exitCode, string? suffix, bool timedOut)
+        {
+            lock (gate)
+            {
+                closed = true;
+                var text = collected.ToString();
+                return new SshResult(exitCode, suffix is null ? text : text + Environment.NewLine + suffix, timedOut);
             }
         }
 
         using var proc = new Process { StartInfo = psi };
-        proc.OutputDataReceived += (_, e) => Handle(e.Data);
-        proc.ErrorDataReceived += (_, e) => Handle(e.Data);
         try
         {
             proc.Start();
@@ -80,8 +90,9 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
         }
 
         proc.StandardInput.Close(); // never wait for interactive input
-        proc.BeginOutputReadLine();
-        proc.BeginErrorReadLine();
+        var pumps = Task.WhenAll(
+            LineReader.PumpAsync(proc.StandardOutput, Handle),
+            LineReader.PumpAsync(proc.StandardError, Handle));
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
@@ -91,52 +102,157 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
         }
         catch (OperationCanceledException)
         {
-            proc.Kill(entireProcessTree: true);
+            try
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // it exited on its own in the meantime
+            }
+
+            await Drain(pumps).ConfigureAwait(false);
+            var timedOut = Finish(TimedOutExitCode, "[lanq] timed out after " + Describe(timeout), timedOut: true);
             ct.ThrowIfCancellationRequested();
-            return new SshResult(TimedOutExitCode, sb + Environment.NewLine + "[lanq] timed out after " + Describe(timeout), TimedOut: true);
+            return timedOut;
         }
 
-        proc.WaitForExit(); // flush async readers
-        return new SshResult(proc.ExitCode, sb.ToString());
+        await Drain(pumps).ConfigureAwait(false);
+        return Finish(proc.ExitCode, null, timedOut: false);
+    }
+
+    /// <summary>Lets the readers finish what the process already wrote, but never waits forever (a grandchild may hold the pipe).</summary>
+    private static async Task Drain(Task pumps)
+    {
+        try
+        {
+            await pumps.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            // whatever arrives later is dropped by the closed gate
+        }
     }
 }
 
 /// <summary>
-/// Collects a command's output for the returned <see cref="SshResult"/>. A single line is capped at <see cref="MaxLineChars"/>. When the
-/// output is also streamed to a callback (a job can run for hours), only the last <see cref="TailChars"/> are kept, so memory stays bounded.
+/// Splits a stream into lines without ever holding more than <see cref="OutputCollector.MaxLineChars"/> of one line: the rest of an
+/// overlong line is discarded and the line ends with a marker. A newline-free flood therefore costs a fixed amount of memory.
+/// </summary>
+internal static class LineReader
+{
+    internal const string Truncated = " [lanq: line truncated]";
+
+    public static async Task PumpAsync(TextReader reader, Action<string> onLine)
+    {
+        var buffer = new char[4096];
+        var line = new StringBuilder();
+        var truncated = false;
+
+        void Emit()
+        {
+            if (!truncated && line.Length > 0 && line[^1] == (char)13)
+            {
+                line.Length--; // CRLF line ending
+            }
+
+            if (truncated)
+            {
+                if (char.IsHighSurrogate(line[^1]))
+                {
+                    line.Length--; // never split a surrogate pair
+                }
+
+                line.Append(Truncated);
+            }
+
+            onLine(line.ToString());
+            line.Clear();
+            truncated = false;
+        }
+
+        try
+        {
+            int n;
+            while ((n = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) > 0)
+            {
+                for (var i = 0; i < n; i++)
+                {
+                    var c = buffer[i];
+                    if (c == (char)10)
+                    {
+                        Emit();
+                    }
+                    else if (line.Length < OutputCollector.MaxLineChars)
+                    {
+                        line.Append(c);
+                    }
+                    else
+                    {
+                        truncated = true;
+                    }
+                }
+            }
+
+            if (line.Length > 0)
+            {
+                Emit();
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            // the process was killed or disposed: stop reading
+        }
+    }
+}
+
+/// <summary>
+/// Collects a command's output for the returned <see cref="SshResult"/>, always bounded. When the output is also streamed to a callback (a
+/// job can run for hours) only the last <see cref="TailChars"/> are kept. Otherwise (slot claim, health probe) only the first
+/// <see cref="HeadChars"/> are kept: the values lanq reads come first, and a worker that floods more is cut off. Not thread-safe; the
+/// caller serialises access.
 /// </summary>
 internal sealed class OutputCollector(bool keepTailOnly)
 {
     internal const int TailChars = 64 * 1024;
 
-    internal const int MaxLineChars = 16 * 1024;
+    internal const int HeadChars = 64 * 1024;
 
-    private const string Truncated = " [lanq: line truncated]";
+    internal const int MaxLineChars = 16 * 1024;
 
     private readonly StringBuilder _sb = new();
     private bool _dropped;
 
-    /// <summary>Records one line and returns it as it should be shown (truncated with a marker if overlong).</summary>
-    public string Add(string line)
+    public void Add(string line)
     {
-        if (line.Length > MaxLineChars)
+        if (!keepTailOnly)
         {
-            line = string.Concat(line.AsSpan(0, MaxLineChars), Truncated);
+            if (_dropped || _sb.Length + line.Length + Environment.NewLine.Length > HeadChars)
+            {
+                _dropped = true;
+                return;
+            }
+
+            _sb.AppendLine(line);
+            return;
         }
 
         _sb.AppendLine(line);
-        if (keepTailOnly && _sb.Length > 2 * TailChars)
+        if (_sb.Length > 2 * TailChars)
         {
             _sb.Remove(0, _sb.Length - TailChars); // amortised: trims only once the buffer has doubled
             _dropped = true;
         }
-
-        return line;
     }
 
     public override string ToString()
     {
-        if (!keepTailOnly || (!_dropped && _sb.Length <= TailChars))
+        if (!keepTailOnly)
+        {
+            return _dropped ? _sb + "[lanq] later output dropped" : _sb.ToString();
+        }
+
+        if (!_dropped && _sb.Length <= TailChars)
         {
             return _sb.ToString();
         }
