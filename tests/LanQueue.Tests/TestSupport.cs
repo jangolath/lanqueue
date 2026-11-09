@@ -69,6 +69,12 @@ internal static class Shells
         }
     }
 
+    /// <summary>
+    /// A test-level guard: no generated script may run longer than this. A script that hangs (a FIFO read, a link loop, a kill that did not
+    /// happen) is killed with its tree and the test fails with a TimeoutException instead of spinning for an hour.
+    /// </summary>
+    public static readonly TimeSpan Guard = TimeSpan.FromMinutes(5);
+
     public static (int Code, string Output) Exec(string file, IEnumerable<string> args, IReadOnlyDictionary<string, string>? env = null)
     {
         var psi = new ProcessStartInfo(file) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -84,9 +90,23 @@ internal static class Shells
 
         using var p = Process.Start(psi)!;
         var err = p.StandardError.ReadToEndAsync();
-        var output = p.StandardOutput.ReadToEnd();
+        var output = p.StandardOutput.ReadToEndAsync();
+        if (!p.WaitForExit(Guard) || !Task.WhenAll(output, err).Wait(Guard))
+        {
+            try
+            {
+                p.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // it exited in the meantime
+            }
+
+            throw new TimeoutException($"{file} ran longer than the {Guard.TotalMinutes} minute test guard; killed.");
+        }
+
         p.WaitForExit();
-        return (p.ExitCode, output + err.Result);
+        return (p.ExitCode, output.Result + err.Result);
     }
 
     internal static bool OnPath(string exe)
