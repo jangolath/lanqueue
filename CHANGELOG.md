@@ -4,6 +4,11 @@
 
 ### Getting a team's pool going
 
+- **`lanq makeready` now runs lanq-makeready 0.2.0** (verified against its release SHA256SUMS and build-provenance
+  attestation): a READY / READY WITH WARNINGS / NOT READY verdict with numbered next steps (exact command, shell, and
+  whether it needs admin), Wake-on-LAN and Fast Startup readiness, Windows 10 end-of-support, OpenSSH Server, firewall
+  and default-shell checks, Linux end-of-life, sshd password and auto-suspend checks, and a `machines.yml` snippet sized
+  from RAM and CPUs (`max_jobs`, `min_free_mem_gb`, "suited for", `wake:`).
 - **`lanq makeready --all`** runs the read-only lanq-makeready check on every machine in `machines.yml`, four at a
   time, with the same rules as `lanq makeready <machine>` (a `PAUSE` file or `allowed_hours` holds a machine unless
   `--force`; the script goes on ssh stdin), and prints one table: machine, OS, verdict (`OK`, `WARN n`, `FAIL n`,

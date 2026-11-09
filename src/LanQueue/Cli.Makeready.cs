@@ -13,7 +13,7 @@ namespace LanQueue;
 public static partial class Cli
 {
     /// <summary>The lanq-makeready release embedded in this build (see scripts/sync-makeready.sh).</summary>
-    internal const string MakereadyVersion = "0.1.0";
+    internal const string MakereadyVersion = "0.2.0";
 
     internal static readonly TimeSpan MakereadyTimeout = TimeSpan.FromSeconds(120);
 

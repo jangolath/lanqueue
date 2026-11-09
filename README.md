@@ -283,7 +283,7 @@ prints one table:
 
 ```text
 $ lanq makeready --all
-lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.1.0)
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.2.0)
 
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending

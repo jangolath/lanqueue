@@ -3,11 +3,12 @@
 # Changes nothing, installs nothing, makes no network calls, needs no root.
 # Every fix is printed as advice for you to run yourself (or not).
 #
-# Usage: lanq-makeready.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--quiet]
+# Usage: lanq-makeready.sh [--json PATH|-] [--out FILE] [--redact] [--hours HH:MM-HH:MM] [--quiet]
 #        --json - writes ONLY the JSON to stdout (for running over SSH: sh -s -- --json - --redact < this-file)
+#        --out FILE also saves the human report to FILE (a new file only: an existing file is never overwritten)
 # Exit:  0 = worker-ready, 1 = not ready, 2 = bad arguments.
 
-TOOL_VERSION=0.1.0
+TOOL_VERSION=0.2.0
 SEP=$(printf '\037')
 CHECKS=""
 
@@ -17,7 +18,9 @@ advice() {
   case "$1" in
     ssh.install) echo "Install and start an SSH server yourself, for example (Debian/Ubuntu): sudo apt install openssh-server ; sudo systemctl enable --now ssh" ;;
     ssh.start) echo "sshd is installed but not running. Start it yourself: sudo systemctl enable --now ssh   (the unit is called sshd on Fedora/RHEL)" ;;
-    ssh.nokeys) echo "Put the orchestrator public key in the build user's ~/.ssh/authorized_keys (chmod 600). Fine to ignore if another user is the build user." ;;
+    ssh.nokeys) echo "As the build user: mkdir -p ~/.ssh ; chmod 700 ~/.ssh ; append the orchestrator public key (one line) to ~/.ssh/authorized_keys ; chmod 600 ~/.ssh/authorized_keys . Fine to ignore if another user is the build user." ;;
+    ssh.password) echo "Security note: sshd accepts passwords. Once key login works, make it key-only: sudoedit /etc/ssh/sshd_config.d/10-key-only.conf and add the two lines PasswordAuthentication no and KbdInteractiveAuthentication no (no sshd_config.d folder: put them near the top of /etc/ssh/sshd_config), then: sudo sshd -t && sudo systemctl reload ssh   (the unit is sshd on Fedora/RHEL)" ;;
+    os.eol) echo "Standard security support for this release has ended (Ubuntu LTS: Ubuntu Pro/ESM may still cover it, check with: pro status ; Debian: Debian LTS/ELTS may cover older releases). It still works for LanQueue, but upgrade when you can: Ubuntu: sudo do-release-upgrade (to a supported LTS such as 24.04) ; Debian: follow the release notes for Debian 13 ; or reinstall a supported release." ;;
     ssh.mac) echo "On macOS check System Settings > General > Sharing > Remote Login yourself. Note: LanQueue v0.3 workers are windows|linux only." ;;
     git.install) echo "git is only needed for transfer: git. Without it use transfer: archive, or install git with your package manager." ;;
     tar.busybox) echo "busybox tar (Alpine, minimal images) is refused by LanQueue for transfer: archive. Install GNU tar or bsdtar, for example on Alpine: apk add tar" ;;
@@ -25,28 +28,40 @@ advice() {
     docker.remote) echo "A remote docker endpoint (DOCKER_HOST or a non-local context) is never probed." ;;
     os.mac) echo "LanQueue v0.3 workers are windows|linux only, so this Mac cannot be a worker yet." ;;
     arch32) echo "32-bit x86 Linux is not supported by .NET 10. Install a 64-bit OS (the CPU may support it)." ;;
-    ram.low) echo "Less than 4 GB RAM: builds will swap and be slow. Use max_jobs: 1; below 2 GB .NET SDK builds are unreliable." ;;
+    ram.low) echo "Less than 4 GB RAM: builds will swap and be slow. In machines.yml keep max_jobs: 1 and min_free_mem_gb (LanQueue holds the PC while less memory is free), and cap build tools with the env: lines in the snippet. Below 2 GB .NET SDK builds are unreliable." ;;
+    swap.none) echo "No (or tiny) swap: a build that runs out of memory is killed. Add a swap file: sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile , then add the line '/swapfile none swap sw 0 0' to /etc/fstab (or install zram-tools)." ;;
     disk.hdd) echo "A spinning disk makes builds slow. An SSD (even a small cheap one) is the single best upgrade for an old PC." ;;
-    disk.low) echo "Free disk space is low. Each job needs room for a worktree plus build output; keep at least 20 GB free, below 10 GB the worker is refused." ;;
+    disk.low) echo "Free disk space is low. Each job needs room for a worktree plus build output; keep at least 20 GB free, below 10 GB the worker is refused. Find space: sudo apt clean ; du -xh -d1 ~ | sort -h ; or use a bigger disk." ;;
     dotnet.glibc) echo "The .NET 10 SDK needs glibc 2.27 or newer (musl 1.2.3 or newer on Alpine). Use a newer distribution release (Ubuntu 22.04/24.04, Debian 13, Alpine 3.21+)." ;;
     dotnet.mac) echo ".NET 10 supports macOS 15 and newer." ;;
     docker.daemon) echo "The docker client is installed but the engine is not answering (or you lack permission). Start the service or check group membership yourself." ;;
     docker.ram) echo "Under 4 GB RAM: containers are not recommended on this machine." ;;
-    power.sleep) echo "The machine may suspend while idle. On a desktop review it yourself in power settings; on systemd you can mask sleep targets: sudo systemctl mask sleep.target suspend.target hibernate.target" ;;
-    reboot.pending) echo "A restart is pending; the machine may reboot during a job. Restart it at a time you choose." ;;
+    power.desktop) echo "A desktop is installed; its power settings cannot be read from this session (no desktop session bus, e.g. over SSH). GNOME and GDM suspend on AC after about 15-20 minutes by default. Check Settings > Power > Automatic Suspend on the PC, or as the desktop user: gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; for the GDM login screen: sudo -u gdm dbus-run-session gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; or block all suspend: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" ;;
+    power.sleep) echo "On a PC that should stay on, stop systemd from suspending it: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target   (undo with systemctl unmask). Skip this if you want the PC to sleep and use LanQueue's wake: setting instead." ;;
+    reboot.pending) echo "A restart is pending; the machine may reboot during a job. Restart it at a time you choose: sudo reboot" ;;
+    wol.wired) echo "Wake-on-LAN needs a wired Ethernet connection (Wi-Fi rarely supports it). Use a cable, or leave wake: out and keep the PC awake." ;;
+    wol.off) echo "Turn magic-packet wake on: sudo ethtool -s IFACE wol g (lasts until reboot). Make it permanent with NetworkManager: sudo nmcli connection modify '<connection name>' 802-3-ethernet.wake-on-lan magic . Also enable Wake on LAN in the BIOS/UEFI. Test: lanq wake <machine> --wait" ;;
+    wol.nosupport) echo "This network card does not offer magic-packet wake (no g in Supports Wake-on). Try another wired port (often the onboard one), or leave wake: out." ;;
     startup.many) echo "Many enabled user services slow login and use RAM. Review them yourself with systemctl --user list-unit-files. This tool never disables anything." ;;
     temp.big) echo "Large cache folders. Review before deleting; this tool never deletes anything." ;;
     *) echo "" ;;
   esac
 }
+advice_admin() { # true when acting on that advice needs root
+  case "$1" in ssh.install|ssh.start|ssh.password|power.desktop|tar.busybox|tar.missing|os.eol|power.sleep|wol.off|swap.none|reboot.pending|dotnet.glibc|arch32|docker.daemon|git.install) echo true ;; *) echo false ;; esac
+}
 # END ADVICE
 
 # ---------- pure helpers (no I/O): used by tests with fixtures ----------
 
-add_check() { # id title status detail [advice-key] [needs-admin]
-  _adv=""
-  [ -n "$5" ] && _adv=$(advice "$5")
-  CHECKS="${CHECKS}$1${SEP}$2${SEP}$3${SEP}$4${SEP}${_adv}${SEP}${6:-false}
+add_check() { # id title status detail [advice-key[:iface]] [needs-admin-to-read]; IFACE in the advice becomes iface
+  _adv=""; _fx=false
+  if [ -n "$5" ]; then
+    _adv=$(advice "${5%%:*}"); _fx=$(advice_admin "${5%%:*}")
+    case "$5" in *:*) _sub=${5#*:}
+      while true; do case "$_adv" in *IFACE*) _adv="${_adv%%IFACE*}$_sub${_adv#*IFACE}" ;; *) break ;; esac; done ;; esac
+  fi
+  CHECKS="${CHECKS}$1${SEP}$2${SEP}$3${SEP}$4${SEP}${_adv}${SEP}${6:-false}${SEP}${_fx}
 "
 }
 
@@ -144,6 +159,8 @@ redact_facts() { # only free-text facts; fields that drive logic are untouched
     eval "F_T_$_n=\$_rv"
   done
   F_HOST="<redacted>"; F_USER="<redacted>"
+  [ -n "${F_WOL_MAC:-}" ] && F_WOL_MAC="<mac>"
+  return 0
 }
 
 classify_tar() { # text of tar --version (stderr included) -> gnu | bsd | busybox | none
@@ -155,11 +172,90 @@ classify_tar() { # text of tar --version (stderr included) -> gnu | bsd | busybo
   esac
 }
 
+distro_eol() { # $1 = os-release ID, $2 = VERSION_ID -> last month with standard security support (YYYYMM), "old" = older than this table, empty = unknown
+  _M=${2%%.*}; _m=${2#*.}; [ "$_m" = "$2" ] && _m=0; _m=${_m%%.*}; case "$_m" in 0?*) _m=${_m#0} ;; esac
+  case "$_M:$_m" in *[!0-9:]*|:*|*:) return 0 ;; esac
+  case "$1" in
+    ubuntu) _y=$((2000 + _M))
+      if [ "$_M" -lt 16 ]; then echo old
+      elif [ "$_M" = 16 ] && [ "$_m" = 4 ]; then echo 202104
+      elif [ "$_m" = 4 ] && [ $((_M % 2)) = 0 ]; then _y=$((_y + 5)); echo "$((_y * 100 + 5))" # LTS: 5 years
+      else _t=$((_y * 12 + _m + 8)); _y=$((_t / 12)); echo "$((_y * 100 + _t % 12 + 1))"; fi ;; # interim: 9 months
+    debian|raspbian) case "$_M" in 10) echo 202406 ;; 11) echo 202608 ;; 12) echo 202806 ;; 13) echo 203006 ;; *) [ "$_M" -lt 10 ] && echo old ;; esac ;;
+    alpine) [ "$_M" = 3 ] || return 0 # official end dates (alpinelinux.org/releases) are the 1st of a month: the month before is the last
+      case "$_m" in 17) echo 202410 ;; 18) echo 202504 ;; 19) echo 202510 ;; 20) echo 202603 ;; 21) echo 202610 ;; 22) echo 202704 ;; 23) echo 202710 ;; *) [ "$_m" -lt 17 ] && echo old ;; esac ;;
+    fedora) case "$_M" in 39) echo 202411 ;; 40) echo 202505 ;; 41) echo 202512 ;; 42) echo 202605 ;; 43) echo 202612 ;; *) [ "$_M" -lt 39 ] && echo old ;; esac ;;
+    centos) case "$_M" in 7) echo 202406 ;; 8) echo 202112 ;; 9) echo 202705 ;; esac ;;
+    linuxmint) case "$_M" in 19) echo 202304 ;; 20) echo 202504 ;; 21) echo 202704 ;; 22) echo 202904 ;; esac ;;
+    *) ;;
+  esac
+  return 0
+}
+
+pick_wired() { # lines "name type has-device wireless operstate mac" -> "name mac" of a physical wired NIC (an up one first)
+  _h='[0-9a-f][0-9a-f]'
+  awk -v re="^$_h:$_h:$_h:$_h:$_h:$_h\$" '$1 != "lo" && $2 == "1" && $3 == "yes" && $4 == "no" && $6 ~ re && $6 != "00:00:00:00:00:00" { if ($5 == "up" && u == "") u = $1 " " $6; else if (f == "") f = $1 " " $6 } END { if (u != "") print u; else if (f != "") print f }'
+}
+
+sshd_pw_auth() { # sshd config text on stdin -> yes | no | unset (the first value wins, as in sshd; Match blocks are not evaluated)
+  # Reads to the end instead of exiting early: an early exit closes the pipe while sshd_conf_lines is still writing, and
+  # dash then prints "printf: I/O error" once per remaining line (seen on GitHub's Ubuntu runner).
+  awk 'BEGIN { v = "unset" } d { next } { sub(/^[ \t]+/, ""); n = split($0, a, /[ \t=]+/); k = tolower(a[1]) } k == "match" { d = 1; next } k == "passwordauthentication" && n >= 2 { v = tolower(a[2]); d = 1 } END { print v }'
+}
+
+logind_values() { # logind.conf text (main file, then drop-ins) on stdin -> "IdleAction HandleLidSwitch HandleLidSwitchExternalPower", "-" when unset; the last value wins
+  awk '/^[ \t]*[#;]/ { next } { gsub(/[ \t]/, "") } /^IdleAction=/ { i = substr($0, 12) } /^HandleLidSwitch=/ { l = substr($0, 17) } /^HandleLidSwitchExternalPower=/ { e = substr($0, 30) } END { print (i == "" ? "-" : i) " " (l == "" ? "-" : l) " " (e == "" ? "-" : e) }'
+}
+
+classify_sleep() { # $1 logind finding, $2 GNOME sleep-inactive-ac-type ("" = not read), $3 display manager active, $4 session bus (yes|no) -> "state|detail"
+  if [ -n "$1" ]; then echo "sleeps|$1"; return 0; fi
+  if [ "$4" = yes ] && [ -n "$2" ]; then
+    case "$2" in *nothing*) echo "unmasked|logind idle and lid, this user's GNOME setting" ;; *) echo "sleeps|GNOME idle action $2 on AC (this user)" ;; esac
+    return 0
+  fi
+  if [ "$3" = yes ]; then echo "desktop|"; return 0; fi
+  echo "unmasked|logind idle and lid"
+}
+
+logind_auto_suspend() { # $1 idle $2 lid $3 lid-on-AC $4 laptop(yes|no) -> what would suspend this PC, empty = nothing found
+  case "$1" in suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "logind IdleAction=$1"; return 0 ;; esac
+  [ "$4" = yes ] || return 0
+  _la=$3; [ "$_la" = - ] && _la=$2
+  case "$_la" in
+    -) echo "laptop lid: HandleLidSwitch default (suspend)" ;;
+    suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "laptop lid: HandleLidSwitch=$_la" ;;
+  esac
+  return 0
+}
+
+# Pool sizing, the thresholds LanQueue 0.5.1+ lanq health uses. $1 = RAM in whole GB, $2 = logical CPUs (24-31 GB counts as the top band).
+suggest_jobs() {
+  if [ "$1" -lt 6 ]; then _j=1; elif [ "$1" -lt 12 ]; then _j=2
+  elif [ "$1" -lt 24 ]; then _j=3; [ "$2" -ge 8 ] && _j=4
+  else _j=6; [ "$2" -ge 16 ] && _j=8; fi
+  [ "$2" -ge 1 ] && [ "$_j" -gt "$2" ] && _j=$2
+  echo "$_j"
+}
+suggest_minmem() { if [ "$1" -lt 6 ]; then echo 1.5; else echo 2; fi; } # headroom for one more job
+suited_tier() { # $1 = RAM GB, $2 = logical CPUs
+  if [ "$1" -lt 6 ]; then echo light; elif [ "$1" -ge 16 ] && [ "$2" -ge 4 ]; then echo heavy; else echo medium; fi
+}
+suited_text() { # $1 = tier, $2 = yes when Docker works
+  case "$1" in light) _s="light: lint and unit-test shards" ;; heavy) _s="heavy: full suites and large builds" ;; *) _s="medium: test shards and builds" ;; esac
+  [ "$2" = yes ] && _s="$_s + container builds"
+  echo "$_s"
+}
+
 eval_checks() { # reads F_* facts, fills CHECKS
   CHECKS=""
   _os="${F_OSNAME:-$F_OS}"
   if [ "$F_OS" = Darwin ]; then add_check os.version OS FAIL "$_os (macOS): LanQueue workers are windows|linux only" os.mac
-  else add_check os.version OS OK "$_os"; fi
+  else
+    _eol=$(distro_eol "${F_OSID:-}" "${F_OSVERID:-}")
+    if [ "$_eol" = old ]; then add_check os.version OS WARN "$_os: end of life (older than this table)" os.eol
+    elif [ -n "$_eol" ] && [ "${F_NOW_YM:-0}" -gt "$_eol" ]; then add_check os.version OS WARN "$_os: end of life: standard security support ended after ${_eol%??}-${_eol#????}" os.eol
+    else add_check os.version OS OK "$_os"; fi
+  fi
   case "$F_ARCH" in
     i?86|x86) add_check os.arch Architecture FAIL "32-bit ($F_ARCH)" arch32 ;;
     *) add_check os.arch Architecture OK "$F_ARCH" ;;
@@ -174,13 +270,22 @@ eval_checks() { # reads F_* facts, fills CHECKS
   if [ "$_min" -lt 10 ]; then _ds=FAIL; _da=disk.low
   elif [ "$F_DISK" = HDD ]; then _ds=WARN; _da=disk.hdd
   elif [ "$_min" -lt 20 ]; then _ds=WARN; _da=disk.low; fi
-  add_check disk Disk "$_ds" "system drive $F_SYSFREEGB GB free, work drive $F_WORKFREEGB GB free, disk type: ${F_DISK:-Unknown}" "$_da"
+  _dd="system drive $F_SYSFREEGB GB free, work drive $F_WORKFREEGB GB free, disk type: ${F_DISK:-Unknown}"
+  [ "$_da" = disk.low ] && _dd="$_dd (recommended: at least 20 GB free; under 10 GB is refused)"
+  add_check disk Disk "$_ds" "$_dd" "$_da"
   case "$F_SSHD" in
     running) add_check ssh.server "SSH server" OK "sshd running" ;;
     socket) add_check ssh.server "SSH server" OK "sshd is socket-activated (starts on the first connection)" ;;
     stopped) add_check ssh.server "SSH server" FAIL "sshd installed but not running" ssh.start ;;
     notinstalled) add_check ssh.server "SSH server" FAIL "no sshd found" ssh.install ;;
     *) add_check ssh.server "SSH server" SKIP "could not determine without admin rights" ssh.mac true ;;
+  esac
+  case "$F_SSHD:${F_SSHD_PW:-unknown}" in
+    notinstalled:*) ;;
+    *:yes) add_check ssh.password "SSH passwords" WARN "PasswordAuthentication yes in the sshd config (security note)" ssh.password ;;
+    *:unset) add_check ssh.password "SSH passwords" WARN "PasswordAuthentication is not set, so sshd's default (yes) applies (security note)" ssh.password ;;
+    *:no) add_check ssh.password "SSH passwords" OK "key-only (PasswordAuthentication no)" ;;
+    *) add_check ssh.password "SSH passwords" SKIP "sshd config not readable" ;;
   esac
   if [ "$F_AUTHKEYS" = yes ]; then add_check ssh.keys "SSH keys" OK "authorized_keys present and non-empty"
   else add_check ssh.keys "SSH keys" WARN "no authorized_keys for this user" ssh.nokeys; fi
@@ -202,17 +307,41 @@ eval_checks() { # reads F_* facts, fills CHECKS
   case "$F_SLEEP" in
     never|masked) add_check power.sleep "Sleep/suspend" OK "will not sleep ($F_SLEEP)" ;;
     sleeps) add_check power.sleep "Sleep/suspend" WARN "may sleep: ${F_SLEEP_DETAIL:-idle suspend enabled}" power.sleep ;;
+    unmasked) add_check power.sleep "Sleep/suspend" OK "sleep targets are not masked; no automatic suspend was found (checked: ${F_SLEEP_DETAIL:-logind idle and lid}); masking them makes an always-on PC certain" ;;
+    desktop) add_check power.sleep "Sleep/suspend" WARN "a desktop is installed (display manager active) but its power settings cannot be read here; GNOME and GDM suspend on AC after about 15-20 minutes by default" power.desktop ;;
     *) add_check power.sleep "Sleep/suspend" SKIP "could not determine (no pmset, gsettings or systemd)" ;;
   esac
   if [ "$F_REBOOT" = yes ]; then add_check reboot.pending "Pending reboot" WARN "a restart is pending" reboot.pending
   else add_check reboot.pending "Pending reboot" OK "none"; fi
-  add_check wol "Wake-on-LAN" SKIP "needs root to read (ethtool)" "" true
+  eval_wol
+  _swt="Swap"
+  if [ -z "${F_SWAPMB:-}" ]; then add_check swap "$_swt" SKIP "could not read"
+  elif [ "${F_RAMMB:-0}" -lt 8192 ] && [ "$F_SWAPMB" -lt 1024 ]; then add_check swap "$_swt" WARN "$(gb "$F_SWAPMB") GB swap with $(gb "${F_RAMMB:-0}") GB RAM" swap.none
+  else add_check swap "$_swt" OK "$(gb "$F_SWAPMB") GB swap"; fi
   if [ -z "$F_STARTUP" ]; then add_check startup "Startup items" SKIP "could not read"
   elif [ "$F_STARTUP" -gt 20 ]; then add_check startup "Startup items" WARN "$F_STARTUP enabled user services/agents" startup.many
   else add_check startup "Startup items" OK "$F_STARTUP enabled user services/agents"; fi
   if [ -z "$F_TEMP" ]; then add_check temp "Cache folders" SKIP "none readable"
   elif [ "${F_TEMP_BIGMB:-0}" -ge 5120 ]; then add_check temp "Cache folders" WARN "$F_TEMP" temp.big
   else add_check temp "Cache folders" OK "$F_TEMP"; fi
+}
+
+eval_wol() {
+  _t="Wake-on-LAN"
+  if [ -z "$F_WOL_IF" ]; then
+    if [ "$F_WOL_WIFI" = yes ]; then add_check wol "$_t" WARN "Wi-Fi only, no wired Ethernet adapter: Wake-on-LAN needs a cable" wol.wired
+    else add_check wol "$_t" WARN "no wired Ethernet adapter found" wol.wired; fi
+    return 0
+  fi
+  _n="wired $F_WOL_IF ($F_WOL_MAC)"
+  case "$F_WOL_ON" in
+    *g*) add_check wol "$_t" OK "$_n: magic-packet wake is on (Wake-on: $F_WOL_ON); the BIOS/UEFI setting cannot be read, enable it there too" ;;
+    ?*) case "$F_WOL_SUP" in
+          *g*|"") add_check wol "$_t" WARN "$_n: magic-packet wake is off (Wake-on: $F_WOL_ON)" "wol.off:$F_WOL_IF" ;;
+          *) add_check wol "$_t" WARN "$_n: the card does not support magic-packet wake (Supports Wake-on: $F_WOL_SUP)" wol.nosupport ;;
+        esac ;;
+    *) add_check wol "$_t" SKIP "$_n: Wake-on is not readable without root; check it as root: ethtool $F_WOL_IF | grep Wake-on (g = on)" "" true ;;
+  esac
 }
 
 eval_dotnet() {
@@ -253,16 +382,45 @@ eval_docker() {
   else add_check docker Docker OK "not installed; Linux runs Docker Engine natively (cgroup ${F_CGROUP:-unknown})"; fi
 }
 
-eval_verdicts() { # sets V_* from CHECKS and F_*
+eval_verdicts() { # sets V_* (and T_* = transfer tool alone) from CHECKS and F_*
   _w=$(worst "$(st ssh.server)" "$(st ssh.keys)" "$(st disk)" "$(st os.version)")
-  _g=FAIL; [ -n "$F_GIT" ] && _g=OK
-  _a=FAIL; case "$F_TARKIND:$F_GZIP" in gnu:yes|bsd:yes) _a=OK ;; esac
-  V_GIT=$(worst "$_w" "$_g")
-  V_ARCHIVE=$(worst "$_w" "$_a")
+  T_GIT=FAIL; [ -n "$F_GIT" ] && T_GIT=OK
+  T_ARCHIVE=FAIL; case "$F_TARKIND:$F_GZIP" in gnu:yes|bsd:yes) T_ARCHIVE=OK ;; esac
+  V_GIT=$(worst "$_w" "$T_GIT")
+  V_ARCHIVE=$(worst "$_w" "$T_ARCHIVE")
   if [ "$F_OS" = Darwin ]; then V_GIT=FAIL; V_ARCHIVE=FAIL; fi
   V_DOTNET=$(st dotnet)
   V_DOCKER=$(st docker)
   V_OVERNIGHT=$(worst "$(st power.sleep)" "$(st reboot.pending)")
+}
+
+is_worker_check() { case "$1" in os.version|ssh.server|ssh.keys|disk|git|tar) return 0 ;; *) return 1 ;; esac; }
+
+# One-line verdict plus the numbered next steps: every WARN/FAIL check, blockers first.
+eval_summary() { # sets S_VERDICT S_TEXT S_BLOCKERS S_WARNINGS S_STEPS (id SEP title SEP status SEP detail SEP advice SEP admin-to-fix SEP blocker)
+  _ready=0; if [ "$V_GIT" != FAIL ] || [ "$V_ARCHIVE" != FAIL ]; then _ready=1; fi
+  _sb=""; _sf=""; _sw=""
+  while IFS="$SEP" read -r _i _ti _s _d _a _adm _fx; do
+    case "$_s" in WARN|FAIL) ;; *) continue ;; esac
+    _blk=0
+    if [ "$_ready" = 0 ] && is_worker_check "$_i"; then
+      if [ "$_s" = FAIL ]; then _blk=1
+      elif [ "$T_GIT" = FAIL ] && [ "$T_ARCHIVE" = FAIL ]; then case "$_i" in git|tar) _blk=1 ;; esac; fi
+    fi
+    _ln="$_i$SEP$_ti$SEP$_s$SEP$_d$SEP$_a$SEP${_fx:-false}$SEP$_blk
+"
+    if [ "$_blk" = 1 ]; then _sb="$_sb$_ln"; elif [ "$_s" = FAIL ]; then _sf="$_sf$_ln"; else _sw="$_sw$_ln"; fi
+  done <<EOF
+$CHECKS
+EOF
+  S_STEPS="$_sb$_sf$_sw"
+  S_BLOCKERS=$(printf '%s' "$_sb" | grep -c .)
+  S_WARNINGS=$(printf '%s' "$_sf$_sw" | grep -c .)
+  if [ "$_ready" = 0 ]; then
+    S_VERDICT=NOT_READY; _p=blockers; [ "$S_BLOCKERS" = 1 ] && _p=blocker
+    S_TEXT="NOT READY ($S_BLOCKERS $_p)"
+  elif [ "$S_WARNINGS" -gt 0 ]; then S_VERDICT=READY_WITH_WARNINGS; S_TEXT="READY WITH WARNINGS ($S_WARNINGS)"
+  else S_VERDICT=READY; S_TEXT=READY; fi
 }
 
 eval_machine() { # sets M_* ; $1 = hours or empty, $2 = 1 when redacting
@@ -280,64 +438,106 @@ eval_machine() { # sets M_* ; $1 = hours or empty, $2 = 1 when redacting
     eval "_v=\${F_T_${_p%%:*}:-}"
     [ -n "$_v" ] && M_CAPS="${M_CAPS:+$M_CAPS, }${_p#*:}"
   done
-  [ -n "$F_DOCKER_SERVER" ] && M_CAPS="${M_CAPS:+$M_CAPS, }docker"
+  M_DOCKER=no; [ -n "$F_DOCKER_SERVER" ] && M_DOCKER=yes
+  [ "$M_DOCKER" = yes ] && M_CAPS="${M_CAPS:+$M_CAPS, }docker"
+  [ -n "$F_GIT" ] && M_CAPS="${M_CAPS:+$M_CAPS, }git"
   M_CAPS="${M_CAPS:+$M_CAPS, }linux"
-  M_JOBS=1; [ "${F_CORES:-0}" -ge 8 ] && [ "${F_RAMMB:-0}" -ge 16000 ] && M_JOBS=2
+  M_RAMGB=$(( ${F_RAMMB:-0} / 1024 )); _cpu=${F_CORES:-1}; case "$_cpu" in ""|*[!0-9]*) _cpu=1 ;; esac
+  M_JOBS=$(suggest_jobs "$M_RAMGB" "$_cpu")
+  M_MINMEM=$(suggest_minmem "$M_RAMGB")
+  M_TIER=$(suited_tier "$M_RAMGB" "$_cpu")
+  M_SUITED=$(suited_text "$M_TIER" "$M_DOCKER")
   M_TRANSFER=none
   if [ -n "$F_GIT" ]; then M_TRANSFER=git
   else case "$F_TARKIND:$F_GZIP" in gnu:yes|bsd:yes) M_TRANSFER=archive ;; esac; fi
   M_HOURS=$1
+  M_WAKE=no; [ "$(st wol)" = OK ] && M_WAKE=yes
 }
 
 render_snippet() {
   if [ "$F_OS" = Darwin ]; then
-    echo "# macOS: LanQueue v0.3 workers are windows|linux only, so there is no machines.yml entry for this Mac."
+    echo "# macOS: LanQueue workers are windows|linux only, so there is no machines.yml entry for this Mac."
     return
   fi
-  if [ "$V_GIT" = FAIL ] && [ "$V_ARCHIVE" = FAIL ]; then echo "# NOT READY yet: fix the FAIL items above first, then re-run."; fi
+  if [ "$V_GIT" = FAIL ] && [ "$V_ARCHIVE" = FAIL ]; then echo "# NOT READY yet: fix the MUST FIX steps first, then re-run."; fi
   echo "machines:"
   echo "  - name: \"$M_NAME\""
   echo "    os: $M_OS"
   echo "    ssh: \"$M_SSH\"   # placeholder: confirm user and host name"
   echo "    work_root: \"/srv/lq\"   # short absolute path; create it, owned by the build user"
   echo "    capabilities: [$M_CAPS]"
-  echo "    max_jobs: $M_JOBS"
+  echo "    max_jobs: $M_JOBS   # $M_RAMGB GB RAM, ${F_CORES:-?} CPUs"
+  echo "    min_free_mem_gb: $M_MINMEM   # LanQueue starts no new job while less memory than this is free"
   if [ "$M_TRANSFER" = none ]; then echo "    # transfer: needs git (transfer: git) or GNU tar/bsdtar + gzip (transfer: archive); neither found"
   else echo "    transfer: $M_TRANSFER"; fi
-  [ -n "$M_HOURS" ] && echo "    allowed_hours: \"$M_HOURS\"   # evaluated in the ORCHESTRATOR's local time"
+  if [ -n "$M_HOURS" ]; then echo "    allowed_hours: \"$M_HOURS\"   # the PC's own clock"
+  else echo "    # allowed_hours: \"22:00-07:00\"   # optional: run jobs only overnight (the PC's own clock)"; fi
+  if [ -z "$F_WOL_IF" ]; then echo "    # wake: not suggested: no wired Ethernet adapter found"
+  elif [ "$M_WAKE" = yes ] && [ "$F_WOL_MAC" = "<mac>" ]; then
+    echo "    # wake:   # Wake-on-LAN looks ready; <mac> is a placeholder (redacted): put this PC's wired MAC here and uncomment"
+    echo "    #   mac: \"<mac>\""
+  elif [ "$M_WAKE" = yes ]; then
+    echo "    wake:   # Wake-on-LAN (LanQueue 0.5+); test it: lanq wake $M_NAME --wait"
+    echo "      mac: \"$F_WOL_MAC\""
+    echo "      # broadcast: 10.20.30.255   # optional: your subnet's directed broadcast on a PC with several networks or a VPN"
+  else
+    echo "    # wake:   # not ready yet (see the Wake-on-LAN step); uncomment once it is fixed"
+    echo "    #   mac: \"$F_WOL_MAC\""
+  fi
+  if [ "$M_RAMGB" -lt 6 ]; then
+    echo "    # Low-RAM PC: keep max_jobs: 1. Optional caps for build tools (job environment only):"
+    echo "    # env:"
+    echo "    #   DOTNET_GCHeapHardLimitPercent: \"0x32\"     # .NET GC heap at most 50% of RAM (hexadecimal)"
+    echo "    #   NODE_OPTIONS: \"--max-old-space-size=1024\"  # Node heap at most 1 GB"
+    echo "    # For .NET jobs on a small box, add -m:1 to dotnet build / dotnet test commands (one MSBuild process)."
+  fi
   return 0
+}
+
+render_steps() {
+  [ -n "$S_STEPS" ] || return 0
+  echo
+  echo "Next steps (blockers first; nothing here is run for you):"
+  _n=0
+  while IFS="$SEP" read -r _i _ti _s _d _a _fx _blk; do
+    [ -n "$_i" ] || continue
+    _n=$((_n + 1)); _tag="should fix"; [ "$_blk" = 1 ] && _tag="MUST FIX"
+    _who="no root needed"; [ "$_fx" = true ] && _who="needs root"
+    printf '%2d. [%s] %s: %s\n' "$_n" "$_tag" "$_ti" "$_d"
+    printf '    do (%s): %s\n' "$_who" "${_a:-see the detail above}"
+  done <<EOF
+$S_STEPS
+EOF
 }
 
 render_human() {
   echo "lanq-makeready $TOOL_VERSION (read-only: nothing is installed, changed or sent anywhere)"
+  echo "VERDICT: $S_TEXT"
   if [ "$QUIET" != 1 ]; then
     echo
-    printf '%s' "$CHECKS" | while IFS="$SEP" read -r _i _ti _s _d _a _adm; do
+    printf '%s' "$CHECKS" | while IFS="$SEP" read -r _i _ti _s _d _a _adm _fx; do
       printf '[%-4s] %s: %s\n' "$_s" "$_ti" "$_d"
-      [ -n "$_a" ] && [ "$_s" != SKIP ] && printf '       advice: %s\n' "$_a"
       [ "$_s" = SKIP ] && [ "$_adm" = true ] && echo "       skipped (needs admin); re-run as root to fill this in"
     done
   fi
   echo
   echo "Verdicts"
   printf '  %-15s %s\n' worker_git "$V_GIT" worker_archive "$V_ARCHIVE" dotnet10 "$V_DOTNET" docker "$V_DOCKER" overnight "$V_OVERNIGHT"
+  [ "$F_OS" = Darwin ] || echo "Suited for: $M_SUITED"
   if [ "$QUIET" != 1 ]; then
+    render_steps
     echo
     echo "# Paste into machines.yml (confirm the placeholders):"
     render_snippet
-  fi
-  if [ "$V_GIT" = FAIL ] && [ "$V_ARCHIVE" = FAIL ]; then
     echo
-    echo "Blockers:"
-    printf '%s' "$CHECKS" | while IFS="$SEP" read -r _i _ti _s _d _; do
-      [ "$_s" = FAIL ] && printf '  - %s: %s\n' "$_ti" "$_d"
-    done
-    [ -z "$F_GIT" ] && [ "$F_TARKIND" != gnu ] && [ "$F_TARKIND" != bsd ] && echo "  - neither git nor a usable tar found: no transfer mode works"
+    echo "VERDICT: $S_TEXT"
   fi
   return 0
 }
 
 json_esc() { printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; } # ASCII only: control chars, ESC, CR and non-UTF-8 bytes become '?'
+
+json_list() { printf '%s' "$1" | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i == 1 ? "" : ", "), $i }'; }
 
 render_json() { # $1 = 1 when redacting
   _h=$F_HOST; _u=$F_USER
@@ -346,9 +546,23 @@ render_json() { # $1 = 1 when redacting
   printf '  "generatedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "host": {"hostname": "%s", "user": "%s", "os": "%s", "arch": "%s"},\n' "$(json_esc "$_h")" "$(json_esc "$_u")" "$(json_esc "${F_OSNAME:-$F_OS}")" "$(json_esc "$F_ARCH")"
   printf '  "verdicts": {"worker_git": "%s", "worker_archive": "%s", "dotnet10": "%s", "docker": "%s", "overnight": "%s"},\n' "$V_GIT" "$V_ARCHIVE" "$V_DOTNET" "$V_DOCKER" "$V_OVERNIGHT"
+  printf '  "summary": {"verdict": "%s", "text": "%s", "blockers": %s, "warnings": %s, "nextSteps": [' "$S_VERDICT" "$S_TEXT" "$S_BLOCKERS" "$S_WARNINGS"
+  _n=0
+  while IFS="$SEP" read -r _i _ti _s _d _a _fx _blk; do
+    [ -n "$_i" ] || continue
+    _n=$((_n + 1)); [ "$_n" = 1 ] || printf ','
+    _b=false; [ "$_blk" = 1 ] && _b=true
+    printf '\n    {"step": %s, "id": "%s", "title": "%s", "status": "%s", "blocker": %s, "detail": "%s", "action": "%s", "adminToFix": %s}' "$_n" "$_i" "$(json_esc "$_ti")" "$_s" "$_b" "$(json_esc "$_d")" "$(json_esc "$_a")" "${_fx:-false}"
+  done <<EOF
+$S_STEPS
+EOF
+  [ "$_n" = 0 ] || printf '\n  '
+  printf ']},\n'
+  _ct=false; [ "$M_DOCKER" = yes ] && _ct=true
+  [ "$F_OS" = Darwin ] || printf '  "suitedFor": {"tier": "%s", "containers": %s, "text": "%s"},\n' "$M_TIER" "$_ct" "$(json_esc "$M_SUITED")"
   printf '  "checks": [\n'
   _first=1
-  while IFS="$SEP" read -r _i _ti _s _d _a _adm; do
+  while IFS="$SEP" read -r _i _ti _s _d _a _adm _fx; do
     [ -z "$_i" ] && continue
     [ "$_first" = 1 ] || printf ',\n'
     _first=0
@@ -357,9 +571,10 @@ render_json() { # $1 = 1 when redacting
 $CHECKS
 EOF
   printf '\n  ],\n'
-  printf '  "capabilities": [%s],\n' "$(printf '%s' "$M_CAPS" | sed -e 's/, linux$//' -e 's/^linux$//' | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i == 1 ? "" : ", "), $i }')"
-  printf '  "suggestedMachine": {"name": "%s", "os": "%s", "ssh": "%s", "work_root": "/srv/lq", "capabilities": [%s], "max_jobs": %s, "transfer": "%s"' "$(json_esc "$M_NAME")" "$M_OS" "$(json_esc "$M_SSH")" "$(printf '%s' "$M_CAPS" | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i == 1 ? "" : ", "), $i }')" "$M_JOBS" "$M_TRANSFER"
+  printf '  "capabilities": [%s],\n' "$(json_list "$(printf '%s' "$M_CAPS" | sed -e 's/, linux$//' -e 's/^linux$//')")"
+  printf '  "suggestedMachine": {"name": "%s", "os": "%s", "ssh": "%s", "work_root": "/srv/lq", "capabilities": [%s], "max_jobs": %s, "min_free_mem_gb": %s, "transfer": "%s"' "$(json_esc "$M_NAME")" "$M_OS" "$(json_esc "$M_SSH")" "$(json_list "$M_CAPS")" "$M_JOBS" "$M_MINMEM" "$M_TRANSFER"
   [ -n "$M_HOURS" ] && printf ', "allowed_hours": "%s"' "$M_HOURS"
+  [ "$M_WAKE" = yes ] && printf ', "wake": {"mac": "%s"}' "$(json_esc "$F_WOL_MAC")"
   printf '}\n}\n'
 }
 
@@ -401,6 +616,42 @@ dir_mb() { # bounded folder size in MB, empty when absent
   [ -n "$_k" ] && echo $(( _k / 1024 ))
 }
 
+sshd_conf_lines() { # $1 = file, $2 = depth: prints its lines in order with Include files expanded where they appear (as sshd reads them)
+  [ -r "$1" ] || return 0
+  while IFS= read -r _l || [ -n "$_l" ]; do
+    case "$_l" in
+      [Ii]nclude[[:space:]]*)
+        [ "$2" -lt 3 ] || continue
+        for _g in ${_l#*[[:space:]]}; do
+          case "$_g" in /*) ;; *) _g=/etc/ssh/$_g ;; esac
+          for _f in $_g; do sshd_conf_lines "$_f" $(($2 + 1)); done
+        done ;;
+      *) printf '%s\n' "$_l" ;;
+    esac
+  done < "$1"
+}
+
+gather_wol() { # physical wired NIC, its MAC, and ethtool Wake-on when readable without root
+  F_WOL_IF=""; F_WOL_MAC=""; F_WOL_WIFI=no; F_WOL_SUP=""; F_WOL_ON=""
+  _nl=""
+  for _n in /sys/class/net/*; do
+    [ -r "$_n/type" ] || continue
+    _d=no; [ -e "$_n/device" ] && _d=yes
+    _w=no; if [ -e "$_n/wireless" ] || [ -e "$_n/phy80211" ]; then _w=yes; [ "$_d" = yes ] && F_WOL_WIFI=yes; fi
+    _nl="$_nl${_n##*/} $(cat "$_n/type" 2>/dev/null) $_d $_w $(cat "$_n/operstate" 2>/dev/null) $(cat "$_n/address" 2>/dev/null)
+"
+  done
+  _pw=$(printf '%s' "$_nl" | pick_wired)
+  [ -n "$_pw" ] || return 0
+  F_WOL_IF=${_pw%% *}; F_WOL_MAC=${_pw#* }
+  _et=""
+  if have ethtool; then _et=ethtool; elif [ -x /usr/sbin/ethtool ]; then _et=/usr/sbin/ethtool; elif [ -x /sbin/ethtool ]; then _et=/sbin/ethtool; fi
+  [ -n "$_et" ] || return 0
+  _eo=$(run_t 5 "$_et" "$F_WOL_IF" 2>/dev/null)
+  F_WOL_SUP=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Supports Wake-on:[[:space:]]*//p' | head -n 1)
+  F_WOL_ON=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p' | head -n 1)
+}
+
 gather_facts() {
   F_OS=$(uname -s); F_ARCH=$(uname -m); F_HOST=$(hostname 2>/dev/null); F_USER=$(id -un 2>/dev/null)
   F_OSNAME=""; F_OSVER=""; F_LIBC=""; F_LIBCVER=""; F_DISK=Unknown; F_SLEEP=unknown; F_REBOOT=no
@@ -415,6 +666,10 @@ gather_facts() {
     F_STARTUP=$(find "$HOME/Library/LaunchAgents" -maxdepth 1 -name '*.plist' 2>/dev/null | wc -l | tr -d ' ')
   else
     F_OSNAME=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"' | head -n 1)
+    F_OSID=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | tr -d '"' | head -n 1)
+    F_OSVERID=$(sed -n 's/^VERSION_ID=//p' /etc/os-release 2>/dev/null | tr -d '"' | head -n 1)
+    F_NOW_YM=$(date +%Y%m)
+    F_SWAPMB=$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
     F_RAMMB=$(ram_installed_mb "$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)")
     F_FREERAMMB=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
     F_CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null)
@@ -435,6 +690,14 @@ gather_facts() {
     elif have systemctl && { run_t 5 systemctl is-active --quiet ssh.socket || run_t 5 systemctl is-active --quiet sshd.socket; } 2>/dev/null; then F_SSHD=socket
     elif have sshd || [ -x /usr/sbin/sshd ]; then F_SSHD=stopped
     else F_SSHD=notinstalled; fi
+    F_SSHD_PW=unknown
+    if [ "$F_SSHD" != notinstalled ]; then
+      _sd=/usr/sbin/sshd; have sshd && _sd=sshd
+      [ "$(id -u)" = 0 ] && F_SSHD_PW=$(run_t 5 "$_sd" -T 2>/dev/null | awk '$1 == "passwordauthentication" { print $2; exit }')
+      if [ -z "$F_SSHD_PW" ] || [ "$F_SSHD_PW" = unknown ]; then
+        F_SSHD_PW=unknown; [ -r /etc/ssh/sshd_config ] && F_SSHD_PW=$(sshd_conf_lines /etc/ssh/sshd_config 0 | sshd_pw_auth)
+      fi
+    fi
     _hdd=0; _ssd=0
     for _q in /sys/block/*/queue/rotational; do
       case "$_q" in */loop*|*/ram*|*/zram*|*/dm-*|*/sr*|*/nbd*) continue ;; esac
@@ -442,12 +705,22 @@ gather_facts() {
       if [ "$(cat "$_q")" = 1 ]; then _hdd=1; else _ssd=1; fi
     done
     if [ "$_ssd" = 1 ]; then F_DISK=SSD; elif [ "$_hdd" = 1 ]; then F_DISK=HDD; fi
-    if have systemctl && [ "$(run_t 5 systemctl is-enabled sleep.target 2>/dev/null)" = masked ]; then F_SLEEP=masked
-    elif have gsettings && have_session_bus; then
-      _gt=$(run_t 5 gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null)
-      case "$_gt" in *nothing*) F_SLEEP=never ;; ?*) F_SLEEP=sleeps; F_SLEEP_DETAIL="GNOME idle action $_gt on AC" ;; esac
+    if have systemctl && { [ "$(run_t 5 systemctl is-enabled sleep.target 2>/dev/null)" = masked ] || [ "$(run_t 5 systemctl is-enabled suspend.target 2>/dev/null)" = masked ]; }; then F_SLEEP=masked
+    elif have systemctl && [ -d /run/systemd/system ]; then
+      F_SLEEP=unmasked
+      _lap=no; for _x in /proc/acpi/button/lid/*; do [ -e "$_x" ] && _lap=yes; done
+      _lv=$(for _x in /etc/systemd/logind.conf /usr/lib/systemd/logind.conf.d/*.conf /run/systemd/logind.conf.d/*.conf /etc/systemd/logind.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | logind_values)
+      # shellcheck disable=SC2086
+      _ld=$(logind_auto_suspend $_lv "$_lap")
+      _gt=""; _bus=no; _dm=no
+      if have_session_bus; then _bus=yes; fi
+      if [ -z "$_ld" ] && [ "$_bus" = yes ] && have gsettings; then _gt=$(run_t 5 gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null); fi
+      if [ -z "$_ld" ] && [ -z "$_gt" ] && [ "$(run_t 5 systemctl is-active display-manager 2>/dev/null)" = active ]; then _dm=yes; fi
+      _cs=$(classify_sleep "$_ld" "$_gt" "$_dm" "$_bus")
+      F_SLEEP=${_cs%%|*}; F_SLEEP_DETAIL=${_cs#*|}
     fi
     [ -e /var/run/reboot-required ] && F_REBOOT=yes
+    gather_wol
     if have systemctl && have_session_bus; then F_STARTUP=$(run_t 5 systemctl --user list-unit-files --state=enabled 2>/dev/null | grep -c '\.service'); fi
     if [ -e /sys/fs/cgroup/cgroup.controllers ]; then F_CGROUP=v2; elif [ -d /sys/fs/cgroup ]; then F_CGROUP=v1; fi
   fi
@@ -493,18 +766,42 @@ gather_facts() {
   F_TEMP=$_tm
 }
 
+# --out: the report goes to a new temp file (created with O_EXCL) in the same folder, then ln puts it in place.
+# link(2) fails if the name exists as anything (file, FIFO, device, link), so nothing is ever overwritten or written through.
+# Returns 0 written, 1 exists or not writable, 3 ln failed on a new name (no hard links on this filesystem).
+save_out() {
+  [ -e "$OUT_PATH" ] || [ -L "$OUT_PATH" ] && return 1
+  case "$OUT_PATH" in */*) _odir=${OUT_PATH%/*}; [ -n "$_odir" ] || _odir=/ ;; *) _odir=. ;; esac
+  case "$_odir" in /*) ;; *) _odir=./$_odir ;; esac # a folder named -x must not be read as an option
+  _otmp=$(mktemp "$_odir/.lanq-makeready.XXXXXX" 2>/dev/null) || return 1
+  trap 'rm -f -- "$_otmp"' EXIT
+  trap 'rm -f -- "$_otmp"; exit 130' INT TERM
+  printf '%s\n' "$1" > "$_otmp"
+  ln -- "$_otmp" "$OUT_PATH" 2>/dev/null; _ok=$?
+  rm -f -- "$_otmp"
+  trap - EXIT INT TERM
+  if [ "$_ok" != 0 ]; then { [ -e "$OUT_PATH" ] || [ -L "$OUT_PATH" ]; } && return 1; return 3; fi
+  return 0
+}
+
+out_error() { # $1 = save_out's code
+  if [ "$1" = 3 ]; then echo "lanq-makeready: could not create $OUT_PATH: this folder's filesystem may not support hard links (e.g. FAT/exFAT USB sticks); choose another folder. Nothing was written."
+  else echo "lanq-makeready: could not create $OUT_PATH (it already exists now, or the folder is not writable); nothing was written."; fi
+}
+
 # ---------- main ----------
 
 main() {
-  JSON_PATH=""; REDACT=0; HOURS=""; QUIET=0
+  JSON_PATH=""; OUT_PATH=""; REDACT=0; HOURS=""; QUIET=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) [ $# -ge 2 ] || { echo "lanq-makeready: --json needs a path (or - for stdout)" >&2; exit 2; }; JSON_PATH=$2; shift ;;
+      --out) [ $# -ge 2 ] && [ -n "$2" ] || { echo "lanq-makeready: --out needs a file name" >&2; exit 2; }; OUT_PATH=$2; shift ;;
       --redact) REDACT=1 ;;
       --hours) [ $# -ge 2 ] || { echo "lanq-makeready: --hours needs a value" >&2; exit 2; }; HOURS=$2; shift ;;
       --quiet) QUIET=1 ;;
-      -h|--help) echo "usage: lanq-makeready.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--quiet]"; exit 0 ;;
-      *) echo "lanq-makeready: unknown argument: $1 (usage: [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--quiet])" >&2; exit 2 ;;
+      -h|--help) echo "usage: lanq-makeready.sh [--json PATH|-] [--out FILE] [--redact] [--hours HH:MM-HH:MM] [--quiet]"; exit 0 ;;
+      *) echo "lanq-makeready: unknown argument: $1 (usage: [--json PATH|-] [--out FILE] [--redact] [--hours HH:MM-HH:MM] [--quiet])" >&2; exit 2 ;;
     esac
     shift
   done
@@ -512,16 +809,24 @@ main() {
     echo "lanq-makeready: --hours must look like 00:00-07:00 (HH:MM-HH:MM, start different from end)." >&2
     exit 2
   fi
+  if [ -n "$OUT_PATH" ] && { [ -e "$OUT_PATH" ] || [ -L "$OUT_PATH" ]; }; then
+    echo "lanq-makeready: --out $OUT_PATH already exists; it is never overwritten. Choose a new file name." >&2
+    exit 2
+  fi
   gather_facts
   [ "$REDACT" = 1 ] && redact_facts
   eval_checks
   eval_verdicts
   eval_machine "$HOURS" "$REDACT"
+  eval_summary
+  _report=$(render_human)
   if [ "$JSON_PATH" = "-" ]; then render_json "$REDACT"
   else
-    render_human
+    printf '%s\n' "$_report"
     [ -n "$JSON_PATH" ] && render_json "$REDACT" > "$JSON_PATH"
   fi
+  # the only other write: a NEW file the user named
+  if [ -n "$OUT_PATH" ]; then save_out "$_report" || out_error "$?" >&2; fi
   if [ "$V_GIT" != FAIL ] || [ "$V_ARCHIVE" != FAIL ]; then exit 0; fi
   exit 1
 }
