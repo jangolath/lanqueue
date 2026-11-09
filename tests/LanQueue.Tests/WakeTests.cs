@@ -124,6 +124,9 @@ internal sealed class ManualTime(DateTimeOffset start) : TimeProvider
 
 public sealed class WakeTests
 {
+    /// <summary>Every async wake test fails after this instead of blocking the suite (a wait on a clock that never moves, say).</summary>
+    private const int TestTimeout = 60_000;
+
     private const string Mac = "aa:bb:cc:dd:ee:ff";
     private static readonly DateTimeOffset Noon = new(2026, 1, 5, 12, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset Night = new(2026, 1, 5, 23, 30, 0, TimeSpan.Zero);
@@ -138,6 +141,8 @@ public sealed class WakeTests
         m.Wake = new WakeConfig { Mac = Mac, WaitSeconds = wait };
         return m;
     }
+
+    private static readonly PolicyConfig P = T.Config().Policy;
 
     private static MachineHealth Down(bool asleep = true, bool paused = false) =>
         new("build-02", false, 0, 0, 0, "unreachable", "x") { HoldKind = HoldKind.Unreachable, LooksAsleep = asleep, Paused = paused };
@@ -303,13 +308,32 @@ public sealed class WakeTests
         var inHours = Night.DateTime;
         var outHours = Noon.DateTime;
 
-        Assert.Equal(WakeDecision.Wake, waker.Evaluate(Sleepy(), Down(), inHours));
-        Assert.Equal(WakeDecision.Wake, waker.Evaluate(Sleepy(hours: null), Down(), outHours)); // no hours: any time
-        Assert.Equal(WakeDecision.OutsideHours, waker.Evaluate(Sleepy(), Down(), outHours));
-        Assert.Equal(WakeDecision.NotAsleep, waker.Evaluate(Sleepy(), Down(asleep: false), inHours)); // auth or host-key failure
-        Assert.Equal(WakeDecision.Paused, waker.Evaluate(Sleepy(), Down(paused: true), inHours));
-        Assert.Equal(WakeDecision.NoWakeConfig, waker.Evaluate(T.Windows(), Down(), inHours));
-        Assert.Equal(WakeDecision.NotAsleep, waker.Evaluate(Sleepy(), new MachineHealth("build-02", true, 0, 0, 0, null, null), inHours));
+        Assert.Equal(WakeDecision.Wake, waker.Evaluate(Sleepy(), Down(), inHours, P).Decision);
+        Assert.Equal(WakeDecision.Wake, waker.Evaluate(Sleepy(hours: null), Down(), outHours, P).Decision); // no hours: any time
+        Assert.Equal(WakeDecision.OutsideHours, waker.Evaluate(Sleepy(), Down(), outHours, P).Decision);
+        Assert.Equal(WakeDecision.NotAsleep, waker.Evaluate(Sleepy(), Down(asleep: false), inHours, P).Decision); // auth or host-key failure
+        Assert.Equal(WakeDecision.Paused, waker.Evaluate(Sleepy(), Down(paused: true), inHours, P).Decision);
+        Assert.Equal(WakeDecision.NoWakeConfig, waker.Evaluate(T.Windows(), Down(), inHours, P).Decision);
+        Assert.Equal(WakeDecision.NotAsleep, waker.Evaluate(Sleepy(), new MachineHealth("build-02", true, 0, 0, 0, null, null), inHours, P).Decision);
+    }
+
+    [Fact]
+    public void DecisionTableHoldsAMachineWhoseWindowEndsBeforeItCouldTakeAJob()
+    {
+        var waker = new WakeService(new FakeSender(), new FakeClock(Night));
+        var m = Sleepy(hours: "22:00-23:00", wait: 120); // default min_window_minutes 10: needs 12 min left
+        DateTime At(int minute) => new(2026, 1, 5, 22, minute, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal(WakeDecision.Wake, waker.Evaluate(m, Down(), At(48), P).Decision);
+        var closing = waker.Evaluate(m, Down(), At(49), P);
+        Assert.Equal(WakeDecision.WindowClosing, closing.Decision);
+        Assert.Contains("11 min left", closing.Reason, StringComparison.Ordinal);
+        Assert.Contains("policy.min_window_minutes (10) + wake.wait_seconds (120 s)", closing.Reason, StringComparison.Ordinal);
+        Assert.Equal(WakeDecision.WindowClosing, waker.TryClaim(m, Down(), At(55), P).Decision);
+        Assert.Equal(WakeDecision.Wake, waker.Evaluate(Sleepy(hours: null), Down(), At(59), P).Decision); // no hours: no window to close
+
+        var policy = new PolicyConfig { MinWindowMinutes = 0 };
+        Assert.Equal(WakeDecision.Wake, waker.Evaluate(Sleepy(hours: "22:00-23:00", wait: 60), Down(), At(59), policy).Decision);
     }
 
     [Fact]
@@ -318,8 +342,8 @@ public sealed class WakeTests
         var waker = new WakeService(new FakeSender(), new FakeClock(Night));
         var m = Sleepy();
 
-        Assert.Equal(WakeDecision.Wake, waker.TryClaim(m, Down(), Night.DateTime));
-        Assert.Equal(WakeDecision.AlreadyWoken, waker.TryClaim(m, Down(), Night.DateTime));
+        Assert.Equal(WakeDecision.Wake, waker.TryClaim(m, Down(), Night.DateTime, P).Decision);
+        Assert.Equal(WakeDecision.AlreadyWoken, waker.TryClaim(m, Down(), Night.DateTime, P).Decision);
     }
 
     // ---- probe integration ----
@@ -333,7 +357,7 @@ public sealed class WakeTests
         return (new HealthProbe(ssh, clock, waker), sender, waker, ssh);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task UnreachableMachineInsideItsHoursIsWokenOnceWithTheRightPacket()
     {
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
@@ -350,7 +374,7 @@ public sealed class WakeTests
         Assert.Contains("waking", first.Error, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task NoWakeOutsideHoursOnAuthFailureWithoutWakeConfigOrForAPlainProbe()
     {
         var (probe, sender, _, _) = Rig(Noon, (_, _) => new SshResult(255, TimedOut));
@@ -367,7 +391,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task AReachablePausedMachineIsNeverWoken()
     {
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(0, Up + "\npaused=1"));
@@ -377,7 +401,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task ProbeWithoutAWakerNeverSendsAnything()
     {
         var ssh = new FakeSsh { Handler = (_, _) => new SshResult(255, TimedOut) };
@@ -387,7 +411,7 @@ public sealed class WakeTests
         Assert.Single(ssh.Calls);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task SendFailureIsReportedNotThrown()
     {
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
@@ -401,7 +425,7 @@ public sealed class WakeTests
 
     // ---- backoff and timeout with fake time ----
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task HealthWaitsWithBackoffUntilTheMachineAnswers()
     {
         var time = new ManualTime(Night);
@@ -429,7 +453,7 @@ public sealed class WakeTests
         Assert.False(waker.AnyPending);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task HealthGivesUpAfterWaitSecondsAndSaysWhat()
     {
         var time = new ManualTime(Night);
@@ -449,7 +473,7 @@ public sealed class WakeTests
         Assert.False(waker.AnyPending);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WithoutWaitTheProbeReturnsAtOnceAndTheWakeStaysPendingUntilItsDeadline()
     {
         var time = new ManualTime(Night);
@@ -462,6 +486,20 @@ public sealed class WakeTests
         Assert.True(waker.AnyPending);
         time.AdvanceTo(Night + TimeSpan.FromSeconds(31));
         Assert.False(waker.AnyPending);
+    }
+
+    /// <summary>The wait counts the delays it slept too, so a clock that never moves cannot make it endless (it hung a test run once).</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AWaitOnAClockThatNeverMovesStillEnds()
+    {
+        var frozen = new FakeClock(Night); // GetUtcNow never changes; its timers are real ones
+        var waker = new WakeService(new FakeSender(), frozen);
+        var calls = 0;
+
+        var up = await waker.WaitForUpAsync(Sleepy(wait: 1), _ => { calls++; return Task.FromResult(false); }, CancellationToken.None);
+
+        Assert.False(up);
+        Assert.Equal(1, calls);
     }
 
     // ---- lanq run keeps going on the other machines and waits for the waking one ----
@@ -530,7 +568,7 @@ public sealed class WakeTests
 
     private static readonly TimeSpan LongWait = TimeSpan.FromMinutes(5);
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunWakesNothingWhileAnAwakeMachineCanTakeTheJob()
     {
         List<Machine> fleet = [Box("awake-1"), Box("sleep-1"), Box("sleep-2"), Box("sleep-3")];
@@ -542,7 +580,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunWakesExactlyOneOfThreeEligibleSleepersTheFirstByNameAndThenUsesIt()
     {
         List<Machine> fleet = [Box("sleep-3"), Box("sleep-1"), Box("sleep-2")];
@@ -556,7 +594,7 @@ public sealed class WakeTests
         Assert.Contains(lines, l => l.Contains("Wake-on-LAN packet to sleep-1", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunWithWaitZeroNeverWakesAndNeverBlocks()
     {
         List<Machine> fleet = [Box("sleep-1"), Box("sleep-2")];
@@ -567,7 +605,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunWithNoWakeNeverWakes()
     {
         var (r, sender, _, _) = await RunFleet([Box("sleep-1")], [], TimeSpan.FromMilliseconds(150), noWake: true);
@@ -576,7 +614,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunWhoseWokenMachineNeverComesUpEndsWithNoCapacityWithinTheWaitAndWakesItOnlyOnce()
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
@@ -589,7 +627,7 @@ public sealed class WakeTests
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), "took " + watch.Elapsed);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunSkipsSleepersThatCouldNotTakeTheJobAnyway()
     {
         // wrong capability, outside its hours (Noon vs 22:00-07:00), and no wake: setting
@@ -601,7 +639,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task RunDoesNotWakeAWindowsSleeperForArgumentsWindowsCannotTake()
     {
         List<Machine> fleet = [Box("win-1", MachineOs.Windows), Box("lin-1")];
@@ -611,6 +649,83 @@ public sealed class WakeTests
         Assert.Equal("lin-1", r.Machine);
         Assert.Single(sender.Sent);
         Assert.DoesNotContain("win-1", up);
+    }
+
+    // ---- the window must outlast policy.min_window_minutes + wake.wait_seconds (defaults: 10 min + 120 s = 12 min) ----
+
+    [Theory(Timeout = TestTimeout)]
+    [InlineData(55, false)] // 5 min left: woken, it could never take the job
+    [InlineData(49, false)] // 11 min left: less than 12
+    [InlineData(48, true)] // exactly 12 min left
+    [InlineData(30, true)]
+    public async Task RunWakesASleeperOnlyWhenItsWindowOutlastsMinWindowPlusTheWakeWait(int minute, bool wakes)
+    {
+        var at = new DateTimeOffset(2026, 1, 5, 22, minute, 0, TimeSpan.Zero);
+
+        var (r, sender, _, _) = await RunFleet([Box("sleep-1", hours: "22:00-23:00")], [], TimeSpan.FromMilliseconds(150), at: at);
+
+        Assert.Equal(wakes ? 1 : 0, sender.Sent.Count);
+        if (!wakes)
+        {
+            Assert.Equal(JobStatus.NoCapacity, r.Status);
+            Assert.Contains("min_window_minutes", r.Message, StringComparison.Ordinal);
+            Assert.Contains("wait_seconds", r.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task RunPassesOverASleeperWhoseWindowIsClosingAndWakesTheNextOne()
+    {
+        var at = new DateTimeOffset(2026, 1, 5, 22, 55, 0, TimeSpan.Zero);
+        List<Machine> fleet = [Box("a-closing", hours: "22:00-23:00"), Box("b-open", hours: "22:00-07:00")];
+
+        var (r, sender, _, up) = await RunFleet(fleet, [], TimeSpan.FromSeconds(5), at: at);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("b-open", r.Machine);
+        Assert.Single(sender.Sent);
+        Assert.DoesNotContain("a-closing", up);
+    }
+
+    [Theory(Timeout = TestTimeout)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HealthWakeDoesNotWakeAMachineWhoseWindowIsClosingAndSaysWhy(bool json)
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(0);
+        config.Machines[0].AllowedHours = ["22:00-23:00"];
+        config.Machines[0].Wake = new WakeConfig { Mac = Mac, WaitSeconds = 120 };
+        var time = new ManualTime(new DateTimeOffset(2026, 1, 5, 22, 55, 0, TimeSpan.Zero));
+        var sender = new FakeSender();
+        var probe = new HealthProbe(new FakeSsh { Handler = (_, _) => new SshResult(255, TimedOut) }, time, new WakeService(sender, time));
+
+        var o = new StringWriter();
+        var code = await time.Drive(Cli.Health(config, probe, o, new StringWriter(), CancellationToken.None, json, wake: true));
+
+        Assert.Equal(0, code);
+        Assert.Empty(sender.Sent);
+        Assert.Contains("down", o.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("5 min left", o.ToString(), StringComparison.Ordinal);
+        Assert.Contains("min_window_minutes (10)", o.ToString(), StringComparison.Ordinal);
+        Assert.Contains("wait_seconds (120 s)", o.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task HealthWakeStillWakesWhenTheWindowOutlastsTheThreshold()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(0);
+        config.Machines[0].AllowedHours = ["22:00-23:00"];
+        config.Machines[0].Wake = new WakeConfig { Mac = Mac, WaitSeconds = 30 };
+        config.Policy.MinWindowMinutes = 5;
+        var time = new ManualTime(new DateTimeOffset(2026, 1, 5, 22, 54, 0, TimeSpan.Zero)); // 6 min left >= 5 min + 30 s
+        var sender = new FakeSender();
+        var probe = new HealthProbe(new FakeSsh { Handler = (_, _) => new SshResult(255, TimedOut) }, time, new WakeService(sender, time));
+
+        await time.Drive(Cli.Health(config, probe, new StringWriter(), new StringWriter(), CancellationToken.None, wake: true));
+
+        Assert.Single(sender.Sent);
     }
 
     // ---- lanq wake ----
@@ -644,7 +759,7 @@ public sealed class WakeTests
         return (code, o.ToString(), e.ToString(), sender);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeSendsEvenOutsideHoursAndSaysSo()
     {
         var (code, o, _, sender) = await RunWake(["wake", "build-02"]);
@@ -656,7 +771,7 @@ public sealed class WakeTests
         Assert.Contains("BIOS", o, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeJsonPrintsExactlyOneObjectAndHumanLinesGoToStderr()
     {
         var (code, o, e, _) = await RunWake(["wake", "build-02", "--json"]);
@@ -671,7 +786,7 @@ public sealed class WakeTests
         Assert.Contains("sending a Wake-on-LAN packet", e, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeWaitReportsAwakeWhenSshAnswers()
     {
         var time = new ManualTime(Noon);
@@ -684,7 +799,7 @@ public sealed class WakeTests
         Assert.True(doc.RootElement.GetProperty("awake").GetBoolean());
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeWaitReportsNoAnswerWithExit1AfterWaitSeconds()
     {
         var time = new ManualTime(Noon);
@@ -697,7 +812,7 @@ public sealed class WakeTests
         Assert.Equal(TimeSpan.FromSeconds(60), time.GetUtcNow() - Noon);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeTextWaitSaysNoAnswerAndPointsAtTheDocs()
     {
         var (code, _, e, _) = await RunWake(["wake", "build-02", "--wait"], (_, _) => new SshResult(255, TimedOut), time: new ManualTime(Noon));
@@ -707,7 +822,7 @@ public sealed class WakeTests
         Assert.Contains("WORKERS.md", e, StringComparison.Ordinal);
     }
 
-    [Theory]
+    [Theory(Timeout = TestTimeout)]
     [InlineData(false)]
     [InlineData(true)]
     public async Task WakeUnknownMachineAndMissingWakeSettingAreExit2WithOneJsonObject(bool json)
@@ -730,7 +845,7 @@ public sealed class WakeTests
         AssertOneErrorObject(o, json, "Rejected", 2);
     }
 
-    [Theory]
+    [Theory(Timeout = TestTimeout)]
     [InlineData(false)]
     [InlineData(true)]
     public async Task WakeSendFailureIsExit70(bool json)
@@ -749,7 +864,7 @@ public sealed class WakeTests
         AssertOneErrorObject(o.ToString(), json, "InfraError", 70);
     }
 
-    [Theory]
+    [Theory(Timeout = TestTimeout)]
     [InlineData(false)]
     [InlineData(true)]
     public async Task WakeSendCancelledByTheSocketNotByCtrlCIsExit70WithOneObject(bool json)
@@ -767,7 +882,7 @@ public sealed class WakeTests
         AssertOneErrorObject(o.ToString(), json, "InfraError", 70);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task ProbeAndHealthWakeReportASocketCancellationOnTheMachineInsteadOfThrowing()
     {
         var (probe, sender, waker, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
@@ -787,7 +902,7 @@ public sealed class WakeTests
         Assert.Contains("DOWN", o.ToString(), StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeJsonStillPrintsOneObjectForBadArgumentsAndBadConfig()
     {
         var o = new StringWriter();
@@ -833,7 +948,7 @@ public sealed class WakeTests
         return o.ToString();
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task DoctorReportsWakeOkWithTheBiosNote()
     {
         var o = await DoctorOut(m => m.Wake = new WakeConfig { Mac = Mac, Broadcast = "10.20.30.255" });
@@ -845,7 +960,7 @@ public sealed class WakeTests
         Assert.Contains("wired Ethernet", line, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task DoctorSaysNothingAboutWakeWithoutASetting()
     {
         var o = await DoctorOut(_ => { });
@@ -854,7 +969,7 @@ public sealed class WakeTests
 
     // ---- item-by-item guarantees ----
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task TwoParallelProbesOfOneMachineSendExactlyOnePacket()
     {
         var (probe, sender, _, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
@@ -865,7 +980,7 @@ public sealed class WakeTests
         Assert.Single(sender.Sent);
     }
 
-    [Theory]
+    [Theory(Timeout = TestTimeout)]
     [InlineData(typeof(SocketException))]
     [InlineData(typeof(InvalidOperationException))]
     [InlineData(typeof(ObjectDisposedException))]
@@ -886,7 +1001,7 @@ public sealed class WakeTests
         Assert.Empty(sender.Sent);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task CancellationDuringTheWaitPropagatesAsCancellation()
     {
         var time = new ManualTime(Night);
@@ -905,7 +1020,7 @@ public sealed class WakeTests
             time.Drive(waker.WaitForUpAsync(Sleepy(), async token => (await new HealthProbe(ssh, time).ProbeOnceAsync(Sleepy(), T.Config().Policy, token)).Reachable, cts.Token)));
     }
 
-    [Theory]
+    [Theory(Timeout = TestTimeout)]
     [InlineData(false)]
     [InlineData(true)]
     public async Task WakeCancelledBeforeTheSendIsExit130WithOneJsonObject(bool json)
@@ -923,7 +1038,7 @@ public sealed class WakeTests
         AssertOneErrorObject(o.ToString(), json, "Cancelled", 130);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task WakeCancelledWhileWaitingIsExit130WithOneJsonObject()
     {
         var time = new ManualTime(Noon);
@@ -946,7 +1061,7 @@ public sealed class WakeTests
         AssertOneErrorObject(o.ToString(), true, "Cancelled", 130);
     }
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task HealthDoesNotWakeByDefaultAndWakesAndWaitsWithTheWakeOption()
     {
         var config = T.Config();
@@ -983,7 +1098,7 @@ public sealed class WakeTests
 
     // ---- the one real socket test ----
 
-    [Fact]
+    [Fact(Timeout = TestTimeout)]
     public async Task UdpSenderDeliversTheExactPacketToALoopbackListener()
     {
         using var listener = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));

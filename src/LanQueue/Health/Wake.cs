@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
@@ -103,8 +104,14 @@ public enum WakeDecision
     NotAsleep,
     Paused,
     OutsideHours,
+
+    /// <summary>Inside its hours, but too little of the window is left to wake it, wait for it and still start a job there.</summary>
+    WindowClosing,
     AlreadyWoken,
 }
+
+/// <summary>A wake decision and, for people, why.</summary>
+public readonly record struct WakeVerdict(WakeDecision Decision, string Reason);
 
 /// <summary>
 /// Decides whether to wake a machine, sends the packet, and remembers per lanq invocation which machines it has already woken (at most
@@ -146,39 +153,52 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
             l.StartsWith(ConnectPrefix, StringComparison.OrdinalIgnoreCase) && AsleepReasons.Any(m => l.Contains(m, StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>
-    /// The decision table for the automatic wake. <paramref name="localNow"/> is this computer's clock: a sleeping worker cannot report its own,
-    /// so allowed_hours is judged here.
+    /// The decision table for the automatic wake (lanq run and lanq health --wake; never the explicit lanq wake). <paramref name="localNow"/> is
+    /// this computer's clock: a sleeping worker cannot report its own, so allowed_hours is judged here. A machine is woken only when its
+    /// window still has at least policy.min_window_minutes plus wake.wait_seconds left: job selection holds a machine with less than
+    /// min_window_minutes left, so a PC woken any later could never be used and would just be left awake.
     /// </summary>
-    public WakeDecision Evaluate(Machine machine, MachineHealth h, DateTime localNow)
+    public WakeVerdict Evaluate(Machine machine, MachineHealth h, DateTime localNow, PolicyConfig policy)
     {
-        if (machine.Wake is null)
+        if (machine.Wake is not { } wake)
         {
-            return WakeDecision.NoWakeConfig;
+            return new(WakeDecision.NoWakeConfig, "no wake: setting");
         }
 
         if (h.Paused)
         {
-            return WakeDecision.Paused;
+            return new(WakeDecision.Paused, "paused on the machine");
         }
 
         if (h.HoldKind != HoldKind.Unreachable || !h.LooksAsleep)
         {
-            return WakeDecision.NotAsleep;
+            return new(WakeDecision.NotAsleep, "does not look asleep");
         }
 
-        if (HoursWindow.ParseAll(machine.AllowedHours) is { } windows && HoursWindow.Remaining(windows, localNow) is null)
+        if (HoursWindow.ParseAll(machine.AllowedHours) is { } windows)
         {
-            return WakeDecision.OutsideHours;
+            if (HoursWindow.Remaining(windows, localNow) is not { } left)
+            {
+                return new(WakeDecision.OutsideHours, "outside allowed hours");
+            }
+
+            var needed = TimeSpan.FromMinutes(policy.MinWindowMinutes) + TimeSpan.FromSeconds(wake.WaitSeconds);
+            if (left < needed)
+            {
+                return new(WakeDecision.WindowClosing, string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"asleep, not woken: {Math.Ceiling(left.TotalMinutes):0} min left of its allowed hours, less than policy.min_window_minutes ({policy.MinWindowMinutes}) + wake.wait_seconds ({wake.WaitSeconds} s), so it could not take a job once awake"));
+            }
         }
 
-        return _woken.ContainsKey(machine.Name) ? WakeDecision.AlreadyWoken : WakeDecision.Wake;
+        return _woken.ContainsKey(machine.Name) ? new(WakeDecision.AlreadyWoken, "already woken by this lanq") : new(WakeDecision.Wake, "asleep and inside its hours");
     }
 
     /// <summary>Evaluates, and when the answer is Wake claims the machine (so it is never woken twice in this invocation).</summary>
-    public WakeDecision TryClaim(Machine machine, MachineHealth h, DateTime localNow)
+    public WakeVerdict TryClaim(Machine machine, MachineHealth h, DateTime localNow, PolicyConfig policy)
     {
-        var d = Evaluate(machine, h, localNow);
-        return d == WakeDecision.Wake && !_woken.TryAdd(machine.Name, DateTimeOffset.MinValue) ? WakeDecision.AlreadyWoken : d;
+        var v = Evaluate(machine, h, localNow, policy);
+        return v.Decision == WakeDecision.Wake && !_woken.TryAdd(machine.Name, DateTimeOffset.MinValue) ? new(WakeDecision.AlreadyWoken, "already woken by this lanq") : v;
     }
 
     /// <summary>Sends the packet; the machine counts as coming up (pending) until its wait_seconds run out, but only after a successful send.</summary>
@@ -207,21 +227,28 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
         }
     }
 
-    /// <summary>Calls <paramref name="isUp"/> after 5 s, 10 s, then every 20 s until it is true or wait_seconds have passed.</summary>
+    /// <summary>
+    /// Calls <paramref name="isUp"/> after 5 s, 10 s, then every 20 s until it is true or wait_seconds have passed. Time passed is the larger of
+    /// the clock's reading and the delays slept, so a clock that does not move (or jumps back) can never make the wait endless.
+    /// </summary>
     public async Task<bool> WaitForUpAsync(Machine machine, Func<CancellationToken, Task<bool>> isUp, CancellationToken ct)
     {
         var wait = TimeSpan.FromSeconds(machine.Wake?.WaitSeconds ?? 0);
         var start = clock.GetUtcNow();
+        var slept = TimeSpan.Zero;
         var delay = FirstDelay;
         while (true)
         {
-            var left = wait - (clock.GetUtcNow() - start);
+            var byClock = clock.GetUtcNow() - start;
+            var left = wait - (byClock > slept ? byClock : slept);
             if (left <= TimeSpan.Zero)
             {
                 return false;
             }
 
-            await Task.Delay(delay < left ? delay : left, clock, ct).ConfigureAwait(false);
+            var step = delay < left ? delay : left;
+            await Task.Delay(step, clock, ct).ConfigureAwait(false);
+            slept += step;
             if (await isUp(ct).ConfigureAwait(false))
             {
                 MarkUp(machine);

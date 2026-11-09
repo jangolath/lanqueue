@@ -53,7 +53,7 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 - `allowed_hours` per machine, by day: `["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]`, on the worker's own clock.
   A job still running when the window ends is stopped after a grace period (exit 124, `[lanq] WindowClosed`).
 - Optional Wake-on-LAN per machine (`wake: {mac: "aa:bb:cc:dd:ee:ff"}`): `lanq run` wakes one sleeping machine only when no awake
-  one can take the job (needs `--wait`, `--no-wake` turns it off), `lanq health --wake` wakes sleepers, both only inside `allowed_hours`; `lanq wake <machine> [--wait] [--json]` wakes it on request. Needs
+  one can take the job (needs `--wait`, `--no-wake` turns it off), `lanq health --wake` wakes sleepers, both only inside `allowed_hours` with at least `min_window_minutes` + `wait_seconds` of the window left; `lanq wake <machine> [--wait] [--json]` wakes it on request. Needs
   Wake-on-LAN enabled in the BIOS/UEFI and the NIC driver, usually wired Ethernet; see docs/WORKERS.md.
 - A `PAUSE` file (Linux: `PAUSE` or `pause`) in the worker's `work_root` holds the machine; anyone at that PC can create
   or delete it. A job already running is not affected.

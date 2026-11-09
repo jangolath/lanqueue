@@ -97,7 +97,8 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
     }
 
     /// <summary>
-    /// Given a probe result: when the machine looks asleep, has a wake: setting and is inside its allowed hours (this computer's clock), sends
+    /// Given a probe result: when the machine looks asleep, has a wake: setting and is inside its allowed hours (this computer's clock) with at
+    /// least policy.min_window_minutes + wake.wait_seconds of the window left (otherwise the result says why it was not woken), sends
     /// one magic packet (at most one per machine per invocation, also across parallel calls). With <paramref name="wait"/> it then probes
     /// again with backoff until the machine answers or its wake.wait_seconds run out; without it, it returns at once saying the machine is
     /// waking. A send that fails for any reason is reported on this machine and never thrown (one machine cannot fail a whole fleet probe).
@@ -105,7 +106,19 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
     /// </summary>
     public async Task<MachineHealth> WakeAsync(Machine machine, PolicyConfig policy, MachineHealth h, bool wait, CancellationToken ct)
     {
-        if (waker is null || machine.Wake is not { } wake || waker.TryClaim(machine, h, clock.GetLocalNow().DateTime) != WakeDecision.Wake)
+        if (waker is null || machine.Wake is not { } wake)
+        {
+            return h;
+        }
+
+        var verdict = waker.TryClaim(machine, h, clock.GetLocalNow().DateTime, policy);
+        if (verdict.Decision == WakeDecision.WindowClosing)
+        {
+            // Say why it stays asleep (health shows the error of a machine that is down; run's "no eligible machine" shows the hold).
+            return h with { Error = verdict.Reason, Hold = $"{h.Hold} ({verdict.Reason})" };
+        }
+
+        if (verdict.Decision != WakeDecision.Wake)
         {
             return h;
         }
