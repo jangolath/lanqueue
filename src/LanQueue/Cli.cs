@@ -31,6 +31,15 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>--yes: confirms a destructive option such as unlock --all.</summary>
     public bool Yes { get; init; }
 
+    /// <summary>--force: makeready scans a machine even when it is paused or outside its allowed hours.</summary>
+    public bool Force { get; init; }
+
+    /// <summary>makeready --ssh user@host: a PC that is not in the config yet.</summary>
+    public string? SshTarget { get; init; }
+
+    /// <summary>makeready --os windows|linux, with --ssh.</summary>
+    public MachineOs? Os { get; init; }
+
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
@@ -42,10 +51,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force"],
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
-    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock" };
+    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready" };
 
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
@@ -63,6 +73,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var all = false;
         var yes = false;
         var remote = false;
+        var force = false;
+        string? sshTarget = null;
+        MachineOs? os = null;
         string? target = null;
         var seen = new List<string>();
         var command = own.Length > 0 ? own[0] : "help";
@@ -115,6 +128,20 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--remote":
                     remote = true;
                     break;
+                case "--force":
+                    force = true;
+                    break;
+                case "--ssh" when i + 1 < own.Length:
+                    sshTarget = own[++i];
+                    break;
+                case "--os" when i + 1 < own.Length:
+                    os = own[++i] switch
+                    {
+                        "windows" => MachineOs.Windows,
+                        "linux" => MachineOs.Linux,
+                        _ => throw new ArgumentException("--os must be windows or linux."),
+                    };
+                    break;
                 default:
                     if (TakesTarget.Contains(command) && target is null && !own[i].StartsWith('-'))
                     {
@@ -131,7 +158,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote };
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote, Force = force, SshTarget = sshTarget, Os = os };
     }
 }
 
@@ -145,6 +172,8 @@ public static partial class Cli
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote] [--config FILE]
+          lanq makeready <machine> [--json] [--force] [--config FILE]
+          lanq makeready --ssh user@host --os windows|linux [--json]
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
@@ -153,8 +182,12 @@ public static partial class Cli
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment). Exit 0 all OK, 1 otherwise.
-        --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end.
-        Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
+        makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
+        problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
+        outside its allowed hours (--force scans anyway). lanq never changes a worker.
+        --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
+        makeready prints the validated report.
+        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
     public static async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct)
@@ -177,7 +210,7 @@ public static partial class Cli
             return Stats(log, stdout);
         }
 
-        if (p.Command is not ("health" or "run" or "unlock" or "doctor"))
+        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready"))
         {
             await stdout.WriteLineAsync(Usage).ConfigureAwait(false);
             return p.Command is "help" or "--help" or "-h" ? 0 : 2;
@@ -187,6 +220,12 @@ public static partial class Cli
         if (p.Command == "doctor")
         {
             return await Doctor(p, LoadConfig, DoctorHost.Real(home), new ProcessSshClient(Environment.GetEnvironmentVariable), stdout, ct).ConfigureAwait(false);
+        }
+
+        if (p.Command == "makeready")
+        {
+            var client = new ProcessSshClient(Environment.GetEnvironmentVariable);
+            return await Makeready(p, LoadConfig, client, new HealthProbe(client, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         FleetConfig config;
