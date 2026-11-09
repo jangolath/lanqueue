@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
@@ -52,6 +53,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force"],
+        ["--version"] = [],
+        ["version"] = [],
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
@@ -179,6 +182,7 @@ public static partial class Cli
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--json]
+          lanq --version
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
@@ -195,6 +199,18 @@ public static partial class Cli
         makeready prints the validated report.
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
+
+    /// <summary>
+    /// lanq --version: this build's version (with its commit) and the embedded lanq-makeready scripts, read back from the binary, so a
+    /// packaging mistake (a missing resource in a trimmed build) shows up here and not on a worker.
+    /// </summary>
+    private static string VersionText()
+    {
+        var version = typeof(Cli).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+        return $"lanq {version}\n"
+            + $"lanq-makeready {MakereadyVersion} (embedded: lanq-makeready.ps1 {MakereadyScript(MachineOs.Windows).Length} bytes, "
+            + $"lanq-makeready.sh {MakereadyScript(MachineOs.Linux).Length} bytes)";
+    }
 
     public static Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct) => RunAsync(args, stdout, stderr, ct, null);
 
@@ -218,6 +234,12 @@ public static partial class Cli
             }
 
             return 2;
+        }
+
+        if (p.Command is "--version" or "version")
+        {
+            await stdout.WriteLineAsync(VersionText()).ConfigureAwait(false);
+            return 0;
         }
 
         var home = ResolveHome(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());

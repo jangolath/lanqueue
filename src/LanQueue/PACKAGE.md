@@ -16,7 +16,11 @@ dotnet tool install --global LanQueue
 dotnet tool update --global LanQueue
 ```
 
-Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, plus `git` and `ssh` on the PATH.
+Requires the .NET 10 SDK on the machine you run `lanq` from, plus `git` and `ssh` on the PATH.
+
+No .NET SDK? Each GitHub release also has a single-file native `lanq` for Windows (x64, Arm64), Linux (x64, Arm64,
+glibc 2.27 and later) and macOS (Apple silicon), with `SHA256SUMS`, build-provenance attestations and a Scoop
+manifest: https://github.com/jangolath/lanqueue#install
 
 ## Quick start
 

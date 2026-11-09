@@ -67,6 +67,32 @@ minutes is overtaken by two others at the same moment, two of them can briefly b
 outcome is that one slot is reclaimed twice, so one extra job may start beside another; no file outside the
 `work_root` locks folder is affected.
 
+## Supply chain and release artifacts
+
+- Every GitHub Action is pinned to a full commit SHA, and the Linux build containers (Microsoft's .NET 10 cross-build
+  images) and the Ubuntu 18.04 smoke-test image are pinned by digest. Every project commits a `packages.lock.json`
+  (the native build has its own `packages.native.lock.json`), and CI restores in locked mode. New package versions are
+  pinned exactly.
+- Each release attaches one `SHA256SUMS` covering every asset and a build-provenance attestation for each asset
+  (binaries, `.nupkg`, the Scoop `lanq.json`, `SHA256SUMS`), signed with the release workflow's OIDC identity through
+  Sigstore's public-good instance. Only the `attest` job can mint that token; it runs no project code. Verify with
+  `gh attestation verify <file> --repo jangolath/lanqueue`; a hash alone proves integrity only if you got it from a
+  channel you trust. An attestation shows where and how a file was built, not that it is free of bugs.
+- Nothing is published unless every native binary built and passed its smoke test; the release is created as a draft,
+  the package pushed to nuget.org (behind the `nuget-release` environment), and only then is the release made public.
+  A re-run reuses a draft only if it holds the same `SHA256SUMS`. Tags must be strict semver and reach the jobs only
+  through `env:`; a pre-release tag becomes a GitHub prerelease that is never marked latest. Checkouts do not keep the
+  workflow token.
+- The pinned .NET runtime cannot fall behind silently: CI and the release fail when the SDK carries a newer 10.0
+  patch, and a weekly workflow fails when Microsoft's `releases.json` lists one.
+- The Scoop manifest pins exact versioned URLs and SHA-256 hashes, and Scoop refuses a zip whose hash differs.
+  Installing from the `releases/latest` URL means each `scoop update` trusts whatever manifest the latest release
+  carries, which is the same trust as downloading the latest release by hand.
+- The native binaries are self-contained: they include the .NET runtime and libraries of the patch they were built
+  with (pinned as `LanqRuntimePackVersion`). A .NET security fix therefore reaches them only through a new `lanq`
+  release; the NuGet tool uses the runtime on your machine and gets .NET fixes from your .NET updates. The macOS binary
+  is ad-hoc signed, not notarized; the Windows binaries are not Authenticode-signed.
+
 It does not:
 - sandbox the allowlisted program (it runs with the remote user's rights; use a low-privilege account);
 - guarantee that no secret leaves your machine (the scan is pattern-based);
