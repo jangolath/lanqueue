@@ -164,8 +164,11 @@ public sealed class JobRunner(
             return (line, null);
         }
 
+        // -?\d{1,10}: a Windows crash code (an NTSTATUS such as 0xC0000005) is negative as an int.
         var digits = line.TrimEnd('\r')[(at + marker.Length)..];
-        return digits.Length is > 0 and <= 3 && digits.All(char.IsAsciiDigit) && int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var code)
+        var unsigned = digits.StartsWith('-') ? digits[1..] : digits;
+        return unsigned.Length is > 0 and <= 10 && unsigned.All(char.IsAsciiDigit)
+            && int.TryParse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var code)
             ? (line[..at], code)
             : (line, null);
     }
@@ -454,21 +457,26 @@ public sealed class JobRunner(
 
         // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
         executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin));
-        // The wrapper's exit marker is taken off the output (never logged or shown); seeing it means the job ran to its end on the worker.
-        int? markedExit = null;
+        // The wrapper's exit marker counts only as the FINAL output line (or glued to the end of it): a line carrying one is held back until
+        // the next line arrives, which shows it was not final, and is then passed on unchanged as ordinary output. The final one is taken off.
+        var heldGate = new object();
+        string? held = null;
         void OnJobLine(string line)
         {
-            var (before, code) = ReadExitMarker(line, jobId);
-            if (code is not null)
+            lock (heldGate)
             {
-                markedExit = code;
-                if (before.Length == 0)
+                if (held is not null)
                 {
-                    return;
+                    onLine(held);
+                }
+
+                var marked = ReadExitMarker(line, jobId).Code is not null;
+                held = marked ? line : null;
+                if (!marked)
+                {
+                    onLine(line);
                 }
             }
-
-            onLine(before);
         }
 
         var run = await ssh.RunAsync(
@@ -478,10 +486,21 @@ public sealed class JobRunner(
             timeout,
             ct).ConfigureAwait(false);
 
-        // ssh exits 255 both when the connection fails and when the job itself exited 255: only the marker tells them apart. With the marker,
-        // its code is the job's (also if the connection dropped after the job ended); without it, 255 is a connection failure.
-        var sshFailed = run.IsSshFailure && markedExit is null;
-        var jobExit = markedExit ?? run.ExitCode;
+        int? markedExit = null;
+        if (held is { } last)
+        {
+            var (before, code) = ReadExitMarker(last, jobId);
+            markedExit = code;
+            if (before.Length > 0)
+            {
+                onLine(before);
+            }
+        }
+
+        // ssh exits 255 both when the connection fails and when the job itself exited 255. The final marker is used for that one question
+        // only: 255 is the job's own exit when the marker says 255, and a lost connection otherwise. Any other ssh exit code stands as it is.
+        var sshFailed = run.IsSshFailure && markedExit != 255;
+        var jobExit = run.ExitCode;
         JobResult result;
         if (run.TimedOut && byWindow)
         {

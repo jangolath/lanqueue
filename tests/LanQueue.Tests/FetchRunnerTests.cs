@@ -236,6 +236,59 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Contains(Texts(ssh), IsStop);
     }
 
+    /// <summary>Runs one job whose execute call answers <paramref name="exit"/> and the output <paramref name="output"/>(job id).</summary>
+    private async Task<(JobResult Result, FakeSsh Ssh, List<string> Lines)> RunJob(int exit, Func<string, string> output)
+    {
+        var (runner, ssh, lines) = Make("build-01", 0, Stream(("a.trx", "x")));
+        var inner = ssh.Handler;
+        ssh.Handler = (m, cmd) =>
+        {
+            var text = Decode(m, cmd);
+            return IsExecute(text) ? new SshResult(exit, output(JobIdOf(text))) : inner(m, cmd);
+        };
+
+        var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+        return (r, ssh, lines);
+    }
+
+    /// <summary>The job printed its own marker mid-run, then the connection dropped: only a FINAL marker counts, so this is a lost connection.</summary>
+    [Fact]
+    public async Task AMarkerMidOutputDoesNotHideALostConnection()
+    {
+        var (r, ssh, lines) = await RunJob(255, id => "start\n" + RemoteScripts.ExitMarker(id) + "0\nstill running\n");
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains("SSH connection failed", r.Message, StringComparison.Ordinal);
+        Assert.Contains(Texts(ssh), IsStop);
+        Assert.Contains(lines, l => l.StartsWith("LANQ_EXIT=", StringComparison.Ordinal)); // not the wrapper's: shown as ordinary output
+    }
+
+    /// <summary>The marker only ever decides what a 255 was; any other ssh exit code is the result, and the marker is just taken off.</summary>
+    [Theory]
+    [InlineData(0, "7")]
+    [InlineData(3, "0")]
+    [InlineData(1, "255")]
+    public async Task AMarkerThatDisagreesWithANon255ExitLosesToSsh(int ssh, string marked)
+    {
+        var (r, _, lines) = await RunJob(ssh, id => "out\n" + RemoteScripts.ExitMarker(id) + marked + "\n");
+
+        Assert.Equal(ssh == 0 ? JobStatus.Completed : JobStatus.Failed, r.Status);
+        Assert.Equal(ssh, r.ExitCode);
+        Assert.DoesNotContain(lines, l => l.Contains("LANQ_EXIT", StringComparison.Ordinal));
+    }
+
+    /// <summary>Windows crash codes (NTSTATUS) are negative as an int: the marker accepts them and is taken off the output.</summary>
+    [Fact]
+    public async Task AWindowsCrashCodeIsTheJobsCodeAndItsMarkerIsNotShown()
+    {
+        var (r, _, lines) = await RunJob(-1073741819, id => "boom\n" + RemoteScripts.ExitMarker(id) + "-1073741819\n");
+
+        Assert.Equal(JobStatus.Failed, r.Status);
+        Assert.Equal(-1073741819, r.ExitCode);
+        Assert.DoesNotContain(lines, l => l.Contains("LANQ_EXIT", StringComparison.Ordinal));
+        Assert.Contains("boom", lines);
+    }
+
     [Fact]
     public async Task AJobWhoseConnectionDroppedWithoutFetchIsNotStoppedEarly()
     {

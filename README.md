@@ -310,8 +310,10 @@ when the job never started.
   same way on a fresh connection and fetches what it left (cleanup would kill it next anyway). If the machine does not
   answer that either, nothing is fetched and `fetchError` is "not fetched: the SSH connection failed during the job".
   ssh reports a lost connection as exit 255, which a job can also exit with; the job wrapper therefore ends its output
-  with a `LANQ_EXIT=<job id>:<code>` line (taken off the output, never shown), and a 255 counts as a lost connection
-  only when that line is missing. A job that exits 255 itself is `Failed` with exit 255.
+  with a `LANQ_EXIT=<job id>:<code>` line (taken off the output), and a 255 counts as the job's own exit only when that
+  line is the final one and says 255; otherwise it is a lost connection. The line decides nothing else: any other exit
+  code is ssh's, and a marker-shaped line that is not the last one is shown as ordinary output. A job that exits 255
+  itself is `Failed` with exit 255.
 - Each file is written as a short `.lanq-partial-N` file in the same folder and renamed to its name only once its size and hash are right.
   Anything the worker prints on stderr during the fetch is shown as `[lanq] fetch stderr: ...` (the first 10 lines,
   sanitised) and never mixed into the files.

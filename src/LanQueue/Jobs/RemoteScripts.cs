@@ -678,7 +678,7 @@ public static class RemoteScripts
     /// <summary>
     /// The start of the job wrapper's last stdout line, followed by the job's exit code: <c>LANQ_EXIT=&lt;job id&gt;:&lt;code&gt;</c>. ssh passes a
     /// remote exit code through, so 255 alone cannot tell a job that exited 255 from a lost connection; this line, printed only after the job
-    /// is over, can (<see cref="JobRunner.ReadExitMarker"/>).
+    /// is over, can, when it is the final output line (<see cref="JobRunner.ReadExitMarker"/>). It decides only that; any other code is ssh's.
     /// </summary>
     internal static string ExitMarker(string jobId) => "LANQ_EXIT=" + SafeJobId(jobId) + ":";
 
