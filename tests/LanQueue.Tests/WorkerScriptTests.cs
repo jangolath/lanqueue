@@ -122,16 +122,40 @@ public sealed class WorkerScriptTests : IDisposable
     [WindowsFact]
     public void RealPowerShellJobPastItsDeadlineIsStoppedWithItsTree()
     {
+        // The job (a grandchild PowerShell) records its own pid, then would sleep five minutes and leave a marker. The worker's 3 s deadline
+        // must stop it with its whole tree. Proved by events, not tight wall-clock windows: exit 124, the run returning long before the five
+        // minutes (stdout stays open while any process of the tree lives), and the recorded grandchild process being gone.
         var marker = Path.Combine(_root, "survivor").Replace('/', (char)92);
+        var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
         var watch = Stopwatch.StartNew();
         var (code, _) = Shells.Run(
             "windows",
-            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 20; New-Item -ItemType File " + marker], TimeSpan.FromSeconds(3)));
+            RemoteScripts.Execute(
+                Worker(MachineOs.Windows), "j1", ".",
+                ["powershell", "-NoProfile", "-Command", "Set-Content -LiteralPath " + grandchild + " -Value $PID; Start-Sleep -Seconds 300; New-Item -ItemType File " + marker],
+                TimeSpan.FromSeconds(3)));
         Assert.Equal(124, code);
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "took " + watch.Elapsed);
-        Thread.Sleep(1000);
+        Assert.True(watch.Elapsed < TimeSpan.FromMinutes(4), "took " + watch.Elapsed);
+        if (File.Exists(grandchild) && int.TryParse(File.ReadAllText(grandchild).Trim(), out var pid))
+        {
+            Assert.True(SpinWait.SpinUntil(() => !IsRunning(pid), TimeSpan.FromSeconds(60)), $"the job's process {pid} survived");
+        }
+
         Assert.False(File.Exists(marker));
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     [PowerShellFact]

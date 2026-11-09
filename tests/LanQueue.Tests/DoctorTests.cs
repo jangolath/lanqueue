@@ -188,7 +188,9 @@ public sealed class DoctorTests : IDisposable
         using var worker = new LocalWorker();
         var bin = Path.Combine(worker.Root, "fake-bin");
         Directory.CreateDirectory(bin);
-        MakeTool(bin, "dotnet", "sleep 60", "@ping -n 60 127.0.0.1 >nul");
+        // The hang lasts ten minutes and each check may take 20 s. Under load, starting a check (a fresh PowerShell) can itself take seconds,
+        // so the old 3 s limit made the quick npm check time out too. Finishing well under ten minutes still proves the hang was stopped.
+        MakeTool(bin, "dotnet", "sleep 600", "@ping -n 600 127.0.0.1 >nul");
         MakeTool(bin, "npm", "echo 9.9.9-fake", "@echo 9.9.9-fake");
         var dir = bin.Replace('\\', '/');
         if (shell == "linux" && OperatingSystem.IsWindows())
@@ -202,8 +204,8 @@ public sealed class DoctorTests : IDisposable
         m.PathPrepend = [dir];
         m.Transfer = TransferMode.Archive;
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        var lines = StaleSlotTests.RunScript(shell, RemoteScripts.Doctor(m, checkSeconds: 3)).Replace("\r", "", StringComparison.Ordinal).Split('\n');
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), "took " + watch.Elapsed);
+        var lines = StaleSlotTests.RunScript(shell, RemoteScripts.Doctor(m, checkSeconds: 20)).Replace("\r", "", StringComparison.Ordinal).Split('\n');
+        Assert.True(watch.Elapsed < TimeSpan.FromMinutes(5), "took " + watch.Elapsed);
         Assert.Contains("cap.dotnet=timeout|", lines);
         Assert.Contains("cap.npm=0|9.9.9-fake", lines);
     }
