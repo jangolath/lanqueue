@@ -76,6 +76,10 @@ public class SshTests
     [InlineData("ForwardAgent=no")]
     [InlineData("ClearAllForwardings=yes")]
     [InlineData("PermitLocalCommand=no")]
+    [InlineData("ForwardX11=no")]
+    [InlineData("ForwardX11Trusted=no")]
+    [InlineData("Tunnel=no")]
+    [InlineData("RequestTTY=no")]
     public void SshAndScpDisableAgentForwardingPortForwardsAndLocalCommands(string option)
     {
         foreach (var args in new[] { SshArgs.Ssh(T.Linux(), "/keys/id", "true"), SshArgs.Scp(T.Linux(), "/keys/id", "a", "b") })
