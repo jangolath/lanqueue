@@ -84,6 +84,43 @@ public static class SecretScanner
         return found;
     }
 
+    public const string CommittedFileRule = "committed-secret-file-name";
+
+    private static readonly string[] CommittedSecretNames = [".env", "id_rsa", "id_ed25519", "credentials.json", ".npmrc", ".pypirc"];
+
+    private static readonly string[] CommittedSecretSuffixes = [".pem", ".pfx", ".p12", ".key", ".kdbx"];
+
+    private static readonly string[] SampleFolders = ["fixtures", "testdata"];
+
+    /// <summary>
+    /// Scans the names of committed files (every path of the HEAD tree): <c>.env</c>, <c>.env.*</c>, <c>id_rsa</c>, <c>id_ed25519</c>,
+    /// <c>*.pem</c>, <c>*.pfx</c>, <c>*.p12</c>, <c>*.key</c>, <c>credentials.json</c>, <c>.npmrc</c>, <c>.pypirc</c>, <c>*.kdbx</c>.
+    /// Obvious samples are allowed: names ending in <c>.example</c> or <c>.sample</c>, names containing <c>.example.</c>, and anything
+    /// under a folder named <c>fixtures</c> or <c>testdata</c>. Names only: content and older commits are not looked at.
+    /// </summary>
+    public static IReadOnlyList<SecretFinding> ScanCommittedFileNames(IEnumerable<string> paths)
+    {
+        var found = new List<SecretFinding>();
+        foreach (var path in paths)
+        {
+            var segments = path.Replace('\\', '/').Split('/');
+            var file = segments[^1];
+            var secretLike = CommittedSecretNames.Contains(file, StringComparer.OrdinalIgnoreCase)
+                || file.StartsWith(".env.", StringComparison.OrdinalIgnoreCase)
+                || CommittedSecretSuffixes.Any(s => file.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+            var sample = file.EndsWith(".example", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith(".sample", StringComparison.OrdinalIgnoreCase)
+                || file.Contains(".example.", StringComparison.OrdinalIgnoreCase)
+                || segments[..^1].Any(d => SampleFolders.Contains(d, StringComparer.OrdinalIgnoreCase));
+            if (secretLike && !sample)
+            {
+                found.Add(new SecretFinding(CommittedFileRule, path));
+            }
+        }
+
+        return found;
+    }
+
     private static Regex Make(string pattern) =>
         new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.Multiline, TimeSpan.FromSeconds(2));
 }

@@ -32,10 +32,12 @@ public sealed class RunnerTests : IDisposable
                 File.WriteAllText(archive, "x");
             }
 
-            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null, Head: Head));
+            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null, Head: Head, CommittedFiles: Committed));
         }
 
         public string Sha { get; set; } = "abc";
+
+        public List<string> Committed { get; } = ["src/app.cs", ".env.example"];
 
         public string Head { get; set; } = new('1', 40);
 
@@ -192,6 +194,30 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
         Assert.Equal(JobStatus.Rejected, r.Status);
         Assert.Empty(ssh.Uploads);
+    }
+
+    [Fact]
+    public async Task CommittedSecretFileIsRefusedBeforeAnythingIsSent()
+    {
+        var (runner, ssh, payloads, _) = Make();
+        payloads.Committed.Add("deploy/prod.pem");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("deploy/prod.pem", r.Message, StringComparison.Ordinal);
+        Assert.Contains("committed", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Uploads);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public async Task ManyCommittedSecretFilesAreListedBriefly()
+    {
+        var (runner, _, payloads, _) = Make();
+        payloads.Committed.AddRange(Enumerable.Range(0, 50).Select(i => $"certs/c{i}.pem"));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("and 40 more", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("certs/c49.pem", r.Message, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -127,7 +127,7 @@ Where each safety check sits (numbers are the diagram steps):
 | Step | Check |
 | --- | --- |
 | 2 | Command and directory must match your allowlists; permission-skipping flags are refused. Nothing has touched the network yet. |
-| 3 | The command line and the uncommitted overlay are secret-scanned; a hit refuses the job before anything is sent. |
+| 3 | The command line and the uncommitted overlay are secret-scanned, and committed file names are checked; a hit refuses the job before anything is sent. |
 | 4-5 | Machines that are unreachable, loaded, outside their hours, low on disk or missing a capability are skipped. |
 | 6 | `max_jobs` is enforced with an atomic slot file per machine. |
 | 4-10 | Every ssh/scp call is key-only, non-interactive and uses `StrictHostKeyChecking=yes`. |
@@ -314,9 +314,13 @@ Each default below is enforced in code and covered by a unit test.
   AWS/GitHub/Slack/`sk-` tokens, JWTs, bearer tokens, and password/secret/API-key style assignments (quoted, JSON,
   YAML, `.env` and `Password=...;` connection strings). Files named like `.env`, `*.pem`, `*.pfx`, `*.jks`,
   `id_rsa`, `*.tfvars`, `terraform.tfstate`, `.git-credentials`, `.aws/credentials` or `*.local.yml` are refused by
-  name. A hit refuses the job before anything is sent, and the message never echoes the value. If a scan pattern
-  times out the job is refused (fail closed). This is a safety net, not a guarantee: it does not scan committed
-  history or binary files, and it cannot recognise every secret format.
+  name. The **names** of all committed files in HEAD are checked too (`.env`, `.env.*`, `id_rsa`, `id_ed25519`,
+  `*.pem`, `*.pfx`, `*.p12`, `*.key`, `credentials.json`, `.npmrc`, `.pypirc`, `*.kdbx`), because a bundle or archive
+  carries them; obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
+  anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
+  never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
+  guarantee: it does not read the content of committed files, it does not look at files that were committed and later
+  deleted (they are still in the history a bundle carries), and it cannot recognise every secret format.
 - **No permission-skipping agent flags.** Any argument containing `dangerously`, `skip-permissions`,
   `bypassPermissions`, `--yolo`, `bypass-approvals`, `danger-full-access`, `approval_policy=never` or
   `--ask-for-approval never` is rejected, even for an allowlisted command.
@@ -342,8 +346,11 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 
 ## Limitations
 
-- The secret scan is pattern-based and best effort; it does not scan already-committed history or file contents
-  of binary files. It is a safety net, not a guarantee.
+- The secret scan is pattern-based and best effort. Committed files are checked by name only (in HEAD), not by
+  content, and older commits are not scanned at all. **A git bundle carries the repository's full history** the first
+  time a machine sees the repository (later bundles carry only new commits), so a secret that was ever committed and
+  then deleted still reaches the worker; rewrite that history (and rotate the secret) or use `transfer: archive`,
+  which sends only the current files. It is a safety net, not a guarantee.
 - The allowlist limits what `lanq` will start, not what an allowlisted program does. Build and package tools such as
   `dotnet test`, `dotnet build`, `npm test` and `npm ci` execute project code (test code, MSBuild targets, npm
   lifecycle scripts) with the remote user's rights. Only run code you trust, and use a dedicated low-privilege

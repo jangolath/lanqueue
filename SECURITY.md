@@ -16,6 +16,16 @@ single-quote characters are escaped), and arguments containing `"` `&` `|` `<` `
 PowerShell 5.1 native-argument passing and `cmd.exe` (which runs `.cmd` shims such as `npm.cmd`) would re-parse
 them. Output from a worker is treated as untrusted: control and invisible formatting characters are shown as `?`.
 
+In git mode a worker receives the repository's history, not just the current files: the first job for a repository
+on a machine sends the full history of HEAD, later jobs only the new commits. The secret scan covers the command
+line, the uncommitted changes (content and names) and the names of committed files in HEAD (`.env`, `id_rsa`,
+`*.pem` and similar, with samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, allowed). It
+does not read committed file contents or older commits, so a secret committed and later deleted still travels in a
+bundle. Archive mode sends only the current files, never history.
+
+On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off and
+all transports refused except reading the uploaded bundle.
+
 It does not:
 - sandbox the allowlisted program (it runs with the remote user's rights; use a low-privilege account);
 - guarantee that no secret leaves your machine (the scan is pattern-based);

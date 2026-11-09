@@ -192,4 +192,17 @@ public sealed class GitPayloadBuilderTests : IDisposable
         Assert.Contains("z.txt", names);
         Assert.Empty(Git("for-each-ref", "refs/lanq"));
     }
+    [Fact]
+    public async Task CommittedFilesListTheWholeHeadTreeButNotTheOverlay()
+    {
+        Directory.CreateDirectory(Path.Combine(_repo, "deploy", "with space"));
+        File.WriteAllText(Path.Combine(_repo, "deploy", "with space", "prod.pem"), "x");
+        Git("add", "-A");
+        Git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "cert");
+        File.WriteAllText(Path.Combine(_repo, "untracked.txt"), "new");
+
+        var p = await new GitPayloadBuilder().BuildAsync("j7", _repo, Path.Combine(_repo, ".out"), PayloadKinds.None, CancellationToken.None);
+
+        Assert.Equal(["a.txt", "deploy/with space/prod.pem"], p.CommittedFiles!.Order(StringComparer.Ordinal));
+    }
 }

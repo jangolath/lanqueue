@@ -43,6 +43,8 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
 
             var repoId = kinds.HasFlag(PayloadKinds.Bundle) ? await RepoIdAsync(top, ct).ConfigureAwait(false) : null;
+            var committed = (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", "HEAD").ConfigureAwait(false))
+                .Split('\0', StringSplitOptions.RemoveEmptyEntries);
 
             ArchiveBuild? built = null;
             if (kinds.HasFlag(PayloadKinds.Archive))
@@ -50,7 +52,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 built = await WriteArchiveAsync(top, tree, Path.Combine(outputDir, jobId + ".tar.gz"), ct).ConfigureAwait(false);
             }
 
-            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head);
+            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed);
         }
         finally
         {

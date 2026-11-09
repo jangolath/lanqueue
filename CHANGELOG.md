@@ -18,6 +18,13 @@
   once to a full bundle automatically (one log line says so). Rewritten history, a pruned base or a missing or
   unreadable `bases.json` simply mean a full bundle. Bundles are now built when a git machine actually gets the job.
   Archive mode is unchanged.
+- **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
+  HEAD tree are checked against `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.pfx`, `*.p12`, `*.key`,
+  `credentials.json`, `.npmrc`, `.pypirc` and `*.kdbx`, because a bundle or archive would carry them. A match refuses
+  the job before anything is sent. Obvious samples pass: names ending in `.example` or `.sample`, names containing
+  `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
+  such a file (for example a `.npmrc` or a test certificate outside those folders) is now refused until the file is
+  renamed or moved. A long list of findings is cut to the first ten.
 
 ## 0.3.1 (2026-11-09)
 

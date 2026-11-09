@@ -114,4 +114,43 @@ public class SecretScannerTests
         Assert.Empty(found);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"{label}: {sw.Elapsed}");
     }
+    [Theory]
+    [InlineData(".env")]
+    [InlineData("app/.env")]
+    [InlineData(".env.production")]
+    [InlineData("deploy/.ENV.local")]
+    [InlineData("id_rsa")]
+    [InlineData("home/.ssh/id_ed25519")]
+    [InlineData("certs/server.pem")]
+    [InlineData("signing/app.pfx")]
+    [InlineData("signing/app.P12")]
+    [InlineData("tls/server.key")]
+    [InlineData("credentials.json")]
+    [InlineData("web/.npmrc")]
+    [InlineData(".pypirc")]
+    [InlineData("vault/passwords.kdbx")]
+    [InlineData("fixturesX/server.pem")]
+    public void CommittedSecretLookingNamesAreFound(string path)
+    {
+        var finding = Assert.Single(SecretScanner.ScanCommittedFileNames([path]));
+        Assert.Equal(SecretScanner.CommittedFileRule, finding.Rule);
+        Assert.Equal(path, finding.Where);
+    }
+
+    [Theory]
+    [InlineData(".env.example")]
+    [InlineData("app/.env.sample")]
+    [InlineData(".env.local.example")]
+    [InlineData("config/server.example.pem")]
+    [InlineData("tests/fixtures/server.pem")]
+    [InlineData("pkg/testdata/id_rsa")]
+    [InlineData("tests/Fixtures/.env")]
+    [InlineData("src/environment.ts")]
+    [InlineData("docs/keys.md")]
+    [InlineData("src/keyboard.cs")]
+    [InlineData("monkey")]
+    [InlineData(".envrc")]
+    [InlineData("package.json")]
+    public void SamplesFixturesAndOrdinaryNamesAreNotFound(string path) =>
+        Assert.Empty(SecretScanner.ScanCommittedFileNames([path]));
 }

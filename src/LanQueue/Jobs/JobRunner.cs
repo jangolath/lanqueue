@@ -95,6 +95,7 @@ public sealed class JobRunner(
         {
             var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
                 .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
+                .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
                 .ToList();
             if (findings.Count > 0)
             {
@@ -382,9 +383,16 @@ public sealed class JobRunner(
             : null;
     }
 
-    private static JobResult Rejected(string jobId, IEnumerable<SecretFinding> findings) =>
-        new(jobId, JobStatus.Rejected, 2, null,
-            "Refused: possible secrets in payload (" + string.Join(", ", findings.Select(f => $"{f.Rule} in {f.Where}")) + "). Nothing was sent.");
+    private static JobResult Rejected(string jobId, IReadOnlyList<SecretFinding> findings)
+    {
+        const int Shown = 10;
+        var listed = string.Join(", ", findings.Take(Shown).Select(f => $"{f.Rule} in {f.Where}"))
+            + (findings.Count > Shown ? $", and {findings.Count - Shown} more" : "");
+        var hint = findings.Any(f => f.Rule == SecretScanner.CommittedFileRule)
+            ? " Committed files named like secrets are refused because the bundle or archive would carry them; rename samples to *.example or keep them under a fixtures/ or testdata/ folder."
+            : "";
+        return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.");
+    }
 
     /// <summary>Builds the archive at most once per job, on first use, and reports what a tar.gz could not carry.</summary>
     private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output)
