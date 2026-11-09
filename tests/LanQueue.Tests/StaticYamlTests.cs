@@ -39,6 +39,11 @@ public sealed class StaticYamlTests
             priority: normal
             allowed_hours: "22:00-07:00"
             transfer: archive
+            wake:
+              mac: "aa:bb:cc:dd:ee:01"
+              broadcast: 10.20.30.255
+              port: 7
+              wait_seconds: 90
           - name: win
             os: Windows
             ssh: build@win.lan
@@ -75,6 +80,7 @@ public sealed class StaticYamlTests
         Assert.Equal(JobPriority.Normal, lin.Priority);
         Assert.Equal(["22:00-07:00"], lin.AllowedHours!);
         Assert.Equal(TransferMode.Archive, lin.Transfer);
+        Assert.Equal(("aa:bb:cc:dd:ee:01", "10.20.30.255", 7, 90), (lin.Wake!.Mac, lin.Wake.Broadcast, lin.Wake.Port, lin.Wake.WaitSeconds));
 
         var win = c.Machines[1];
         Assert.Equal(MachineOs.Windows, win.Os);
@@ -86,13 +92,14 @@ public sealed class StaticYamlTests
         Assert.Equal(JobPriority.Low, win.Priority);
         Assert.Equal(["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"], win.AllowedHours!);
         Assert.Equal(TransferMode.Git, win.Transfer);
+        Assert.Null(win.Wake);
     }
 
     /// <summary>A new config key must be added to <see cref="Everything"/>, so this file keeps testing every key the loader accepts.</summary>
     [Fact]
     public void EveryConfigPropertyIsCoveredAbove()
     {
-        foreach (var type in new[] { typeof(FleetConfig), typeof(PolicyConfig), typeof(Machine) })
+        foreach (var type in new[] { typeof(FleetConfig), typeof(PolicyConfig), typeof(Machine), typeof(WakeConfig) })
         {
             foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanWrite))
             {
@@ -100,6 +107,41 @@ public sealed class StaticYamlTests
                 Assert.True(Everything.Contains(key + ":", StringComparison.Ordinal), $"{type.Name}.{p.Name} ({key}) is not covered by the static YAML test config");
             }
         }
+    }
+
+    /// <summary>
+    /// Every class the config can hold must be registered on <see cref="YamlContext"/>: the static deserializer has no reflection fallback,
+    /// so a missing [YamlSerializable] makes every config that uses the key fail to load, in the tool and in the native binary alike.
+    /// </summary>
+    [Fact]
+    public void EveryConfigClassIsInTheStaticContext()
+    {
+        var registered = typeof(YamlContext).GetCustomAttributesData()
+            .Where(a => a.AttributeType == typeof(YamlDotNet.Serialization.YamlSerializableAttribute))
+            .Select(a => (Type)a.ConstructorArguments[0].Value!)
+            .ToHashSet();
+        var pending = new Stack<Type>([typeof(FleetConfig)]);
+        var seen = new HashSet<Type>();
+        while (pending.TryPop(out var type))
+        {
+            if (!seen.Add(type))
+            {
+                continue;
+            }
+
+            Assert.True(registered.Contains(type), $"{type.Name} is part of the config but has no [YamlSerializable] on YamlContext");
+            foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanWrite))
+            {
+                var t = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+                var element = t.IsGenericType ? t.GetGenericArguments().Last() : t.BaseType is { IsGenericType: true } b ? b.GetGenericArguments().Last() : t;
+                if (element.IsClass && element != typeof(string) && element.Namespace == typeof(FleetConfig).Namespace)
+                {
+                    pending.Push(element);
+                }
+            }
+        }
+
+        Assert.Contains(typeof(WakeConfig), seen);
     }
 
     [Theory]
@@ -152,6 +194,24 @@ public sealed class StaticYamlTests
     [InlineData("    path_prepend:\n      - /home/build/.nvm/versions/node/v22/bin", "    path_prepend: ~", "path_prepend")]
     [InlineData("    path_prepend:\n      - /home/build/.nvm/versions/node/v22/bin", "    path_prepend: [~]", "path_prepend")]
     [InlineData("      - \"Mon-Fri 22:00-07:00\"", "      - ~", "allowed_hours")]
+    [InlineData(WakeBlock, "    wake: ~", "'machines.wake' has no value")]
+    [InlineData(WakeBlock, "    wake:", "'machines.wake' has no value")]
+    [InlineData(WakeBlock, "    wake: null", "'machines.wake' has no value")]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: ~", "'machines.wake.mac' has no value")]
+    [InlineData("      port: 7", "      port:", "'machines.wake.port' has no value")]
+    [InlineData("      wait_seconds: 90", "      wait_seconds: ~", "'machines.wake.wait_seconds' has no value")]
+    [InlineData("      broadcast: 10.20.30.255", "      broadcast: null", "'machines.wake.broadcast' has no value")]
+    [InlineData("      port: 7", "      port: 7\n      password: x", "password")]
+    [InlineData("      port: 7", "      port: 7\n      mac_address: x", "mac_address")]
+    [InlineData(WakeBlock, "    wake: aa:bb:cc:dd:ee:01", "Invalid config")]
+    [InlineData(WakeBlock, "    wake: [aa:bb:cc:dd:ee:01]", "Invalid config")]
+    [InlineData(WakeBlock, "    wake: {}", "wake.mac is required")]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: [aa]", "Invalid config")]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: \"00:00:00:00:00:00\"", "wake.mac is required")]
+    [InlineData("      broadcast: 10.20.30.255", "      broadcast: 198.51.100.255", "wake.broadcast must be 255.255.255.255 or a private")]
+    [InlineData("      port: 7", "      port: 8", "wake.port must be 7 or 9")]
+    [InlineData("      port: 7", "      port: seven", "Invalid config")]
+    [InlineData("      wait_seconds: 90", "      wait_seconds: 601", "wake.wait_seconds must be from 1 to 600")]
     public void WrongShapesAreFriendlyConfigErrors(string from, string to, string mentions)
     {
         var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
@@ -159,6 +219,9 @@ public sealed class StaticYamlTests
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
         Assert.Contains(mentions, ex.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>The wake: block of the first machine in <see cref="Everything"/>.</summary>
+    private const string WakeBlock = "    wake:\n      mac: \"aa:bb:cc:dd:ee:01\"\n      broadcast: 10.20.30.255\n      port: 7\n      wait_seconds: 90";
 
     private const string OneMachine = "machines:\n  - name: a\n    os: linux\n    ssh: u@h\n    work_root: /srv/l\n";
 
@@ -173,10 +236,13 @@ public sealed class StaticYamlTests
     [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    env:\n      A: ~\n", "env 'A' needs a value")]
     [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    name: b\n", "Duplicate key")] // ambiguous: refused
     [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    env:\n      A: x\n      A: y\n", "Duplicate key")]
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    wake:\n      mac: aa:bb:cc:dd:ee:01\n      mac: aa:bb:cc:dd:ee:02\n", "Duplicate key")]
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    wake:\n      mac: aa:bb:cc:dd:ee:01\n    wake:\n      mac: aa:bb:cc:dd:ee:02\n", "Duplicate key")]
+    [InlineData("policy:\n  allowed_commands: [dotnet test]\n" + OneMachine + "    wake: {mac: \"aa:bb:cc:dd:ee:01\", port: 9, port: 7}\n", "Duplicate key")]
     public void WrongDocumentShapesAreFriendlyConfigErrors(string yaml, string mentions) =>
         Assert.Contains(mentions, Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml)).Message, StringComparison.Ordinal);
 
-    /// <summary>The same shapes behind --json: exit 2 and exactly one JSON object on stdout, never a crash.</summary>
+    /// <summary>The same shapes behind --json (health, run and wake): exit 2 and exactly one JSON object on stdout, never a crash.</summary>
     [Theory]
     [InlineData("just a string\n")]
     [InlineData("machines: ~\n")]
@@ -184,13 +250,15 @@ public sealed class StaticYamlTests
     [InlineData("policy:\n  allowed_commands: [x, ~]\n" + OneMachine)]
     [InlineData("policy:\n  allowed_commands: [x]\nmachines:\n  - name: a\n    os: 7\n    ssh: u@h\n    work_root: /srv/l\n")]
     [InlineData("policy:\n  allowed_commands: [x]\n" + OneMachine + "    max_jobs: ~\n")]
+    [InlineData("policy:\n  allowed_commands: [x]\n" + OneMachine + "    wake: ~\n")]
+    [InlineData("policy:\n  allowed_commands: [x]\n" + OneMachine + "    wake:\n      mac: aa:bb:cc:dd:ee:01\n      color: red\n")]
     public async Task BadShapesStillGiveOneJsonObject(string yaml)
     {
         var path = Path.Combine(Path.GetTempPath(), "lanq-shape-" + Guid.NewGuid().ToString("N") + ".yml");
         File.WriteAllText(path, yaml);
         try
         {
-            foreach (var args in new[] { new[] { "health", "--json", "--config", path }, ["run", "--json", "--config", path, "--", "dotnet", "test"] })
+            foreach (var args in new[] { new[] { "health", "--json", "--config", path }, ["run", "--json", "--config", path, "--", "dotnet", "test"], ["wake", "a", "--json", "--config", path] })
             {
                 var o = new StringWriter();
                 var code = await Cli.RunAsync(args, o, new StringWriter(), CancellationToken.None);
@@ -231,6 +299,42 @@ public sealed class StaticYamlTests
         Assert.Equal(TransferMode.Archive, lin.Transfer);
         Assert.Equal("build@lin.lan", lin.Ssh);
         Assert.Equal("1", lin.Env["MSBUILDNODECOUNT"]);
+    }
+
+    /// <summary>The wake: block goes through the same tag stripping: standard tags load as the untagged value.</summary>
+    [Theory]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: !!str \"aa:bb:cc:dd:ee:01\"")]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: ! aa:bb:cc:dd:ee:01")]
+    [InlineData("      broadcast: 10.20.30.255", "      broadcast: !!str 10.20.30.255")]
+    [InlineData("      port: 7", "      port: !!int \"7\"")]
+    [InlineData("      port: 7", "      port: !!float 7.0")]
+    [InlineData("      wait_seconds: 90", "      wait_seconds: !!str 90")]
+    [InlineData("    wake:\n", "    wake: !!map\n")]
+    public void StandardTagsLoadInsideWake(string from, string to)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        var wake = ConfigLoader.Parse(yaml).Machines[0].Wake!;
+        Assert.Equal(("aa:bb:cc:dd:ee:01", "10.20.30.255", 7, 90), (wake.Mac, wake.Broadcast, wake.Port, wake.WaitSeconds));
+    }
+
+    [Theory]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: !mac \"aa:bb:cc:dd:ee:01\"", "!mac")]
+    [InlineData("    wake:\n", "    wake: !wol\n", "!wol")]
+    [InlineData("      port: 7", "      port: !!binary Bw==", "tag:yaml.org,2002:binary")]
+    public void UnknownTagsInsideWakeAreRefusedByName(string from, string to, string tag)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        Assert.Contains($"tag '{tag}' is not supported", Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml)).Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Only mac is required: the other wake keys keep their defaults when left out.</summary>
+    [Fact]
+    public void WakeWithOnlyAMacUsesTheDefaults()
+    {
+        var wake = ConfigLoader.Parse("policy:\n  allowed_commands: [x]\n" + OneMachine + "    wake: {mac: aa-bb-cc-dd-ee-02}\n").Machines[0].Wake!;
+        Assert.Equal(("aa-bb-cc-dd-ee-02", "255.255.255.255", 9, 120), (wake.Mac, wake.Broadcast, wake.Port, wake.WaitSeconds));
     }
 
     [Fact]

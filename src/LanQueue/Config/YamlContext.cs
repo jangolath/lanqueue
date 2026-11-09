@@ -10,4 +10,5 @@ namespace LanQueue.Config;
 [YamlSerializable(typeof(FleetConfig))]
 [YamlSerializable(typeof(PolicyConfig))]
 [YamlSerializable(typeof(Machine))]
+[YamlSerializable(typeof(WakeConfig))]
 public partial class YamlContext : StaticContext;
