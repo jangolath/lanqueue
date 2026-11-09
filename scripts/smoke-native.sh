@@ -35,6 +35,21 @@ echo "== lanq doctor --config machines.example.yml"
 cat "$work/doctor.txt"
 grep -q -E '^OK +config: 4 machine[(]s[)]' "$work/doctor.txt" || fail "the example config did not load"
 
+echo "== lanq doctor with a wake: block (the static config context must know WakeConfig)"
+printf 'policy:\n  allowed_commands: [dotnet test]\nmachines:\n  - name: sleeper\n    os: linux\n    ssh: build@sleeper.lan\n    work_root: /srv/lanq\n    wake:\n      mac: !!str "aa:bb:cc:dd:ee:01"\n      broadcast: 10.20.30.255\n      wait_seconds: 90\n' > "$work/wake.yml"
+"$bin" doctor --config "$work/wake.yml" > "$work/wake.txt" 2>&1 || true
+cat "$work/wake.txt"
+grep -q -E '^OK +config: 1 machine[(]s[)]' "$work/wake.txt" || fail "a config with a wake: block did not load"
+grep -q -F 'sleeper: wake: magic packet to 10.20.30.255:9 for aa:bb:cc:dd:ee:01, waits up to 90 s' "$work/wake.txt" || fail "the wake: settings were not read"
+
+echo "== lanq health --json with an unknown key inside wake:"
+printf 'policy:\n  allowed_commands: [dotnet test]\nmachines:\n  - name: sleeper\n    os: linux\n    ssh: build@sleeper.lan\n    work_root: /srv/lanq\n    wake:\n      mac: "aa:bb:cc:dd:ee:01"\n      colour: red\n' > "$work/wake-bad.yml"
+code=0
+"$bin" health --json --config "$work/wake-bad.yml" > "$work/wake-bad.json" 2> "$work/wake-bad.err" || code=$?
+cat "$work/wake-bad.json"
+[ "$code" = 2 ] || fail "health --json with a bad wake: exited $code, expected 2"
+grep -q -E '^[{]"status":"Rejected","exitCode":2,"message":"Invalid config: .*colour' "$work/wake-bad.json" || fail "unexpected health --json object for a bad wake:"
+
 echo "== lanq health --json with an invalid config"
 printf 'machines: []\npolicy:\n  allowed_commands: [dotnet test]\n' > "$work/empty.yml"
 code=0
