@@ -77,7 +77,9 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
                 ? t
                 : (DateTime?)null;
         var windows = HoursWindow.ParseAll(machine.AllowedHours);
-        var remaining = windows is null ? null : HoursWindow.Remaining(windows, workerNow ?? clock.GetLocalNow().DateTime);
+        // The worker's UTC offsets for the next 36 h place the window end across a DST change (only together with its own clock).
+        var offsets = workerNow is null ? null : UtcOffsetTable.TryParse(values.GetValueOrDefault("now_epoch"), values.GetValueOrDefault("tz_offsets"));
+        var remaining = windows is null ? null : HoursWindow.Remaining(windows, workerNow ?? clock.GetLocalNow().DateTime, offsets);
         var health = new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, null, null)
         {
             MemFreeGb = OptionalNum(values, "mem_free_gb"),

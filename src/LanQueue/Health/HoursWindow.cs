@@ -100,9 +100,10 @@ public sealed partial class HoursWindow
     /// <summary>
     /// How long the machine may still work from <paramref name="now"/> (its local clock): to the end of the window it is in, carried on
     /// through windows that continue it within a minute (so "Sat 00:00-23:59" then "Sun 00:00-23:59" is one stretch). Null when outside
-    /// every window.
+    /// every window. With the worker's <paramref name="offsets"/> table the window end becomes a real instant, so a night with a DST
+    /// change counts real time; without one it is wall-clock time (an hour off on such a night).
     /// </summary>
-    public static TimeSpan? Remaining(IReadOnlyList<HoursWindow> windows, DateTime now)
+    public static TimeSpan? Remaining(IReadOnlyList<HoursWindow> windows, DateTime now, UtcOffsetTable? offsets = null)
     {
         var end = windows.Max(w => w.EndOfOccurrenceContaining(now));
         for (var hops = 0; end is { } e && hops < 64; hops++)
@@ -116,7 +117,9 @@ public sealed partial class HoursWindow
             end = next;
         }
 
-        return end - now;
+        return end is not { } last ? null
+            : offsets is null ? last - now
+            : TimeSpan.FromSeconds(offsets.ToEpoch(last) - offsets.NowEpoch);
     }
 
     /// <summary>Parses allowed_hours entries that config validation has accepted; null when there are none (any time is fine).</summary>

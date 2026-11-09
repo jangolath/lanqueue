@@ -41,6 +41,9 @@ public static class RemoteScripts
             if ($os -and $os.FreePhysicalMemory) { 'mem_free_gb=' + ([double]$os.FreePhysicalMemory / 1MB).ToString('0.##', $inv) }
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
+            $u = [DateTimeOffset]::UtcNow
+            'now_epoch=' + $u.ToUnixTimeSeconds()
+            'tz_offsets=' + ((0..36 | ForEach-Object { [int][TimeZoneInfo]::Local.GetUtcOffset($u.AddHours($_)).TotalMinutes }) -join ',')
             {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
             """
         : $$"""
@@ -55,8 +58,19 @@ public static class RemoteScripts
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
             if [ -e "$R/PAUSE" ]; then echo paused=1; else echo paused=0; fi
             echo "local_time=$(date '+%Y-%m-%dT%H:%M:%S')"
+            {{LinuxOffsetTable}}
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
             """;
+
+    /// <summary>
+    /// now_epoch= and tz_offsets=: the worker's UTC offset in minutes at now + 0 h ... + 36 h, from <c>date -d @EPOCH +%z</c> (GNU and busybox
+    /// date accept it). When date cannot do that, tz_offsets is left out and lanq uses wall-clock time for the window end.
+    /// </summary>
+    internal const string LinuxOffsetTable = """
+        e=$(date +%s); echo "now_epoch=$e"; z=; k=0
+        while [ "$k" -le 36 ]; do o=$(date -d "@$((e + k * 3600))" +%z 2>/dev/null) || break; z="$z $o"; k=$((k + 1)); done
+        if [ "$k" -gt 36 ]; then printf '%s\n' "$z" | awk '{ s = "tz_offsets="; for (i = 1; i <= NF; i++) { v = $i; if (v !~ /^[+-][0-9][0-9][0-9][0-9]$/) exit; m = substr(v, 2, 2) * 60 + substr(v, 4, 2); s = s (i > 1 ? "," : "") (substr(v, 1, 1) == "-" ? 0 - m : m) } if (NF == 37) print s }'; fi
+        """;
 
     /// <summary>
     /// Options for every git call on a worker (hooks in the cache or a hooks path in the worker's git config must never run

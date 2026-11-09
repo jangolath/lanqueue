@@ -134,6 +134,97 @@ public sealed class WindowTests : IDisposable
         }
     }
 
+    // ---- DST: the worker's UTC offset table ----
+
+    /// <summary>A probe-style offset table: <paramref name="before"/> minutes for the first <paramref name="hoursBefore"/> hourly samples, then <paramref name="after"/>.</summary>
+    private static UtcOffsetTable Table(DateTimeOffset nowUtc, int before, int hoursBefore, int after) =>
+        new(nowUtc.ToUnixTimeSeconds(), [.. Enumerable.Range(0, 37).Select(k => k < hoursBefore ? before : after)]);
+
+    private static TimeSpan? RemainingAt(DateTime localNow, UtcOffsetTable table, params string[] entries) =>
+        HoursWindow.Remaining(HoursWindow.ParseAll(entries)!, localNow, table);
+
+    [Fact]
+    public void SpringForwardNightCountsRealTimeNotWallClockTime()
+    {
+        // US Eastern, 2026-03-08: 02:00 EST (07:00Z) jumps to 03:00 EDT. Now: Saturday 23:00 EST = Sunday 04:00Z.
+        var nowUtc = new DateTimeOffset(2026, 3, 8, 4, 0, 0, TimeSpan.Zero);
+        var table = Table(nowUtc, -300, 3, -240);
+        var localNow = new DateTime(2026, 3, 7, 23, 0, 0);
+        Assert.Equal(TimeSpan.FromHours(6), RemainingAt(localNow, table, "Sat 22:00-06:00")); // 06:00 EDT = 10:00Z; the wall clock says 7 h
+        Assert.Equal(TimeSpan.FromHours(3), RemainingAt(localNow, table, "Sat 22:00-02:30")); // 02:30 does not exist: the window ends at the jump (07:00Z)
+    }
+
+    [Fact]
+    public void FallBackNightCountsRealTimeAndAnAmbiguousEndIsTheEarlierInstant()
+    {
+        // US Eastern, 2026-11-01: 02:00 EDT (06:00Z) falls back to 01:00 EST. Now: Saturday 23:00 EDT = Sunday 03:00Z.
+        var nowUtc = new DateTimeOffset(2026, 11, 1, 3, 0, 0, TimeSpan.Zero);
+        var table = Table(nowUtc, -240, 3, -300);
+        var localNow = new DateTime(2026, 10, 31, 23, 0, 0);
+        Assert.Equal(TimeSpan.FromHours(6), RemainingAt(localNow, table, "Sat 22:00-04:00")); // 04:00 EST = 09:00Z; the wall clock says 5 h
+        Assert.Equal(TimeSpan.FromMinutes(150), RemainingAt(localNow, table, "Sat 22:00-01:30")); // 01:30 happens twice: the first (05:30Z)
+    }
+
+    [Fact]
+    public void WithoutATableRemainingIsWallClockTime() =>
+        Assert.Equal(TimeSpan.FromHours(7), HoursWindow.Remaining(HoursWindow.ParseAll(["Sat 22:00-06:00"])!, new DateTime(2026, 3, 7, 23, 0, 0)));
+
+    [Fact]
+    public async Task TheProbeOffsetTableMovesTheWindowEndAcrossADstChange()
+    {
+        var nowUtc = new DateTimeOffset(2026, 3, 8, 4, 0, 0, TimeSpan.Zero);
+        var offsets = string.Join(',', Enumerable.Range(0, 37).Select(k => k < 3 ? "-300" : "-240"));
+        var output = Healthy + "local_time=2026-03-07T23:00:00" + NL + "now_epoch=" + nowUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) + NL + "tz_offsets=" + offsets;
+        var h = await Probe(output, nowUtc, hours: ["Sat 22:00-06:00"]);
+        Assert.Null(h.Hold);
+        Assert.Equal(nowUtc + TimeSpan.FromHours(6), h.WindowEndsUtc);
+    }
+
+    [Theory]
+    [InlineData("tz_offsets=-300")] // too short
+    [InlineData("tz_offsets=x,y")]
+    [InlineData("")]
+    public async Task AMissingOrGarbledTableFallsBackToWallClockTime(string table)
+    {
+        var nowUtc = new DateTimeOffset(2026, 3, 8, 4, 0, 0, TimeSpan.Zero);
+        var h = await Probe(Healthy + "local_time=2026-03-07T23:00:00" + NL + "now_epoch=" + nowUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) + NL + table, nowUtc, hours: ["Sat 22:00-06:00"]);
+        Assert.Equal(nowUtc + TimeSpan.FromHours(7), h.WindowEndsUtc);
+    }
+
+    /// <summary>The sh probe in a real sh, in a zone with DST: its table matches what .NET says that zone's offsets are.</summary>
+    [ShFact]
+    public void RealShProbeReportsTheUtcOffsetsOfItsZone()
+    {
+        var m = T.Linux();
+        m.WorkRoot = Path.Combine(_dir, "shroot").Replace((char)92, '/');
+        var (_, output) = Shells.Run("linux", RemoteScripts.Probe(m), new Dictionary<string, string> { ["TZ"] = "EST5EDT" });
+        var v = HealthProbe.Parse(output);
+        var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_offsets"));
+        Assert.True(table is not null, "probe output: " + output);
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
+        var now = DateTimeOffset.FromUnixTimeSeconds(table.NowEpoch);
+        Assert.Equal(Enumerable.Range(0, 37).Select(k => (int)zone.GetUtcOffset(now.AddHours(k)).TotalMinutes), table.OffsetMinutes);
+    }
+
+    [Fact]
+    public void RealProbeOnThisHostReportsItsUtcOffsets()
+    {
+        var root = Path.Combine(_dir, "tzroot").Replace((char)92, '/');
+        Directory.CreateDirectory(root);
+        var output = WorkerHealthTests.RunProbe(root);
+        Assert.NotNull(output);
+        var v = HealthProbe.Parse(output);
+        var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_offsets"));
+        Assert.True(table is not null, "probe output: " + output);
+        Assert.Equal(37, table.OffsetMinutes.Count);
+        var now = DateTimeOffset.FromUnixTimeSeconds(table.NowEpoch);
+        Assert.True(Math.Abs((now - DateTimeOffset.UtcNow).TotalMinutes) < 5);
+        for (var k = 0; k < 37; k++)
+        {
+            Assert.Equal((int)TimeZoneInfo.Local.GetUtcOffset(now.AddHours(k)).TotalMinutes, table.OffsetMinutes[k]);
+        }
+    }
+
     // ---- health: the worker's clock ----
 
     private const string Healthy = "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok\n";

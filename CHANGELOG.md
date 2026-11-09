@@ -30,6 +30,13 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
   the end minute). Errors name the bad entry.
 - **Windows use the worker's clock.** The probe reports the worker's local time; output from an older probe falls back
   to the clock of the machine running `lanq`, and `lanq health` then says `time: local`.
+- **Daylight saving.** The probe also reports `now_epoch=` and `tz_offsets=`, the worker's UTC offset in minutes now
+  and every hour for the next 36 hours (PowerShell `TimeZoneInfo.Local`; on Linux `date -d @EPOCH +%z`, which GNU and
+  busybox date accept). The end of a window is turned into a real instant with that table, so a window over a
+  clock change counts real time: a local end time that happens twice (clocks go back) is its earlier instant, and one
+  that does not exist (clocks go forward) is the first instant after the jump. The table is hourly, so a change is
+  placed to within an hour. A worker whose `date` cannot do this (or an older probe) gets wall-clock time, which can be
+  an hour off on such a night.
 - **Window close.** On a machine with windows a job may run until the window ends plus `policy.window_grace_minutes`
   (default 15) or until `--timeout`, whichever is sooner. If the window limit stops it, the job is cleaned up like a
   timeout, exits `124`, and the status line is `[lanq] WindowClosed`. A machine whose window ends in less than
