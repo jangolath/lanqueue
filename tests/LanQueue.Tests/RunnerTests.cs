@@ -571,15 +571,44 @@ public sealed class RunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task CmdMetacharacterArgumentIsRefusedOnAWindowsWorkerBeforeUpload()
+    public async Task CmdMetacharacterArgumentSkipsWindowsWorkersAndRunsOnLinux()
     {
         var (runner, ssh, _, _) = Make();
-        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None); // build-02 (Windows) is least loaded
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None); // build-02 (Windows) is less loaded
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-01", r.Machine);
+        Assert.DoesNotContain(ssh.Calls, c => c.Machine == "build-02" && DecodedContains(T.Windows(), c.Command, "SLOT="));
+    }
+
+    [Fact]
+    public async Task CmdMetacharacterArgumentWithOnlyWindowsWorkersIsRejectedBeforeAnyNetworkWork()
+    {
+        var (_, ssh, payloads, _) = Make();
+        var config = T.Config();
+        config.Machines.RemoveAt(0); // only the Windows machine is left
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None);
 
         Assert.Equal(JobStatus.Rejected, r.Status);
         Assert.Equal(2, r.CliExitCode);
         Assert.Contains("cmd.exe", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
         Assert.Empty(ssh.Uploads);
+    }
+
+    [Fact]
+    public async Task CmdMetacharacterArgumentWaitingForBusyLinuxShowsTheWindowsHoldReason()
+    {
+        var (runner, _, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=FULL")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("build-02: arguments not safe for Windows cmd shims", r.Message, StringComparison.Ordinal);
     }
 
     [Theory]

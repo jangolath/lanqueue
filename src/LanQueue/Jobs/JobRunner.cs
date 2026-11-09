@@ -65,6 +65,14 @@ public sealed class JobRunner(
             return Rejected(jobId, commandFindings);
         }
 
+        // Arguments that cmd.exe shims would re-parse can still run on a Linux worker; refuse only when no non-Windows machine has
+        // the needed capabilities, before any network or git work.
+        var windows = JobPolicy.ValidateForWindows(req.Argv);
+        if (!windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        {
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!);
+        }
+
         JobPayload payload;
         try
         {
@@ -98,9 +106,15 @@ public sealed class JobRunner(
         }
     }
 
+    internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
+
+    private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
+        needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
+
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
+        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
         // Static property of the config: can any git-transfer machine ever take this job (capabilities only; load, hours and slots are temporary)?
         var gitCanEverTakeIt = config.Machines.Any(m => m.Transfer == TransferMode.Git
             && req.Needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)));
@@ -108,7 +122,9 @@ public sealed class JobRunner(
         {
             // Probe every machine at once; WhenAll keeps the config order whatever order the answers arrive in.
             var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
-            var health = config.Machines.Zip(probes).ToList();
+            var health = config.Machines.Zip(probes)
+                .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold }) : h)
+                .ToList();
 
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
             foreach (var machine in ranked)

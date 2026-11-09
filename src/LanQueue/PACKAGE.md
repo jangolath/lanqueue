@@ -41,7 +41,7 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 
 - Key-only SSH with strict host-key checking; there is no password option.
 - Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell (Windows
-  workers refuse arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
+  workers never take arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
 - Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
 - Best-effort secret scan of the command and uncommitted changes before anything leaves your machine.
 - No daemon, no telemetry, and no network access except the SSH hosts you list.

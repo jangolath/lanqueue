@@ -12,7 +12,7 @@ volunteer-maintained project.
 checking, a command and directory allowlist, a best-effort secret scan and a ban on permission-skipping agent flags.
 
 On Windows workers every argument is passed to PowerShell as a single-quoted literal (all five PowerShell
-single-quote characters are escaped), and arguments containing `"` `&` `|` `<` `>` `^` `%` are refused, because
+single-quote characters are escaped), and arguments containing `"` `&` `|` `<` `>` `^` `%` never go to a Windows worker, because
 PowerShell 5.1 native-argument passing and `cmd.exe` (which runs `.cmd` shims such as `npm.cmd`) would re-parse
 them. Output from a worker is treated as untrusted: control and invisible formatting characters are shown as `?`.
 
