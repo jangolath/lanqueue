@@ -142,6 +142,9 @@ public sealed class JobRunner(
     /// <summary>The --fetch step may run at most this long past a machine's allowed hours plus grace (where a window-closed job stopped).</summary>
     internal static readonly TimeSpan FetchWindowMargin = TimeSpan.FromMinutes(2);
 
+    /// <summary>How long stopping a timed-out or window-closed job before its fetch may take.</summary>
+    internal static readonly TimeSpan StopBeforeFetchTimeout = TimeSpan.FromSeconds(60);
+
     /// <summary>With less time than this left for the fetch (by the window), it is not started.</summary>
     internal static readonly TimeSpan MinFetchTime = TimeSpan.FromSeconds(15);
 
@@ -418,6 +421,14 @@ public sealed class JobRunner(
                 run.ExitCode,
                 machine.Name,
                 $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+        }
+
+        // A job lanq stopped (timeout or window) may still be running on the worker, which enforces the limit only a margin later: stop it
+        // first, so the fetch reads files that are no longer being written. Cleanup would kill it anyway, but only after the fetch.
+        if (req.Fetch is not null && result.Status is JobStatus.TimedOut or JobStatus.WindowClosed)
+        {
+            onLine($"[lanq] {machine.Name}: stopping the job before fetching its files");
+            await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.StopJob(machine, jobId)), null, StopBeforeFetchTimeout, ct).ConfigureAwait(false);
         }
 
         // The job ran (completed, failed, or was stopped): bring back what it produced, before the caller's cleanup deletes the job folder.

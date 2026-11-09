@@ -111,6 +111,34 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Contains(lines, l => l.StartsWith("[lanq] fetch (the job completed): 1 file(s)", StringComparison.Ordinal));
     }
 
+    /// <summary>A timed-out job may still run on the worker (it enforces the limit a margin later): it is stopped before the fetch reads its files.</summary>
+    [Theory]
+    [InlineData("build-01")]
+    [InlineData("build-02")]
+    public async Task ATimedOutJobIsStoppedBeforeItsFilesAreFetched(string target)
+    {
+        var (runner, ssh, lines) = Make(target, 0, Stream(("a.trx", "x")));
+        var inner = ssh.Handler;
+        ssh.Handler = (m, cmd) => IsExecute(Decode(m, cmd)) ? new SshResult(124, "", TimedOut: true) : inner(m, cmd);
+
+        var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.TimedOut, r.Status);
+        var texts = Texts(ssh);
+        var stop = texts.FindIndex(t => t.Contains(RemoteScripts.StopJobMarker, StringComparison.Ordinal));
+        Assert.True(texts.FindIndex(IsExecute) < stop && stop < texts.FindIndex(IsFetch) && texts.FindIndex(IsFetch) < texts.FindIndex(IsCleanup));
+        Assert.Contains(lines, l => l.Contains("stopping the job before fetching", StringComparison.Ordinal));
+        Assert.Single(r.Fetch!.Fetched);
+    }
+
+    [Fact]
+    public async Task ACompletedJobIsNotStoppedBeforeTheFetch()
+    {
+        var (runner, ssh, _) = Make("build-01", 1, Stream(("a.trx", "x")));
+        await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+        Assert.DoesNotContain(Texts(ssh), t => t.Contains(RemoteScripts.StopJobMarker, StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task AFailedJobIsFetchedTooAndKeepsItsExitCode()
     {

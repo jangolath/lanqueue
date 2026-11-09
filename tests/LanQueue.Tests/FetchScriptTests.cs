@@ -294,6 +294,65 @@ public sealed class FetchScriptTests : IDisposable
         AssertRoundTrip(rx.Finish(), "TestResults/run.trx");
     }
 
+    /// <summary>A timed-out job may still be running when lanq fetches: the stop script kills its recorded process group first.</summary>
+    [LinuxFact]
+    public void TheLinuxStopScriptKillsTheRecordedProcessGroup()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var pf = _root + "/locks/job-j1.pid";
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false };
+        foreach (var a in new[] { "sh", "-c", "echo $$ > \"$1\"; sleep 60 & wait", "sh", pf })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using var job = System.Diagnostics.Process.Start(psi)!;
+        Assert.True(SpinWait.SpinUntil(() => File.Exists(pf) && File.ReadAllText(pf).Trim().Length > 0, TimeSpan.FromSeconds(10)));
+
+        try
+        {
+            var (code, output) = Shells.Run("linux", RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1"));
+
+            Assert.True(code == 0, output);
+            Assert.True(job.WaitForExit(TimeSpan.FromSeconds(30)), "the job's process group is still running");
+            Assert.False(File.Exists(pf));
+        }
+        finally
+        {
+            Shells.Exec("sh", ["-c", "kill -s KILL -- -" + job.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
+        }
+    }
+
+    [WindowsFact]
+    public void TheWindowsStopScriptKillsTheRecordedProcess()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        var psi = new System.Diagnostics.ProcessStartInfo("powershell") { UseShellExecute = false, CreateNoWindow = true };
+        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 120" })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using var job = System.Diagnostics.Process.Start(psi)!;
+        File.WriteAllLines(_root + "/locks/job-j1.pid", [job.Id.ToString(System.Globalization.CultureInfo.InvariantCulture), job.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture)]);
+
+        try
+        {
+            var (code, output) = Shells.Run("windows", RemoteScripts.StopJob(Worker(MachineOs.Windows), "j1"));
+
+            Assert.True(code == 0, output);
+            Assert.True(job.WaitForExit(TimeSpan.FromSeconds(60)), "the recorded job process is still running");
+            Assert.False(File.Exists(_root + "/locks/job-j1.pid"));
+        }
+        finally
+        {
+            if (!job.HasExited)
+            {
+                job.Kill(entireProcessTree: true);
+            }
+        }
+    }
+
     /// <summary>The real process plumbing behind RunSplitAsync: stderr written between two stdout lines never reaches the stdout callback.</summary>
     [ShFact]
     public async Task StderrIsKeptApartFromStdoutLineByLine()
