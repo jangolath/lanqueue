@@ -151,6 +151,25 @@ public sealed class JobRunner(
     /// <summary>With less time than this left for the fetch (by the window), it is not started.</summary>
     internal static readonly TimeSpan MinFetchTime = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// Splits the wrapper's exit marker (<see cref="RemoteScripts.ExitMarker"/>) off the end of an output line: the text before it (job output
+    /// that had no final newline) and the job's exit code, or the line unchanged and null when it does not end with this job's marker.
+    /// </summary>
+    internal static (string Before, int? Code) ReadExitMarker(string line, string jobId)
+    {
+        var marker = RemoteScripts.ExitMarker(jobId);
+        var at = line.TrimEnd('\r').LastIndexOf(marker, StringComparison.Ordinal);
+        if (at < 0)
+        {
+            return (line, null);
+        }
+
+        var digits = line.TrimEnd('\r')[(at + marker.Length)..];
+        return digits.Length is > 0 and <= 3 && digits.All(char.IsAsciiDigit) && int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var code)
+            ? (line[..at], code)
+            : (line, null);
+    }
+
     /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
     private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
         needGb is not { } need || !h.Reachable || h.Hold is not null || h.MemFreeGb >= need
@@ -435,12 +454,34 @@ public sealed class JobRunner(
 
         // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
         executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin));
+        // The wrapper's exit marker is taken off the output (never logged or shown); seeing it means the job ran to its end on the worker.
+        int? markedExit = null;
+        void OnJobLine(string line)
+        {
+            var (before, code) = ReadExitMarker(line, jobId);
+            if (code is not null)
+            {
+                markedExit = code;
+                if (before.Length == 0)
+                {
+                    return;
+                }
+            }
+
+            onLine(before);
+        }
+
         var run = await ssh.RunAsync(
             machine,
             executeCommand,
-            onLine,
+            OnJobLine,
             timeout,
             ct).ConfigureAwait(false);
+
+        // ssh exits 255 both when the connection fails and when the job itself exited 255: only the marker tells them apart. With the marker,
+        // its code is the job's (also if the connection dropped after the job ended); without it, 255 is a connection failure.
+        var sshFailed = run.IsSshFailure && markedExit is null;
+        var jobExit = markedExit ?? run.ExitCode;
         JobResult result;
         if (run.TimedOut && byWindow)
         {
@@ -451,7 +492,7 @@ public sealed class JobRunner(
         {
             result = new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
         }
-        else if (run.IsSshFailure)
+        else if (sshFailed)
         {
             result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.");
         }
@@ -459,17 +500,17 @@ public sealed class JobRunner(
         {
             result = new JobResult(
                 jobId,
-                run.Ok ? JobStatus.Completed : JobStatus.Failed,
-                run.ExitCode,
+                jobExit == 0 ? JobStatus.Completed : JobStatus.Failed,
+                jobExit,
                 machine.Name,
-                $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+                $"exit {jobExit.ToString(CultureInfo.InvariantCulture)}");
         }
 
         // A job lanq stopped (timeout or window) may still be running on the worker, which enforces the limit only a margin later: stop it
         // first, so the fetch reads files that are no longer being written. Cleanup would kill it anyway, but only after the fetch.
         // A job whose ssh connection dropped may also still be running there: it is stopped the same way, on a fresh connection (the caller's
         // cleanup would kill it on one anyway). When the machine does not answer that either, nothing is fetched and the report says why.
-        var dropped = run.IsSshFailure && !run.TimedOut;
+        var dropped = sshFailed && !run.TimedOut;
         if (req.Fetch is not null && (dropped || result.Status is JobStatus.TimedOut or JobStatus.WindowClosed))
         {
             onLine($"[lanq] {machine.Name}: stopping the job before fetching its files");

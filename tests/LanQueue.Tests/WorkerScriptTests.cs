@@ -84,11 +84,27 @@ public sealed class WorkerScriptTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
     }
 
+    /// <summary>The wrapper's last stdout line is its exit marker with the job's real code, also after output without a final newline.</summary>
+    [ShFact]
+    public void TheLinuxWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("linux", ["sh", "-c", "printf partial; exit 255"]);
+
+    [PowerShellFact]
+    public void TheWindowsWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("windows", ["powershell", "-NoProfile", "-Command", "[Console]::Out.Write('partial'); exit 255"]);
+
+    private void TheWrapperEndsWithTheJobsExitMarker(string shell, string[] argv)
+    {
+        var (code, output) = Shells.Run(shell, RemoteScripts.Execute(Worker(shell == "linux" ? MachineOs.Linux : MachineOs.Windows), "j1", ".", argv, TimeSpan.FromMinutes(5)));
+        Assert.Equal(255, code);
+        var last = output.Replace("\r", "", StringComparison.Ordinal).TrimEnd('\n').Split('\n')[^1];
+        Assert.EndsWith(RemoteScripts.ExitMarker("j1") + "255", last, StringComparison.Ordinal);
+        Assert.Equal(255, JobRunner.ReadExitMarker(last, "j1").Code);
+    }
+
     [Fact]
     public void TheLinuxJobRunsUnderTimeoutWhenALimitIsGiven()
     {
         var s = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], TimeSpan.FromSeconds(90.5));
-        Assert.Contains("if timeout -k 1 5 true >/dev/null 2>&1; then T=\"timeout -k 30 91\"; fi", s, StringComparison.Ordinal);
+        Assert.Contains("if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 91\"; fi", s, StringComparison.Ordinal);
         Assert.Contains("$S $T $N $I env 'LANQ_JOB=j1' /bin/sh -c", s, StringComparison.Ordinal);
     }
 

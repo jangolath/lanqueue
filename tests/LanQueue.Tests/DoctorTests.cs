@@ -133,7 +133,7 @@ public sealed class DoctorTests : IDisposable
         var linux = T.Linux();
         linux.Capabilities = ["dotnet", "rust"];
         var sh = RemoteScripts.Doctor(linux, checkSeconds: 7);
-        Assert.Contains("if timeout -k 5 1 true >/dev/null 2>&1; then T=\"timeout -k 5 7\"; fi", sh, StringComparison.Ordinal);
+        Assert.Contains("if timeout -k 5 30 true >/dev/null 2>&1; then T=\"timeout -k 5 7\"; fi", sh, StringComparison.Ordinal);
         Assert.Contains("$T /bin/sh -c 'dotnet --version'", sh, StringComparison.Ordinal);
         Assert.Contains("=timeout|", sh, StringComparison.Ordinal);
 
@@ -179,6 +179,35 @@ public sealed class DoctorTests : IDisposable
 
     [ShFact]
     public void TheRealShScriptStopsAHangingToolCheck() => TheRealScriptStopsAHangingToolCheck("linux");
+
+    /// <summary>
+    /// A tool that ignores SIGTERM outlives timeout's TERM and is killed by its -k KILL, which makes timeout exit 137, not 124. That is still a
+    /// check that ran out of time. (Under load Git for Windows sh delivers the emulated TERM late enough that the hanging-tool test above saw
+    /// exactly this and reported cap.dotnet=137.) A short check limit keeps the test quick; the assertion is on the line, never on timing.
+    /// </summary>
+    [ShFact]
+    public void TheRealShScriptReportsATermIgnoringToolAsTimedOut()
+    {
+        using var worker = new LocalWorker();
+        var bin = Path.Combine(worker.Root, "fake-bin");
+        Directory.CreateDirectory(bin);
+        MakeTool(bin, "dotnet", "trap '' TERM; exec sleep 600 >/dev/null 2>&1", "@ping -n 600 127.0.0.1 >nul");
+        var dir = bin.Replace('\\', '/');
+        if (OperatingSystem.IsWindows())
+        {
+            dir = "/" + char.ToLowerInvariant(dir[0]) + dir[2..];
+        }
+
+        var m = worker.Machine;
+        m.Os = MachineOs.Linux;
+        m.Capabilities = ["dotnet"];
+        m.PathPrepend = [dir];
+        m.Transfer = TransferMode.Archive;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var lines = StaleSlotTests.RunScript("linux", RemoteScripts.Doctor(m, checkSeconds: 3)).Replace("\r", "", StringComparison.Ordinal).Split('\n');
+        Assert.True(watch.Elapsed < TimeSpan.FromMinutes(5), "took " + watch.Elapsed);
+        Assert.Contains("cap.dotnet=timeout|", lines);
+    }
 
     [WindowsFact]
     public void TheRealPowerShellScriptStopsAHangingToolCheck() => TheRealScriptStopsAHangingToolCheck("windows");

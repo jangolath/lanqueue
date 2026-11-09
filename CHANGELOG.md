@@ -89,7 +89,11 @@
   (a bad `--wait` value or `--fetch` pattern) and a missing or invalid config.
 - A job whose ssh connection drops mid-run is stopped and its files fetched on a fresh connection, before cleanup (which
   would kill it anyway); if the machine does not answer that either, `fetchError` says "not fetched: the SSH connection
-  failed during the job".
+  failed during the job". A job that itself exits 255 is not mistaken for this: the job wrapper ends its output with a
+  `LANQ_EXIT=<job id>:<code>` line (taken off the output), and ssh's 255 means a lost connection only without it.
+- `lanq doctor --remote` on Linux: a tool check that ignores SIGTERM and is killed by `timeout -k` (exit 137 after the
+  full check limit) is reported as `timeout`, not as exit 137, and probing for a working `timeout` (here and in the job
+  wrapper) no longer gives up when merely starting `true` takes over a second on a loaded worker.
 - Windows workers receive the fetch script on ssh stdin (as base64 of its UTF-16 text), so patterns do not count
   toward the 8000-character command line.
 

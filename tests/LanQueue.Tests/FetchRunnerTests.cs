@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using LanQueue.Config;
 using LanQueue.Fetch;
 using LanQueue.Health;
@@ -187,6 +188,52 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Equal("InfraError", json.GetProperty("status").GetString());
         Assert.StartsWith("not fetched: the SSH connection failed during the job", json.GetProperty("fetchError").GetString(), StringComparison.Ordinal);
         Assert.Equal(0, json.GetProperty("fetched").GetArrayLength());
+    }
+
+    private static string JobIdOf(string text) => Regex.Match(text, "job-([A-Za-z0-9_-]+)\\.pid", RegexOptions.None, TimeSpan.FromSeconds(1)).Groups[1].Value;
+
+    /// <summary>
+    /// ssh passes the job's own exit code through, so 255 alone cannot tell a job that exited 255 from a lost connection; the wrapper's final
+    /// exit marker (printed only once the job is over) can. A job that exited 255 is Failed, never stopped early, and its files are fetched.
+    /// </summary>
+    [Theory]
+    [InlineData("build-01", "job output\n")]
+    [InlineData("build-02", "job output\n")]
+    [InlineData("build-01", "no newline at the end ")]
+    public async Task AJobThatExitsWith255ItselfIsFailedNotALostConnection(string target, string jobOutput)
+    {
+        var (runner, ssh, lines) = Make(target, 0, Stream(("a.trx", "x")));
+        var inner = ssh.Handler;
+        ssh.Handler = (m, cmd) =>
+        {
+            var text = Decode(m, cmd);
+            return IsExecute(text) ? new SshResult(255, jobOutput + RemoteScripts.ExitMarker(JobIdOf(text)) + "255\n") : inner(m, cmd);
+        };
+
+        var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Failed, r.Status);
+        Assert.Equal(255, r.ExitCode);
+        Assert.Equal("exit 255", r.Message);
+        Assert.DoesNotContain(Texts(ssh), IsStop);
+        Assert.Single(r.Fetch!.Fetched);
+        Assert.DoesNotContain(lines, l => l.Contains("ssh connection", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(lines, l => l.Contains("LANQ_EXIT", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.StartsWith(jobOutput.TrimEnd('\n'), StringComparison.Ordinal));
+    }
+
+    /// <summary>A marker for another job id is not the wrapper's: 255 stays a lost connection.</summary>
+    [Fact]
+    public async Task AMarkerForAnotherJobDoesNotHideALostConnection()
+    {
+        var (runner, ssh, _) = Make("build-01", 0, Stream(("a.trx", "x")));
+        var inner = ssh.Handler;
+        ssh.Handler = (m, cmd) => IsExecute(Decode(m, cmd)) ? new SshResult(255, RemoteScripts.ExitMarker("someone-else") + "0\n") : inner(m, cmd);
+
+        var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains(Texts(ssh), IsStop);
     }
 
     [Fact]

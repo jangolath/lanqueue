@@ -347,8 +347,11 @@ public static class RemoteScripts
 
         var env = JobEnvironmentPosix(m);
         var lines = caps.Select(c => c.ToLowerInvariant()).Select(c =>
-            $"o=$($T {env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; "
-            + $"if [ -n \"$T\" ] && [ \"$rc\" = 124 ]; then echo \"cap.{c}=timeout|\"; else echo \"cap.{c}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"; fi");
+            // timeout exits 124 when TERM stopped the check, and 137 (128 + KILL) when the tool ignored TERM and -k had to kill it; 137 counts
+            // as a timeout only when the check really ran for its whole limit (an OOM-killed tool exits 137 too, but early).
+            $"s=$(date +%s); o=$($T {env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; "
+            + $"if [ -n \"$T\" ] && {{ [ \"$rc\" = 124 ] || {{ [ \"$rc\" = 137 ] && [ $(( $(date +%s) - s )) -ge {seconds} ]; }}; }}; then echo \"cap.{c}=timeout|\"; "
+            + $"else echo \"cap.{c}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"; fi");
         return $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
             if [ -d "$R" ]; then
@@ -356,7 +359,7 @@ public static class RemoteScripts
               if ( : > "$t" ) 2>/dev/null; then rm -f "$t"; echo root=ok; else echo root=readonly; fi
             else echo root=missing; fi
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux + "\n" + GitVersionLinux)}}
-            T=; if timeout -k 5 1 true >/dev/null 2>&1; then T="timeout -k 5 {{seconds}}"; fi
+            T=; if timeout -k 5 30 true >/dev/null 2>&1; then T="timeout -k 5 {{seconds}}"; fi
             {{string.Join('\n', lines)}}
             """;
     }
@@ -604,6 +607,7 @@ public static class RemoteScripts
                 } finally {
                   Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
                 }
+                [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId))}} + $code)
                 exit $code
                 """;
         }
@@ -615,7 +619,7 @@ public static class RemoteScripts
             case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
             P={{ShellQuote.Posix(pidFile)}}
             S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
-            T={{(limit is { } l ? $"; if timeout -k 1 5 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
+            T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
             $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
@@ -624,6 +628,7 @@ public static class RemoteScripts
             wait "$j"
             rc=$?
             rm -f "$P"
+            printf '%s%s\n' {{ShellQuote.Posix(ExitMarker(jobId))}} "$rc"
             exit $rc
             """;
     }
@@ -669,6 +674,13 @@ public static class RemoteScripts
     /// job's group after its leader has gone; jobs and tools may read it too.
     /// </summary>
     internal const string JobMarker = "LANQ_JOB";
+
+    /// <summary>
+    /// The start of the job wrapper's last stdout line, followed by the job's exit code: <c>LANQ_EXIT=&lt;job id&gt;:&lt;code&gt;</c>. ssh passes a
+    /// remote exit code through, so 255 alone cannot tell a job that exited 255 from a lost connection; this line, printed only after the job
+    /// is over, can (<see cref="JobRunner.ReadExitMarker"/>).
+    /// </summary>
+    internal static string ExitMarker(string jobId) => "LANQ_EXIT=" + SafeJobId(jobId) + ":";
 
     /// <summary>A job id is 1 to 64 of A-Z, a-z, 0-9, '_' and '-' (lanq makes them as yyyyMMdd-HHmmss-xxxxxx).</summary>
     internal static string SafeJobId(string jobId) =>
