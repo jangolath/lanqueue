@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+### Behaviour changes
+
+- `lanq run` judges every machine for a job in one place (the same rules for single jobs, `--shards` placement,
+  `--shards auto` and Wake-on-LAN). The `NoCapacity` message now gives the reason waiting cannot cure first: a
+  machine that is unreachable AND lacks a capability says `lacks gpu (capabilities: ...)` instead of its ssh error, and
+  a Windows machine skipped for arguments cmd.exe would re-parse says so even when it is down.
+
 ## Unreleased
 
 - Docs: [docs/JSON.md](docs/JSON.md), the `--json` contract (every field, status and exit code, with jq and

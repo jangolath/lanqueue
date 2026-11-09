@@ -196,7 +196,7 @@ public sealed partial class JobRunner(
         }
     }
 
-    internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
+    internal const string WindowsUnsafeHold = Scheduler.WindowsUnsafeHold;
 
     /// <summary>The worker enforces the job limit itself (timeout on Linux, a deadline wait on Windows) this long after lanq would stop it.</summary>
     internal static readonly TimeSpan WorkerDeadlineMargin = TimeSpan.FromMinutes(1);
@@ -235,60 +235,25 @@ public sealed partial class JobRunner(
             : (line, null);
     }
 
-    /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
-    private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
-        needGb is not { } need || !h.Reachable || h.Hold is not null || h.MemFreeGb >= need
-            ? h
-            : h with
-            {
-                HoldKind = HoldKind.Job,
-                Hold = h.MemFreeGb is { } free
-                    ? string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, --mem needs {need:0.0} GB")
-                    : "free memory unknown (--mem needs the machine to report it)",
-            };
-
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
 
     /// <summary>Why a machine did not take the job, for the NoCapacity message: its hold or ssh error, a missing capability, or no free slot.</summary>
-    internal static string WhyNot(Machine m, MachineHealth h, IReadOnlyCollection<string> needs)
-    {
-        if (!h.Reachable)
-        {
-            // The ssh error says what to fix (host key, key, sshd); the bare hold would only say "unreachable".
-            return "unreachable: " + (h.Error ?? h.Hold ?? "no answer");
-        }
-
-        if (h.Hold is { } hold)
-        {
-            return hold;
-        }
-
-        var missing = needs.Where(n => !m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
-        if (missing.Count > 0)
-        {
-            return $"lacks {string.Join(", ", missing)} (capabilities: {string.Join(", ", m.Capabilities)})";
-        }
-
-        return h.SlotsUsed >= m.MaxJobs
-            ? string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs})")
-            : "no free slot when the job tried to start (busy, or ssh failed)";
-    }
+    internal static string WhyNot(Assessment a) => a.Why ?? "no free slot when the job tried to start (busy, or ssh failed)";
 
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
-        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var needs = new JobNeeds(req.Needs, req.MinMemGb, !JobPolicy.ValidateForWindows(req.Argv).Ok);
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
         while (true)
         {
-            var (probes, health) = await ProbeForJobAsync(req, windowsUnsafe, ct).ConfigureAwait(false);
-            var ranked = Scheduler.Rank(health, req.Needs).ToList();
-            foreach (var machine in ranked)
+            var (probes, assessed) = await ProbeForJobAsync(needs, ct).ConfigureAwait(false);
+            var ranked = Scheduler.Rank(assessed);
+            foreach (var a in ranked)
             {
-                var windowEnds = health.First(h => ReferenceEquals(h.Item1, machine)).Item2.WindowEndsUtc;
-                var result = await TryOnMachine(jobId, req, prepared, machine, windowEnds, gitCanEverTakeIt, output, ct).ConfigureAwait(false);
+                var result = await TryOnMachine(jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, output, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -299,12 +264,12 @@ public sealed partial class JobRunner(
             // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
             if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
             {
-                await WakeBestSleeperAsync(req, probes, health, windowsUnsafe, archive, ct).ConfigureAwait(false);
+                await WakeBestSleeperAsync(needs, probes, assessed, archive, ct).ConfigureAwait(false);
             }
 
             if (deadline.Elapsed >= req.Wait)
             {
-                var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {WhyNot(h.Item1, h.Item2, req.Needs)}"));
+                var held = string.Join("; ", assessed.Select(a => $"{a.Machine.Name}: {WhyNot(a)}"));
                 var archiveNote = archive.Failure is null ? "" : " Archive build failed: " + archive.Failure;
                 return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + archiveNote);
             }
@@ -319,32 +284,35 @@ public sealed partial class JobRunner(
         config.Machines.Any(m => m.Transfer == TransferMode.Git && HasCapabilities(m, req.Needs));
 
     /// <summary>
-    /// Probes every machine at once (WhenAll keeps the config order whatever order the answers arrive in), then holds the machines this job
-    /// cannot use now: Windows ones for arguments unsafe there, and ones short of --mem.
+    /// Probes every machine at once (WhenAll keeps the config order whatever order the answers arrive in), then judges each one for this job
+    /// (<see cref="Scheduler.Assess"/>): the raw probe results, and the assessments in config order.
     /// </summary>
-    private async Task<(MachineHealth[] Probes, List<(Machine, MachineHealth)> Health)> ProbeForJobAsync(JobRequest req, bool windowsUnsafe, CancellationToken ct)
+    private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(JobNeeds needs, CancellationToken ct)
     {
         var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
-        var health = config.Machines.Zip(probes)
-            .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold, HoldKind = HoldKind.Job }) : h)
-            .Select(h => (h.First, WithMemRequirement(h.Item2, req.MinMemGb)))
-            .ToList();
-        return (probes, health);
+        return (probes, Scheduler.Assess(config.Machines.Zip(probes), needs));
     }
 
     /// <summary>
-    /// Wakes at most one machine: the first by name among those that look asleep, have a wake: setting, are inside their hours and could take
-    /// the job by everything knowable without a probe (capabilities, Windows-safe arguments, archive build). A sleeper's memory and load are
-    /// unknown, so they are not judged. The decision uses the raw probe results (not the job-adjusted holds in <paramref name="health"/>).
+    /// Whether a machine that looks asleep is worth waking for a job, by everything knowable without a probe: it has a wake: setting, the
+    /// capabilities, is not Windows for arguments unsafe there, and is not an archive machine when the archive could not be built. A sleeper's
+    /// memory and load are unknown, so they are not judged. <paramref name="raw"/> is the probe result as returned (no job holds).
     /// </summary>
-    private async Task WakeBestSleeperAsync(
-        JobRequest req, MachineHealth[] probes, List<(Machine, MachineHealth)> health, bool windowsUnsafe, LazyArchive archive, CancellationToken ct)
+    internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
+        m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
+        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+
+    /// <summary>
+    /// Wakes at most one machine: the first by name among those <see cref="CouldWakeFor"/> allows that are inside their hours. The decision uses
+    /// the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the new result in <paramref name="probes"/>
+    /// and is judged again in <paramref name="assessed"/>.
+    /// </summary>
+    private async Task WakeBestSleeperAsync(JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, CancellationToken ct)
     {
         foreach (var i in Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal))
         {
             var m = config.Machines[i];
-            if (m.Wake is null || !probes[i].LooksAsleep || !HasCapabilities(m, req.Needs)
-                || (windowsUnsafe && m.Os == MachineOs.Windows) || (m.Transfer == TransferMode.Archive && archive.Failure is not null))
+            if (!CouldWakeFor(m, probes[i], needs, archive.Failure is not null))
             {
                 continue;
             }
@@ -355,10 +323,11 @@ public sealed partial class JobRunner(
                 continue; // not allowed now (outside its hours, already woken)
             }
 
-            health[i] = (m, after);
+            probes[i] = after;
+            assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
             if (probe.Waker!.AnyPending)
             {
-                output($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
+                output($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
                 return;
             }
         }
