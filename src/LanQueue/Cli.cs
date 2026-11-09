@@ -136,9 +136,12 @@ public static class Cli
         var result = await runner.RunAsync(
             new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
             ct).ConfigureAwait(false);
-        await stderr.WriteLineAsync($"[lanq] {result.Status}: {result.Message}").ConfigureAwait(false);
+        await stderr.WriteLineAsync(StatusLine(result)).ConfigureAwait(false);
         return result.CliExitCode;
     }
+
+    /// <summary>The final line on stderr; TimedOut and WindowClosed (both exit 124) are told apart here.</summary>
+    internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}: {result.Message}";
 
     /// <summary>State folder: $LANQ_HOME, else a per-user folder. Deliberately never inside the current repository.</summary>
     internal static string ResolveHome(Func<string, string?> env, bool windows)
@@ -205,6 +208,7 @@ public static class Cli
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
                 ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots {h.SlotsUsed}/{m.MaxJobs}")
+                    + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                 : h.Error ?? "";
             await stdout.WriteLineAsync($"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd()).ConfigureAwait(false);
         }

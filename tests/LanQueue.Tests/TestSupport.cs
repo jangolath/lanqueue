@@ -107,9 +107,10 @@ internal sealed class GatedProbeSsh : ISshClient
             : cmd;
 }
 
-internal sealed class FakeClock(DateTimeOffset now) : TimeProvider
+/// <summary>A fixed instant; the local zone is UTC unless a (fixed-offset, DST-free) zone is given.</summary>
+internal sealed class FakeClock(DateTimeOffset now, TimeZoneInfo? zone = null) : TimeProvider
 {
     public override DateTimeOffset GetUtcNow() => now;
 
-    public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+    public override TimeZoneInfo LocalTimeZone => zone ?? TimeZoneInfo.Utc;
 }

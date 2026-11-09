@@ -34,6 +34,12 @@ public sealed class PolicyConfig
 
     /// <summary>Linux PSI memory "some avg10" (percent of time stalled) above this holds the machine.</summary>
     public double MaxMemPressure { get; set; } = 20;
+
+    /// <summary>A job may run this many minutes past the end of its machine's allowed hours before it is stopped.</summary>
+    public int WindowGraceMinutes { get; set; } = 15;
+
+    /// <summary>A machine whose allowed hours end sooner than this does not start a new job ("window closing").</summary>
+    public int MinWindowMinutes { get; set; } = 10;
     public List<string> AllowedCommands { get; set; } = [];
     public List<string> AllowedDirectories { get; set; } = [];
 }
@@ -60,7 +66,9 @@ public sealed class Machine
     /// <summary>low (default): nice/ionice on Linux, BelowNormal on Windows. normal: unchanged.</summary>
     public JobPriority Priority { get; set; } = JobPriority.Low;
 
-    public string? AllowedHours { get; set; }
+    /// <summary>allowed_hours: one entry as a string (as before 0.4) or a list of entries; null = any time.</summary>
+    [YamlDotNet.Serialization.YamlConverter(typeof(StringOrListConverter))]
+    public List<string>? AllowedHours { get; set; }
     public TransferMode Transfer { get; set; } = TransferMode.Git;
 }
 

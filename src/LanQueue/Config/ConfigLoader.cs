@@ -33,6 +33,37 @@ internal sealed class WordEnumConverter<TEnum>(string key) : IYamlTypeConverter
         throw new NotSupportedException();
 }
 
+/// <summary>
+/// A key that accepts either one string or a list of strings (allowed_hours); anything else is a friendly error. Used only where a property
+/// names it with [YamlConverter]: Accepts is false so other lists (capabilities, allowed_commands) stay lists only.
+/// </summary>
+internal sealed class StringOrListConverter : IYamlTypeConverter
+{
+    public bool Accepts(Type type) => false;
+
+    public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
+    {
+        if (parser.TryConsume<Scalar>(out var single))
+        {
+            return new List<string> { single.Value };
+        }
+
+        var start = parser.Consume<SequenceStart>();
+        var list = new List<string>();
+        while (!parser.TryConsume<SequenceEnd>(out _))
+        {
+            list.Add(parser.TryConsume<Scalar>(out var item)
+                ? item.Value
+                : throw new YamlException(start.Start, start.End, "allowed_hours must be a string or a list of strings such as \"Mon-Fri 18:00-23:00\"."));
+        }
+
+        return list;
+    }
+
+    public void WriteYaml(IEmitter emitter, object? value, Type type, ObjectSerializer serializer) =>
+        throw new NotSupportedException();
+}
+
 public static partial class ConfigLoader
 {
     [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$", RegexOptions.None, 1000)]
@@ -64,6 +95,7 @@ public static partial class ConfigLoader
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
             .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
+            .WithTypeConverter(new StringOrListConverter())
             .Build();
         FleetConfig config;
         try
@@ -113,6 +145,16 @@ public static partial class ConfigLoader
             throw new ConfigException("policy.max_mem_pressure must be from 0 to 100 (percent of time stalled on memory).");
         }
 
+        if (config.Policy.WindowGraceMinutes is < 0 or > 1440)
+        {
+            throw new ConfigException("policy.window_grace_minutes must be from 0 to 1440.");
+        }
+
+        if (config.Policy.MinWindowMinutes is < 0 or > 1440)
+        {
+            throw new ConfigException("policy.min_window_minutes must be from 0 to 1440.");
+        }
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in config.Machines)
         {
@@ -156,17 +198,24 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': max_jobs must be >= 1.");
             }
 
-            if (m.AllowedHours is not null)
+            if (m.AllowedHours is { Count: 0 })
             {
-                if (!HoursWindow.TryParse(m.AllowedHours, out var hours))
+                throw new ConfigException($"Machine '{m.Name}': allowed_hours is an empty list. Omit it to allow any time.");
+            }
+
+            foreach (var entry in m.AllowedHours ?? [])
+            {
+                if (!HoursWindow.TryParse(entry, out var hours))
                 {
-                    throw new ConfigException($"Machine '{m.Name}': allowed_hours must look like '22:00-07:00'.");
+                    throw new ConfigException(
+                        $"Machine '{m.Name}': allowed_hours entry '{entry.ReplaceLineEndings(" ")}' is not valid. Use '[Days ]HH:mm-HH:mm', for example "
+                        + "'22:00-07:00', 'Mon-Fri 18:00-23:00' or 'Sat,Sun 08:00-22:00' (days Mon..Sun, ranges with '-', lists with ',').");
                 }
 
                 if (hours.IsSingleInstant)
                 {
                     throw new ConfigException(
-                        $"Machine '{m.Name}': allowed_hours '{m.AllowedHours}' has the same start and end, so it would match a single minute. "
+                        $"Machine '{m.Name}': allowed_hours '{entry}' has the same start and end, so it would match a single minute. "
                         + "Omit allowed_hours to allow all day, or give a real window like '22:00-07:00'.");
                 }
             }

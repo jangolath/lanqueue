@@ -17,6 +17,9 @@ public enum JobStatus
     NoCapacity,
     InfraError,
     TimedOut,
+
+    /// <summary>Stopped because the machine's allowed hours ended (plus policy.window_grace_minutes); exit 124 like TimedOut.</summary>
+    WindowClosed,
 }
 
 /// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
@@ -29,11 +32,11 @@ public sealed record JobRequest(
 
 public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, string? Machine, string Message)
 {
-    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out, 70 for infra.</summary>
+    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
         JobStatus.Completed or JobStatus.Failed => ExitCode,
-        JobStatus.TimedOut => ProcessSshClient.TimedOutExitCode,
+        JobStatus.TimedOut or JobStatus.WindowClosed => ProcessSshClient.TimedOutExitCode,
         JobStatus.NoCapacity => 75,
         JobStatus.Rejected => 2,
         _ => 70,
@@ -48,9 +51,11 @@ public sealed class JobRunner(
     JobLog log,
     string scratchDir,
     Action<string> output,
-    Func<TimeSpan, CancellationToken, Task>? delay = null)
+    Func<TimeSpan, CancellationToken, Task>? delay = null,
+    TimeProvider? clock = null)
 {
     private readonly Func<TimeSpan, CancellationToken, Task> delay = delay ?? Task.Delay;
+    private readonly TimeProvider clock = clock ?? TimeProvider.System;
 
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
@@ -143,7 +148,8 @@ public sealed class JobRunner(
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
             foreach (var machine in ranked)
             {
-                var result = await TryOnMachine(jobId, req, payload, archive, machine, gitCanEverTakeIt, ct).ConfigureAwait(false);
+                var windowEnds = health.First(h => ReferenceEquals(h.Item1, machine)).Item2.WindowEndsUtc;
+                var result = await TryOnMachine(jobId, req, payload, archive, machine, windowEnds, gitCanEverTakeIt, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -163,7 +169,8 @@ public sealed class JobRunner(
     }
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
-    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, bool gitCanEverTakeIt, CancellationToken ct)
+    private async Task<JobResult?> TryOnMachine(
+        string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, CancellationToken ct)
     {
         string? archivePath = null;
         if (machine.Transfer == TransferMode.Archive)
@@ -232,7 +239,7 @@ public sealed class JobRunner(
             JobResult result;
             try
             {
-                result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
+                result = await Transfer(jobId, req, payload, archivePath, machine, windowEnds, OnLine, ct).ConfigureAwait(false);
             }
             finally
             {
@@ -258,7 +265,8 @@ public sealed class JobRunner(
         }
     }
 
-    private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, Action<string> onLine, CancellationToken ct)
+    private async Task<JobResult> Transfer(
+        string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, DateTimeOffset? windowEnds, Action<string> onLine, CancellationToken ct)
     {
         string executeCommand;
         try
@@ -293,13 +301,30 @@ public sealed class JobRunner(
                 "Could not prepare the job on the machine." + (step.TimedOut ? " (timed out)" : ""));
         }
 
+        // A machine with allowed hours stops the job when its window ends plus the grace period, if that comes before --timeout. The
+        // limit is taken now, after upload and prepare, so time spent getting here counts against the window.
         var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
+        var grace = TimeSpan.FromMinutes(config.Policy.WindowGraceMinutes);
+        var windowLimit = windowEnds + grace - clock.GetUtcNow();
+        var byWindow = windowLimit < timeout;
+        if (byWindow)
+        {
+            timeout = windowLimit > TimeSpan.FromSeconds(1) ? windowLimit.Value : TimeSpan.FromSeconds(1);
+            onLine($"[lanq] {machine.Name}: allowed hours end soon; the job will be stopped after {ProcessSshClient.Describe(timeout)} (window end + {grace.TotalMinutes:0} min grace)");
+        }
+
         var run = await ssh.RunAsync(
             machine,
             executeCommand,
             onLine,
             timeout,
             ct).ConfigureAwait(false);
+        if (run.TimedOut && byWindow)
+        {
+            return new JobResult(jobId, JobStatus.WindowClosed, ProcessSshClient.TimedOutExitCode, machine.Name,
+                $"stopped after {ProcessSshClient.Describe(timeout)}: {machine.Name}'s allowed hours ended (plus {grace.TotalMinutes:0} min grace)");
+        }
+
         if (run.TimedOut)
         {
             return new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));

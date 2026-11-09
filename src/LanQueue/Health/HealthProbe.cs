@@ -26,15 +26,18 @@ public sealed record MachineHealth(
 
     /// <summary>True when a PAUSE file exists in the machine's work_root.</summary>
     public bool Paused { get; init; }
+
+    /// <summary>True when the hours were checked against the worker's own clock; false when it did not report one (orchestrator clock used).</summary>
+    public bool WorkerClock { get; init; }
+
+    /// <summary>When the machine's current allowed-hours window ends (UTC), or null when it has no allowed_hours.</summary>
+    public DateTimeOffset? WindowEndsUtc { get; init; }
 }
 
 public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
 {
     public async Task<MachineHealth> ProbeAsync(Machine machine, PolicyConfig policy, CancellationToken ct)
     {
-        var now = TimeOnly.FromDateTime(clock.GetLocalNow().DateTime);
-        var outside = !HoursWindow.IsAllowed(machine.AllowedHours, now);
-
         SshResult result;
         try
         {
@@ -65,12 +68,21 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
             return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (load, disk_free_gb or slots_used missing or invalid)", null);
         }
 
+        // Hours are the worker's own: its local clock when it reports one, else (older probe output) the orchestrator's local clock.
+        var workerNow = values.TryGetValue("local_time", out var lt)
+            && DateTime.TryParseExact(lt, "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var t)
+                ? t
+                : (DateTime?)null;
+        var windows = HoursWindow.ParseAll(machine.AllowedHours);
+        var remaining = windows is null ? null : HoursWindow.Remaining(windows, workerNow ?? clock.GetLocalNow().DateTime);
         var health = new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, null, null)
         {
             MemFreeGb = OptionalNum(values, "mem_free_gb"),
             SwapFreeGb = OptionalNum(values, "swap_free_gb"),
             MemPressure = OptionalNum(values, "mem_pressure"),
             Paused = values.TryGetValue("paused", out var paused) && paused == "1",
+            WorkerClock = workerNow is not null,
+            WindowEndsUtc = remaining is { } left ? clock.GetUtcNow() + left : null,
         };
         return health with
         {
@@ -78,24 +90,33 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
                 ? machine.Transfer == TransferMode.Archive
                     ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or bsdtar plus gzip on Linux, or a Windows built-in tar.exe that accepts --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions)"
                     : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)"
-                : Evaluate(machine, policy, health, outside),
+                : Evaluate(machine, policy, health, remaining),
         };
     }
 
     /// <summary>
-    /// "Hold short" rules: a PAUSE file, outside allowed hours, low disk, low memory, memory pressure, or load above the threshold.
-    /// Memory that the worker did not report (null) never holds: older kernels and odd hosts simply do not say.
+    /// "Hold short" rules: a PAUSE file, outside allowed hours, a window about to close, low disk, low memory, memory pressure, or load
+    /// above the threshold. Memory that the worker did not report (null) never holds: older kernels and odd hosts simply do not say.
     /// </summary>
-    public static string? Evaluate(Machine machine, PolicyConfig policy, MachineHealth h, bool outsideHours)
+    /// <param name="windowRemaining">Time left in the machine's current allowed-hours window; null when outside (or when it has none).</param>
+    public static string? Evaluate(Machine machine, PolicyConfig policy, MachineHealth h, TimeSpan? windowRemaining)
     {
         if (h.Paused)
         {
             return "paused on the machine";
         }
 
-        if (outsideHours)
+        if (machine.AllowedHours is { Count: > 0 })
         {
-            return "outside allowed hours";
+            if (windowRemaining is not { } left)
+            {
+                return "outside allowed hours";
+            }
+
+            if (left < TimeSpan.FromMinutes(policy.MinWindowMinutes))
+            {
+                return string.Create(CultureInfo.InvariantCulture, $"window closing ({Math.Ceiling(left.TotalMinutes):0} min left)");
+            }
         }
 
         if (h.DiskFreeGb < policy.MinFreeDiskGb)

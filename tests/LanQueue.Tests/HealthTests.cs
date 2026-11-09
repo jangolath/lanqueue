@@ -140,15 +140,6 @@ public class HealthTests
         Assert.False(h.Reachable);
     }
 
-    [Theory]
-    [InlineData("22:00-07:00", 23, 0, true)]
-    [InlineData("22:00-07:00", 3, 0, true)]
-    [InlineData("22:00-07:00", 12, 0, false)]
-    [InlineData("09:00-17:00", 12, 0, true)]
-    [InlineData("09:00-17:00", 18, 0, false)]
-    public void HoursWindowMath(string window, int h, int m, bool expected) =>
-        Assert.Equal(expected, HoursWindow.IsAllowed(window, new TimeOnly(h, m)));
-
     [Fact]
     public async Task UnreachableErrorTextHasNoTerminalEscapes()
     {

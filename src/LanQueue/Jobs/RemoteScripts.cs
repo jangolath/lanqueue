@@ -40,6 +40,7 @@ public static class RemoteScripts
             $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
             if ($os -and $os.FreePhysicalMemory) { 'mem_free_gb=' + ([double]$os.FreePhysicalMemory / 1MB).ToString('0.##', $inv) }
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
+            'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
             {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
             """
         : $$"""
@@ -53,6 +54,7 @@ public static class RemoteScripts
             awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
             if [ -e "$R/PAUSE" ]; then echo paused=1; else echo paused=0; fi
+            echo "local_time=$(date '+%Y-%m-%dT%H:%M:%S')"
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
             """;
 
