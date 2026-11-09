@@ -506,6 +506,13 @@ public sealed class FetchScriptTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The job is started in the background before the wrapper writes its pid file, so a job may run before that file exists or is complete.
+    /// The test job therefore waits (event-like: until the file holds all three newline-terminated lines, bounded at 60 s) before copying it.
+    /// </summary>
+    private const string WaitForPidFile =
+        "i=0; while [ $(cat \"$0\" 2>/dev/null | wc -l) -lt 3 ]; do i=$((i+1)); [ $i -le 600 ] || exit 9; sleep 0.1; done; ";
+
     /// <summary>The Linux job wrapper records the job's process group, its leader's start time and the boot id, and marks the job with LANQ_JOB.</summary>
     [LinuxFact]
     public void TheLinuxWrapperRecordsTheLeadersStartTime()
@@ -514,7 +521,7 @@ public sealed class FetchScriptTests : IDisposable
         var copy = _root + "/copy.pid";
         var (code, output) = Shells.Run(
             "linux",
-            RemoteScripts.Execute(Worker(MachineOs.Linux), "j1", ".", ["sh", "-c", "cp \"$0\" \"$1\" && printf '%s' \"$LANQ_JOB\" > \"$1.job\"", _root + "/locks/job-j1.pid", copy]));
+            RemoteScripts.Execute(Worker(MachineOs.Linux), "j1", ".", ["sh", "-c", WaitForPidFile + "cp \"$0\" \"$1\" && printf '%s' \"$LANQ_JOB\" > \"$1.job\"", _root + "/locks/job-j1.pid", copy]));
         Assert.True(code == 0, output);
         var lines = File.ReadAllLines(copy);
         Assert.Equal(3, lines.Length);
