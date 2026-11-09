@@ -212,6 +212,7 @@ public static class RemoteScripts
                   if ($p.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 126 }
                   $p = $p.Parent
                 }
+                {{JobEnvironmentPowerShell(m)}}
                 Set-Content -LiteralPath $pf -Value $PID
                 $code = 1
                 try {
@@ -229,11 +230,40 @@ public static class RemoteScripts
             case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
             P={{ShellQuote.Posix(pidFile)}}
             S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
-            $S sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$P" {{string.Join(' ', argv.Select(ShellQuote.Posix))}}
+            $S {{JobEnvironmentPosix(m)}}sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$P" {{string.Join(' ', argv.Select(ShellQuote.Posix))}}
             rc=$?
             rm -f "$P"
             exit $rc
             """;
+    }
+
+    /// <summary>
+    /// env: and path_prepend: for the job's own process only, as one "env NAME=value ..." prefix right before the job's sh. Each assignment
+    /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
+    /// trailing ':' (which would mean the current directory).
+    /// </summary>
+    private static string JobEnvironmentPosix(Machine m)
+    {
+        var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
+        if (m.PathPrepend.Count > 0)
+        {
+            words.Add(ShellQuote.Posix("PATH=" + string.Join(':', m.PathPrepend)) + "\"${PATH:+:$PATH}\"");
+        }
+
+        return words.Count == 0 ? "" : "env " + string.Join(' ', words) + " ";
+    }
+
+    /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
+    private static string JobEnvironmentPowerShell(Machine m)
+    {
+        var lines = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => $"$env:{e.Key} = {ShellQuote.PowerShell(e.Value)}").ToList();
+        if (m.PathPrepend.Count > 0)
+        {
+            var dirs = ShellQuote.PowerShell(string.Join(';', m.PathPrepend.Select(d => d.Replace('/', '\\'))));
+            lines.Add($"$env:Path = {dirs} + $(if ($env:Path) {{ ';' + $env:Path }} else {{ '' }})");
+        }
+
+        return string.Join('\n', lines);
     }
 
     /// <summary>Best-effort teardown: worktree, ref, bundle, slot. Never fails the job.</summary>

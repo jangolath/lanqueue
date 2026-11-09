@@ -44,8 +44,15 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
     private static partial Regex WindowsWorkRootRegex();
 
-    [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.None, 1000)]
+    // \z, not $: "$" would also match just before a trailing newline.
+    [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*\z", RegexOptions.None, 1000)]
     private static partial Regex EnvNameRegex();
+
+    [GeneratedRegex(@"^[A-Za-z]:[/\\]", RegexOptions.None, 1000)]
+    private static partial Regex WindowsAbsolutePathRegex();
+
+    /// <summary>Names that would let a value hijack the dynamic loader or a shell's startup; refused in env: (compared ignoring case).</summary>
+    private static readonly string[] DeniedEnvNames = ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "PROMPT_COMMAND", "PSModulePath", "COMSPEC", "PATHEXT"];
 
     public static FleetConfig Parse(string yaml)
     {
@@ -138,6 +145,8 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': min_free_mem_gb must be >= 0.");
             }
 
+            ValidateJobEnvironment(m);
+
             if (m.MaxJobs < 1)
             {
                 throw new ConfigException($"Machine '{m.Name}': max_jobs must be >= 1.");
@@ -156,6 +165,52 @@ public static partial class ConfigLoader
                         $"Machine '{m.Name}': allowed_hours '{m.AllowedHours}' has the same start and end, so it would match a single minute. "
                         + "Omit allowed_hours to allow all day, or give a real window like '22:00-07:00'.");
                 }
+            }
+        }
+    }
+
+    private static void ValidateJobEnvironment(Machine m)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, value) in m.Env)
+        {
+            if (!EnvNameRegex().IsMatch(name))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env names must be letters, digits and _ and not start with a digit (got '{name.ReplaceLineEndings(" ")}').");
+            }
+
+            if (string.Equals(name, "PATH", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' is not allowed; list extra directories under path_prepend instead.");
+            }
+
+            if (name.StartsWith("DYLD_", StringComparison.OrdinalIgnoreCase) || DeniedEnvNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused because it can hijack the program loader or a shell.");
+            }
+
+            if (!names.Add(name))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' is listed twice (names are compared ignoring case, as on Windows).");
+            }
+
+            // The value is never echoed: it may be something the owner would rather not see in a terminal.
+            if (value is null || value.Any(char.IsControl))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' needs a value without control characters (no newlines, tabs or escapes); use \"\" for empty.");
+            }
+        }
+
+        foreach (var dir in m.PathPrepend)
+        {
+            var ok = !string.IsNullOrEmpty(dir) && !dir.Any(char.IsControl) && (m.Os == MachineOs.Windows
+                ? WindowsAbsolutePathRegex().IsMatch(dir) && !dir.Contains(';', StringComparison.Ordinal)
+                : dir.StartsWith('/') && !dir.Contains(':', StringComparison.Ordinal));
+            if (!ok)
+            {
+                throw new ConfigException(m.Os == MachineOs.Windows
+                    ? $"Machine '{m.Name}': each path_prepend entry must be an absolute drive path such as C:/Users/me/.cargo/bin (no ';', no control characters)."
+                    : $"Machine '{m.Name}': each path_prepend entry must be an absolute directory such as /home/me/.nvm/versions/node/v22/bin (no ':', no control characters).");
             }
         }
     }

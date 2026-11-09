@@ -41,6 +41,13 @@ public sealed class Machine
 
     /// <summary>Overrides policy.min_free_mem_gb for this machine.</summary>
     public double? MinFreeMemGb { get; set; }
+
+    /// <summary>Environment variables for the job process only (never for lanq's own remote scripts).</summary>
+    public Dictionary<string, string> Env { get; set; } = [];
+
+    /// <summary>Absolute directories put in front of PATH for the job (for example an nvm or pyenv bin folder).</summary>
+    public List<string> PathPrepend { get; set; } = [];
+
     public string? AllowedHours { get; set; }
     public TransferMode Transfer { get; set; } = TransferMode.Git;
 }
