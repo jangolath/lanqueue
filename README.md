@@ -129,7 +129,7 @@ Where each safety check sits (numbers are the diagram steps):
 | 2 | Command and directory must match your allowlists; permission-skipping flags are refused. Nothing has touched the network yet. |
 | 3 | The command line and the uncommitted overlay are secret-scanned, and committed file names are checked; a hit refuses the job before anything is sent. |
 | 4-5 | Machines that are unreachable, loaded, outside their hours, low on disk or missing a capability are skipped. |
-| 6 | `max_jobs` is enforced with an atomic slot file per machine. |
+| 6 | `max_jobs` is enforced with an atomic slot file per machine; a slot left by a crashed run is reclaimed 30 minutes after its recorded deadline. |
 | 4-10 | Every ssh/scp call is key-only, non-interactive and uses `StrictHostKeyChecking=yes`. |
 | 11 | Cleanup runs even when the job fails, is cancelled or times out (best effort if the network is down). |
 
@@ -364,8 +364,10 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
   have yet (see "Incremental bundles"). Archive mode sends the whole working snapshot each time, with no history and
   no cache.
-- A crashed orchestrator can leave a slot file behind; delete `locks/slot-N` (and any stale `locks/job-*.pid`) under
-  the machine's `work_root`.
+- A crashed orchestrator can leave a slot file behind. Each slot file records its own deadline (the job's
+  `--timeout` plus 40 minutes for transfer and cleanup, on the worker's clock), and a slot more than 30 minutes past it
+  is reclaimed by the next job that needs a slot. Slot files written by lanq before 0.4 carry no deadline and are never
+  reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
 - Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
   embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through

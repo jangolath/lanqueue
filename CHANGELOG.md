@@ -25,6 +25,10 @@
   `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
   such a file (for example a `.npmrc` or a test certificate outside those folders) is now refused until the file is
   renamed or moved. A long list of findings is cut to the first ten.
+- **Stale slots are reclaimed.** A slot file now records its own deadline (worker clock: now + the job's `--timeout`
+  + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline
+  (left by a crashed or killed `lanq`) is renamed away atomically and reused; a live slot, or one without a deadline
+  (written by an older lanq), is never touched.
 
 ## 0.3.1 (2026-11-09)
 

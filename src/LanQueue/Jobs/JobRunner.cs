@@ -190,7 +190,7 @@ public sealed class JobRunner(
         var clock = Stopwatch.StartNew();
         var command = string.Join(' ', req.Argv);
 
-        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.AcquireSlot(machine, jobId)), null, TimeSpan.FromSeconds(30), ct)
+        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.AcquireSlot(machine, jobId, req.Timeout ?? JobRequest.DefaultTimeout)), null, TimeSpan.FromSeconds(30), ct)
             .ConfigureAwait(false);
         var slot = ParseSlot(acquire.Output);
         if (!acquire.Ok || slot is null)

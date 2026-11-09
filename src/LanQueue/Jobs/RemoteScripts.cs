@@ -83,30 +83,70 @@ public static class RemoteScripts
         + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
         + "'tool=' + $(if ($ok) { 'ok' } else { 'missing' })";
 
-    /// <summary>Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL.</summary>
-    public static string AcquireSlot(Machine m, string jobId) => m.Os == MachineOs.Windows
-        ? $$"""
-            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
-            New-Item -ItemType Directory -Force -Path "$root/locks" | Out-Null
-            for ($i = 1; $i -le {{m.MaxJobs.ToString(CultureInfo.InvariantCulture)}}; $i++) {
-              try {
-                $fs = [System.IO.File]::Open("$root/locks/slot-$i", 'CreateNew', 'Write', 'None')
-                $b = [Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}}); $fs.Write($b, 0, $b.Length); $fs.Close()
-                'SLOT=' + $i; exit 0
-              } catch [System.IO.IOException] { }
-            }
-            'SLOT=FULL'
-            """
-        : $$"""
-            R={{ShellQuote.Posix(m.WorkRoot)}}
-            mkdir -p "$R/locks"
-            i=1
-            while [ "$i" -le {{m.MaxJobs.ToString(CultureInfo.InvariantCulture)}} ]; do
-              if ( set -C; echo {{ShellQuote.Posix(jobId)}} > "$R/locks/slot-$i" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
-              i=$((i+1))
-            done
-            echo "SLOT=FULL"
-            """;
+    /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
+    internal const int StaleSlotGraceSeconds = 1800;
+
+    /// <summary>Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback) and cleanup.</summary>
+    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(40);
+
+    /// <summary>
+    /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
+    /// its deadline in the worker's own epoch seconds (now + <paramref name="jobTimeout"/> + <see cref="SlotTransferAllowance"/>). A slot
+    /// more than <see cref="StaleSlotGraceSeconds"/> past its deadline was left by a crashed run and is reclaimed: it is renamed away
+    /// (atomic), and put back if what was renamed is not the stale file that was read. A slot without a deadline is never reclaimed.
+    /// </summary>
+    public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout)
+    {
+        var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
+        var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
+        return m.Os == MachineOs.Windows
+            ? $$"""
+                $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+                New-Item -ItemType Directory -Force -Path "$root/locks" | Out-Null
+                $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                $deadline = $now + {{lease}}
+                for ($i = 1; $i -le {{max}}; $i++) {
+                  $f = "$root/locks/slot-$i"
+                  try {
+                    $c = [IO.File]::ReadAllText($f); $l = $c -split "`n"
+                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}$' -and $now -gt ([long]$l[1].Trim() + {{grace}})) {
+                      $t = "$f.stale.$PID"
+                      [IO.File]::Move($f, $t)
+                      if ([IO.File]::ReadAllText($t) -ceq $c) { [IO.File]::Delete($t) } else { try { [IO.File]::Move($t, $f) } catch { [IO.File]::Delete($t) } }
+                    }
+                  } catch { }
+                  try {
+                    $fs = [System.IO.File]::Open($f, 'CreateNew', 'Write', 'None')
+                    $b = [Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}} + "`n" + $deadline + "`n"); $fs.Write($b, 0, $b.Length); $fs.Close()
+                    'SLOT=' + $i; exit 0
+                  } catch [System.IO.IOException] { }
+                }
+                'SLOT=FULL'
+                """
+            : $$"""
+                R={{ShellQuote.Posix(m.WorkRoot)}}
+                mkdir -p "$R/locks"
+                now=$(date +%s); D=$((now + {{lease}}))
+                i=1
+                while [ "$i" -le {{max}} ]; do
+                  f="$R/locks/slot-$i"
+                  if [ -f "$f" ]; then
+                    c=$(cat "$f" 2>/dev/null); d=$(printf '%s\n' "$c" | sed -n 2p)
+                    case "$d" in
+                      ''|*[!0-9]*) ;;
+                      *) if [ "$now" -gt $((d + {{grace}})) ] && mv "$f" "$f.stale.$$" 2>/dev/null; then
+                           if [ "$(cat "$f.stale.$$")" != "$c" ]; then ln "$f.stale.$$" "$f" 2>/dev/null; fi
+                           rm -f "$f.stale.$$"
+                         fi ;;
+                    esac
+                  fi
+                  if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
+                  i=$((i+1))
+                done
+                echo "SLOT=FULL"
+                """;
+    }
 
     /// <summary>
     /// Git mode: verifies the uploaded bundle against the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> (printing

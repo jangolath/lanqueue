@@ -130,7 +130,7 @@ public class ScriptSafetyTests
         var scripts = new Dictionary<string, string>
         {
             ["probe"] = RemoteScripts.Probe(m),
-            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1"),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromMinutes(5)),
             ["prepare"] = RemoteScripts.Prepare(m, "j1", T.RepoId),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
@@ -167,7 +167,7 @@ public class ScriptSafetyTests
         var scripts = new Dictionary<string, string>
         {
             ["probe"] = RemoteScripts.Probe(m),
-            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1"),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromMinutes(5)),
             ["prepare"] = RemoteScripts.Prepare(m, "j1", T.RepoId),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),

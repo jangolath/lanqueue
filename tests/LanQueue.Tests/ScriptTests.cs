@@ -38,9 +38,9 @@ public class ScriptTests
     [Fact]
     public void SlotUsesExclusiveCreateAndHonoursMaxJobs()
     {
-        Assert.Contains("set -C", RemoteScripts.AcquireSlot(T.Linux(), "j"), StringComparison.Ordinal);
-        Assert.Contains("-le 2", RemoteScripts.AcquireSlot(T.Linux(), "j"), StringComparison.Ordinal);
-        Assert.Contains("CreateNew", RemoteScripts.AcquireSlot(T.Windows(), "j"), StringComparison.Ordinal);
+        Assert.Contains("set -C", RemoteScripts.AcquireSlot(T.Linux(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
+        Assert.Contains("-le 2", RemoteScripts.AcquireSlot(T.Linux(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
+        Assert.Contains("CreateNew", RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
     }
 
     [Fact]
