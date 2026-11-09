@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
 using LanQueue.Jobs;
+using LanQueue.Output;
 using LanQueue.Payload;
 using LanQueue.Ssh;
 
@@ -17,6 +19,23 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --mem: minimum available memory in GB, or null.</summary>
     public double? MemGb { get; init; }
 
+    /// <summary>--json: machine-readable output on stdout.</summary>
+    public bool Json { get; init; }
+
+    /// <summary>The one positional argument some commands take (a machine name).</summary>
+    public string? Target { get; init; }
+
+    /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
+    private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
+    {
+        ["health"] = ["--json"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json"],
+        ["stats"] = [],
+    };
+
+    /// <summary>Commands that take one positional machine name.</summary>
+    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal);
+
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
     {
@@ -29,9 +48,17 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var wait = 0;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
+        var json = false;
+        string? target = null;
+        var seen = new List<string>();
         var command = own.Length > 0 ? own[0] : "help";
         for (var i = 1; i < own.Length; i++)
         {
+            if (own[i].StartsWith("--", StringComparison.Ordinal))
+            {
+                seen.Add(own[i]);
+            }
+
             switch (own[i])
             {
                 case "--config" when i + 1 < own.Length:
@@ -62,12 +89,26 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
                     mem = gb;
                     break;
+                case "--json":
+                    json = true;
+                    break;
                 default:
+                    if (TakesTarget.Contains(command) && target is null && !own[i].StartsWith('-'))
+                    {
+                        target = own[i];
+                        break;
+                    }
+
                     throw new ArgumentException($"Unknown or incomplete option '{own[i]}'.");
             }
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem };
+        if (Allowed.TryGetValue(command, out var allowed) && seen.FirstOrDefault(o => o != "--config" && !allowed.Contains(o)) is { } bad)
+        {
+            throw new ArgumentException($"lanq {command} does not take {bad}.");
+        }
+
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target };
     }
 }
 
@@ -76,14 +117,15 @@ public static class Cli
     private const string Usage = """
         lanq - headless job runner for your own LAN machines
 
-          lanq health [--config FILE]
-          lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--config FILE] -- dotnet test
+          lanq health [--json] [--config FILE]
+          lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--json] [--config FILE] -- dotnet test
           lanq stats
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
+        --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end.
         Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
@@ -128,15 +170,31 @@ public static class Cli
         var probe = new HealthProbe(ssh, TimeProvider.System);
         if (p.Command == "health")
         {
-            return await Health(config, probe, stdout, stderr, ct).ConfigureAwait(false);
+            return await Health(config, probe, stdout, stderr, ct, p.Json).ConfigureAwait(false);
         }
 
-        var scratch = Path.Combine(home, "tmp");
-        var runner = new JobRunner(config, ssh, new GitPayloadBuilder(), probe, log, scratch, line => stdout.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
+        return await Run(p, config, ssh, new GitPayloadBuilder(), probe, log, home, Directory.GetCurrentDirectory(), stdout, stderr, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>lanq run. With --json the job's output streams to stderr and stdout carries only the final JSON object.</summary>
+    internal static async Task<int> Run(
+        ParsedArgs p, FleetConfig config, ISshClient ssh, IPayloadBuilder payloads, HealthProbe probe, JobLog log, string home, string repoDir,
+        TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    {
+        var jobOutput = p.Json ? stderr : stdout;
+        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
+        var started = System.Diagnostics.Stopwatch.StartNew();
         var result = await runner.RunAsync(
-            new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
+            new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
             ct).ConfigureAwait(false);
         await stderr.WriteLineAsync(StatusLine(result)).ConfigureAwait(false);
+        if (p.Json)
+        {
+            var json = new RunJson(
+                result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message));
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.RunJson)).ConfigureAwait(false);
+        }
+
         return result.CliExitCode;
     }
 
@@ -194,7 +252,7 @@ public static class Cli
     private static string HomeDir(Func<string, string?> env) =>
         env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    internal static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    internal static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false)
     {
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
@@ -203,6 +261,13 @@ public static class Cli
 
         // Probe all machines concurrently, then print in config order.
         var results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        if (json)
+        {
+            var rows = config.Machines.Zip(results).Select(x => HealthRow(x.First, x.Second)).ToList();
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)).ConfigureAwait(false);
+            return 0;
+        }
+
         foreach (var (m, h) in config.Machines.Zip(results))
         {
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
@@ -214,6 +279,14 @@ public static class Cli
         }
 
         return 0;
+    }
+
+    internal static HealthJson HealthRow(Machine m, MachineHealth h)
+    {
+        var state = !h.Reachable ? "down" : h.Hold is not null ? "hold" : "ok";
+        var reason = !h.Reachable ? h.Error ?? h.Hold : h.Hold;
+        return new HealthJson(
+            m.Name, state, reason is null ? [] : [JobRunner.SafeLine(reason)], h.LoadRatio, h.DiskFreeGb, h.MemFreeGb, h.SlotsUsed, m.MaxJobs, h.LocalTime);
     }
 
     private static string Memory(MachineHealth h) =>

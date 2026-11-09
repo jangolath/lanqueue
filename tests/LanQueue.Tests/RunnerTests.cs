@@ -14,7 +14,7 @@ public sealed class RunnerTests : IDisposable
 
     private readonly BaseStore _bases = new(null);
 
-    private sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
+    internal sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
     {
         public int Built { get; private set; }
 

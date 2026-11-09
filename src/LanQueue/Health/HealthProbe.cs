@@ -32,6 +32,9 @@ public sealed record MachineHealth(
 
     /// <summary>When the machine's current allowed-hours window ends (UTC), or null when it has no allowed_hours.</summary>
     public DateTimeOffset? WindowEndsUtc { get; init; }
+
+    /// <summary>The worker's own local time as it reported it (yyyy-MM-ddTHH:mm:ss), or null when it did not.</summary>
+    public string? LocalTime { get; init; }
 }
 
 public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
@@ -82,6 +85,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
             MemPressure = OptionalNum(values, "mem_pressure"),
             Paused = values.TryGetValue("paused", out var paused) && paused == "1",
             WorkerClock = workerNow is not null,
+            LocalTime = workerNow?.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture),
             WindowEndsUtc = remaining is { } left ? clock.GetUtcNow() + left : null,
         };
         return health with
