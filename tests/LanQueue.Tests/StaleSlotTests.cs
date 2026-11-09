@@ -155,6 +155,35 @@ public sealed class StaleSlotTests : IDisposable
     }
 
     /// <summary>A reclaim lock left by a reclaimer that died (older than ten minutes) does not block the slot for ever.</summary>
+    /// <summary>
+    /// The race in clearing an abandoned lock: it looked old, but by the time it is renamed away a live reclaimer's fresh lock is in its
+    /// place. A fake find reports the live name as old and the renamed file as fresh, which is exactly that interleaving: the fresh lock
+    /// must be put back and the slot left alone (deleting it would let two reclaimers both win).
+    /// </summary>
+    [ShFact]
+    public void AFreshLockThatReplacedAnAbandonedOneIsNotDeletedSh()
+    {
+        var stale = Lines("crashed-job", Now - RemoteScripts.StaleSlotGraceSeconds - 60);
+        WriteSlot(1, stale);
+        File.WriteAllText(Slot(1) + ".reclaim", "");
+        var bin = Path.Combine(_root, "fake-bin");
+        Directory.CreateDirectory(bin);
+        // "Old" for the live lock name (and, like find -exec rm, deletes it when asked to), "fresh" (no output) for anything else.
+        File.WriteAllText(Path.Combine(bin, "find"), "#!/bin/sh\ncase \"$1\" in *.reclaim) case \" $* \" in *' -exec '*) rm -f \"$1\" ;; *) printf '%s\\n' \"$1\" ;; esac ;; esac\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(Path.Combine(bin, "find"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        var env = new Dictionary<string, string> { ["PATH"] = bin + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH") };
+        var (_, output) = Shells.Run("linux", RemoteScripts.AcquireSlot(Worker("linux", 1), "new-job", TimeSpan.FromMinutes(10)), env);
+
+        Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
+        Assert.Equal(stale, File.ReadAllText(Slot(1)));
+        Assert.True(File.Exists(Slot(1) + ".reclaim"), "the fresh lock was deleted");
+        Assert.DoesNotContain(LockFiles(), f => f.Contains(".old.", StringComparison.Ordinal));
+    }
+
     [ShFact]
     public void AnAbandonedReclaimLockIsClearedSh() => AnAbandonedReclaimLockIsCleared("linux");
 

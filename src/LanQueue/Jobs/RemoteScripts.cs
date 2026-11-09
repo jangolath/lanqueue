@@ -139,13 +139,21 @@ public static class RemoteScripts
     /// <summary>
     /// sh helpers for reclaim and unlock (they need $R). <c>deadline_of</c> prints a slot file's deadline as plain base-10 (leading zeros
     /// stripped, so "08" is 8 and never octal) and fails unless it is 1 to 18 digits. <c>take</c> creates the slot's lock file exclusively
-    /// (set -C), first clearing one older than ten minutes (a reclaimer that died). <c>stop_job</c> stops a stale slot's job if it is still
+    /// (set -C), first clearing one older than ten minutes (a reclaimer that died): the old lock is renamed to a unique name
+    /// (atomic, so one clearer wins) and checked again there; if what was renamed turns out to be fresh (a live reclaimer's lock that
+    /// replaced the old one in between), a lock is put back in its place, so the live reclaimer keeps the slot to itself. <c>stop_job</c> stops a stale slot's job if it is still
     /// running: it reads locks/job-ID.pid and kills that process group only when /proc shows the process working inside that job's folder
     /// (so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
     /// </summary>
     internal const string LinuxSlotFunctions = """
         deadline_of() { d=$(printf '%s\n' "$1" | sed -n 2p); case "$d" in ''|*[!0-9]*) return 1 ;; esac; [ ${#d} -le 18 ] || return 1; d=$(printf '%s' "$d" | sed 's/^0*//'); echo "${d:-0}"; }
-        take() { find "$1.reclaim" -mmin +10 -exec rm -f {} \; 2>/dev/null; ( set -C; : > "$1.reclaim" ) 2>/dev/null; }
+        take() {
+          k="$1.reclaim"; o="$k.old.$$"
+          if [ -n "$(find "$k" -mmin +10 2>/dev/null)" ] && mv "$k" "$o" 2>/dev/null; then
+            if [ -n "$(find "$o" -mmin +10 2>/dev/null)" ]; then rm -f "$o"; else ( set -C; : > "$k" ) 2>/dev/null; rm -f "$o"; fi
+          fi
+          ( set -C; : > "$k" ) 2>/dev/null
+        }
         stop_job() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
           kp="$R/locks/job-$1.pid"; [ -f "$kp" ] || return 0
@@ -169,7 +177,14 @@ public static class RemoteScripts
     internal const string WindowsSlotFunctions = """
         function Take([string]$f) {
           $k = "$f.reclaim"
-          try { if ((Test-Path -LiteralPath $k) -and [IO.File]::GetLastWriteTimeUtc($k) -lt [DateTime]::UtcNow.AddMinutes(-10)) { [IO.File]::Delete($k) } } catch { }
+          $o = "$k.old.$PID"; $old = [DateTime]::UtcNow.AddMinutes(-10)
+          try {
+            if ((Test-Path -LiteralPath $k) -and [IO.File]::GetLastWriteTimeUtc($k) -lt $old) {
+              [IO.File]::Move($k, $o)
+              if ([IO.File]::GetLastWriteTimeUtc($o) -ge $old) { try { [IO.File]::Open($k, 'CreateNew', 'Write', 'None').Close() } catch { } }
+              [IO.File]::Delete($o)
+            }
+          } catch { }
           try { [IO.File]::Open($k, 'CreateNew', 'Write', 'None').Close(); $true } catch { $false }
         }
         function Drop([string]$f) { try { [IO.File]::Delete("$f.reclaim") } catch { } }
