@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
 
@@ -5,17 +7,35 @@ namespace LanQueue.Config;
 
 /// <summary>
 /// Reads YAML with the explicit standard tags (<c>!!str</c>, <c>!!int</c>, <c>!!float</c>, <c>!!bool</c>, <c>!!null</c>, <c>!!seq</c>,
-/// <c>!!map</c> and the non-specific <c>!</c>) removed, so a tagged value loads exactly as the same value untagged, as it did in 0.4.
-/// Any other tag (a custom <c>!name</c>, <c>!!binary</c>, <c>!!timestamp</c>, a verbatim <c>!&lt;...&gt;</c>) is refused by name:
-/// lanq's config has no use for it.
+/// <c>!!map</c>) removed, so a tagged value loads as the same value untagged, as it did in 0.4, with two guarantees:
+/// <list type="bullet">
+/// <item><c>!!str</c> keeps a scalar a string: it is passed on quoted, so <c>!!str ~</c>, <c>!!str null</c> or an empty <c>!!str</c> can
+/// never become YAML null (for allowed_hours that would silently mean "any time").</item>
+/// <item>A tag must fit its node: <c>!!map</c> only on a mapping, <c>!!seq</c> only on a sequence, a scalar tag only on a scalar holding
+/// that kind of value.</item>
+/// </list>
+/// Any other tag (a custom <c>!name</c>, the non-specific <c>!</c>, <c>!!binary</c>, <c>!!timestamp</c>, a verbatim <c>!&lt;...&gt;</c>),
+/// and a tag that contradicts its node, is refused with the tag and line (ConfigException sanitises the quoted value).
 /// </summary>
-internal sealed class StandardTagParser(IParser inner) : IParser
+internal sealed partial class StandardTagParser(IParser inner) : IParser
 {
-    private static readonly HashSet<string> Standard = new(StringComparer.Ordinal)
-    {
-        "tag:yaml.org,2002:str", "tag:yaml.org,2002:int", "tag:yaml.org,2002:float", "tag:yaml.org,2002:bool",
-        "tag:yaml.org,2002:null", "tag:yaml.org,2002:seq", "tag:yaml.org,2002:map",
-    };
+    private const string Str = "tag:yaml.org,2002:str";
+    private const string Int = "tag:yaml.org,2002:int";
+    private const string Float = "tag:yaml.org,2002:float";
+    private const string Bool = "tag:yaml.org,2002:bool";
+    private const string Null = "tag:yaml.org,2002:null";
+    private const string Seq = "tag:yaml.org,2002:seq";
+    private const string Map = "tag:yaml.org,2002:map";
+
+    // YAML integers (decimal with optional underscores, 0x hex, 0o octal), the special floats, and the boolean words.
+    [GeneratedRegex(@"^[-+]?([0-9][0-9_]*|0x[0-9A-Fa-f_]+|0o[0-7_]+)\z", RegexOptions.None, 1000)]
+    private static partial Regex IntRegex();
+
+    [GeneratedRegex(@"^([-+]?\.(inf|Inf|INF)|\.(nan|NaN|NAN))\z", RegexOptions.None, 1000)]
+    private static partial Regex SpecialFloatRegex();
+
+    [GeneratedRegex(@"^(true|false|yes|no|on|off|y|n)\z", RegexOptions.IgnoreCase, 1000)]
+    private static partial Regex BoolRegex();
 
     public ParsingEvent? Current { get; private set; }
 
@@ -31,9 +51,11 @@ internal sealed class StandardTagParser(IParser inner) : IParser
 
         Current = inner.Current switch
         {
-            Scalar s when Strip(s.Tag, s.Start) => new Scalar(s.Anchor, TagName.Empty, Value(s), s.Style, true, true, s.Start, s.End, s.IsKey),
-            SequenceStart q when Strip(q.Tag, q.Start) => new SequenceStart(q.Anchor, TagName.Empty, true, q.Style, q.Start, q.End),
-            MappingStart m when Strip(m.Tag, m.Start) => new MappingStart(m.Anchor, TagName.Empty, true, m.Style, m.Start, m.End),
+            Scalar s when Fits(s.Tag, s.Start, s) => new Scalar(
+                s.Anchor, TagName.Empty, Value(s), s.Tag.Value == Str && s.Style == ScalarStyle.Plain ? ScalarStyle.DoubleQuoted : s.Style,
+                true, true, s.Start, s.End, s.IsKey),
+            SequenceStart q when Fits(q.Tag, q.Start, q) => new SequenceStart(q.Anchor, TagName.Empty, true, q.Style, q.Start, q.End),
+            MappingStart m when Fits(m.Tag, m.Start, m) => new MappingStart(m.Anchor, TagName.Empty, true, m.Style, m.Start, m.End),
             var other => other,
         };
         return true;
@@ -44,25 +66,37 @@ internal sealed class StandardTagParser(IParser inner) : IParser
     /// A whole-number float is therefore passed on as that whole number (the same value for a double key); anything else is unchanged.
     /// </summary>
     private static string Value(Scalar s) =>
-        s.Tag.Value == "tag:yaml.org,2002:float"
-        && double.TryParse(s.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d)
+        s.Tag.Value == Float
+        && double.TryParse(s.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)
         && double.IsFinite(d) && d == Math.Floor(d) && Math.Abs(d) <= int.MaxValue
-            ? ((long)d).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            ? ((long)d).ToString(CultureInfo.InvariantCulture)
             : s.Value;
 
-    /// <summary>True when the node has a standard tag to remove; throws for any other tag.</summary>
-    private static bool Strip(TagName tag, Mark at)
+    private static bool IsNumber(string value) =>
+        IntRegex().IsMatch(value) || SpecialFloatRegex().IsMatch(value) || double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
+
+    /// <summary>True when the node has a standard tag that fits it (and is removed); false for no tag; throws for any other tag.</summary>
+    private static bool Fits(TagName tag, Mark at, ParsingEvent node)
     {
         if (tag.IsEmpty)
         {
             return false;
         }
 
-        if (tag.IsNonSpecific || Standard.Contains(tag.Value))
+        if (tag.Value is not (Str or Int or Float or Bool or Null or Seq or Map))
         {
-            return true;
+            throw new ConfigException($"Invalid config: the YAML tag '{tag.Value}' is not supported (line {at.Line}); remove it.");
         }
 
-        throw new ConfigException($"Invalid config: the YAML tag '{tag.Value}' is not supported (line {at.Line}); remove it.");
+        var fits = (tag.Value, node) switch
+        {
+            (Map, MappingStart) or (Seq, SequenceStart) or (Str, Scalar) => true,
+            (Int, Scalar s) => IntRegex().IsMatch(s.Value),
+            (Float, Scalar s) => IsNumber(s.Value),
+            (Bool, Scalar s) => BoolRegex().IsMatch(s.Value),
+            (Null, Scalar s) => s.Value is "" or "~" or "null" or "Null" or "NULL",
+            _ => false,
+        };
+        return fits ? true : throw new ConfigException($"Invalid config: the YAML tag '{tag.Value}' does not fit this value (line {at.Line}); remove it.");
     }
 }
