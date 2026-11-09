@@ -25,16 +25,23 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>The one positional argument some commands take (a machine name).</summary>
     public string? Target { get; init; }
 
+    /// <summary>lanq unlock --all: every slot file, not only the expired ones.</summary>
+    public bool All { get; init; }
+
+    /// <summary>--yes: confirms a destructive option such as unlock --all.</summary>
+    public bool Yes { get; init; }
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json"],
         ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json"],
         ["stats"] = [],
+        ["unlock"] = ["--all", "--yes"],
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
-    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock" };
 
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
@@ -49,6 +56,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
+        var all = false;
+        var yes = false;
         string? target = null;
         var seen = new List<string>();
         var command = own.Length > 0 ? own[0] : "help";
@@ -92,6 +101,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--json":
                     json = true;
                     break;
+                case "--all":
+                    all = true;
+                    break;
+                case "--yes":
+                    yes = true;
+                    break;
                 default:
                     if (TakesTarget.Contains(command) && target is null && !own[i].StartsWith('-'))
                     {
@@ -108,11 +123,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target };
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes };
     }
 }
 
-public static class Cli
+public static partial class Cli
 {
     private const string Usage = """
         lanq - headless job runner for your own LAN machines
@@ -120,11 +135,13 @@ public static class Cli
           lanq health [--json] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--json] [--config FILE] -- dotnet test
           lanq stats
+          lanq unlock <machine> [--all --yes] [--config FILE]
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
+        unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end.
         Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
@@ -149,7 +166,7 @@ public static class Cli
             return Stats(log, stdout);
         }
 
-        if (p.Command is not ("health" or "run"))
+        if (p.Command is not ("health" or "run" or "unlock"))
         {
             await stdout.WriteLineAsync(Usage).ConfigureAwait(false);
             return p.Command is "help" or "--help" or "-h" ? 0 : 2;
@@ -167,6 +184,11 @@ public static class Cli
         }
 
         var ssh = new ProcessSshClient(Environment.GetEnvironmentVariable);
+        if (p.Command == "unlock")
+        {
+            return await Unlock(p, config, ssh, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
         var probe = new HealthProbe(ssh, TimeProvider.System);
         if (p.Command == "health")
         {

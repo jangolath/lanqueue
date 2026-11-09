@@ -148,6 +148,49 @@ public sealed class StaleSlotTests : IDisposable
         Assert.Contains("+ " + seconds.ToString(CultureInfo.InvariantCulture), RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(30)), StringComparison.Ordinal);
     }
 
+    private string[] LockFiles() => Directory.GetFiles(Path.Combine(_root, "locks")).Select(f => Path.GetFileName(f)!).Order(StringComparer.Ordinal).ToArray();
+
+    [Theory]
+    [MemberData(nameof(Shells))]
+    public void UnlockRemovesOnlySlotsPastTheirDeadline(string shell)
+    {
+        WriteSlot(1, Lines("crashed-job", Now - 60)); // past its deadline (no grace needed when a person asks)
+        WriteSlot(2, Lines("live-job", Now + 3600));
+        WriteSlot(3, "job-from-an-older-lanq"); // no deadline
+        File.WriteAllText(Slot(4) + ".stale.4242", "x"); // someone else's reclaim in progress
+
+        var output = RunScript(shell, RemoteScripts.Unlock(Worker(shell), all: false));
+        if (output is null)
+        {
+            return;
+        }
+
+        Assert.Equal(["slot-2", "slot-3", "slot-4.stale.4242"], LockFiles());
+        var report = Cli.ParseUnlock(output);
+        Assert.Equal([("slot-1", "crashed-job")], report.Removed);
+        Assert.Contains(("slot-2", "live"), report.Kept);
+        Assert.Contains(("slot-3", "nodeadline"), report.Kept);
+    }
+
+    [Theory]
+    [MemberData(nameof(Shells))]
+    public void UnlockAllRemovesEverySlotFile(string shell)
+    {
+        WriteSlot(1, Lines("live-job", Now + 3600));
+        WriteSlot(2, "job-from-an-older-lanq");
+        File.WriteAllText(Slot(3) + ".stale.4242", "x");
+        File.WriteAllText(Path.Combine(_root, "locks", "job-abc.pid"), "123"); // not a slot: untouched
+
+        var output = RunScript(shell, RemoteScripts.Unlock(Worker(shell), all: true));
+        if (output is null)
+        {
+            return;
+        }
+
+        Assert.Equal(["job-abc.pid"], LockFiles());
+        Assert.Equal(3, Cli.ParseUnlock(output).Removed.Count);
+    }
+
     private static string Exec(string file, params string[] args)
     {
         var psi = new ProcessStartInfo(file) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };

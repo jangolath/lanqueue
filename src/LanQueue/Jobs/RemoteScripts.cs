@@ -157,6 +157,67 @@ public static class RemoteScripts
     }
 
     /// <summary>
+    /// lanq unlock. Prints <c>REMOVED=&lt;file&gt; &lt;job id&gt;</c> or <c>KEPT=&lt;file&gt; live|nodeadline|changed</c> per slot file.
+    /// Without <paramref name="all"/> only a <c>slot-N</c> past its recorded deadline is removed, the same way a stale slot is reclaimed
+    /// (renamed away atomically, put back if it changed meanwhile); no grace period, since a person asked. With <paramref name="all"/>
+    /// every <c>slot-*</c> file is removed, including one without a deadline and a reclaim's transient file.
+    /// </summary>
+    public static string Unlock(Machine m, bool all) => (m.Os, all) switch
+    {
+        (MachineOs.Windows, true) => $$"""
+            # unlock --all
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+            foreach ($f in @(Get-ChildItem -LiteralPath "$root/locks" -Filter 'slot-*' -File -ErrorAction SilentlyContinue)) {
+              $j = ''; try { $j = ([IO.File]::ReadAllText($f.FullName) -split "`n")[0].Trim() } catch { }
+              try { [IO.File]::Delete($f.FullName); 'REMOVED=' + $f.Name + ' ' + $j } catch { 'KEPT=' + $f.Name + ' changed' }
+            }
+            """,
+        (MachineOs.Windows, false) => $$"""
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            foreach ($f in @(Get-ChildItem -LiteralPath "$root/locks" -Filter 'slot-*' -File -ErrorAction SilentlyContinue)) {
+              $n = $f.Name; $p = $f.FullName
+              if ($n -notmatch '^slot-[0-9]+$') { continue }
+              try { $c = [IO.File]::ReadAllText($p) } catch { continue }
+              $l = $c -split "`n"
+              if ($l.Count -lt 2 -or $l[1].Trim() -notmatch '^[0-9]{1,18}$') { "KEPT=$n nodeadline"; continue }
+              if ($now -le [long]$l[1].Trim()) { "KEPT=$n live"; continue }
+              $t = "$p.stale.$PID"
+              try { [IO.File]::Move($p, $t) } catch { continue }
+              if ([IO.File]::ReadAllText($t) -ceq $c) { [IO.File]::Delete($t); 'REMOVED=' + $n + ' ' + $l[0].Trim() }
+              else { try { [IO.File]::Move($t, $p) } catch { }; "KEPT=$n changed" }
+            }
+            """,
+        (_, true) => $$"""
+            # unlock --all
+            R={{ShellQuote.Posix(m.WorkRoot)}}
+            for f in "$R"/locks/slot-*; do
+              [ -f "$f" ] || continue
+              j=$(sed -n 1p "$f" 2>/dev/null)
+              if rm -f "$f"; then echo "REMOVED=${f##*/} $j"; else echo "KEPT=${f##*/} changed"; fi
+            done
+            """,
+        _ => $$"""
+            R={{ShellQuote.Posix(m.WorkRoot)}}
+            now=$(date +%s)
+            for f in "$R"/locks/slot-*; do
+              [ -f "$f" ] || continue
+              n=${f##*/}
+              case "$n" in slot-|slot-*[!0-9]*) continue ;; esac
+              c=$(cat "$f" 2>/dev/null); d=$(printf '%s\n' "$c" | sed -n 2p)
+              case "$d" in ''|*[!0-9]*) echo "KEPT=$n nodeadline"; continue ;; esac
+              if [ "$now" -le "$d" ]; then echo "KEPT=$n live"; continue; fi
+              mv "$f" "$f.stale.$$" 2>/dev/null || continue
+              if [ "$(cat "$f.stale.$$")" = "$c" ]; then
+                rm -f "$f.stale.$$"; echo "REMOVED=$n $(printf '%s\n' "$c" | sed -n 1p)"
+              else
+                ln "$f.stale.$$" "$f" 2>/dev/null; rm -f "$f.stale.$$"; echo "KEPT=$n changed"
+              fi
+            done
+            """,
+    };
+
+    /// <summary>
     /// Git mode: verifies the uploaded bundle against the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> (printing
     /// <see cref="BundleNotUsable"/> and failing if its prerequisites are missing), fetches it, moves <c>refs/lanq/base</c> to the snapshot
     /// (keeping it alive as the next incremental base) and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
