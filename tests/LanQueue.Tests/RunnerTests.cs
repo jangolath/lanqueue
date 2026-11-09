@@ -585,6 +585,11 @@ public sealed class RunnerTests : IDisposable
 
         public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
             Task.FromResult(new SshResult(0, ""));
+
+        /// <summary>A split run (the fetch) goes through RunAsync with stdout as the line callback, so this fake serves --fetch runs too.</summary>
+        public Task<SshResult> RunSplitAsync(
+            Config.Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+            RunAsync(machine, remoteCommand, onStdout, timeout, ct);
     }
 
     [Fact]
@@ -661,6 +666,11 @@ public sealed class RunnerTests : IDisposable
 
         public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
             Task.FromResult(new SshResult(0, ""));
+
+        /// <summary>A split run (the fetch) goes through RunAsync with stdout as the line callback, so this fake serves --fetch runs too.</summary>
+        public Task<SshResult> RunSplitAsync(
+            Config.Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+            RunAsync(machine, remoteCommand, onStdout, timeout, ct);
     }
 
     [Fact]

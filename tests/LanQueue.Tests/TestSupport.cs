@@ -353,6 +353,11 @@ internal sealed class GatedProbeSsh : ISshClient
         m.Os == MachineOs.Windows && cmd.Contains("-EncodedCommand ", StringComparison.Ordinal)
             ? System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(cmd[(cmd.LastIndexOf(' ') + 1)..]))
             : cmd;
+
+    /// <summary>A split run (the fetch) goes through RunAsync with stdout as the line callback, so this fake serves --fetch runs too.</summary>
+    public Task<SshResult> RunSplitAsync(
+        Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+        RunAsync(machine, remoteCommand, onStdout, timeout, ct);
 }
 
 /// <summary>A fixed instant; the local zone is UTC unless a (fixed-offset, DST-free) zone is given.</summary>
