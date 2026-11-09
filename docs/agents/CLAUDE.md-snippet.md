@@ -42,7 +42,7 @@
   gets `LANQ_SHARD` and `LANQ_SHARDS`):
   `lanq run --json --no-wake --needs node --shards auto -- npx jest --shard={shard}/{shards} 2> "${TMPDIR:-/tmp}/lanq-last.log"`
   `lanq run --json --no-wake --needs node --shards 4 -- npx playwright test --shard={shard}/{shards}`
-  `lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/{shards}`
+  `lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}`
   .NET, Python and Go need a small committed helper script that reads `LANQ_SHARD` (examples in LanQueue's
   docs/SHARDING.md); ask the developer which one is allowlisted.
 - `--json` prints one object: `status`, `exitCode` (0 only if every shard passed; otherwise the failing shard's own

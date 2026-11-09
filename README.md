@@ -591,7 +591,7 @@ A long test suite can run as N pieces at once, one per free slot, while your dev
 ```bash
 lanq run --needs node --shards 4 -- npx jest --shard={shard}/{shards}
 lanq run --needs node --shards auto -- npx playwright test --shard={shard}/{shards}
-lanq run --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/{shards}
+lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}
 ```
 
 - `--shards N` (1 to 64) starts N jobs of one command, each with its own job id; `--shards auto` uses the number of
@@ -601,7 +601,8 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/
   and `LANQ_SHARDS`. Every shard's command line passes the allowlist, the permission-flag ban and the secret scan before
   anything is sent.
 - The repository is snapshotted once and each bundle or archive built once for all shards. Shards beyond the free
-  slots wait for a sibling to finish; `--wait` counts only while none of the run's shards is running.
+  slots wait for a sibling to finish; `--wait` counts only while no shard of the run holds a slot. `--mem` is per
+  shard: a machine takes at most as many shards as its free memory covers.
 - Output lines are prefixed `[i/N machine]`, and a summary table ends the run. Exit 0 only if every shard passed;
   otherwise the failing shard's own code, else 2, 124, 70 or 75. `--json` prints one object with a `shards` array.
 - `--fail-fast` cancels the rest after the first shard that fails; `--shard-retries R` (0 to 3) re-runs only a shard

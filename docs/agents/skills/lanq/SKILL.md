@@ -68,7 +68,7 @@ interactive as a single run.
 ```bash
 lanq run --json --no-wake --needs node --shards auto -- npx jest --shard={shard}/{shards} 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 60 "${TMPDIR:-/tmp}/lanq-last.log"
 lanq run --json --no-wake --needs node --shards 4 -- npx playwright test --shard={shard}/{shards}
-lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/{shards}
+lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}
 ```
 
 `{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only; each job also gets `LANQ_SHARD` and

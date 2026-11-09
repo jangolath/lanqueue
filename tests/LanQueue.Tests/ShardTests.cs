@@ -32,6 +32,18 @@ internal sealed partial class PoolSsh : ISshClient
 
     public Func<Exec, CancellationToken, Task<SshResult>> OnExecute { get; set; } = (e, _) => Task.FromResult(e.Exit(0));
 
+    /// <summary>True makes this slot claim answer SLOT=FULL although a slot is free (the probe said free, the machine said full).</summary>
+    public Func<Machine, bool> RefuseSlot { get; set; } = _ => false;
+
+    /// <summary>The result of each upload; tests block or fail it here.</summary>
+    public Func<Machine, CancellationToken, Task<SshResult>> OnUpload { get; set; } = (_, _) => Task.FromResult(new SshResult(0, ""));
+
+    /// <summary>The result of each prepare step (git bundle fetch or archive extract), or null for success.</summary>
+    public Func<Machine, SshResult?> OnPrepare { get; set; } = _ => null;
+
+    /// <summary>The result of each cleanup; a failed cleanup keeps the slot taken, as on a machine that stopped answering.</summary>
+    public Func<Machine, SshResult> OnCleanup { get; set; } = _ => new SshResult(0, "");
+
     /// <summary>Extra probe lines per machine (memory, cores), added to load, disk, slots and tool.</summary>
     public Func<Machine, string> ProbeExtra { get; set; } = _ => "mem_free_gb=3";
 
@@ -73,7 +85,7 @@ internal sealed partial class PoolSsh : ISshClient
             lock (_gate)
             {
                 var used = _used.GetValueOrDefault(machine.Name);
-                if (used < machine.MaxJobs)
+                if (used < machine.MaxJobs && !RefuseSlot(machine))
                 {
                     _used[machine.Name] = used + 1;
                     Peak.AddOrUpdate(machine.Name, used + 1, (_, p) => Math.Max(p, used + 1));
@@ -85,14 +97,21 @@ internal sealed partial class PoolSsh : ISshClient
                 }
             }
         }
-        else if (remoteCommand.Contains("worktree prune", StringComparison.Ordinal))
+        else if (remoteCommand.Contains("/locks/slot-", StringComparison.Ordinal))
         {
-            lock (_gate)
+            // Cleanup (git or archive): releases the slot unless it failed.
+            r = OnCleanup(machine);
+            if (r.Ok)
             {
-                _used[machine.Name] = _used.GetValueOrDefault(machine.Name) - 1;
+                lock (_gate)
+                {
+                    _used[machine.Name] = _used.GetValueOrDefault(machine.Name) - 1;
+                }
             }
-
-            r = new SshResult(0, "");
+        }
+        else if (remoteCommand.Contains("bundle verify", StringComparison.Ordinal) || remoteCommand.Contains("unsafe archive entry", StringComparison.Ordinal))
+        {
+            r = OnPrepare(machine) ?? new SshResult(0, "");
         }
         else
         {
@@ -110,7 +129,7 @@ internal sealed partial class PoolSsh : ISshClient
     public Task<SshResult> UploadAsync(Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct)
     {
         Uploads.Enqueue(machine.Name + ":" + remotePath);
-        return Task.FromResult(new SshResult(0, ""));
+        return OnUpload(machine, ct);
     }
 
     public Task<SshResult> RunSplitAsync(
@@ -139,7 +158,7 @@ public sealed class ShardTests : IDisposable
 {
     private const int TestTimeout = 60_000;
 
-    private const string PoolYaml = """
+    internal const string PoolYaml = """
         policy:
           load_threshold: 0.8
           allowed_commands: ["npx jest", "dotnet test1", "dotnet test3"]

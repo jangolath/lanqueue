@@ -12,9 +12,11 @@
 - **`--shards auto`** sets N to the free slots on the machines that can take the job now (capabilities, hours, `--mem`,
   holds), at least 1, at most 64, and prints the choice and why.
 - **Placement:** shards are dealt round-robin over free slots, so a machine with `max_jobs: 4` runs up to four at once.
-  Shards beyond the free slots wait for a sibling to finish; `--wait` counts only while none of the run's shards runs.
+  Shards beyond the free slots wait for a sibling to finish; `--wait` counts only while no shard of the run holds a
+  slot (an attempt whose slot claim fails never extends it). `--mem` is per shard: a machine takes at most
+  floor(free memory / `--mem`) shards at once, also when `--shards auto` counts.
 - **One payload:** the snapshot is taken and scanned once, and each bundle (full or incremental) or archive is built at
-  most once for the whole run. The bundle carries the snapshot under a shared ref that each shard's prepare fetches into
+  most once for the whole run, one build at a time (a failed build is tried once more). The bundle carries the snapshot under a shared ref that each shard's prepare fetches into
   its own; lanq prepares (and cleans up) one job at a time per machine within a run, so shards on one worker do not race
   on its repository cache.
 - **Results:** lines prefixed `[i/N machine]`, a summary table (shard, machine, status, exit, duration), exit 0 only if
@@ -22,10 +24,14 @@
   object with `status`, `exitCode`, `shardCount`, `durationSeconds`, `message` and a `shards` array of run objects with
   `shard` and `attempts`. `--fetch` puts each shard's files in its own job-id folder.
 - **`--fail-fast`** cancels the other shards after the first one that does not complete; **`--shard-retries R`** (0 to
-  3) re-runs only a shard whose machine stopped answering ssh (never a test failure or a job that exited 255 itself).
+  3) re-runs only a shard whose machine stopped answering ssh (never a test failure or a job that exited 255 itself),
+  and never where it could run twice: if the connection dropped mid-run and the cleanup did not finish, the re-run goes
+  to another machine, or does not happen when none can take it. An unexpected error ends only its own shard, and
+  Ctrl+C after every shard has finished keeps the real result.
   Ctrl+C cancels every shard and still cleans each one up.
 - **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (light under 6 GB, medium 6 to 16 GB,
-  heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; the same thresholds as
+  heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; the Linux core count tries
+  getconf, nproc, then /proc/cpuinfo and is left out (unknown) when none works; the same thresholds as
   lanq-makeready); the probe now reports `mem_total_gb` and `cores` on
   Linux and Windows (unknown values are shown as `?`, never a hold). `health --json` adds `cores`, `memTotalGb`,
   `freeSlots`, `size` and `suitedFor`; earlier fields are unchanged. The text line now says `slots free F/M` instead

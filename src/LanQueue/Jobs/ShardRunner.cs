@@ -60,9 +60,9 @@ public sealed partial class JobRunner
     /// lanq run --shards: N jobs of one command, each with its own job id, LANQ_SHARD and LANQ_SHARDS, and {shard}/{shards} substituted in its
     /// arguments. Every shard's command line passes the same policy and secret checks as a single job before anything is built or sent. The
     /// repository is snapshotted once and its bundles and archive are built once and shared. Shards go to free slots (a machine with
-    /// max_jobs 4 takes up to four at once); the rest wait for a sibling to finish. --wait is how long to wait while none of this run's
-    /// shards is running and no machine can take one; then the rest end NoCapacity. One shard failing never stops the others unless
-    /// <see cref="ShardOptions.FailFast"/>. Cancelling stops every shard; each one's cleanup still runs.
+    /// max_jobs 4 takes up to four at once, fewer when --mem asks for more memory than it has free for four); the rest wait for a sibling to
+    /// finish. --wait is how long to wait while no shard of this run holds a slot; then the rest end NoCapacity. One shard failing never
+    /// stops the others unless <see cref="ShardOptions.FailFast"/>. Cancelling stops every shard; each one's cleanup still runs.
     /// </summary>
     public async Task<ShardRunResult> RunShardsAsync(JobRequest template, ShardOptions options, CancellationToken ct)
     {
@@ -97,8 +97,10 @@ public sealed partial class JobRunner
 
         await using (prepared.ConfigureAwait(false))
         {
+            // DispatchShards returns only once every shard it started has finished (and cleaned up), so the payload outlives them all.
             var results = await DispatchShards(template, shards, options, prepared, ct).ConfigureAwait(false);
-            return Aggregate(count, results, ct.IsCancellationRequested);
+            // Ctrl+C that came after every shard had already finished does not turn a real result into Cancelled.
+            return Aggregate(count, results, ct.IsCancellationRequested && results.Any(r => r.Status == Cancelled));
         }
 
         static ShardRunResult Refused(int n, string message, JobResult? r) =>
@@ -106,15 +108,25 @@ public sealed partial class JobRunner
     }
 
     /// <summary>
-    /// --shards auto: the free slots on every machine that can take the job right now (capabilities, allowed hours, --mem, holds, and
-    /// Windows-safe arguments), at least 1 and at most <see cref="ShardInfo.MaxShards"/>. Prints the choice and why.
+    /// How many shards a machine can take now: max_jobs minus the slots in use (or this run's own shards there, if more), and with --mem no more
+    /// than the shards its free memory covers (floor of free memory / --mem). A machine that does not report memory is already held under --mem.
+    /// </summary>
+    private static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours)
+    {
+        var slots = machine.MaxJobs - Math.Max(h.SlotsUsed, ours);
+        return memGb is { } need && h.MemFreeGb is { } free ? Math.Min(slots, (int)Math.Floor(free / need)) : slots;
+    }
+
+    /// <summary>
+    /// --shards auto: the free slots on every machine that can take the job right now (capabilities, allowed hours, --mem per shard, holds,
+    /// and Windows-safe arguments), at least 1 and at most <see cref="ShardInfo.MaxShards"/>. Prints the choice and why.
     /// </summary>
     private async Task<int> AutoShardCountAsync(JobRequest template, CancellationToken ct)
     {
         var argv = new ShardInfo(1, 1).Substitute(template.Argv);
         var (_, health) = await ProbeForJobAsync(template, !JobPolicy.ValidateForWindows(argv).Ok, ct).ConfigureAwait(false);
         var free = Scheduler.Rank(health, template.Needs)
-            .Select(m => (m.Name, Free: m.MaxJobs - health.First(h => ReferenceEquals(h.Item1, m)).Item2.SlotsUsed))
+            .Select(m => (m.Name, Free: FreeFor(m, health.First(h => ReferenceEquals(h.Item1, m)).Item2, template.MinMemGb, 0)))
             .Where(f => f.Free > 0)
             .ToList();
         var total = free.Sum(f => f.Free);
@@ -128,9 +140,9 @@ public sealed partial class JobRunner
     }
 
     /// <summary>
-    /// The overall result. All shards completed: Completed, 0. Cancelled by the caller (Ctrl+C): Cancelled, 130. Otherwise the shard with
-    /// the most telling status decides, lowest index first: Failed (the job's own exit code) before Rejected (2), TimedOut and WindowClosed
-    /// (124), InfraError (70), NoCapacity (75) and Cancelled by --fail-fast (130).
+    /// The overall result. All shards completed: Completed, 0. Cancelled by the caller (Ctrl+C) while shards were unfinished: Cancelled, 130.
+    /// Otherwise the shard with the most telling status decides, lowest index first: Failed (the job's own exit code) before Rejected (2),
+    /// TimedOut and WindowClosed (124), InfraError (70), NoCapacity (75) and Cancelled by --fail-fast (130).
     /// </summary>
     internal static ShardRunResult Aggregate(int count, IReadOnlyList<ShardResult> shards, bool cancelled)
     {
@@ -165,9 +177,25 @@ public sealed partial class JobRunner
         public int Attempts { get; set; }
 
         public ShardResult? Final { get; set; }
+
+        /// <summary>Machines a re-run must not use: the job may still be running there (its cleanup after a lost connection did not finish).</summary>
+        public HashSet<string> Avoid { get; } = new(StringComparer.Ordinal);
     }
 
-    private sealed record Attempt(ShardState State, Machine Machine, JobResult? Result, TimeSpan Duration, bool Cancelled);
+    /// <param name="HadSlot">The attempt held a slot on its machine at some point (null results never did).</param>
+    private sealed record Attempt(ShardState State, Machine Machine, JobResult? Result, TimeSpan Duration, bool Cancelled, bool HadSlot);
+
+    /// <summary>One started attempt: its machine and whether it holds a slot yet (set from the attempt's own thread).</summary>
+    private sealed class Running(string machine)
+    {
+        private volatile bool _holding;
+
+        public string Machine => machine;
+
+        public bool Holding => _holding;
+
+        public void Hold() => _holding = true;
+    }
 
     private async Task<List<ShardResult>> DispatchShards(JobRequest template, List<ShardInfo> shards, ShardOptions options, PreparedPayload prepared, CancellationToken ct)
     {
@@ -185,12 +213,16 @@ public sealed partial class JobRunner
         var gitCanEverTakeIt = GitCanEverTakeIt(template);
         var states = shards.Select(s => new ShardState(s)).ToList();
         var pending = new List<ShardState>(states);
-        var running = new Dictionary<Task<Attempt>, string>();
+        var running = new Dictionary<Task<Attempt>, Running>();
+
+        // --wait: how long no shard of this run has held a slot. Restarted only by an attempt that really got one, so attempts that keep
+        // failing to claim a slot (the probe said free, the machine said full) cannot hold the run open for ever.
         var idle = Stopwatch.StartNew();
         var backoff = false;
-        string held = "";
+        var held = "";
+        Exception? loopError = null;
 
-        Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds)
+        Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot)
         {
             st.Attempts++;
             var req = template with { Argv = st.Shard.Substitute(template.Argv), Shard = st.Shard };
@@ -200,145 +232,169 @@ public sealed partial class JobRunner
                 var clock = Stopwatch.StartNew();
                 try
                 {
-                    var r = await TryOnMachine(NewId(), req, prepared, machine, windowEnds, gitCanEverTakeIt, line => Emit(prefix + line), stop.Token).ConfigureAwait(false);
-                    return new Attempt(st, machine, r, clock.Elapsed, false);
+                    var r = await TryOnMachine(NewId(), req, prepared, machine, windowEnds, gitCanEverTakeIt, line => Emit(prefix + line), stop.Token, slot.Hold).ConfigureAwait(false);
+                    return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
                 {
-                    return new Attempt(st, machine, null, clock.Elapsed, true);
+                    return new Attempt(st, machine, null, clock.Elapsed, true, slot.Holding);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex)
                 {
+                    // Anything else (an OperationCanceledException nobody asked for included) is this attempt's result: the other shards go on.
                     var failed = new JobResult(NewId(), JobStatus.InfraError, 70, machine.Name, SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
-                    return new Attempt(st, machine, failed, clock.Elapsed, false);
+                    return new Attempt(st, machine, failed, clock.Elapsed, false, slot.Holding);
                 }
             }, CancellationToken.None);
         }
 
-        while (pending.Count > 0 || running.Count > 0)
+        try
         {
-            if (stop.IsCancellationRequested)
+            while (pending.Count > 0 || running.Count > 0)
             {
-                break;
-            }
+                if (stop.IsCancellationRequested)
+                {
+                    break;
+                }
 
-            var launched = 0;
-            if (pending.Count > 0 && !backoff)
-            {
-                List<(Machine, MachineHealth)> health;
-                MachineHealth[] probes;
+                var launched = 0;
+                if (pending.Count > 0 && !backoff)
+                {
+                    List<(Machine, MachineHealth)> health;
+                    MachineHealth[] probes;
+                    try
+                    {
+                        (probes, health) = await ProbeForJobAsync(template, windowsUnsafe, stop.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (stop.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    // Free slots per machine (see FreeFor; a shard just launched may not hold its slot yet when the probe looks, so this run's
+                    // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
+                    // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
+                    var free = Scheduler.Rank(health, template.Needs)
+                        .Select(m => (Machine: m, Health: health.First(x => ReferenceEquals(x.Item1, m)).Item2))
+                        .Select(x => (x.Machine, x.Health, Free: FreeFor(x.Machine, x.Health, template.MinMemGb, running.Values.Count(r => r.Machine == x.Machine.Name))))
+                        .Where(x => x.Free > 0)
+                        .ToList();
+                    for (var round = 0; pending.Count > 0 && free.Any(f => f.Free > round); round++)
+                    {
+                        foreach (var f in free.Where(f => f.Free > round))
+                        {
+                            var st = pending.FirstOrDefault(p => !p.Avoid.Contains(f.Machine.Name));
+                            if (st is null)
+                            {
+                                continue;
+                            }
+
+                            pending.Remove(st);
+                            var slot = new Running(f.Machine.Name);
+                            running[Launch(st, f.Machine, f.Health.WindowEndsUtc, slot)] = slot;
+                            launched++;
+                        }
+                    }
+
+                    held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
+                    if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
+                    {
+                        await WakeBestSleeperAsync(template, probes, health, windowsUnsafe, prepared.Archive, stop.Token).ConfigureAwait(false);
+                    }
+                }
+
+                backoff = false;
+                if (running.Values.Any(r => r.Holding))
+                {
+                    idle.Restart();
+                }
+                else if (pending.Count > 0 && running.Count == 0 && idle.Elapsed >= template.Wait)
+                {
+                    var archiveNote = prepared.Archive.Failure is null ? "" : " Archive build failed: " + prepared.Archive.Failure;
+                    foreach (var st in pending)
+                    {
+                        st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, "No eligible machine. " + held + archiveNote);
+                    }
+
+                    pending.Clear();
+                    break;
+                }
+
+                // Wait for a shard to finish; with shards still waiting for a slot, look again after 15 s at the latest.
+                var waits = new List<Task>(running.Keys);
+                Task? timer = null;
+                if (pending.Count > 0 && launched == 0)
+                {
+                    if (running.Count == 0)
+                    {
+                        Emit(string.Create(CultureInfo.InvariantCulture, $"[lanq] no eligible machine for {pending.Count} shard(s); waiting 15s"));
+                    }
+
+                    timer = delay(TimeSpan.FromSeconds(15), stop.Token);
+                    waits.Add(timer);
+                }
+
+                if (waits.Count == 0)
+                {
+                    continue;
+                }
+
                 try
                 {
-                    (probes, health) = await ProbeForJobAsync(template, windowsUnsafe, stop.Token).ConfigureAwait(false);
+                    await Task.WhenAny(waits).ConfigureAwait(false);
+                    if (timer is { IsCanceled: true } || timer is { IsFaulted: true })
+                    {
+                        await timer.ConfigureAwait(false);
+                    }
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
                 {
                     break;
                 }
 
-                // Free slots per machine: what the probe says, but never more than max_jobs minus this run's own shards there (a shard just
-                // launched may not hold its slot yet when the probe looks). Shards are dealt round-robin over the ranked machines, so a few
-                // shards spread out and many fill every slot: a machine with max_jobs 4 takes four.
-                var free = Scheduler.Rank(health, template.Needs)
-                    .Select(m => (Machine: m, Health: health.First(x => ReferenceEquals(x.Item1, m)).Item2))
-                    .Select(x => (x.Machine, x.Health, Free: x.Machine.MaxJobs - Math.Max(x.Health.SlotsUsed, running.Values.Count(n => n == x.Machine.Name))))
-                    .Where(x => x.Free > 0)
-                    .ToList();
-                for (var round = 0; pending.Count > 0 && free.Any(f => f.Free > round); round++)
+                foreach (var task in running.Keys.Where(t => t.IsCompleted).ToList())
                 {
-                    foreach (var f in free.Where(f => f.Free > round))
+                    running.Remove(task);
+                    var a = await task.ConfigureAwait(false);
+                    if (a.HadSlot)
                     {
-                        if (pending.Count == 0)
-                        {
-                            break;
-                        }
-
-                        var st = pending[0];
-                        pending.RemoveAt(0);
-                        running[Launch(st, f.Machine, f.Health.WindowEndsUtc)] = f.Machine.Name;
-                        launched++;
+                        idle.Restart();
                     }
+
+                    if (Settle(a, template, options, pending, Emit) && options.FailFast && !stop.IsCancellationRequested)
+                    {
+                        Emit($"[lanq] --fail-fast: shard {a.State.Shard} {a.State.Final!.Status}; cancelling the other shards");
+                        await stop.CancelAsync().ConfigureAwait(false);
+                    }
+
+                    backoff |= a.Result is null && !a.Cancelled;
                 }
-
-                held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
-                if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
-                {
-                    await WakeBestSleeperAsync(template, probes, health, windowsUnsafe, prepared.Archive, stop.Token).ConfigureAwait(false);
-                }
-            }
-
-            backoff = false;
-            if (running.Count > 0)
-            {
-                idle.Restart();
-            }
-            else if (pending.Count > 0 && idle.Elapsed >= template.Wait)
-            {
-                var archiveNote = prepared.Archive.Failure is null ? "" : " Archive build failed: " + prepared.Archive.Failure;
-                foreach (var st in pending)
-                {
-                    st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, "No eligible machine. " + held + archiveNote);
-                }
-
-                pending.Clear();
-                break;
-            }
-
-            // Wait for a shard to finish; with shards still waiting for a slot, look again after 15 s at the latest.
-            var waits = new List<Task>(running.Keys);
-            Task? timer = null;
-            if (pending.Count > 0 && launched == 0)
-            {
-                if (running.Count == 0)
-                {
-                    Emit(string.Create(CultureInfo.InvariantCulture, $"[lanq] no eligible machine for {pending.Count} shard(s); waiting 15s"));
-                }
-
-                timer = delay(TimeSpan.FromSeconds(15), stop.Token);
-                waits.Add(timer);
-            }
-
-            if (waits.Count == 0)
-            {
-                continue;
-            }
-
-            try
-            {
-                await Task.WhenAny(waits).ConfigureAwait(false);
-                if (timer is { IsCanceled: true } || timer is { IsFaulted: true })
-                {
-                    await timer.ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException) when (stop.IsCancellationRequested)
-            {
-                break;
-            }
-
-            foreach (var task in running.Keys.Where(t => t.IsCompleted).ToList())
-            {
-                running.Remove(task);
-                var a = await task.ConfigureAwait(false);
-                if (Settle(a, options, pending, Emit) && options.FailFast && !stop.IsCancellationRequested)
-                {
-                    Emit($"[lanq] --fail-fast: shard {a.State.Shard} {a.State.Final!.Status}; cancelling the other shards");
-                    await stop.CancelAsync().ConfigureAwait(false);
-                }
-
-                backoff |= a.Result is null && !a.Cancelled;
             }
         }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+            // Ctrl+C or --fail-fast while probing or waking: the started shards are awaited below.
+        }
+        catch (Exception ex)
+        {
+            // The dispatch itself broke (a probe, a wake): stop the shards still running and wait for them below.
+            loopError = ex;
+            Emit(SafeLine($"[lanq] unexpected error: {ex.GetType().Name}: {ex.Message}; stopping the other shards"));
+            await stop.CancelAsync().ConfigureAwait(false);
+        }
 
-        // Cancelled (Ctrl+C or --fail-fast): wait for every started shard to finish its cleanup.
+        // Cancelled (Ctrl+C, --fail-fast or an error above): wait for every started shard to finish its cleanup. Each attempt task catches
+        // everything itself, so none of these awaits throws.
         foreach (var task in running.Keys)
         {
-            Settle(await task.ConfigureAwait(false), options, pending, Emit);
+            Settle(await task.ConfigureAwait(false), template, options, pending, Emit);
         }
 
         foreach (var st in states.Where(s => s.Final is null))
         {
-            st.Final = new ShardResult(st.Shard.Index, Cancelled, 130, null, null, TimeSpan.Zero, st.Attempts, "cancelled before it started");
+            st.Final = loopError is null
+                ? new ShardResult(st.Shard.Index, Cancelled, 130, null, null, TimeSpan.Zero, st.Attempts, "cancelled before it started")
+                : new ShardResult(st.Shard.Index, nameof(JobStatus.InfraError), 70, null, null, TimeSpan.Zero, st.Attempts, SafeLine($"not run: unexpected error: {loopError.GetType().Name}: {loopError.Message}"));
         }
 
         return [.. states.Select(s => s.Final!)];
@@ -346,9 +402,11 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// Records an attempt. No slot after all (null): back to the front of the queue. Lost its machine (ConnectionLost) with retries left:
-    /// queued again, as a new job. Otherwise final. True when the shard ended without completing.
+    /// queued again as a new job, but only where it cannot run twice. When the connection dropped while the job ran and its cleanup did not
+    /// finish, the job may still be running there, so the re-run must go to another machine; if no other machine could take it, it is not
+    /// re-run. Otherwise final. True when the shard ended without completing.
     /// </summary>
-    private static bool Settle(Attempt a, ShardOptions options, List<ShardState> pending, Action<string> emit)
+    private bool Settle(Attempt a, JobRequest template, ShardOptions options, List<ShardState> pending, Action<string> emit)
     {
         var st = a.State;
         var prefix = $"[{st.Shard} {a.Machine.Name}] ";
@@ -365,14 +423,32 @@ public sealed partial class JobRunner
             return false;
         }
 
+        var note = "";
         if (r.ConnectionLost && st.Attempts <= options.Retries)
         {
-            emit(prefix + string.Create(CultureInfo.InvariantCulture, $"[lanq] {r.Message} Re-running the shard (retry {st.Attempts} of {options.Retries}; --shard-retries)."));
-            pending.Insert(0, st);
-            return false;
+            var mayRunTwice = r.MayStillRun && !r.CleanedUp;
+            if (!mayRunTwice)
+            {
+                emit(prefix + string.Create(CultureInfo.InvariantCulture, $"[lanq] {r.Message} Re-running the shard (retry {st.Attempts} of {options.Retries}; --shard-retries)."));
+                pending.Insert(0, st);
+                return false;
+            }
+
+            if (config.Machines.Any(m => m.Name != a.Machine.Name && !st.Avoid.Contains(m.Name) && HasCapabilities(m, template.Needs)))
+            {
+                st.Avoid.Add(a.Machine.Name);
+                emit(prefix + string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"[lanq] {r.Message} The job may still be running on {a.Machine.Name} (its cleanup did not finish); re-running the shard on another machine (retry {st.Attempts} of {options.Retries}; --shard-retries)."));
+                pending.Insert(0, st);
+                return false;
+            }
+
+            note = $" Not re-run: the job may still be running on {a.Machine.Name} (its cleanup did not finish) and no other machine can take the shard.";
+            emit(prefix + "[lanq]" + note);
         }
 
-        var message = SafeLine(r.Message) + (st.Attempts > 1 ? string.Create(CultureInfo.InvariantCulture, $" (attempt {st.Attempts})") : "");
+        var message = SafeLine(r.Message + note) + (st.Attempts > 1 ? string.Create(CultureInfo.InvariantCulture, $" (attempt {st.Attempts})") : "");
         st.Final = new ShardResult(st.Shard.Index, r.Status.ToString(), r.CliExitCode, r.Machine, r.JobId, a.Duration, st.Attempts, message) { Fetch = r.Fetch };
         return r.Status != JobStatus.Completed;
     }

@@ -27,19 +27,30 @@ route work in a pool of mixed machines.
 - **Placement.** Shards go to free slots, dealt round-robin over the eligible machines in the usual order (least
   loaded first). A machine with `max_jobs: 4` takes up to four shards at once and one with `max_jobs: 1` takes one, so
   with five shards, a 1-slot box and an equally loaded 4-slot box run one and four.
+- **`--mem` is per shard.** With `--mem GB`, a machine takes no more shards at once than its free memory covers
+  (free memory divided by `--mem`, rounded down), whatever its `max_jobs`: a 4-slot box with 5 GB free and `--mem 4`
+  takes one shard at a time. `--shards auto` counts the same way. The free figure comes from the last probe, so shards
+  already running there count only as far as they have used memory by then.
 - **More shards than slots.** The rest wait for a sibling shard to finish, then take the slot it freed. That wait does
-  not count against `--wait`: `--wait` is how long lanq waits while none of this run's shards is running and no machine
-  can take one. When it runs out, the shards still waiting end `NoCapacity` (75). With `--wait` above 0 and no awake
+  not count against `--wait`: `--wait` is how long lanq waits while no shard of this run holds a slot. When it runs
+  out, the shards still waiting end `NoCapacity` (75). A machine that the probe shows free but that refuses the slot
+  (another lanq took it first) sends the shard back to wait; such attempts never extend `--wait`. With `--wait` above 0 and no awake
   machine able to take a shard, lanq may wake one sleeping machine, as for a single job; `--no-wake` turns that off.
 - **One snapshot.** The repository is snapshotted once, secret-scanned once, and each git bundle (full, or incremental
   on a base a worker already has) or archive is built at most once for the whole run and uploaded to every shard that
-  needs it. Within one run, lanq prepares one shard at a time per machine, so the second shard on a machine usually
-  gets a small incremental bundle.
+  needs it. Builds run one at a time (each git bundle build uses one temporary local ref), and a build that failed is
+  tried once more by the next shard that needs it. Within one run, lanq prepares one shard at a time per machine, so
+  the second shard on a machine usually gets a small incremental bundle.
 - **Independent shards.** One shard failing does not stop the others. `--fail-fast` makes the first shard that does not
   complete cancel the rest (they are stopped and cleaned up, and show as `Cancelled`).
 - **Retries for infrastructure only.** `--shard-retries R` (0 to 3, default 0) re-runs a shard, as a new job, only when
   its machine stopped answering ssh while the job was uploaded, prepared or running (ssh exit 255 without the job's
-  own exit marker). A test failure, a timeout, a refusal or a job that itself exited 255 is never re-run.
+  own exit marker). A test failure, a timeout, a refusal or a job that itself exited 255 is never re-run. A re-run never
+  risks running the same shard twice at once: when the connection dropped while the job was running and lanq's cleanup
+  on that machine did not finish either, the job may still be running there, so the re-run goes to another machine that
+  can take the shard; if there is none, the shard is not re-run and its message says so (`InfraError`, 70). When the
+  connection dropped during upload or prepare, or the cleanup finished, the job is known not to be running and the
+  re-run may use any machine.
 - **Ctrl+C** cancels every shard. Each started shard's cleanup still runs (its process is stopped, its worktree and
   slot removed), and lanq exits 130.
 
@@ -180,7 +191,8 @@ lanq run --needs node --shards 4 -- npx vitest run --shard={shard}/{shards}
 lanq run --needs node --shards 4 -- npx playwright test --shard={shard}/{shards}
 ```
 
-Jest needs 28 or later. Each shard needs `node_modules` on the worker; a committed lockfile plus an install step in a
+`--shard` was added in Jest 28; a custom `testSequencer` must implement a `shard` method. Vitest's `--shard` works with
+`vitest run` (not watch mode). Each shard needs `node_modules` on the worker; a committed lockfile plus an install step in a
 script (`npm ci` then the test command) is the simple way, and on small boxes `NODE_OPTIONS=--max-old-space-size=...`
 under the machine's `env:` keeps a shard from swapping (see "Old machines with little RAM" in the README).
 
@@ -221,10 +233,11 @@ lanq run --needs go --shards 3 -- sh scripts/lanq/go-test-shard.sh
 
 ### Rust
 
-[cargo-nextest](https://nexte.st/) partitions natively:
+[cargo-nextest](https://nexte.st/) partitions natively (`slice:m/n`, 1-based; the older `count:m/n` is deprecated,
+and `hash:m/n` keeps a test in the same bucket as tests are added):
 
 ```bash
-lanq run --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/{shards}
+lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}
 ```
 
 Each shard compiles the test binaries on its worker; on small boxes `CARGO_BUILD_JOBS` under the machine's `env:`
@@ -279,7 +292,8 @@ Three patterns cover most of it:
 
 - **A full suite on a big box.** `--mem GB` asks for a machine with at least that much memory **available now** (not
   installed): `lanq run --mem 8 -- dotnet test` goes only to a machine reporting 8 GB or more free. A 16 GB machine
-  rarely has 16 GB free, so `--mem 16` would usually find nothing; ask for what the job needs.
+  rarely has 16 GB free, so `--mem 16` would usually find nothing; ask for what the job needs. With `--shards`, the
+  figure is per shard (see above).
 - **Slices across everything.** `lanq run --shards auto -- ...` uses every free slot, so small boxes take their one
   shard each and big ones take several.
 - **Tags for what you know.** Capabilities are free-form tags. Add your own, such as `bigmem` on machines with 16 GB or

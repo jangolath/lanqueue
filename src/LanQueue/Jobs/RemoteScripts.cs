@@ -61,14 +61,16 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
-            cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+            n=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || n=$(nproc 2>/dev/null) || n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null) || n=
+            case "$n" in ''|*[!0-9]*|0) n= ;; esac
+            cpus=${n:-1}
             l=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
             d="$R"; [ -d "$d" ] || d=/
             echo "load=$(awk -v l="$l" -v c="$cpus" 'BEGIN{printf "%.3f", l/c}')"
             echo "disk_free_gb=$(df -Pk "$d" | awk 'NR==2{printf "%.1f", $4/1048576}')"
             echo "slots_used=$(ls "$R/locks" 2>/dev/null | grep -c '^slot-[0-9][0-9]*$')"
             awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^MemTotal:/{print "mem_total_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
-            echo "cores=$cpus"
+            if [ -n "$n" ]; then echo "cores=$n"; fi
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
             if [ -e "$R/PAUSE" ] || [ -e "$R/pause" ]; then echo paused=1; else echo paused=0; fi
             echo "local_time=$(date '+%Y-%m-%dT%H:%M:%S')"

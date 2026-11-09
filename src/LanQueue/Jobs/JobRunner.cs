@@ -55,6 +55,15 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// </summary>
     public bool ConnectionLost { get; init; }
 
+    /// <summary>
+    /// True when the connection dropped while the job itself was running, so the job may still be running on the worker until its cleanup
+    /// stops it. With <see cref="ConnectionLost"/>, a re-run is safe on that machine only when <see cref="CleanedUp"/>.
+    /// </summary>
+    public bool MayStillRun { get; init; }
+
+    /// <summary>True when the cleanup after the job finished on the worker (its process stopped, folder and slot removed).</summary>
+    public bool CleanedUp { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -145,11 +154,13 @@ public sealed partial class JobRunner(
             return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message));
         }
 
+        var builds = new SemaphoreSlim(1, 1);
         var prepared = new PreparedPayload(
             payloadId,
             payload,
-            new LazyArchive(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, emit),
-            new LazyBundles(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha));
+            new LazyArchive(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, emit, builds),
+            new LazyBundles(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, builds),
+            builds);
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
@@ -165,7 +176,7 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>A snapshot shared by the jobs of one lanq run (one job, or every shard): deleting it removes the snapshot files and every bundle and archive built.</summary>
-    private sealed class PreparedPayload(string id, JobPayload payload, LazyArchive archive, LazyBundles bundles) : IAsyncDisposable
+    private sealed class PreparedPayload(string id, JobPayload payload, LazyArchive archive, LazyBundles bundles, SemaphoreSlim builds) : IAsyncDisposable
     {
         /// <summary>The id the payload was built under; the bundle carries the snapshot as refs/lanq/&lt;Id&gt;.</summary>
         public string Id => id;
@@ -181,6 +192,7 @@ public sealed partial class JobRunner(
             TryDelete(payload.ArchivePath);
             await bundles.DeleteAsync().ConfigureAwait(false);
             await archive.DeleteAsync().ConfigureAwait(false);
+            builds.Dispose();
         }
     }
 
@@ -329,8 +341,10 @@ public sealed partial class JobRunner(
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
     /// <param name="emit">Where this job's lines go (lanq's own and the job's output, already sanitised).</param>
+    /// <param name="onSlot">Called once the job holds a slot on the machine (the sharded run counts --wait only while no shard holds one).</param>
     private async Task<JobResult?> TryOnMachine(
-        string jobId, JobRequest req, PreparedPayload prepared, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, Action<string> emit, CancellationToken ct)
+        string jobId, JobRequest req, PreparedPayload prepared, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, Action<string> emit, CancellationToken ct,
+        Action? onSlot = null)
     {
         var (payload, archive) = (prepared.Payload, prepared.Archive);
         string? archivePath = null;
@@ -373,6 +387,7 @@ public sealed partial class JobRunner(
             return null; // unreachable or full: try the next machine
         }
 
+        onSlot?.Invoke();
         emit($"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
@@ -394,6 +409,7 @@ public sealed partial class JobRunner(
             }
         }
 
+        var cleanedUp = false;
         try
         {
             JobResult result;
@@ -412,6 +428,7 @@ public sealed partial class JobRunner(
                         .ConfigureAwait(false);
                 }
 
+                cleanedUp = cleanup.Ok;
                 if (!cleanup.Ok)
                 {
                     emit($"[lanq] warning: cleanup on {machine.Name} did not finish; check {machine.WorkRoot}/jobs/{jobId}");
@@ -419,7 +436,7 @@ public sealed partial class JobRunner(
             }
 
             log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
-            return result;
+            return result with { CleanedUp = cleanedUp };
         }
         finally
         {
@@ -547,7 +564,7 @@ public sealed partial class JobRunner(
         }
         else if (sshFailed)
         {
-            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.") { ConnectionLost = true };
+            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.") { ConnectionLost = true, MayStillRun = true };
         }
         else
         {
@@ -852,11 +869,15 @@ public sealed partial class JobRunner(
         return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.");
     }
 
-    /// <summary>Builds the archive at most once per payload, on first use (several shards may ask at once), and reports what a tar.gz could not carry.</summary>
-    private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output)
+    /// <summary>
+    /// Builds the archive at most once per payload, on first use (several shards may ask at once), and reports what a tar.gz could not carry.
+    /// Builds run one at a time with the bundle builds (<paramref name="builds"/>). A build that failed is tried once more on the next request.
+    /// </summary>
+    private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output, SemaphoreSlim builds)
     {
         private readonly Lock _gate = new();
         private Task<ArchiveBuild>? _task;
+        private int _started;
         private bool _reportedFailure;
         private volatile string? _failure;
 
@@ -880,7 +901,12 @@ public sealed partial class JobRunner(
             lock (_gate)
             {
                 first = _task is null;
-                _task ??= builder.BuildArchiveAsync(jobId, repoDir, dir, sha, ct);
+                if (_task is null || ((_task.IsFaulted || _task.IsCanceled) && _started < MaxBuilds))
+                {
+                    _started++;
+                    _task = Serialised(builds, () => builder.BuildArchiveAsync(jobId, repoDir, dir, sha, ct), ct);
+                }
+
                 task = _task;
             }
 
@@ -910,31 +936,35 @@ public sealed partial class JobRunner(
             {
                 TryDelete((await task.ConfigureAwait(false)).Path);
             }
-            catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException)
+            catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException or UnauthorizedAccessException)
             {
                 // nothing was built
             }
         }
     }
 
-    /// <summary>Builds each distinct bundle (full, or incremental on one base) at most once per payload, on first use (several shards may ask at once).</summary>
-    private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha)
+    /// <summary>
+    /// Builds each distinct bundle (full, or incremental on one base) at most once per payload, on first use (several shards may ask at once).
+    /// Builds run one at a time (<paramref name="builds"/>, shared with the archive): each bundle build creates and deletes the payload's
+    /// local ref refs/lanq/&lt;payload id&gt;, so two at once would race on it. A build that failed is tried once more on the next request.
+    /// </summary>
+    private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, SemaphoreSlim builds)
     {
         private readonly Lock _gate = new();
-        private readonly Dictionary<string, Task<BundleBuild>> _built = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (Task<BundleBuild> Task, int Started)> _built = new(StringComparer.Ordinal);
 
         public Task<BundleBuild> GetAsync(string? baseSha, CancellationToken ct)
         {
             var key = baseSha ?? "";
             lock (_gate)
             {
-                if (!_built.TryGetValue(key, out var task))
+                if (!_built.TryGetValue(key, out var entry) || ((entry.Task.IsFaulted || entry.Task.IsCanceled) && entry.Started < MaxBuilds))
                 {
-                    task = builder.BuildBundleAsync(jobId, repoDir, dir, sha, baseSha, ct);
-                    _built[key] = task;
+                    entry = (Serialised(builds, () => builder.BuildBundleAsync(jobId, repoDir, dir, sha, baseSha, ct), ct), entry.Started + 1);
+                    _built[key] = entry;
                 }
 
-                return task;
+                return entry.Task;
             }
         }
 
@@ -943,7 +973,7 @@ public sealed partial class JobRunner(
             List<Task<BundleBuild>> built;
             lock (_gate)
             {
-                built = [.. _built.Values];
+                built = [.. _built.Values.Select(v => v.Task)];
             }
 
             foreach (var task in built)
@@ -957,6 +987,23 @@ public sealed partial class JobRunner(
                     // nothing was built
                 }
             }
+        }
+    }
+
+    /// <summary>A failed bundle or archive build is tried at most this many times in all (once more after the first failure).</summary>
+    private const int MaxBuilds = 2;
+
+    /// <summary>Runs one build while holding <paramref name="gate"/>: bundle and archive builds of one payload never overlap.</summary>
+    private static async Task<T> Serialised<T>(SemaphoreSlim gate, Func<Task<T>> build, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await build().ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 
