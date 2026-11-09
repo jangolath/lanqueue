@@ -52,13 +52,13 @@ internal static partial class FetchPath
             return "absolute path";
         }
 
-        if (rel.EndsWith(FetchReceiver.PartialSuffix, StringComparison.OrdinalIgnoreCase))
-        {
-            return "a name ending in " + FetchReceiver.PartialSuffix + " (reserved for files lanq is still receiving)";
-        }
-
         foreach (var s in rel.Split('/'))
         {
+            if (s.StartsWith(FetchReceiver.PartialPrefix, StringComparison.OrdinalIgnoreCase) || s.EndsWith(FetchReceiver.PartialPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return "a name starting or ending with " + FetchReceiver.PartialPrefix + " (reserved for files lanq is still receiving)";
+            }
+
             if (s.Length == 0 || s is "." or "..")
             {
                 return "empty, '.' or '..' path segment";

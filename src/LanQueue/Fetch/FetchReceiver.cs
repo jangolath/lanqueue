@@ -106,8 +106,14 @@ public sealed class FetchReceiver : IDisposable
     /// <summary>Deletes a partial file; false when it could not (tests stand in for a locked file).</summary>
     internal Func<string, bool> DeleteFile { get; init; } = TryDelete;
 
-    /// <summary>A file is written under its name plus this suffix and renamed to its name only once its size and hash are right.</summary>
-    internal const string PartialSuffix = ".lanq-partial";
+    /// <summary>
+    /// A file is written under a short temporary name in its own folder, <c>.lanq-partial-N</c>, and renamed to its name only once its size
+    /// and hash are right. The temporary name never depends on the real one, so a 255-character name still fits; worker paths with a
+    /// segment starting or ending with <c>.lanq-partial</c> are refused.
+    /// </summary>
+    internal const string PartialPrefix = ".lanq-partial";
+
+    private int _partials;
 
     private sealed class Current(string rel, long size, FileStream? stream, string fullPath, string finalPath = "")
     {
@@ -316,7 +322,7 @@ public sealed class FetchReceiver : IDisposable
             return;
         }
 
-        var partial = full + PartialSuffix;
+        var partial = Path.Combine(Path.GetDirectoryName(full)!, PartialPrefix + "-" + (++_partials).ToString(CultureInfo.InvariantCulture));
         if (IsLink(partial))
         {
             _cur = new Current(rel, size, null, "") { DropReason = "the target is an existing link" };

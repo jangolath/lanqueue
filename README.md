@@ -228,7 +228,7 @@ when the job never started.
   itself a minute later), so before fetching `lanq` stops it the way cleanup does: the recorded process group on
   Linux, and on Windows only the recorded processes whose pid and start time still match. A job that completed or
   failed is not touched.
-- Each file is written as `<name>.lanq-partial` and renamed to its name only once its size and hash are right.
+- Each file is written as a short `.lanq-partial-N` file in the same folder and renamed to its name only once its size and hash are right.
   Anything the worker prints on stderr during the fetch is shown as `[lanq] fetch stderr: ...` (the first 10 lines,
   sanitised) and never mixed into the files.
 - **Fetch problems never change the exit code**: the job's result is what `lanq` reports, and a skipped or failed file
@@ -650,7 +650,7 @@ Each default below is enforced in code and covered by a unit test.
   differ only in case), that it matches a pattern you asked for (in linear time: a crafted name cannot make the matcher
   hang), the file count and size caps on the bytes actually received, the exact size announced and the hash. Only
   stdout carries files; stderr is a separate, sanitised diagnostic. A file that fails any check is deleted and listed.
-  Files are written under a `.lanq-partial` name, created new, and renamed (never overwriting) only below
+  Files are written under a short `.lanq-partial-N` name, created new, and renamed (never overwriting) only below
   `<out>/<job id>/` once complete; nothing is written through a symlink or junction anywhere from the repository top
   (or `--fetch-dir`) down, so a `.lanq` link committed in a repository is refused. Tests run the real
   scripts against links to `/etc/passwd`, symlink loops, junctions, names with newlines and FIFOs, and feed the

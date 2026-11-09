@@ -376,7 +376,18 @@ public sealed class FetchReceiverTests : IDisposable
         Assert.Empty(r.Fetched);
         Assert.Contains("exists", Reason(r, "a.txt"), StringComparison.Ordinal);
         Assert.Equal("mine", File.ReadAllText(Path.Combine(JobDir, "a.txt")));
-        Assert.False(File.Exists(Path.Combine(JobDir, "a.txt.lanq-partial")));
+        Assert.Empty(Directory.EnumerateFiles(JobDir, ".lanq-partial*"));
+    }
+
+    /// <summary>The longest name a file system allows (255) is fetched: the partial file has a short name of its own, not name + suffix.</summary>
+    [Fact]
+    public void AFileWithA255CharacterNameIsFetched()
+    {
+        var name = new string('n', 251) + ".trx";
+        var data = Bytes(5000);
+        var r = Receive(Frame(name, data));
+        Assert.Empty(r.Skipped);
+        Assert.Equal(data, File.ReadAllBytes(Path.Combine(JobDir, name)));
     }
 
     [Fact]
@@ -388,7 +399,7 @@ public sealed class FetchReceiverTests : IDisposable
             rx.OnLine(l);
         }
 
-        Assert.True(File.Exists(Path.Combine(JobDir, "a.txt.lanq-partial")));
+        Assert.Single(Directory.EnumerateFiles(JobDir, ".lanq-partial-*"));
         rx.Dispose(); // Ctrl+C: no Finish
         Assert.Empty(Directory.EnumerateFiles(JobDir));
     }
@@ -396,9 +407,11 @@ public sealed class FetchReceiverTests : IDisposable
     [Fact]
     public void AWorkerCannotSendANameThatLooksLikeAPartialFile()
     {
-        var r = Receive(Frame("a.txt.lanq-partial", Bytes(5)).Concat(Frame("b.LANQ-PARTIAL", Bytes(5))));
+        var r = Receive(Frame("a.txt.lanq-partial", Bytes(5)).Concat(Frame("b.LANQ-PARTIAL", Bytes(5)))
+            .Concat(Frame(".lanq-partial-1", Bytes(5))).Concat(Frame("x.lanq-partial/a.txt", Bytes(5))).Concat(Frame(".Lanq-Partial-7/b.txt", Bytes(5))));
         Assert.Empty(r.Fetched);
-        Assert.Equal(2, r.Skipped.Count);
+        Assert.Equal(5, r.Skipped.Count);
+        Assert.All(r.Skipped, s => Assert.Contains("reserved", s.Reason, StringComparison.Ordinal));
     }
 
     /// <summary>Bytes of a failed file whose partial file could not be deleted are still on disk, so they keep counting against the total.</summary>
@@ -470,10 +483,10 @@ public sealed class FetchReceiverTests : IDisposable
             rx.OnLine(l);
         }
 
-        Assert.True(new FileInfo(Path.Combine(JobDir, "big.bin.lanq-partial")).Length >= 200_000);
+        Assert.True(new FileInfo(Assert.Single(Directory.EnumerateFiles(JobDir, ".lanq-partial-*"))).Length >= 200_000);
         Assert.False(File.Exists(Path.Combine(JobDir, "big.bin")));
         rx.OnLine(frame[^1]);
-        Assert.False(File.Exists(Path.Combine(JobDir, "big.bin.lanq-partial")));
+        Assert.Empty(Directory.EnumerateFiles(JobDir, ".lanq-partial*"));
         rx.OnLine("LQF1 DONE");
         Assert.Equal(data, File.ReadAllBytes(Path.Combine(JobDir, "big.bin")));
         Assert.Single(rx.Finish().Fetched);
