@@ -619,8 +619,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   "arguments not safe for Windows cmd shims") and runs on a Linux worker; it is refused (exit 2) only when no Linux
   worker has the needed capabilities.
 - `allowed_hours` uses the worker's clock. Across a daylight-saving change the window end is placed with the UTC
-  offsets the worker reports for the next 36 hours (to within an hour; an end time that happens twice counts as the
-  earlier one); a Linux worker whose `date` cannot print the offset of another instant (`date -d @EPOCH +%z`) falls
+  offsets the worker reports on every UTC quarter hour for the next 36 hours (an end time that happens twice counts as
+  the earlier one); a Linux worker whose `date` cannot print the offset of another instant (`date -d @EPOCH +%z`) falls
   back to plain local time, which can be an hour longer or shorter that night. A PAUSE file, `allowed_hours` and the memory holds only stop new jobs from
   starting; a running job is stopped only by `--timeout` or by the end of its window plus the grace period. In tests the generated Linux scripts are
   checked with `sh -n` and the Windows scripts with the PowerShell parser, but only when those shells exist on the

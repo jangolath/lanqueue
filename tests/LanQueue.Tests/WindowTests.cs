@@ -148,9 +148,20 @@ public sealed class WindowTests : IDisposable
 
     // ---- DST: the worker's UTC offset table ----
 
-    /// <summary>A probe-style offset table: <paramref name="before"/> minutes for the first <paramref name="hoursBefore"/> hourly samples, then <paramref name="after"/>.</summary>
-    private static UtcOffsetTable Table(DateTimeOffset nowUtc, int before, int hoursBefore, int after) =>
-        new(nowUtc.ToUnixTimeSeconds(), [.. Enumerable.Range(0, 37).Select(k => k < hoursBefore ? before : after)]);
+    /// <summary>A probe-style offset table on UTC quarter hours: <paramref name="before"/> minutes until <paramref name="changeUtc"/>, then <paramref name="after"/>.</summary>
+    private static UtcOffsetTable Table(DateTimeOffset nowUtc, int before, DateTimeOffset changeUtc, int after)
+    {
+        var start = nowUtc.ToUnixTimeSeconds() / 900 * 900;
+        return new(nowUtc.ToUnixTimeSeconds(), start, [.. Enumerable.Range(0, UtcOffsetTable.Samples).Select(k => start + (k * 900L) < changeUtc.ToUnixTimeSeconds() ? before : after)]);
+    }
+
+    private static string TableLines(UtcOffsetTable t) =>
+        "now_epoch=" + t.NowEpoch.ToString(CultureInfo.InvariantCulture) + NL + "tz_start=" + t.StartEpoch.ToString(CultureInfo.InvariantCulture)
+        + NL + "tz_offsets=" + string.Join(',', t.OffsetMinutes.Select(o => o.ToString(CultureInfo.InvariantCulture)));
+
+    private static readonly DateTimeOffset SpringForward = new(2026, 3, 8, 7, 0, 0, TimeSpan.Zero);
+
+    private static readonly DateTimeOffset FallBack = new(2026, 11, 1, 6, 0, 0, TimeSpan.Zero);
 
     private static TimeSpan? RemainingAt(DateTime localNow, UtcOffsetTable table, params string[] entries) =>
         HoursWindow.Remaining(HoursWindow.ParseAll(entries)!, localNow, table);
@@ -160,7 +171,7 @@ public sealed class WindowTests : IDisposable
     {
         // US Eastern, 2026-03-08: 02:00 EST (07:00Z) jumps to 03:00 EDT. Now: Saturday 23:00 EST = Sunday 04:00Z.
         var nowUtc = new DateTimeOffset(2026, 3, 8, 4, 0, 0, TimeSpan.Zero);
-        var table = Table(nowUtc, -300, 3, -240);
+        var table = Table(nowUtc, -300, SpringForward, -240);
         var localNow = new DateTime(2026, 3, 7, 23, 0, 0);
         Assert.Equal(TimeSpan.FromHours(6), RemainingAt(localNow, table, "Sat 22:00-06:00")); // 06:00 EDT = 10:00Z; the wall clock says 7 h
         Assert.Equal(TimeSpan.FromHours(3), RemainingAt(localNow, table, "Sat 22:00-02:30")); // 02:30 does not exist: the window ends at the jump (07:00Z)
@@ -171,7 +182,7 @@ public sealed class WindowTests : IDisposable
     {
         // US Eastern, 2026-11-01: 02:00 EDT (06:00Z) falls back to 01:00 EST. Now: Saturday 23:00 EDT = Sunday 03:00Z.
         var nowUtc = new DateTimeOffset(2026, 11, 1, 3, 0, 0, TimeSpan.Zero);
-        var table = Table(nowUtc, -240, 3, -300);
+        var table = Table(nowUtc, -240, FallBack, -300);
         var localNow = new DateTime(2026, 10, 31, 23, 0, 0);
         Assert.Equal(TimeSpan.FromHours(6), RemainingAt(localNow, table, "Sat 22:00-04:00")); // 04:00 EST = 09:00Z; the wall clock says 5 h
         Assert.Equal(TimeSpan.FromMinutes(150), RemainingAt(localNow, table, "Sat 22:00-01:30")); // 01:30 happens twice: the first (05:30Z)
@@ -185,20 +196,46 @@ public sealed class WindowTests : IDisposable
     public async Task TheProbeOffsetTableMovesTheWindowEndAcrossADstChange()
     {
         var nowUtc = new DateTimeOffset(2026, 3, 8, 4, 0, 0, TimeSpan.Zero);
-        var offsets = string.Join(',', Enumerable.Range(0, 37).Select(k => k < 3 ? "-300" : "-240"));
-        var output = Healthy + "local_time=2026-03-07T23:00:00" + NL + "now_epoch=" + nowUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) + NL + "tz_offsets=" + offsets;
+        var output = Healthy + "local_time=2026-03-07T23:00:00" + NL + TableLines(Table(nowUtc, -300, SpringForward, -240));
         var h = await Probe(output, nowUtc, hours: ["Sat 22:00-06:00"]);
         Assert.Null(h.Hold);
         Assert.Equal(nowUtc + TimeSpan.FromHours(6), h.WindowEndsUtc);
     }
 
+    /// <summary>
+    /// Samples at now + k hours placed a change only to within the hour after it (a window end up to an hour late). Samples on UTC
+    /// quarter-hour boundaries place it exactly: spring forward at 07:00Z, now 00:30 EST (05:30Z), the window ends 03:15 EDT = 07:15Z.
+    /// </summary>
+    [Fact]
+    public async Task AWindowEndJustAfterTheJumpIsPlacedExactlyWhenNowIsNotOnTheHour()
+    {
+        var nowUtc = new DateTimeOffset(2026, 3, 8, 5, 30, 0, TimeSpan.Zero);
+        var start = nowUtc.ToUnixTimeSeconds() / 900 * 900;
+        var change = new DateTimeOffset(2026, 3, 8, 7, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+        var offsets = string.Join(',', Enumerable.Range(0, 145).Select(k => start + (k * 900L) < change ? "-300" : "-240"));
+        var output = Healthy + "local_time=2026-03-08T00:30:00" + NL + "now_epoch=" + nowUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)
+            + NL + "tz_start=" + start.ToString(CultureInfo.InvariantCulture) + NL + "tz_offsets=" + offsets;
+        var h = await Probe(output, nowUtc, hours: ["Sat 22:00-03:15"]);
+        Assert.Equal(new DateTimeOffset(2026, 3, 8, 7, 15, 0, TimeSpan.Zero), h.WindowEndsUtc);
+    }
+
     [Theory]
     [InlineData("tz_offsets=-300")] // too short
+    [InlineData("tz_start=1772942400|tz_offsets=-300")] // a start, but too short
     [InlineData("tz_offsets=x,y")]
+    [InlineData("TABLE-WITHOUT-START")] // a full table but no tz_start
+    [InlineData("TABLE-WITH-UNALIGNED-START")]
     [InlineData("")]
     public async Task AMissingOrGarbledTableFallsBackToWallClockTime(string table)
     {
         var nowUtc = new DateTimeOffset(2026, 3, 8, 4, 0, 0, TimeSpan.Zero);
+        var full = TableLines(Table(nowUtc, -300, SpringForward, -240));
+        table = table switch
+        {
+            "TABLE-WITHOUT-START" => string.Join(NL, full.Split(NL).Where(l => !l.StartsWith("tz_start=", StringComparison.Ordinal))),
+            "TABLE-WITH-UNALIGNED-START" => full.Replace("tz_start=1772942400", "tz_start=1772942401", StringComparison.Ordinal),
+            _ => table.Replace('|', NL),
+        };
         var h = await Probe(Healthy + "local_time=2026-03-07T23:00:00" + NL + "now_epoch=" + nowUtc.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) + NL + table, nowUtc, hours: ["Sat 22:00-06:00"]);
         Assert.Equal(nowUtc + TimeSpan.FromHours(7), h.WindowEndsUtc);
     }
@@ -211,11 +248,11 @@ public sealed class WindowTests : IDisposable
         m.WorkRoot = Path.Combine(_dir, "shroot").Replace((char)92, '/');
         var (_, output) = Shells.Run("linux", RemoteScripts.Probe(m), new Dictionary<string, string> { ["TZ"] = "EST5EDT" });
         var v = HealthProbe.Parse(output);
-        var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_offsets"));
+        var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_start"), v.GetValueOrDefault("tz_offsets"));
         Assert.True(table is not null, "probe output: " + output);
         var zone = TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
-        var now = DateTimeOffset.FromUnixTimeSeconds(table.NowEpoch);
-        Assert.Equal(Enumerable.Range(0, 37).Select(k => (int)zone.GetUtcOffset(now.AddHours(k)).TotalMinutes), table.OffsetMinutes);
+        var start = DateTimeOffset.FromUnixTimeSeconds(table.StartEpoch);
+        Assert.Equal(Enumerable.Range(0, UtcOffsetTable.Samples).Select(k => (int)zone.GetUtcOffset(start.AddMinutes(15 * k)).TotalMinutes), table.OffsetMinutes);
     }
 
     [Fact]
@@ -226,14 +263,15 @@ public sealed class WindowTests : IDisposable
         var output = WorkerHealthTests.RunProbe(root);
         Assert.NotNull(output);
         var v = HealthProbe.Parse(output);
-        var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_offsets"));
+        var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_start"), v.GetValueOrDefault("tz_offsets"));
         Assert.True(table is not null, "probe output: " + output);
-        Assert.Equal(37, table.OffsetMinutes.Count);
+        Assert.Equal(UtcOffsetTable.Samples, table.OffsetMinutes.Count);
         var now = DateTimeOffset.FromUnixTimeSeconds(table.NowEpoch);
         Assert.True(Math.Abs((now - DateTimeOffset.UtcNow).TotalMinutes) < 5);
-        for (var k = 0; k < 37; k++)
+        var start = DateTimeOffset.FromUnixTimeSeconds(table.StartEpoch);
+        for (var k = 0; k < UtcOffsetTable.Samples; k++)
         {
-            Assert.Equal((int)TimeZoneInfo.Local.GetUtcOffset(now.AddHours(k)).TotalMinutes, table.OffsetMinutes[k]);
+            Assert.Equal((int)TimeZoneInfo.Local.GetUtcOffset(start.AddMinutes(15 * k)).TotalMinutes, table.OffsetMinutes[k]);
         }
     }
 

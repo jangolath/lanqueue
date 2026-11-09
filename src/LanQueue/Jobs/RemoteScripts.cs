@@ -41,9 +41,10 @@ public static class RemoteScripts
             if ($os -and $os.FreePhysicalMemory) { 'mem_free_gb=' + ([double]$os.FreePhysicalMemory / 1MB).ToString('0.##', $inv) }
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
-            $u = [DateTimeOffset]::UtcNow
-            'now_epoch=' + $u.ToUnixTimeSeconds()
-            'tz_offsets=' + ((0..36 | ForEach-Object { [int][TimeZoneInfo]::Local.GetUtcOffset($u.AddHours($_)).TotalMinutes }) -join ',')
+            $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $s = $e - ($e % 900)
+            'now_epoch=' + $e
+            'tz_start=' + $s
+            'tz_offsets=' + ((0..144 | ForEach-Object { [int][TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds($s + 900 * $_)).TotalMinutes }) -join ',')
             {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
             """
         : $$"""
@@ -63,13 +64,16 @@ public static class RemoteScripts
             """;
 
     /// <summary>
-    /// now_epoch= and tz_offsets=: the worker's UTC offset in minutes at now + 0 h ... + 36 h, from <c>date -d @EPOCH +%z</c> (GNU and busybox
-    /// date accept it). When date cannot do that, tz_offsets is left out and lanq uses wall-clock time for the window end.
+    /// now_epoch=, tz_start= and tz_offsets=: the worker's UTC offset in minutes on every UTC quarter hour from the one at or before now
+    /// (tz_start) for 36 hours, 145 values. GNU date converts them all in one call (<c>date -f -</c>); otherwise one <c>date -d @EPOCH +%z</c>
+    /// each (busybox accepts that). When date can do neither, tz_offsets is left out and lanq uses wall-clock time for the window end.
     /// </summary>
     internal const string LinuxOffsetTable = """
-        e=$(date +%s); echo "now_epoch=$e"; z=; k=0
-        while [ "$k" -le 36 ]; do o=$(date -d "@$((e + k * 3600))" +%z 2>/dev/null) || break; z="$z $o"; k=$((k + 1)); done
-        if [ "$k" -gt 36 ]; then printf '%s\n' "$z" | awk '{ s = "tz_offsets="; for (i = 1; i <= NF; i++) { v = $i; if (v !~ /^[+-][0-9][0-9][0-9][0-9]$/) exit; m = substr(v, 2, 2) * 60 + substr(v, 4, 2); s = s (i > 1 ? "," : "") (substr(v, 1, 1) == "-" ? 0 - m : m) } if (NF == 37) print s }'; fi
+        e=$(date +%s); s=$((e - e % 900)); echo "now_epoch=$e"; echo "tz_start=$s"
+        l=$(k=0; while [ "$k" -le 144 ]; do echo "@$((s + k * 900))"; k=$((k + 1)); done)
+        z=$(printf '%s\n' "$l" | date -f - +%z 2>/dev/null)
+        if [ "$(printf '%s\n' "$z" | grep -c .)" != 145 ]; then z=; for t in $l; do o=$(date -d "$t" +%z 2>/dev/null) || { z=; break; }; z="$z $o"; done; fi
+        if [ -n "$z" ]; then echo $z | awk '{ s = "tz_offsets="; for (i = 1; i <= NF; i++) { v = $i; if (v !~ /^[+-][0-9][0-9][0-9][0-9]$/) exit; m = substr(v, 2, 2) * 60 + substr(v, 4, 2); s = s (i > 1 ? "," : "") (substr(v, 1, 1) == "-" ? 0 - m : m) } if (NF == 145) print s }'; fi
         """;
 
     /// <summary>
