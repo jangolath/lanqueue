@@ -713,7 +713,9 @@ policy:
 
 A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing a machine with the people who use it").
 
-Unknown keys are an error (so a `password:` field is refused rather than ignored). Config lookup: `--config`,
+Unknown keys are an error (so a `password:` field is refused rather than ignored), and so is a duplicate key. A key
+left without a value (`max_jobs: ~`, a bare `wake:`) is an error too, except `allowed_hours`, `key_env` and a
+machine's `min_free_mem_gb`, where it means "not set"; to turn Wake-on-LAN off, leave `wake:` out. Config lookup: `--config`,
 then `$LANQ_CONFIG`, then the per-user config folder (`~/.config/lanq/machines.yml` or `%APPDATA%\lanq\machines.yml`).
 `LANQ_HOME` moves the state folder (job log, logs, scratch, `bases.json`); it defaults to a per-user folder outside any repository.
 

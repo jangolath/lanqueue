@@ -91,6 +91,10 @@
   so; `--wait` waits for ssh. `--json` prints exactly one object on every path.
 - `lanq doctor` reports the wake setting and
   reminds that Wake-on-LAN must be enabled in the BIOS/UEFI and the network card driver and usually needs wired Ethernet.
+- `wake:` is read through the same static config context as every other key, so it loads in the NuGet tool and the
+  native binaries alike, with the same rules: an unknown or duplicate key inside `wake:` is an error, standard YAML tags
+  load as the untagged value, and `wake: ~`, a bare `wake:` or a `wake:` key without a value is an error naming the key
+  (leave `wake:` out for no Wake-on-LAN). A test fails when a config class is missing from the static context.
 - Docs: Windows and Linux Wake-on-LAN setup in `docs/WORKERS.md`; the magic packet is unauthenticated and LAN-only,
   which is why it is opt-in per machine (SECURITY.md).
 
