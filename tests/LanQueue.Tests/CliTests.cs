@@ -27,6 +27,29 @@ public class CliTests
         Assert.Contains("lanq health", o.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("--version")]
+    [InlineData("version")]
+    public async Task VersionPrintsLanqAndTheEmbeddedMakereadyVersionOnStdout(string arg)
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        var code = await Cli.RunAsync([arg], o, e, CancellationToken.None);
+        Assert.Equal(0, code);
+        Assert.Equal("", e.ToString());
+        var lines = o.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(2, lines.Length);
+        Assert.Matches(@"^lanq \d+\.\d+\.\d+", lines[0]);
+        Assert.Equal(
+            $"lanq-makeready {Cli.MakereadyVersion} (embedded: lanq-makeready.ps1 {Cli.MakereadyScript(Config.MachineOs.Windows).Length} bytes, "
+            + $"lanq-makeready.sh {Cli.MakereadyScript(Config.MachineOs.Linux).Length} bytes)",
+            lines[1]);
+    }
+
+    [Fact]
+    public void VersionTakesNoOptions() =>
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["--version", "--json"]));
+
     [Fact]
     public async Task AnUnknownCommandPrintsUsageOnStderrAndExits2()
     {

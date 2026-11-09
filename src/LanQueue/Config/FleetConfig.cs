@@ -67,8 +67,7 @@ public sealed class Machine
     public JobPriority Priority { get; set; } = JobPriority.Low;
 
     /// <summary>allowed_hours: one entry as a string (as before 0.4) or a list of entries; null = any time.</summary>
-    [YamlDotNet.Serialization.YamlConverter(typeof(StringOrListConverter))]
-    public List<string>? AllowedHours { get; set; }
+    public HoursList? AllowedHours { get; set; }
     public TransferMode Transfer { get; set; } = TransferMode.Git;
 }
 
@@ -77,3 +76,10 @@ public sealed class FleetConfig
     public PolicyConfig Policy { get; set; } = new();
     public List<Machine> Machines { get; set; } = [];
 }
+
+/// <summary>
+/// The allowed_hours entries. Its own type so that <see cref="StringOrListConverter"/> can claim exactly this key by type: YamlDotNet's
+/// static generator (used for trimming and NativeAOT) does not carry a property's [YamlConverter] attribute into the generated code, so a
+/// per-property converter would silently be skipped.
+/// </summary>
+public sealed class HoursList : List<string>;

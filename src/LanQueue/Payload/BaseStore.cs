@@ -43,7 +43,7 @@ public class BaseStore(string? path)
             var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
             try
             {
-                File.WriteAllText(tmp, JsonSerializer.Serialize(all));
+                File.WriteAllText(tmp, JsonSerializer.Serialize(all, Jobs.StateJson.Default.DictionaryStringDictionaryStringString));
                 File.Move(tmp, path, overwrite: true);
             }
             finally
@@ -63,7 +63,7 @@ public class BaseStore(string? path)
         try
         {
             return File.Exists(path)
-                ? JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(File.ReadAllText(path)) ?? new(StringComparer.Ordinal)
+                ? JsonSerializer.Deserialize(File.ReadAllText(path), Jobs.StateJson.Default.DictionaryStringDictionaryStringString) ?? new(StringComparer.Ordinal)
                 : new(StringComparer.Ordinal);
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)

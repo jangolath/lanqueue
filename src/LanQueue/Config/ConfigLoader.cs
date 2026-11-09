@@ -35,12 +35,12 @@ internal sealed class WordEnumConverter<TEnum>(string key) : IYamlTypeConverter
 }
 
 /// <summary>
-/// A key that accepts either one string or a list of strings (allowed_hours); anything else is a friendly error. Used only where a property
-/// names it with [YamlConverter]: Accepts is false so other lists (capabilities, allowed_commands) stay lists only.
+/// A key that accepts either one string or a list of strings (allowed_hours); anything else is a friendly error. It claims only the
+/// <see cref="HoursList"/> type, so other lists (capabilities, allowed_commands) stay lists only.
 /// </summary>
 internal sealed class StringOrListConverter : IYamlTypeConverter
 {
-    public bool Accepts(Type type) => false;
+    public bool Accepts(Type type) => type == typeof(HoursList);
 
     public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
     {
@@ -49,11 +49,11 @@ internal sealed class StringOrListConverter : IYamlTypeConverter
             // A bare "allowed_hours:" or "~" / null is YAML null: no hours set, any time (as in 0.3). A quoted "~" stays an entry.
             return single.Style == ScalarStyle.Plain && single.Value is "" or "~" or "null" or "Null" or "NULL"
                 ? null
-                : new List<string> { single.Value };
+                : new HoursList { single.Value };
         }
 
         var start = parser.Consume<SequenceStart>();
-        var list = new List<string>();
+        var list = new HoursList();
         while (!parser.TryConsume<SequenceEnd>(out _))
         {
             list.Add(parser.TryConsume<Scalar>(out var item)
@@ -105,7 +105,7 @@ public static partial class ConfigLoader
     public static FleetConfig Parse(string yaml)
     {
         // Strict: unknown keys (for example "password") are an error, not ignored.
-        var deserializer = new DeserializerBuilder()
+        var deserializer = new StaticDeserializerBuilder(new YamlContext())
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
             .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
