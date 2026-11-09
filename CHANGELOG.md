@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## Unreleased (0.4.0)
+
+## 0.3.1 (2026-11-09)
 
 - **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the
   typographic quotes U+201A and U+201B as single quotes. They were not escaped, so an argument containing one could

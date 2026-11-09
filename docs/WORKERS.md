@@ -4,6 +4,13 @@ A *worker* is any machine on your network that `lanq` sends jobs to. Nothing fro
 your own PC runs `lanq`, ships the code over SSH (as a git bundle by default, or as a `tar.gz` with
 `transfer: archive`), and the worker only needs the pieces below. **An old PC needs only SSH, tar and your toolchain.**
 
+## Check a machine first: lanq-makeready
+
+Not sure an old PC is up to it? Run [lanq-makeready](https://github.com/jangolath/lanq-makeready) **on that PC**
+first. It is a read-only script (Windows, Linux, macOS; no admin, no network, nothing installed) that reports
+what is missing or too old for this checklist, what would break an overnight job (sleep, pending reboot, update
+restarts), and prints a ready-to-paste `machines.yml` entry.
+
 ## Checklist
 
 | Need | Required? | Why | How to check on the worker |
