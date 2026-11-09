@@ -84,7 +84,7 @@ public static class Cli
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
-        Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out.
+        Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
     public static async Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct)

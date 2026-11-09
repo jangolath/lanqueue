@@ -2,6 +2,39 @@
 
 ## Unreleased (0.4.0)
 
+Workers and windows: making old and shared PCs safe to lend to the queue.
+
+- **Memory in health.** The probe reports available memory (Linux `MemAvailable` and free swap, plus PSI memory
+  pressure `some avg10` where `/proc/pressure/memory` exists; Windows free physical memory) and `lanq health` shows
+  `mem free X.X GB`. A machine with less than `policy.min_free_mem_gb` (default 1.0, per-machine `min_free_mem_gb`)
+  is held ("low memory (x.x GB free)"), and on Linux one whose pressure is above `policy.max_mem_pressure` (default
+  20) is held ("memory pressure"). A machine that does not report memory is not held for it.
+- **`lanq run --mem <GB>`** sends a job only to a machine reporting at least that much available memory (never to one
+  that cannot report it).
+- **Per-machine `env:`** sets variables for the job process only, for example heap caps on small machines
+  (`DOTNET_GCHeapHardLimitPercent`, `NODE_OPTIONS=--max-old-space-size=2048`, `MSBUILDNODECOUNT`,
+  `CARGO_BUILD_JOBS`). Names must match `^[A-Za-z_][A-Za-z0-9_]*$`, values may not contain control characters, and
+  loader or shell hijack names (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `BASH_ENV`, `ENV`,
+  `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`) are refused. Values are passed as quoted data in both
+  shells.
+- **Per-machine `path_prepend:`** puts absolute directories in front of `PATH` for the job, so tools installed by nvm,
+  pyenv, rustup or sdkman are found in a non-login SSH session. `PATH` itself cannot be set through `env:`.
+- **`priority: low|normal`** (default `low`): Linux jobs run under `nice -n 10` and `ionice -c3` when available;
+  Windows jobs run at BelowNormal priority, inherited by their child processes. **This changes the default for
+  existing configs**; set `priority: normal` on a dedicated build box.
+- **PAUSE file.** If `<work_root>/PAUSE` exists on a worker, the machine is held ("paused on the machine"). Anyone at
+  that PC can create or delete it. A job that is already running is not affected.
+- **Availability windows v2.** `allowed_hours` still accepts one string, and now also a list of entries
+  `[Days ]HH:mm-HH:mm` with days `Mon`..`Sun`, ranges (`Mon-Fri`) and lists (`Sat,Sun`). A window that crosses
+  midnight belongs to its start day. The start minute is inside a window and the end minute is not (0.3 also counted
+  the end minute). Errors name the bad entry.
+- **Windows use the worker's clock.** The probe reports the worker's local time; output from an older probe falls back
+  to the clock of the machine running `lanq`, and `lanq health` then says `time: local`.
+- **Window close.** On a machine with windows a job may run until the window ends plus `policy.window_grace_minutes`
+  (default 15) or until `--timeout`, whichever is sooner. If the window limit stops it, the job is cleaned up like a
+  timeout, exits `124`, and the status line is `[lanq] WindowClosed`. A machine whose window ends in less than
+  `policy.min_window_minutes` (default 10) takes no new job ("window closing").
+
 ## 0.3.1 (2026-11-09)
 
 - **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the

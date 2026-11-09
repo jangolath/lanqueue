@@ -80,8 +80,8 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 
    ```
    $ lanq health
-   build-01       OK    load 0.12  disk free 180.4 GB  slots 0/2
-   build-02       HOLD  load 0.05  disk free 90.1 GB  slots 0/1 (outside allowed hours)
+   build-01       OK    load 0.12  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots 0/2
+   build-02       HOLD  load 0.05  disk free 90.1 GB  mem free 5.1 GB  slots 0/1 (outside allowed hours)
    ```
 
 4. Run something from inside a git repository:
@@ -91,12 +91,14 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    ```
 
    The job's exit code becomes `lanq`'s exit code. `--wait 120` keeps retrying for up to 120 seconds when every
-   machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `lanq stats` sums
-   wall-clock time from your local log.
+   machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
+   only to a machine that reports at least 4 GB of available memory. `lanq stats` sums wall-clock time from your
+   local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
-`75` no eligible machine; `124` the job ran past `--timeout` and was stopped. A job that itself exits with `124`
-gives the same code; the last stderr line tells them apart (`[lanq] TimedOut: timed out after N min` versus
+`75` no eligible machine; `124` the job ran past `--timeout`, or past the end of its machine's `allowed_hours` plus
+the grace period, and was stopped. A job that itself exits with `124` gives the same code; the last stderr line tells
+them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stopped after N min: ...` versus
 `[lanq] Failed: exit 124`).
 
 ## How it works
@@ -128,7 +130,7 @@ Where each safety check sits (numbers are the diagram steps):
 | --- | --- |
 | 2 | Command and directory must match your allowlists; permission-skipping flags are refused. Nothing has touched the network yet. |
 | 3 | The command line and the uncommitted overlay are secret-scanned; a hit refuses the job before anything is sent. |
-| 4-5 | Machines that are unreachable, loaded, outside their hours, low on disk or missing a capability are skipped. |
+| 4-5 | Machines that are unreachable, paused, loaded, outside their hours (or about to close), low on disk or memory, under memory pressure or missing a capability are skipped. |
 | 6 | `max_jobs` is enforced with an atomic slot file per machine. |
 | 4-10 | Every ssh/scp call is key-only, non-interactive and uses `StrictHostKeyChecking=yes`. |
 | 11 | Cleanup runs even when the job fails, is cancelled or times out (best effort if the network is down). |
@@ -171,6 +173,82 @@ Windows one.
 
 `lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
 (plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
+
+## Sharing a machine with the people who use it
+
+An old PC is often still someone's PC: a family desktop, a partner's laptop, the kids' homework machine. Four
+settings keep `lanq` a polite guest there (a full example is the "family PC" entry in `machines.example.yml`):
+
+- **Hours by day.** `allowed_hours` takes one window or a list, each `[Days ]HH:mm-HH:mm`:
+
+  ```yaml
+  allowed_hours:
+    - "Mon-Fri 22:00-07:00"    # weeknights; a window that crosses midnight belongs to the day it starts
+    - "Sat,Sun 01:00-09:00"    # Mon..Sun, ranges with '-', lists with ','
+  ```
+
+  Times are the worker's own clock (the probe reports it); a worker that does not report one is checked against your
+  PC's clock and `lanq health` shows `time: local`. A machine whose window ends within `policy.min_window_minutes`
+  (default 10) takes no new job ("window closing"). A job still running when the window ends gets
+  `policy.window_grace_minutes` (default 15) more, then it is stopped and cleaned up like a timeout: exit `124`,
+  status `[lanq] WindowClosed`.
+- **A PAUSE switch anyone can use.** If a file named `PAUSE` exists in the machine's `work_root`, `lanq` holds the
+  machine ("paused on the machine") and starts nothing there. No lanq knowledge needed:
+  - Windows: in a Command Prompt, `type nul > D:\lanq\PAUSE` (use your `work_root`), and `del D:\lanq\PAUSE` to
+    resume. Friendlier: put two desktop shortcuts on that PC, "Pause builds" with the target
+    `cmd /c type nul > D:\lanq\PAUSE` and "Resume builds" with the target `cmd /c del D:\lanq\PAUSE`.
+  - Linux: `touch /srv/lanq/PAUSE` to pause, `rm /srv/lanq/PAUSE` to resume.
+
+  The person needs write access to the `work_root` folder (grant it once, or make the shortcuts for an account that
+  has it). Only the file's existence counts; its content is ignored.
+
+  **A job that is already running is not affected**: PAUSE only stops new jobs from starting there. To end a running
+  job now, stop `lanq run` on your PC (Ctrl+C), which cleans the job up on the worker.
+- **Low priority (the default).** `priority: low` runs the job with `nice -n 10` and `ionice -c3` on Linux (when they
+  exist and work) and at BelowNormal priority on Windows (inherited by every process the job starts), so the person
+  at the keyboard keeps a responsive machine. Set `priority: normal` on a dedicated build box.
+- **Memory.** See the next section.
+
+## Old machines with little RAM
+
+`lanq health` reports each machine's available memory (Linux `MemAvailable` and free swap, plus memory pressure
+from `/proc/pressure/memory` where the kernel has it; Windows free physical memory). A machine is held when:
+
+- it has less than `policy.min_free_mem_gb` available (default 1.0; a machine can set its own `min_free_mem_gb`):
+  "low memory (0.8 GB free)";
+- on Linux, the PSI `some avg10` figure (the share of the last 10 seconds in which tasks stalled waiting for memory)
+  is above `policy.max_mem_pressure` (default 20): "memory pressure".
+
+A machine that does not report memory (an older kernel, an unusual host) is not held for it. A job that needs a lot
+of memory can ask: `lanq run --mem 6 ...` goes only to a machine that reports at least 6 GB available, and never to
+one that cannot report it.
+
+Build tools size themselves to the machine, which on a 4 GB box usually means swapping. Cap them per machine with
+`env:` (set for the job only):
+
+```yaml
+env:
+  DOTNET_GCHeapHardLimitPercent: "0x32"        # .NET: GC heap at most 50% of RAM (the value is hexadecimal)
+  NODE_OPTIONS: "--max-old-space-size=2048"    # Node: 2 GB heap
+  MSBUILDNODECOUNT: "1"                        # MSBuild: one worker node
+  CARGO_BUILD_JOBS: "2"                        # Rust: two parallel compile jobs
+```
+
+Tools installed per user (nvm, pyenv, rustup, sdkman) are often missing in a non-login SSH session, because they put
+themselves on `PATH` from `.bashrc` or `.profile`. List their folders under `path_prepend:` and the job finds them:
+
+```yaml
+path_prepend:
+  - /home/build/.nvm/versions/node/v22.11.0/bin
+  - /home/build/.cargo/bin
+```
+
+`env:` names must be letters, digits and `_`; values may not contain control characters. Names that can hijack the
+program loader or a shell are refused (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `BASH_ENV`, `ENV`,
+`PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`), and `PATH` is set only through `path_prepend` (absolute
+directories; a drive path such as `C:/Users/build/.cargo/bin` on Windows). Values reach the job as data: on Linux each
+`NAME=value` is one single-quoted word passed to `env`, on Windows a single-quoted PowerShell string, so quotes,
+`$( )` or backticks in a value are never run.
 
 ## Keeping your keys safe
 
@@ -280,8 +358,25 @@ machines:
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files
     transfer: git             # optional: git (default, recommended; worker needs git) | archive (worker needs only tar)
-    allowed_hours: "22:00-07:00"   # optional; local time of the machine running lanq; may wrap midnight
+    allowed_hours: "22:00-07:00"   # optional; one "[Days ]HH:mm-HH:mm" or a list, e.g. ["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]
+    priority: low             # optional: low (default; nice/ionice or BelowNormal) | normal
+    min_free_mem_gb: 2        # optional; overrides policy.min_free_mem_gb for this machine
+    env:                      # optional; variables for the job process only (see "Old machines with little RAM")
+      NODE_OPTIONS: "--max-old-space-size=2048"
+    path_prepend: [/home/build/.cargo/bin]   # optional; absolute directories put in front of PATH for the job
 ```
+
+Policy keys added in 0.4, with their defaults:
+
+```yaml
+policy:
+  min_free_mem_gb: 1.0        # hold a machine with less available memory (GB)
+  max_mem_pressure: 20        # Linux PSI memory "some avg10" (%) above this holds the machine
+  window_grace_minutes: 15    # a job may run this long past the end of its machine's allowed_hours window
+  min_window_minutes: 10      # no new job on a machine whose window ends sooner than this
+```
+
+A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing a machine with the people who use it").
 
 Unknown keys are an error (so a `password:` field is refused rather than ignored). Config lookup: `--config`,
 then `$LANQ_CONFIG`, then the per-user config folder (`~/.config/lanq/machines.yml` or `%APPDATA%\lanq\machines.yml`).
@@ -348,7 +443,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   `cmd.exe`, so such an argument could run a second command. Such a job skips Windows workers (hold reason
   "arguments not safe for Windows cmd shims") and runs on a Linux worker; it is refused (exit 2) only when no Linux
   worker has the needed capabilities.
-- `allowed_hours` uses the clock of the machine running `lanq`. In tests the generated Linux scripts are
+- `allowed_hours` uses the worker's clock as a plain local time: a window that spans a daylight-saving change can be
+  an hour longer or shorter that night. A PAUSE file, `allowed_hours` and the memory holds only stop new jobs from
+  starting; a running job is stopped only by `--timeout` or by the end of its window plus the grace period. In tests the generated Linux scripts are
   checked with `sh -n` and the Windows scripts with the PowerShell parser, but only when those shells exist on the
   machine running the tests (otherwise those checks are skipped), and the scripts have so far been exercised only
   against fakes plus a local process-group test; report any real-host defects.

@@ -56,7 +56,10 @@ Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
 
 1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
    `capabilities`, `max_jobs`, optional `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for
-   a worker without git).
+   a worker without git). For a PC someone else also uses, see the "family PC" example: hours by day, low priority
+   (the default), a memory floor, heap caps in `env:`, and a `PAUSE` file the people at that PC can create to hold it.
+   If a tool installed per user (nvm, pyenv, rustup, sdkman) works in your interactive shell but `lanq` jobs cannot
+   find it, list its folder under `path_prepend:`.
 2. Make sure the worker's host key is in your `known_hosts` (connect once with `ssh` and verify the fingerprint):
    lanq uses `StrictHostKeyChecking=yes`.
 3. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason.

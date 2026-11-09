@@ -37,6 +37,18 @@ An SSH server, the toolchain your jobs use, and git (recommended, the default) o
 `tar` (the built-in bsdtar on Windows 10 1803+; GNU tar or bsdtar plus gzip on Linux, busybox tar is refused). Nothing from lanqueue is installed on it, and it needs no GitHub
 access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md).
 
+## Lend it a shared or old PC
+
+- `allowed_hours` per machine, by day: `["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]`, on the worker's own clock.
+  A job still running when the window ends is stopped after a grace period (exit 124, `[lanq] WindowClosed`).
+- A `PAUSE` file in the worker's `work_root` holds the machine; anyone at that PC can create or delete it. A job
+  already running is not affected.
+- Jobs run at low priority by default (`nice`/`ionice` on Linux, BelowNormal on Windows); `priority: normal` turns it off.
+- Machines with little free memory are held (`min_free_mem_gb`, Linux memory pressure), and `lanq run --mem 4` asks
+  for a machine with at least 4 GB available.
+- Per-machine `env:` (for example `NODE_OPTIONS: "--max-old-space-size=2048"`) and `path_prepend:` (for nvm, pyenv,
+  rustup or sdkman tools a non-login SSH session cannot find).
+
 ## Safe by default
 
 - Key-only SSH with strict host-key checking; there is no password option.

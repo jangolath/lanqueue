@@ -166,4 +166,23 @@ public class ConfigTests
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WithLinuxMachine("min_free_mem_gb: -0.5")));
         Assert.Contains("min_free_mem_gb", ex.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ExampleShowsAFamilyPcUsingEveryWorkerSetting()
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "machines.example.yml")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        var path = Path.Combine(dir!, "machines.example.yml");
+        var family = Assert.Single(ConfigLoader.Load(path).Machines, m => m.Name == "family-pc");
+        Assert.True(family.AllowedHours!.Count > 1);
+        Assert.Equal(JobPriority.Low, family.Priority);
+        Assert.NotNull(family.MinFreeMemGb);
+        Assert.Contains("NODE_OPTIONS", family.Env.Keys);
+        Assert.NotEmpty(family.PathPrepend);
+        Assert.Contains("PAUSE", File.ReadAllText(path), StringComparison.Ordinal);
+    }
 }
