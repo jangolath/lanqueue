@@ -249,11 +249,17 @@ public class SecretScannerTests
     [InlineData(".yarnrc.yml", "npmAuthToken: SuperSecret#Value123|")] // '#' without whitespace before it is part of the value
     [InlineData(".yarnrc.yml", "npmScopes: {acme: {npmAlwaysAuth: true, npmAuthToken: '${NPM_TOKEN}'}}|")] // flow style, even with a reference
     [InlineData(".yarnrc.yml", "\"npmAuthToken\": \"SuperSecretValue123\"|")]
+    [InlineData(".yarnrc.yml", "npmAuthToken:|  npm_SuperSecretValue123|")] // the value continues on a deeper line
+    [InlineData(".yarnrc.yml", "npmAuthToken: # see CI|  npm_SuperSecretValue123|")]
+    [InlineData(".yarnrc.yml", "npmScopes:|  acme:|    npmAuthToken:||      # a comment line between|      npm_SuperSecretValue123|")]
+    [InlineData(".yarnrc.yml", "npmAuthToken: >|  npm_SuperSecretValue123|")] // block scalars (the literal '|' form is a Fact below)
+    [InlineData(".yarnrc.yml", "npmAuthToken: >-|  npm_SuperSecretValue123|")]
+    [InlineData(".yarnrc.yml", "npmAuthIdent:|\tdXNlcjpTdXBlclNlY3JldFZhbHVlMTIz|")]
     public void YarnrcWithALiteralNpmAuthTokenIsRefused(string path, string content)
     {
         Assert.True(SecretScanner.IsPackageConfig(path));
         var finding = Assert.Single(SecretScanner.ScanCommittedConfig(path, Yaml(content)));
-        Assert.Contains("key npmAuthToken", finding.Rule, StringComparison.Ordinal);
+        Assert.Contains(content.Contains("npmAuthIdent", StringComparison.Ordinal) ? "key npmAuthIdent" : "key npmAuthToken", finding.Rule, StringComparison.Ordinal);
         Assert.DoesNotContain("SuperSecretValue123", finding.Rule + finding.Where, StringComparison.Ordinal);
     }
 
@@ -265,8 +271,18 @@ public class SecretScannerTests
     [InlineData("npmAuthToken: ${NPM_TOKEN} # ci|")] // a YAML comment after the reference
     [InlineData("npmScopes:|  acme:|    npmAuthToken: '${NPM_TOKEN}'   # set in CI|")]
     [InlineData("npmAuthToken: ${NPM_TOKEN?}|")]
+    [InlineData("npmScopes:|  acme:|    npmAuthToken:|    npmAlwaysAuth: true|")] // empty, then a sibling at the same level
+    [InlineData("npmAuthToken:|npmRegistryServer: 'https://r.example'|")]
+    [InlineData("npmAuthToken: # set in CI||# nothing more|")]
     public void YarnrcWithoutALiteralTokenPasses(string content) =>
         Assert.Empty(SecretScanner.ScanCommittedConfig(".yarnrc.yml", Yaml(content)));
+
+    [Fact]
+    public void AYarnLiteralBlockScalarTokenIsRefused()
+    {
+        var finding = Assert.Single(SecretScanner.ScanCommittedConfig(".yarnrc.yml", "npmAuthToken: |\n  npm_SuperSecretValue123\n"));
+        Assert.Contains("key npmAuthToken", finding.Rule, StringComparison.Ordinal);
+    }
 
     /// <summary>Flow style is refused even for a plain reference, and the refusal says why (and how to write it instead).</summary>
     [Fact]

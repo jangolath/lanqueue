@@ -143,8 +143,10 @@ public static partial class SecretScanner
         var yarn = kind == "yarn";
         var keys = npm ? NpmCredentialKeys : yarn ? YarnCredentialKeys : ["password"];
         var found = new List<SecretFinding>();
-        foreach (var raw in content.Split(['\r', '\n']))
+        var lines = content.Split(['\r', '\n']);
+        for (var n = 0; n < lines.Length; n++)
         {
+            var raw = lines[n];
             var line = raw.Trim();
             if (line.Length == 0 || line[0] is '#' or ';')
             {
@@ -180,6 +182,11 @@ public static partial class SecretScanner
             {
                 found.Add(new SecretFinding($"{CommittedConfigRule} (key {canonical})", path));
             }
+            else if (yarn && canonical is not null && rest.Trim().Length == 0 && ContinuesOnADeeperLine(lines, n, raw))
+            {
+                // "npmAuthToken:" (or with only a comment) and the value on the next, more-indented line: a plain multi-line scalar.
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {canonical})", path));
+            }
             else if (canonical is null && yarnKey is not null)
             {
                 // Flow style ({acme: {npmAuthToken: ...}}) is refused whatever the value, even a plain reference.
@@ -188,6 +195,27 @@ public static partial class SecretScanner
         }
 
         return found.DistinctBy(f => f.Rule).ToList();
+    }
+
+    /// <summary>
+    /// YAML: a key with an empty value takes the next non-blank, non-comment line as its value when that line is indented deeper than the
+    /// key (a tab counts as deeper indentation too, so nothing slips through).
+    /// </summary>
+    private static bool ContinuesOnADeeperLine(string[] lines, int keyLine, string keyRaw)
+    {
+        static int Indent(string s) => s.Length - s.TrimStart(' ', '\t').Length;
+        for (var i = keyLine + 1; i < lines.Length; i++)
+        {
+            var t = lines[i].Trim();
+            if (t.Length == 0 || t[0] == '#')
+            {
+                continue;
+            }
+
+            return Indent(lines[i]) > Indent(keyRaw);
+        }
+
+        return false;
     }
 
     private static readonly string[] SampleFolders = ["fixtures", "testdata"];

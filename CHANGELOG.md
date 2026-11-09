@@ -94,7 +94,8 @@ Transfer and supply chain:
   and only a literal credential refuses the job (`.npmrc`: a non-empty `_authToken`, `_auth`, `_password` or
   `password`, including `//host/:_authToken=`, unless it is just an environment reference such as `${NPM_TOKEN}`;
   `.yarnrc.yml`: a non-empty `npmAuthToken` or `npmAuthIdent`, also under `npmScopes`, with the same environment
-  reference rule (a YAML comment after the value is ignored), and any other line naming one of those keys, such as
+  reference rule (a YAML comment after the value is ignored; a key left empty whose value continues on a more-indented
+  next line, or a block scalar `|` / `>`, is refused), and any other line naming one of those keys, such as
   YAML flow style `{acme: {npmAuthToken: x}}`, which is refused even with a reference (the message says to use a
   block mapping); an environment reference is exactly `${NAME}` or npm's optional `${NAME?}`, so
   `${NPM_TOKEN:-literal}` counts as a literal; `.pypirc`: a non-empty `password`). The refusal names the file and key, never

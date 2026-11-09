@@ -553,7 +553,8 @@ Each default below is enforced in code and covered by a unit test.
   registry-scoped `//host/:_authToken=` form) that is not just an environment reference like `${NPM_TOKEN}`, in
   `.pypirc` a non-empty `password`, in `.yarnrc.yml` a non-empty `npmAuthToken` or `npmAuthIdent` (or any other line naming them: flow style is refused even
   with a reference, so write a block mapping; an environment reference must be exactly `${NAME}` or `${NAME?}`, a
-  `${NAME:-default}` counts as literal; a YAML comment after the value is ignored) (lines may end in CR,
+  `${NAME:-default}` counts as literal; a YAML comment after the value is ignored; an empty key whose value continues on a deeper next line, and a block scalar,
+  are refused) (lines may end in CR,
   LF or CRLF); the refusal names the file and key, never the value. Obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
   anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
   never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
