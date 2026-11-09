@@ -58,6 +58,16 @@ public static class RemoteScripts
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
             """;
 
+    /// <summary>
+    /// Options for every git call on a worker (hooks in the cache or a hooks path in the worker's git config must never run
+    /// anything). Hooks are pointed at the null device, the fsmonitor daemon is off, and every transport is refused; only the
+    /// bundle fetch re-allows reading a local file, with <c>-c protocol.file.allow=always</c> on that one call.
+    /// </summary>
+    internal const string GitHardeningLinux = "-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+
+    /// <inheritdoc cref="GitHardeningLinux"/>
+    internal const string GitHardeningWindows = "-c core.longpaths=true -c core.hooksPath=NUL -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+
     private const string GitProbeWindows = "'tool=' + $(if (Get-Command git -ErrorAction SilentlyContinue) { 'ok' } else { 'missing' })";
 
     private const string GitProbeLinux = "if git --version >/dev/null 2>&1; then echo tool=ok; else echo tool=missing; fi";
@@ -81,33 +91,78 @@ public static class RemoteScripts
         + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
         + "'tool=' + $(if ($ok) { 'ok' } else { 'missing' })";
 
-    /// <summary>Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL.</summary>
-    public static string AcquireSlot(Machine m, string jobId) => m.Os == MachineOs.Windows
-        ? $$"""
-            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
-            New-Item -ItemType Directory -Force -Path "$root/locks" | Out-Null
-            for ($i = 1; $i -le {{m.MaxJobs.ToString(CultureInfo.InvariantCulture)}}; $i++) {
-              try {
-                $fs = [System.IO.File]::Open("$root/locks/slot-$i", 'CreateNew', 'Write', 'None')
-                $b = [Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}}); $fs.Write($b, 0, $b.Length); $fs.Close()
-                'SLOT=' + $i; exit 0
-              } catch [System.IO.IOException] { }
-            }
-            'SLOT=FULL'
-            """
-        : $$"""
-            R={{ShellQuote.Posix(m.WorkRoot)}}
-            mkdir -p "$R/locks"
-            i=1
-            while [ "$i" -le {{m.MaxJobs.ToString(CultureInfo.InvariantCulture)}} ]; do
-              if ( set -C; echo {{ShellQuote.Posix(jobId)}} > "$R/locks/slot-$i" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
-              i=$((i+1))
-            done
-            echo "SLOT=FULL"
-            """;
+    /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
+    internal const int StaleSlotGraceSeconds = 1800;
 
-    /// <summary>Fetches the uploaded bundle into a bare cache repo and adds a detached per-job worktree.</summary>
-    public static string Prepare(Machine m, string jobId) => m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId);
+    /// <summary>Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback) and cleanup.</summary>
+    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(40);
+
+    /// <summary>
+    /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
+    /// its deadline in the worker's own epoch seconds (now + <paramref name="jobTimeout"/> + <see cref="SlotTransferAllowance"/>). A slot
+    /// more than <see cref="StaleSlotGraceSeconds"/> past its deadline was left by a crashed run and is reclaimed: it is renamed away
+    /// (atomic), and put back if what was renamed is not the stale file that was read. A slot without a deadline is never reclaimed.
+    /// </summary>
+    public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout)
+    {
+        var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
+        var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
+        return m.Os == MachineOs.Windows
+            ? $$"""
+                $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+                New-Item -ItemType Directory -Force -Path "$root/locks" | Out-Null
+                $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                $deadline = $now + {{lease}}
+                for ($i = 1; $i -le {{max}}; $i++) {
+                  $f = "$root/locks/slot-$i"
+                  try {
+                    $c = [IO.File]::ReadAllText($f); $l = $c -split "`n"
+                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}$' -and $now -gt ([long]$l[1].Trim() + {{grace}})) {
+                      $t = "$f.stale.$PID"
+                      [IO.File]::Move($f, $t)
+                      if ([IO.File]::ReadAllText($t) -ceq $c) { [IO.File]::Delete($t) } else { try { [IO.File]::Move($t, $f) } catch { [IO.File]::Delete($t) } }
+                    }
+                  } catch { }
+                  try {
+                    $fs = [System.IO.File]::Open($f, 'CreateNew', 'Write', 'None')
+                    $b = [Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}} + "`n" + $deadline + "`n"); $fs.Write($b, 0, $b.Length); $fs.Close()
+                    'SLOT=' + $i; exit 0
+                  } catch [System.IO.IOException] { }
+                }
+                'SLOT=FULL'
+                """
+            : $$"""
+                R={{ShellQuote.Posix(m.WorkRoot)}}
+                mkdir -p "$R/locks"
+                now=$(date +%s); D=$((now + {{lease}}))
+                i=1
+                while [ "$i" -le {{max}} ]; do
+                  f="$R/locks/slot-$i"
+                  if [ -f "$f" ]; then
+                    c=$(cat "$f" 2>/dev/null); d=$(printf '%s\n' "$c" | sed -n 2p)
+                    case "$d" in
+                      ''|*[!0-9]*) ;;
+                      *) if [ "$now" -gt $((d + {{grace}})) ] && mv "$f" "$f.stale.$$" 2>/dev/null; then
+                           if [ "$(cat "$f.stale.$$")" != "$c" ]; then ln "$f.stale.$$" "$f" 2>/dev/null; fi
+                           rm -f "$f.stale.$$"
+                         fi ;;
+                    esac
+                  fi
+                  if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
+                  i=$((i+1))
+                done
+                echo "SLOT=FULL"
+                """;
+    }
+
+    /// <summary>
+    /// Git mode: verifies the uploaded bundle against the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> (printing
+    /// <see cref="BundleNotUsable"/> and failing if its prerequisites are missing), fetches it, moves <c>refs/lanq/base</c> to the snapshot
+    /// (keeping it alive as the next incremental base) and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
+    /// </summary>
+    public static string Prepare(Machine m, string jobId, string? repoId = null) =>
+        m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId, SafeRepoId(repoId));
 
     /// <summary>
     /// Extracts the uploaded tar.gz into a fresh per-job folder with the platform's own tar. Only GNU tar or bsdtar is accepted. The archive is
@@ -157,24 +212,41 @@ public static class RemoteScripts
             tar -xzf "$A" -C "$J" --no-same-owner --no-same-permissions
             """;
 
-    private static string PrepareGit(Machine m, string jobId) => m.Os == MachineOs.Windows
+    private static string PrepareGit(Machine m, string jobId, string repoId) => m.Os == MachineOs.Windows
         ? $$"""
             $ErrorActionPreference = 'Stop'
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
-            function G { & git -c core.longpaths=true @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
-            New-Item -ItemType Directory -Force -Path "$root/jobs" | Out-Null
-            if (-not (Test-Path "$root/repo.git")) { G init --bare -q "$root/repo.git" }
-            G -C "$root/repo.git" fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
-            G -C "$root/repo.git" worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
+            $c = "$root/repos/{{repoId}}.git"
+            function Q { & git {{GitHardeningWindows}} @args }
+            function G { Q @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+            New-Item -ItemType Directory -Force -Path "$root/jobs", "$root/repos" | Out-Null
+            if (-not (Test-Path -LiteralPath $c)) { G init --bare -q $c }
+            $ErrorActionPreference = 'Continue'
+            Q -C $c bundle verify "$root/incoming/$id.bundle" 2>&1 | Out-Null
+            $ok = $LASTEXITCODE -eq 0
+            $ErrorActionPreference = 'Stop'
+            if (-not $ok) { '{{BundleNotUsable}}'; exit 3 }
+            G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
+            G -C $c update-ref refs/lanq/base "refs/lanq/$id"
+            G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
             set -e
-            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
-            mkdir -p "$R/jobs"
-            [ -d "$R/repo.git" ] || git init --bare -q "$R/repo.git"
-            git -C "$R/repo.git" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
-            git -C "$R/repo.git" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}; C="$R/repos/{{repoId}}.git"
+            mkdir -p "$R/jobs" "$R/repos"
+            G() { git {{GitHardeningLinux}} "$@"; }
+            [ -d "$C" ] || G init --bare -q "$C"
+            G -C "$C" bundle verify "$R/incoming/$ID.bundle" >/dev/null 2>&1 || { echo '{{BundleNotUsable}}'; exit 3; }
+            G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
+            G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
+            G -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
+
+    /// <summary>
+    /// Printed by the git prepare step when the cache cannot take the uploaded bundle (<c>git bundle verify</c> failed: for an incremental
+    /// bundle, the worker no longer has the base). The runner then sends a full bundle, once.
+    /// </summary>
+    internal const string BundleNotUsable = "lanq: bundle not usable by the worker cache (missing prerequisites)";
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
 
@@ -279,8 +351,8 @@ public static class RemoteScripts
     }
 
     /// <summary>Best-effort teardown: worktree, ref, bundle, slot. Never fails the job.</summary>
-    public static string Cleanup(Machine m, string jobId, string slot) =>
-        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot);
+    public static string Cleanup(Machine m, string jobId, string slot, string? repoId = null) =>
+        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot, SafeRepoId(repoId));
 
     private static string CleanupArchive(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
         ? $$"""
@@ -321,7 +393,7 @@ public static class RemoteScripts
             exit 0
             """;
 
-    private static string CleanupGit(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
+    private static string CleanupGit(Machine m, string jobId, string slot, string repoId) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $pf = "$root/locks/job-$id.pid"
@@ -333,10 +405,12 @@ public static class RemoteScripts
               }
               Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
             }
-            & git -C "$root/repo.git" worktree remove --force "$root/jobs/$id" 2>$null
+            $c = "$root/repos/{{repoId}}.git"
+            function Q { & git {{GitHardeningWindows}} @args 2>$null }
+            Q -C $c worktree remove --force "$root/jobs/$id"
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
-            & git -C "$root/repo.git" worktree prune 2>$null
-            & git -C "$root/repo.git" update-ref -d "refs/lanq/$id" 2>$null
+            Q -C $c worktree prune
+            Q -C $c update-ref -d "refs/lanq/$id"
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
             exit 0
@@ -352,13 +426,21 @@ public static class RemoteScripts
               esac
               rm -f "$P"
             fi
-            git -C "$R/repo.git" worktree remove --force "$R/jobs/$ID" 2>/dev/null
+            C="$R/repos/{{repoId}}.git"
+            G() { git {{GitHardeningLinux}} "$@"; }
+            G -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
             rm -rf "$R/jobs/$ID"
-            git -C "$R/repo.git" worktree prune 2>/dev/null
-            git -C "$R/repo.git" update-ref -d "refs/lanq/$ID" 2>/dev/null
+            G -C "$C" worktree prune 2>/dev/null
+            G -C "$C" update-ref -d "refs/lanq/$ID" 2>/dev/null
             rm -f "$R/incoming/$ID.bundle" "$R/locks/slot-{{SafeSlot(slot)}}"
             exit 0
             """;
+
+    /// <summary>A repository id is exactly 16 lowercase hex digits, so it can never carry a path or shell syntax into a script.</summary>
+    internal static string SafeRepoId(string? repoId) =>
+        repoId is { Length: 16 } && repoId.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'))
+            ? repoId
+            : throw new ArgumentException("Invalid repository id.", nameof(repoId));
 
     private static string SafeSlot(string slot) =>
         int.TryParse(slot, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0

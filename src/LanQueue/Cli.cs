@@ -132,7 +132,7 @@ public static class Cli
         }
 
         var scratch = Path.Combine(home, "tmp");
-        var runner = new JobRunner(config, ssh, new GitPayloadBuilder(), probe, log, scratch, line => stdout.WriteLine(line));
+        var runner = new JobRunner(config, ssh, new GitPayloadBuilder(), probe, log, scratch, line => stdout.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
         var result = await runner.RunAsync(
             new JobRequest(p.Needs, p.Argv, p.Directory, Directory.GetCurrentDirectory(), TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
             ct).ConfigureAwait(false);

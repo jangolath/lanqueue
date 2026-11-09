@@ -23,6 +23,17 @@ not contain control characters, and names that hijack the program loader or a sh
 are refused. `path_prepend` entries must be absolute. Both are written by you in your own config: they are a
 convenience for your machines, not a boundary against someone who can edit that file.
 
+In git mode a worker receives the repository's history, not just the current files: the first job for a repository
+on a machine sends the full history of HEAD, later jobs only the new commits. The secret scan covers the command
+line, the uncommitted changes (content and names), the names of committed files in HEAD (`.env`, `id_rsa`,
+`*.pem` and similar, with samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, allowed), and
+the content of committed `.npmrc` / `.pypirc` files (refused only for a literal token or password; `${NPM_TOKEN}`-style
+references pass, and the value is never printed). It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
+bundle. Archive mode sends only the current files, never history.
+
+On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off and
+all transports refused except reading the uploaded bundle.
+
 It does not:
 - sandbox the allowlisted program (it runs with the remote user's rights; use a low-privilege account);
 - guarantee that no secret leaves your machine (the scan is pattern-based);

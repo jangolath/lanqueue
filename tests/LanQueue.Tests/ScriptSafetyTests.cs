@@ -49,7 +49,7 @@ public class ScriptSafetyTests
         var s = RemoteScripts.Execute(T.Linux(), "job1", "src", ["dotnet", "test"]);
         Assert.Contains("setsid -w", s, StringComparison.Ordinal);
         Assert.Contains("locks/job-job1.pid", s, StringComparison.Ordinal);
-        var c = RemoteScripts.Cleanup(T.Linux(), "job1", "1");
+        var c = RemoteScripts.Cleanup(T.Linux(), "job1", "1", T.RepoId);
         Assert.Contains("locks/job-$ID.pid", c, StringComparison.Ordinal);
         Assert.Contains("kill -s TERM", c, StringComparison.Ordinal);
         Assert.Contains("kill -s KILL", c, StringComparison.Ordinal);
@@ -64,7 +64,7 @@ public class ScriptSafetyTests
         var s = RemoteScripts.Execute(T.Windows(), "job1", "src", ["dotnet", "test"]);
         Assert.Contains("$PID", s, StringComparison.Ordinal);
         Assert.Contains("locks/job-job1.pid", s, StringComparison.Ordinal);
-        var c = RemoteScripts.Cleanup(T.Windows(), "job1", "1");
+        var c = RemoteScripts.Cleanup(T.Windows(), "job1", "1", T.RepoId);
         Assert.Contains("taskkill", c, StringComparison.Ordinal);
         Assert.Contains("/T", c, StringComparison.Ordinal);
         Assert.True(c.IndexOf("taskkill", StringComparison.Ordinal) < c.IndexOf("worktree remove", StringComparison.Ordinal));
@@ -95,7 +95,7 @@ public class ScriptSafetyTests
             }
 
             Assert.True(File.Exists(pidFile));
-            Assert.Equal(0, Run("sh", "-c", RemoteScripts.Cleanup(m, "jk", "1")));
+            Assert.Equal(0, Run("sh", "-c", RemoteScripts.Cleanup(m, "jk", "1", T.RepoId)));
             Assert.True(run.WaitForExit(15000));
             Assert.False(File.Exists(pidFile));
             Assert.False(File.Exists(marker));
@@ -130,11 +130,11 @@ public class ScriptSafetyTests
         var scripts = new Dictionary<string, string>
         {
             ["probe"] = RemoteScripts.Probe(m),
-            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1"),
-            ["prepare"] = RemoteScripts.Prepare(m, "j1"),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromMinutes(5)),
+            ["prepare"] = RemoteScripts.Prepare(m, "j1", T.RepoId),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
-            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2"),
+            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2", T.RepoId),
             ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
@@ -168,11 +168,11 @@ public class ScriptSafetyTests
         var scripts = new Dictionary<string, string>
         {
             ["probe"] = RemoteScripts.Probe(m),
-            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1"),
-            ["prepare"] = RemoteScripts.Prepare(m, "j1"),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromMinutes(5)),
+            ["prepare"] = RemoteScripts.Prepare(m, "j1", T.RepoId),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
-            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2"),
+            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2", T.RepoId),
             ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),

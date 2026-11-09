@@ -65,6 +65,22 @@ dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
 
+### Verify a release
+
+From 0.4.0 on, the release workflow attests the build provenance of the `.nupkg` it builds (GitHub artifact
+attestations, signed with the workflow's OIDC identity). The `.nupkg` attached to the GitHub Release is that exact
+file, so you can check it was built from this repository by the release workflow, then install it:
+
+```bash
+gh release download v0.4.0 --repo jangolath/lanqueue --pattern '*.nupkg'
+gh attestation verify LanQueue.0.4.0.nupkg --repo jangolath/lanqueue
+dotnet tool install --global --add-source . LanQueue --version 0.4.0
+```
+
+(The copy on nuget.org carries nuget.org's own repository signature, so its bytes differ from the attested file;
+verify the GitHub Release asset.) Dependencies are pinned too: every project commits a `packages.lock.json`, CI
+restores in locked mode, and every GitHub Action is pinned to a full commit SHA.
+
 ## Quick start
 
 Before your first job, each worker needs an SSH server, git (or only `tar` in archive mode) and the toolchain your jobs use; it does **not** need
@@ -129,9 +145,9 @@ Where each safety check sits (numbers are the diagram steps):
 | Step | Check |
 | --- | --- |
 | 2 | Command and directory must match your allowlists; permission-skipping flags are refused. Nothing has touched the network yet. |
-| 3 | The command line and the uncommitted overlay are secret-scanned; a hit refuses the job before anything is sent. |
+| 3 | The command line and the uncommitted overlay are secret-scanned, and committed file names are checked; a hit refuses the job before anything is sent. |
 | 4-5 | Machines that are unreachable, paused, loaded, outside their hours (or about to close), low on disk or memory, under memory pressure or missing a capability are skipped. |
-| 6 | `max_jobs` is enforced with an atomic slot file per machine. |
+| 6 | `max_jobs` is enforced with an atomic slot file per machine; a slot left by a crashed run is reclaimed 30 minutes after its recorded deadline. |
 | 4-10 | Every ssh/scp call is key-only, non-interactive and uses `StrictHostKeyChecking=yes`. |
 | 11 | Cleanup runs even when the job fails, is cancelled or times out (best effort if the network is down). |
 
@@ -153,8 +169,10 @@ Where each safety check sits (numbers are the diagram steps):
 
 Each machine in `machines.yml` has an optional `transfer` setting:
 
-- **`git`** (the default, recommended): `lanq` sends a git bundle and the worker keeps a bare cache repo with a
-  detached worktree per job. Later jobs on the same worker are cheaper to prepare. The worker needs `git`.
+- **`git`** (the default, recommended): `lanq` sends a git bundle and the worker keeps one bare cache repo per
+  repository (`<work_root>/repos/<repoid>.git`, named after the first 16 hex digits of the root commit) with a
+  detached worktree per job. Later jobs on the same worker are cheaper to prepare. The worker needs `git`. (Versions
+  before 0.4 used a single shared `<work_root>/repo.git`; it is no longer used and can be deleted.)
 - **`archive`**: `lanq` builds the same snapshot (HEAD plus uncommitted and untracked files, honouring `.gitignore`,
   never `.lanq/`) on your PC and sends it as a `tar.gz`; the worker extracts it into a fresh per-job folder with its
   own `tar`: GNU tar (with gzip) on Linux, or the bsdtar built into Windows 10 1803+ / Server 2019+. **The worker does
@@ -170,6 +188,16 @@ skipped, not archived (only regular files and directories are), and the job outp
 Paths that Windows cannot store (names ending in a dot or space, the characters `<>:"|?*`, or device names such as
 `CON`, `NUL` or `COM1`) make the archive build fail with the offending path and rule, because any worker could be a
 Windows one.
+
+### Incremental bundles (git mode)
+
+The first job for a repository on a machine sends a full bundle. After a worker has fetched a snapshot, `lanq`
+records the commit it was taken on in `<state>/bases.json` (per machine and repository; written atomically), and the
+worker's cache keeps `refs/lanq/base` on that snapshot so the objects stay put. The next job bundles only what is new
+(`git bundle create … --not <base>`), as long as the base is still a local ancestor of the new snapshot. The worker
+runs `git bundle verify` before fetching; if its cache no longer has the base (for example it was deleted), the job
+falls back once to a full bundle automatically and the log says so. Rewritten history (rebase, amend, reset) or a
+missing `bases.json` simply mean a full bundle; deleting `bases.json` is always safe.
 
 `lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
 (plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
@@ -380,7 +408,7 @@ A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing
 
 Unknown keys are an error (so a `password:` field is refused rather than ignored). Config lookup: `--config`,
 then `$LANQ_CONFIG`, then the per-user config folder (`~/.config/lanq/machines.yml` or `%APPDATA%\lanq\machines.yml`).
-`LANQ_HOME` moves the state folder (job log, logs, scratch); it defaults to a per-user folder outside any repository.
+`LANQ_HOME` moves the state folder (job log, logs, scratch, `bases.json`); it defaults to a per-user folder outside any repository.
 
 ## Security model
 
@@ -397,14 +425,25 @@ Each default below is enforced in code and covered by a unit test.
   AWS/GitHub/Slack/`sk-` tokens, JWTs, bearer tokens, and password/secret/API-key style assignments (quoted, JSON,
   YAML, `.env` and `Password=...;` connection strings). Files named like `.env`, `*.pem`, `*.pfx`, `*.jks`,
   `id_rsa`, `*.tfvars`, `terraform.tfstate`, `.git-credentials`, `.aws/credentials` or `*.local.yml` are refused by
-  name. A hit refuses the job before anything is sent, and the message never echoes the value. If a scan pattern
-  times out the job is refused (fail closed). This is a safety net, not a guarantee: it does not scan committed
-  history or binary files, and it cannot recognise every secret format.
+  name. The **names** of all committed files in HEAD are checked too (`.env`, `.env.*`, `id_rsa`, `id_ed25519`,
+  `*.pem`, `*.pfx`, `*.p12`, `*.key`, `credentials.json`, `*.kdbx`), because a bundle or archive carries them. Committed
+  `.npmrc` and `.pypirc` files are read instead (up to 64 KB; larger ones are refused unchecked) and refused only when
+  they hold a literal credential: in `.npmrc` a non-empty `_authToken`, `_auth`, `_password` or `password` (also the
+  registry-scoped `//host/:_authToken=` form) that is not just an environment reference like `${NPM_TOKEN}`, in
+  `.pypirc` a non-empty `password`; the refusal names the file and key, never the value. Obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
+  anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
+  never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
+  guarantee: apart from `.npmrc` and `.pypirc` it does not read the content of committed files, it does not look at files that were committed and later
+  deleted (they are still in the history a bundle carries), and it cannot recognise every secret format.
 - **No permission-skipping agent flags.** Any argument containing `dangerously`, `skip-permissions`,
   `bypassPermissions`, `--yolo`, `bypass-approvals`, `danger-full-access`, `approval_policy=never` or
   `--ask-for-approval never` is rejected, even for an allowlisted command.
 - **Isolation.** One detached worktree (git mode) or one fresh extracted folder (archive mode) per job, removed
   afterwards. Gitignored files are never shipped.
+- **git on the worker runs no hooks and no transports.** Every git call in the worker scripts passes
+  `-c core.hooksPath=/dev/null` (`NUL` on Windows), `-c core.fsmonitor=false`, `-c protocol.allow=never` and
+  `-c protocol.file.allow=never`; only the fetch of the uploaded bundle re-allows reading that local file. Tests plant
+  hooks in a worker cache and check that none of them runs.
 - **Archive extraction is checked before it happens.** `lanq` refuses to create an archive with an absolute path, a
   `..` segment, a backslash or a name Windows cannot store; non-regular entries (symlinks, submodules) are skipped
   and reported, never archived. The worker uses only GNU tar or bsdtar (busybox tar is refused, because it hides hard
@@ -421,8 +460,11 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 
 ## Limitations
 
-- The secret scan is pattern-based and best effort; it does not scan already-committed history or file contents
-  of binary files. It is a safety net, not a guarantee.
+- The secret scan is pattern-based and best effort. Committed files are checked by name only (in HEAD), not by
+  content (except `.npmrc` and `.pypirc`), and older commits are not scanned at all. **A git bundle carries the repository's full history** the first
+  time a machine sees the repository (later bundles carry only new commits), so a secret that was ever committed and
+  then deleted still reaches the worker; rewrite that history (and rotate the secret) or use `transfer: archive`,
+  which sends only the current files. It is a safety net, not a guarantee.
 - The allowlist limits what `lanq` will start, not what an allowlisted program does. Build and package tools such as
   `dotnet test`, `dotnet build`, `npm test` and `npm ci` execute project code (test code, MSBuild targets, npm
   lifecycle scripts) with the remote user's rights. Only run code you trust, and use a dedicated low-privilege
@@ -433,10 +475,13 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   job that deliberately detaches into a new session or process group can escape it.
 - Windows remote commands are passed as an encoded command line limited to roughly 8000 characters; very long
   argument lists are refused with a clear message.
-- The full HEAD history is bundled on every run in git mode (no incremental transfer yet). Archive mode sends the
-  whole working snapshot each time, with no history and no cache.
-- A crashed orchestrator can leave a slot file behind; delete `locks/slot-N` (and any stale `locks/job-*.pid`) under
-  the machine's `work_root`.
+- In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
+  have yet (see "Incremental bundles"). Archive mode sends the whole working snapshot each time, with no history and
+  no cache.
+- A crashed orchestrator can leave a slot file behind. Each slot file records its own deadline (the job's
+  `--timeout` plus 40 minutes for transfer and cleanup, on the worker's clock), and a slot more than 30 minutes past it
+  is reclaimed by the next job that needs a slot. Slot files written by lanq before 0.4 carry no deadline and are never
+  reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
 - Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
   embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through

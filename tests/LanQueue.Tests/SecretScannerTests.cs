@@ -114,4 +114,73 @@ public class SecretScannerTests
         Assert.Empty(found);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"{label}: {sw.Elapsed}");
     }
+    [Theory]
+    [InlineData(".env")]
+    [InlineData("app/.env")]
+    [InlineData(".env.production")]
+    [InlineData("deploy/.ENV.local")]
+    [InlineData("id_rsa")]
+    [InlineData("home/.ssh/id_ed25519")]
+    [InlineData("certs/server.pem")]
+    [InlineData("signing/app.pfx")]
+    [InlineData("signing/app.P12")]
+    [InlineData("tls/server.key")]
+    [InlineData("credentials.json")]
+    [InlineData("vault/passwords.kdbx")]
+    [InlineData("fixturesX/server.pem")]
+    public void CommittedSecretLookingNamesAreFound(string path)
+    {
+        var finding = Assert.Single(SecretScanner.ScanCommittedFileNames([path]));
+        Assert.Equal(SecretScanner.CommittedFileRule, finding.Rule);
+        Assert.Equal(path, finding.Where);
+    }
+
+    [Theory]
+    [InlineData(".env.example")]
+    [InlineData("app/.env.sample")]
+    [InlineData(".env.local.example")]
+    [InlineData("config/server.example.pem")]
+    [InlineData("tests/fixtures/server.pem")]
+    [InlineData("pkg/testdata/id_rsa")]
+    [InlineData("tests/Fixtures/.env")]
+    [InlineData("src/environment.ts")]
+    [InlineData("docs/keys.md")]
+    [InlineData("src/keyboard.cs")]
+    [InlineData("monkey")]
+    [InlineData(".envrc")]
+    [InlineData("package.json")]
+    [InlineData("web/.npmrc")]
+    [InlineData(".pypirc")]
+    public void SamplesFixturesAndOrdinaryNamesAreNotFound(string path) =>
+        Assert.Empty(SecretScanner.ScanCommittedFileNames([path]));
+
+    [Theory]
+    [InlineData(".npmrc", "registry=https://registry.example.com/\n@acme:registry=https://npm.acme.dev/\nalways-auth=true\n")]
+    [InlineData(".npmrc", "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n")]
+    [InlineData(".npmrc", "_authToken = \"${NPM_TOKEN}\"\n")]
+    [InlineData(".npmrc", "//npm.acme.dev/:_authToken=\n; _authToken=commented-out-token\n# password=commented\n")]
+    [InlineData("tools/.pypirc", "[distutils]\nindex-servers = pypi\n\n[pypi]\nusername = __token__\n")]
+    [InlineData(".pypirc", "[pypi]\nusername = me\npassword =\n")]
+    public void PackageConfigsWithoutLiteralCredentialsPass(string path, string content) =>
+        Assert.Empty(SecretScanner.ScanCommittedConfig(path, content));
+
+    [Theory]
+    [InlineData(".npmrc", "//registry.npmjs.org/:_authToken=npm_SuperSecretValue123", "_authToken")]
+    [InlineData("web/.npmrc", "registry=https://r.example/\n_auth = dXNlcjpTdXBlclNlY3JldFZhbHVlMTIz\n", "_auth")]
+    [InlineData(".npmrc", "//npm.acme.dev/:_password=\"SuperSecretValue123\"", "_password")]
+    [InlineData(".npmrc", "password=SuperSecretValue123", "password")]
+    [InlineData(".pypirc", "[pypi]\nusername = __token__\npassword = pypi-SuperSecretValue123\n", "password")]
+    [InlineData(".pypirc", "[testpypi]\r\nPassword: SuperSecretValue123\r\n", "password")]
+    public void PackageConfigsWithALiteralCredentialAreRefusedWithoutEchoingIt(string path, string content, string key)
+    {
+        var finding = Assert.Single(SecretScanner.ScanCommittedConfig(path, content));
+        Assert.Equal(path, finding.Where);
+        Assert.Contains("key " + key, finding.Rule, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SuperSecretValue123", finding.Rule + finding.Where, StringComparison.Ordinal);
+        Assert.DoesNotContain("dXNlcj", finding.Rule + finding.Where, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PackageConfigTooLargeToCheckIsRefused() =>
+        Assert.Single(SecretScanner.ScanCommittedConfig(".npmrc", null));
 }

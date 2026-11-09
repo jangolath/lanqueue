@@ -35,6 +35,44 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
   timeout, exits `124`, and the status line is `[lanq] WindowClosed`. A machine whose window ends in less than
   `policy.min_window_minutes` (default 10) takes no new job ("window closing").
 
+Transfer and supply chain:
+
+- **One cache per repository on git workers.** The single shared `<work_root>/repo.git` is replaced by
+  `<work_root>/repos/<repoid>.git`, where `<repoid>` is the first 16 hex digits of the repository's root commit (the
+  ordinally smallest one if the history has several roots). Different projects no longer share one object store. An
+  existing `repo.git` is left alone and no longer used; delete it whenever convenient.
+- **Hardened git on workers.** Every git call in the worker scripts (init, fetch, worktree add/remove/prune,
+  update-ref) runs with `-c core.hooksPath=<null device> -c core.fsmonitor=false -c protocol.allow=never
+  -c protocol.file.allow=never` (`/dev/null` on Linux, `NUL` on Windows); only the bundle fetch re-allows reading
+  that one local file. A hook planted in a worker cache, or a hooks path in the worker's git config, no longer runs.
+- **Incremental bundles.** `lanq` records, per machine and repository, the last commit a worker has fetched
+  (`<state>/bases.json`, written atomically, updated only after a successful fetch), and the worker cache keeps
+  `refs/lanq/base` on the last fetched snapshot. The next job sends `git bundle create … --not <base>` when that commit
+  is still a local ancestor of the snapshot, so usually only the new commits and the uncommitted overlay travel. The
+  worker checks the bundle with `git bundle verify` before fetching; if its cache lost the base, the job falls back
+  once to a full bundle automatically (one log line says so). Rewritten history, a pruned base or a missing or
+  unreadable `bases.json` simply mean a full bundle. Bundles are now built when a git machine actually gets the job.
+  Archive mode is unchanged.
+- **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
+  HEAD tree are checked against `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.pfx`, `*.p12`, `*.key`,
+  `credentials.json` and `*.kdbx`, because a bundle or archive would carry them. A match refuses the job before
+  anything is sent. Committed `.npmrc` and `.pypirc` files are not refused by name (registry-only ones are common):
+  their content (up to 64 KB) is checked, and only a literal credential refuses the job (`.npmrc`: a non-empty
+  `_authToken`, `_auth`, `_password` or `password`, including `//host/:_authToken=`, unless it is just an environment
+  reference such as `${NPM_TOKEN}`; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
+  the value. Obvious samples pass: names ending in `.example` or `.sample`, names containing
+  `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
+  such a file (for example a test certificate outside those folders, or an `.npmrc` with a literal token) is now refused until the file is
+  renamed or moved. A long list of findings is cut to the first ten.
+- **Stale slots are reclaimed.** A slot file now records its own deadline (worker clock: now + the job's `--timeout`
+  + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline
+  (left by a crashed or killed `lanq`) is renamed away atomically and reused; a live slot, or one without a deadline
+  (written by an older lanq), is never touched.
+- **Supply chain.** Every project commits a `packages.lock.json` and CI restores in locked mode
+  (`RestoreLockedMode` when `CI=true`); Dependabot proposes grouped weekly NuGet and GitHub Actions updates; the
+  release workflow attests the `.nupkg`'s build provenance (`actions/attest-build-provenance`, pinned by SHA, with
+  `id-token`/`attestations` write granted to that one job). README: "Verify a release" with `gh attestation verify`.
+
 ## 0.3.1 (2026-11-09)
 
 - **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the

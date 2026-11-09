@@ -5,7 +5,7 @@ namespace LanQueue.Payload;
 
 /// <summary>
 /// Snapshots HEAD plus uncommitted and untracked (non-ignored) changes into a commit using a throwaway index,
-/// so the user's index, branches and working tree are never touched, then bundles it.
+/// so the user's index, branches and working tree are never touched, then bundles or archives it on demand.
 /// </summary>
 public sealed class GitPayloadBuilder : IPayloadBuilder
 {
@@ -14,7 +14,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         Directory.CreateDirectory(outputDir);
         var top = (await Git(repoDir, null, ct, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim();
         var head = (await Git(top, null, ct, "rev-parse", "HEAD").ConfigureAwait(false)).Trim();
-        var tmpIndex = Path.Combine(Path.GetTempPath(), $"lanq-index-{jobId}");
+        var tmpIndex = Path.Combine(Path.GetTempPath(), $"lanq-index-{jobId}-{Guid.NewGuid():N}");
         var env = new Dictionary<string, string>
         {
             ["GIT_INDEX_FILE"] = tmpIndex,
@@ -23,7 +23,6 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             ["GIT_COMMITTER_NAME"] = "lanq",
             ["GIT_COMMITTER_EMAIL"] = "lanq@localhost",
         };
-        var refName = $"refs/lanq/{jobId}";
         try
         {
             await Git(top, env, ct, "read-tree", "HEAD").ConfigureAwait(false);
@@ -43,12 +42,15 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 ? head
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
 
-            string? bundle = null;
-            if (kinds.HasFlag(PayloadKinds.Bundle))
+            var repoId = kinds.HasFlag(PayloadKinds.Bundle) ? await RepoIdAsync(top, ct).ConfigureAwait(false) : null;
+            var committed = (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", "HEAD").ConfigureAwait(false))
+                .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            var configs = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var path in committed.Where(Policy.SecretScanner.IsPackageConfig))
             {
-                bundle = Path.Combine(outputDir, jobId + ".bundle");
-                await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
-                await Git(top, null, ct, "bundle", "create", bundle, refName).ConfigureAwait(false);
+                // Read only small blobs (a bigger one is refused unread by the scan); the content never leaves this process.
+                var size = long.Parse((await Git(top, null, ct, "cat-file", "-s", "HEAD:" + path).ConfigureAwait(false)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                configs[path] = size > Policy.SecretScanner.MaxConfigBytes ? null : await Git(top, null, ct, "cat-file", "-p", "HEAD:" + path).ConfigureAwait(false);
             }
 
             ArchiveBuild? built = null;
@@ -57,21 +59,73 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 built = await WriteArchiveAsync(top, tree, Path.Combine(outputDir, jobId + ".tar.gz"), ct).ConfigureAwait(false);
             }
 
-            return new JobPayload(bundle, sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0);
+            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed, configs);
         }
         finally
         {
-            try
-            {
-                await Git(top, null, CancellationToken.None, "update-ref", "-d", refName).ConfigureAwait(false);
-            }
-            catch (InvalidOperationException)
-            {
-                // ref was never created
-            }
-
             File.Delete(tmpIndex);
         }
+    }
+
+    /// <summary>
+    /// Bundles the snapshot <paramref name="sha"/> under <c>refs/lanq/&lt;jobId&gt;</c>. With a <paramref name="baseSha"/> that is still a
+    /// local commit and an ancestor of the snapshot, the bundle is incremental (<c>--not &lt;base&gt;</c>, or the base's parents when the
+    /// snapshot is the base itself, since git refuses an empty bundle); otherwise, or when the base is malformed, it is a full bundle.
+    /// </summary>
+    public async Task<BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct)
+    {
+        Directory.CreateDirectory(outputDir);
+        var top = (await Git(repoDir, null, ct, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim();
+        var exclude = baseSha is null ? [] : await IncrementalExcludesAsync(top, baseSha, sha, ct).ConfigureAwait(false);
+        var usedBase = exclude.Count > 0 ? baseSha : null;
+        var bundle = Path.Combine(outputDir, usedBase is null ? jobId + ".bundle" : $"{jobId}-{usedBase}.bundle");
+        var refName = $"refs/lanq/{jobId}";
+        await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
+        try
+        {
+            string[] args = ["bundle", "create", bundle, refName, .. exclude.Count > 0 ? ["--not", .. exclude] : Array.Empty<string>()];
+            await Git(top, null, ct, args).ConfigureAwait(false);
+        }
+        finally
+        {
+            await Git(top, null, CancellationToken.None, "update-ref", "-d", refName).ConfigureAwait(false);
+        }
+
+        return new BundleBuild(bundle, usedBase);
+    }
+
+    /// <summary>The commits to exclude for an incremental bundle on <paramref name="baseSha"/>, or none when only a full bundle is safe.</summary>
+    private static async Task<IReadOnlyList<string>> IncrementalExcludesAsync(string top, string baseSha, string sha, CancellationToken ct)
+    {
+        if (!IsObjectId(baseSha)
+            || (await GitRun(top, null, ct, "cat-file", "-e", baseSha + "^{commit}").ConfigureAwait(false)).Code != 0
+            || (await GitRun(top, null, ct, "merge-base", "--is-ancestor", baseSha, sha).ConfigureAwait(false)).Code != 0)
+        {
+            return [];
+        }
+
+        if (!string.Equals(baseSha, sha, StringComparison.Ordinal))
+        {
+            return [baseSha];
+        }
+
+        return (await Git(top, null, ct, "rev-parse", baseSha + "^@").ConfigureAwait(false))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    internal static bool IsObjectId(string s) =>
+        s.Length is 40 or 64 && s.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    /// <summary>
+    /// Names the worker's cache for this repository: the first 16 hex digits of its root commit (the parentless commit reachable from
+    /// HEAD; with several roots, the ordinally smallest sha), so every clone of the same project shares one cache and unrelated
+    /// projects never do.
+    /// </summary>
+    internal static async Task<string> RepoIdAsync(string top, CancellationToken ct)
+    {
+        var roots = (await Git(top, null, ct, "rev-list", "--max-parents=0", "HEAD").ConfigureAwait(false))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return roots.Min(StringComparer.Ordinal)![..16];
     }
 
     /// <summary>
@@ -347,6 +401,12 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
 
     private static async Task<string> Git(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)
     {
+        var (code, output, error) = await GitRun(dir, env, ct, args).ConfigureAwait(false);
+        return code == 0 ? output : throw new InvalidOperationException($"git {args[0]} failed: {error.Trim()}");
+    }
+
+    private static async Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)
+    {
         var psi = new ProcessStartInfo("git")
         {
             WorkingDirectory = dir,
@@ -373,11 +433,6 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         var err = p.StandardError.ReadToEndAsync(ct);
         var output = await p.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
         await p.WaitForExitAsync(ct).ConfigureAwait(false);
-        if (p.ExitCode != 0)
-        {
-            throw new InvalidOperationException($"git {args[0]} failed: {(await err.ConfigureAwait(false)).Trim()}");
-        }
-
-        return output;
+        return (p.ExitCode, output, await err.ConfigureAwait(false));
     }
 }

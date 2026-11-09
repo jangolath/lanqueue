@@ -357,15 +357,18 @@ public sealed class WindowTests : IDisposable
 
     private sealed class EmptyPayloads : IPayloadBuilder
     {
-        public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct)
+        public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct) =>
+            Task.FromResult(new JobPayload("abc", [], "", RepoId: T.RepoId, Head: "abc"));
+
+        public Task<ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct) =>
+            throw new InvalidOperationException("not used");
+
+        public Task<BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct)
         {
             Directory.CreateDirectory(outputDir);
             var bundle = Path.Combine(outputDir, jobId + ".bundle");
             File.WriteAllText(bundle, "x");
-            return Task.FromResult(new JobPayload(bundle, "abc", [], "", null));
+            return Task.FromResult(new BundleBuild(bundle, null));
         }
-
-        public Task<ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct) =>
-            throw new InvalidOperationException("not used");
     }
 }

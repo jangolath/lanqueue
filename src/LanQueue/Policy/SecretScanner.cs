@@ -84,6 +84,95 @@ public static class SecretScanner
         return found;
     }
 
+    public const string CommittedFileRule = "committed-secret-file-name";
+
+    public const string CommittedConfigRule = "committed-credential";
+
+    /// <summary>Largest committed package-manager config that is read for the credential scan; a bigger one is refused unread.</summary>
+    public const int MaxConfigBytes = 64 * 1024;
+
+    private static readonly string[] NpmCredentialKeys = ["_authToken", "_auth", "_password", "password"];
+
+    /// <summary>Committed package-manager configs are checked by content, not refused by name: registry-only files are common.</summary>
+    public static bool IsPackageConfig(string path) =>
+        path.Replace('\\', '/').Split('/')[^1] is var f
+        && (f.Equals(".npmrc", StringComparison.OrdinalIgnoreCase) || f.Equals(".pypirc", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Refuses a committed <c>.npmrc</c> with a non-empty <c>_authToken</c>, <c>_auth</c>, <c>_password</c> or <c>password</c> (also
+    /// registry-scoped, <c>//host/:_authToken=</c>) unless the value is just an environment reference such as <c>${NPM_TOKEN}</c>, and a
+    /// committed <c>.pypirc</c> with a non-empty <c>password</c>. Null content (over <see cref="MaxConfigBytes"/>) is refused unchecked.
+    /// Findings name the path and key, never the value.
+    /// </summary>
+    public static IReadOnlyList<SecretFinding> ScanCommittedConfig(string path, string? content)
+    {
+        if (content is null)
+        {
+            return [new SecretFinding(CommittedConfigRule + " (file over 64 KB, not checked)", path)];
+        }
+
+        var npm = path.Replace('\\', '/').Split('/')[^1].Equals(".npmrc", StringComparison.OrdinalIgnoreCase);
+        var keys = npm ? NpmCredentialKeys : ["password"];
+        var found = new List<SecretFinding>();
+        foreach (var raw in content.Split('\n'))
+        {
+            var line = raw.Trim();
+            var sep = npm ? line.IndexOf('=', StringComparison.Ordinal) : line.IndexOfAny(['=', ':']);
+            if (line.Length == 0 || line[0] is '#' or ';' or '[' || sep <= 0)
+            {
+                continue;
+            }
+
+            var key = line[..sep].Trim();
+            key = npm ? key[(key.LastIndexOf(':') + 1)..] : key; // "//registry.example/:_authToken" -> "_authToken"
+            var value = line[(sep + 1)..].Trim().Trim('"', '\'').Trim();
+            var envReference = npm && value.StartsWith("${", StringComparison.Ordinal) && value.EndsWith('}') && value.IndexOf('}') == value.Length - 1;
+            var canonical = keys.FirstOrDefault(k => k.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (canonical is not null && value.Length > 0 && !envReference)
+            {
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {canonical})", path));
+            }
+        }
+
+        return found.DistinctBy(f => f.Rule).ToList();
+    }
+
+    private static readonly string[] CommittedSecretNames = [".env", "id_rsa", "id_ed25519", "credentials.json"];
+
+    private static readonly string[] CommittedSecretSuffixes = [".pem", ".pfx", ".p12", ".key", ".kdbx"];
+
+    private static readonly string[] SampleFolders = ["fixtures", "testdata"];
+
+    /// <summary>
+    /// Scans the names of committed files (every path of the HEAD tree): <c>.env</c>, <c>.env.*</c>, <c>id_rsa</c>, <c>id_ed25519</c>,
+    /// <c>*.pem</c>, <c>*.pfx</c>, <c>*.p12</c>, <c>*.key</c>, <c>credentials.json</c>, <c>*.kdbx</c> (<c>.npmrc</c> and <c>.pypirc</c> are
+    /// checked by content instead, see <see cref="ScanCommittedConfig"/>).
+    /// Obvious samples are allowed: names ending in <c>.example</c> or <c>.sample</c>, names containing <c>.example.</c>, and anything
+    /// under a folder named <c>fixtures</c> or <c>testdata</c>. Names only: content and older commits are not looked at.
+    /// </summary>
+    public static IReadOnlyList<SecretFinding> ScanCommittedFileNames(IEnumerable<string> paths)
+    {
+        var found = new List<SecretFinding>();
+        foreach (var path in paths)
+        {
+            var segments = path.Replace('\\', '/').Split('/');
+            var file = segments[^1];
+            var secretLike = CommittedSecretNames.Contains(file, StringComparer.OrdinalIgnoreCase)
+                || file.StartsWith(".env.", StringComparison.OrdinalIgnoreCase)
+                || CommittedSecretSuffixes.Any(s => file.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+            var sample = file.EndsWith(".example", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith(".sample", StringComparison.OrdinalIgnoreCase)
+                || file.Contains(".example.", StringComparison.OrdinalIgnoreCase)
+                || segments[..^1].Any(d => SampleFolders.Contains(d, StringComparer.OrdinalIgnoreCase));
+            if (secretLike && !sample)
+            {
+                found.Add(new SecretFinding(CommittedFileRule, path));
+            }
+        }
+
+        return found;
+    }
+
     private static Regex Make(string pattern) =>
         new(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | RegexOptions.Multiline, TimeSpan.FromSeconds(2));
 }
