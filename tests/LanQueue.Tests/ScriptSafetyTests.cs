@@ -49,7 +49,7 @@ public class ScriptSafetyTests
         var s = RemoteScripts.Execute(T.Linux(), "job1", "src", ["dotnet", "test"]);
         Assert.Contains("setsid -w", s, StringComparison.Ordinal);
         Assert.Contains("locks/job-job1.pid", s, StringComparison.Ordinal);
-        var c = RemoteScripts.Cleanup(T.Linux(), "job1", "1");
+        var c = RemoteScripts.Cleanup(T.Linux(), "job1", "1", T.RepoId);
         Assert.Contains("locks/job-$ID.pid", c, StringComparison.Ordinal);
         Assert.Contains("kill -s TERM", c, StringComparison.Ordinal);
         Assert.Contains("kill -s KILL", c, StringComparison.Ordinal);
@@ -64,20 +64,15 @@ public class ScriptSafetyTests
         var s = RemoteScripts.Execute(T.Windows(), "job1", "src", ["dotnet", "test"]);
         Assert.Contains("$PID", s, StringComparison.Ordinal);
         Assert.Contains("locks/job-job1.pid", s, StringComparison.Ordinal);
-        var c = RemoteScripts.Cleanup(T.Windows(), "job1", "1");
+        var c = RemoteScripts.Cleanup(T.Windows(), "job1", "1", T.RepoId);
         Assert.Contains("taskkill", c, StringComparison.Ordinal);
         Assert.Contains("/T", c, StringComparison.Ordinal);
         Assert.True(c.IndexOf("taskkill", StringComparison.Ordinal) < c.IndexOf("worktree remove", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [LinuxFact]
     public void LinuxCleanupKillsTheRunningJobProcessGroup()
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return; // real process-group behaviour is exercised on the Linux CI leg
-        }
-
         var root = Path.Combine(Path.GetTempPath(), "lanq-kill-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(root, "jobs", "jk", "src"));
         Directory.CreateDirectory(Path.Combine(root, "locks"));
@@ -95,7 +90,7 @@ public class ScriptSafetyTests
             }
 
             Assert.True(File.Exists(pidFile));
-            Assert.Equal(0, Run("sh", "-c", RemoteScripts.Cleanup(m, "jk", "1")));
+            Assert.Equal(0, Run("sh", "-c", RemoteScripts.Cleanup(m, "jk", "1", T.RepoId)));
             Assert.True(run.WaitForExit(15000));
             Assert.False(File.Exists(pidFile));
             Assert.False(File.Exists(marker));
@@ -118,26 +113,51 @@ public class ScriptSafetyTests
     public void ShortWindowsCommandsWrapFine() =>
         Assert.NotEmpty(RemoteScripts.Wrap(T.Windows(), RemoteScripts.Execute(T.Windows(), "j", ".", ["dotnet", "test"])));
 
+    /// <summary>
+    /// Every fixed Windows worker script (with a realistic job id, work_root, env and path_prepend) leaves room under the 8000-character
+    /// encoded-command cap (800 characters for a longer work_root, job arguments and env), so a growing script fails here instead of on a worker.
+    /// </summary>
     [Fact]
+    public void EveryWindowsWorkerScriptLeavesRoomUnderTheCommandLineCap()
+    {
+        var m = WithJobEnvironment(T.Windows());
+        m.Capabilities = [.. RemoteScripts.ToolChecks.Keys];
+        const string Job = "20261109-221503-a1b2c3";
+        var scripts = new Dictionary<string, string>
+        {
+            ["probe"] = RemoteScripts.Probe(m),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, Job, TimeSpan.FromHours(4)),
+            ["prepare"] = RemoteScripts.Prepare(m, Job, T.RepoId),
+            ["execute"] = RemoteScripts.Execute(m, Job, "src", ["dotnet", "test"], TimeSpan.FromHours(4)),
+            ["cleanup"] = RemoteScripts.Cleanup(m, Job, "1", T.RepoId),
+            ["unlock"] = RemoteScripts.Unlock(m, all: false),
+            ["doctor"] = RemoteScripts.Doctor(m),
+            ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), Job),
+            ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), Job, "1"),
+        };
+        foreach (var (name, script) in scripts)
+        {
+            var length = RemoteScripts.Wrap(m, script).Length;
+            Assert.True(length <= 7200, $"the Windows '{name}' script is {length} characters once encoded; keep each under 7200");
+        }
+    }
+
+    [ShFact]
     public void GeneratedLinuxScriptsPassShSyntaxCheck()
     {
-        if (!OnPath("sh"))
-        {
-            return; // no POSIX shell on this machine; nothing to check with
-        }
-
         var m = T.Linux();
         var scripts = new Dictionary<string, string>
         {
             ["probe"] = RemoteScripts.Probe(m),
-            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1"),
-            ["prepare"] = RemoteScripts.Prepare(m, "j1"),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromMinutes(5)),
+            ["prepare"] = RemoteScripts.Prepare(m, "j1", T.RepoId),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
-            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2"),
+            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2", T.RepoId),
             ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
+            ["execute-env"] = RemoteScripts.Execute(WithJobEnvironment(m), "j1", "src", ["dotnet", "test"]),
         };
         foreach (var (name, script) in scripts)
         {
@@ -154,27 +174,23 @@ public class ScriptSafetyTests
         }
     }
 
-    [Fact]
+    [PowerShellFact]
     public void GeneratedPowerShellScriptsParseCleanly()
     {
-        var host = OnPath("pwsh") ? "pwsh" : OnPath("powershell") ? "powershell" : null;
-        if (host is null)
-        {
-            return; // no PowerShell on this machine; nothing to check with
-        }
-
+        var host = Shells.PowerShell!;
         var m = T.Windows();
         var scripts = new Dictionary<string, string>
         {
             ["probe"] = RemoteScripts.Probe(m),
-            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1"),
-            ["prepare"] = RemoteScripts.Prepare(m, "j1"),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromMinutes(5)),
+            ["prepare"] = RemoteScripts.Prepare(m, "j1", T.RepoId),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["execute"] = RemoteScripts.Execute(m, "j1", "src", ["dotnet", "test", "--filter", "a b; rm -rf /", "it's"]),
-            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2"),
+            ["cleanup"] = RemoteScripts.Cleanup(m, "j1", "2", T.RepoId),
             ["archive-probe"] = RemoteScripts.Probe(Archive(m)),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), "j1"),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), "j1", "2"),
+            ["execute-env"] = RemoteScripts.Execute(WithJobEnvironment(m), "j1", "src", ["dotnet", "test"]),
         };
         var checker = Path.Combine(Path.GetTempPath(), "lanq-ps-check-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(
@@ -202,6 +218,15 @@ public class ScriptSafetyTests
         {
             File.Delete(checker);
         }
+    }
+
+    /// <summary>The same machine with env:, path_prepend: and priority: low, so the extra Execute lines are syntax-checked too.</summary>
+    private static LanQueue.Config.Machine WithJobEnvironment(LanQueue.Config.Machine m)
+    {
+        m.Env["NODE_OPTIONS"] = "--max-old-space-size=2048 'x' $(y)";
+        m.PathPrepend.Add(m.Os == LanQueue.Config.MachineOs.Windows ? "C:/tools/bin" : "/opt/tools/bin");
+        m.Priority = LanQueue.Config.JobPriority.Low;
+        return m;
     }
 
     private static LanQueue.Config.Machine Archive(LanQueue.Config.Machine m) => new()

@@ -12,7 +12,9 @@ public sealed class RunnerTests : IDisposable
 
     private readonly List<string> _output = [];
 
-    private sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
+    private BaseStore _bases = new(null);
+
+    internal sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
     {
         public int Built { get; private set; }
 
@@ -23,20 +25,40 @@ public sealed class RunnerTests : IDisposable
             Built++;
             LastKinds = kinds;
             Directory.CreateDirectory(outputDir);
-            string? bundle = null, archive = null;
-            if (kinds.HasFlag(PayloadKinds.Bundle))
-            {
-                bundle = Path.Combine(outputDir, jobId + ".bundle");
-                File.WriteAllText(bundle, "x");
-            }
-
+            string? archive = null;
             if (kinds.HasFlag(PayloadKinds.Archive))
             {
                 archive = Path.Combine(outputDir, jobId + ".tar.gz");
                 File.WriteAllText(archive, "x");
             }
 
-            return Task.FromResult(new JobPayload(bundle, "abc", files, diff, archive));
+            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) && !NoRepoId ? T.RepoId : null, Head: Head, CommittedFiles: Committed, CommittedConfigs: Configs));
+        }
+
+        public string Sha { get; set; } = "abc";
+
+        public bool NoRepoId { get; set; }
+
+        public List<string> Committed { get; } = ["src/app.cs", ".env.example"];
+
+        public Dictionary<string, string?> Configs { get; } = [];
+
+        public string Head { get; set; } = new('1', 40);
+
+        /// <summary>The base each bundle build was asked for, in order (null = full).</summary>
+        public List<string?> BundleBases { get; } = [];
+
+        /// <summary>Whether a build with a base produces an incremental bundle (false models "base not an ancestor any more").</summary>
+        public bool BaseUsable { get; set; } = true;
+
+        public Task<BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct)
+        {
+            BundleBases.Add(baseSha);
+            Directory.CreateDirectory(outputDir);
+            var used = BaseUsable ? baseSha : null;
+            var bundle = Path.Combine(outputDir, jobId + (used is null ? "" : "-" + used) + ".bundle");
+            File.WriteAllText(bundle, "x");
+            return Task.FromResult(new BundleBuild(bundle, used));
         }
 
         public int ArchivesBuilt { get; private set; }
@@ -87,7 +109,7 @@ public sealed class RunnerTests : IDisposable
 
             return new SshResult(0, "ran");
         });
-        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), log, Path.Combine(_dir, "tmp"), _output.Add);
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), log, Path.Combine(_dir, "tmp"), _output.Add, bases: _bases);
         return (runner, ssh, payloads, log);
     }
 
@@ -112,6 +134,7 @@ public sealed class RunnerTests : IDisposable
         Assert.Single(ssh.Uploads);
         Assert.EndsWith(".bundle", ssh.Uploads[0], StringComparison.Ordinal);
         Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "worktree remove --force"));
+        Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "fetch -q") && DecodedContains(T.Windows(), c.Command, "repos/" + T.RepoId + ".git"));
         var rec = Assert.Single(log.ReadAll());
         Assert.Equal("build-02", rec.Machine);
         Assert.Equal("Completed", rec.Status);
@@ -175,6 +198,76 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
         Assert.Equal(JobStatus.Rejected, r.Status);
         Assert.Empty(ssh.Uploads);
+    }
+
+    [Fact]
+    public async Task CommittedSecretFileIsRefusedBeforeAnythingIsSent()
+    {
+        var (runner, ssh, payloads, _) = Make();
+        payloads.Committed.Add("deploy/prod.pem");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("deploy/prod.pem", r.Message, StringComparison.Ordinal);
+        Assert.Contains("committed", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Uploads);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public async Task CommittedNpmrcWithALiteralTokenIsRefusedWithoutEchoingIt()
+    {
+        var (runner, ssh, payloads, _) = Make();
+        payloads.Committed.Add("web/.npmrc");
+        payloads.Configs["web/.npmrc"] = "registry=https://r.example/\n//r.example/:_authToken=npm_SuperSecretValue123\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("web/.npmrc", r.Message, StringComparison.Ordinal);
+        Assert.Contains("_authToken", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SuperSecretValue123", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public async Task CommittedNpmrcWithAnEnvReferenceRuns()
+    {
+        var (runner, _, payloads, _) = Make();
+        payloads.Committed.Add(".npmrc");
+        payloads.Configs[".npmrc"] = "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+    }
+
+    [Fact]
+    public async Task UncommittedRegistryOnlyNpmrcRunsLikeACommittedOne()
+    {
+        var (runner, _, payloads, _) = Make(files: ["web/.npmrc", ".pypirc"]);
+        payloads.Configs["web/.npmrc"] = "registry=https://r.example/\n";
+        payloads.Configs[".pypirc"] = "[pypi]\nusername = __token__\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+    }
+
+    [Fact]
+    public async Task UncommittedNpmrcWithALiteralTokenIsRefusedByContent()
+    {
+        var (runner, ssh, payloads, _) = Make(files: [".npmrc"]);
+        payloads.Configs[".npmrc"] = "//r.example/:_authToken=npm_SuperSecretValue123\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("_authToken", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SuperSecretValue123", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public async Task ManyCommittedSecretFilesAreListedBriefly()
+    {
+        var (runner, _, payloads, _) = Make();
+        payloads.Committed.AddRange(Enumerable.Range(0, 50).Select(i => $"certs/c{i}.pem"));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("and 40 more", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("certs/c49.pem", r.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -619,6 +712,14 @@ public sealed class RunnerTests : IDisposable
     [InlineData(0x200B)]
     [InlineData(0x200F)]
     [InlineData(0xFEFF)]
+    [InlineData(0x061C)] // Arabic letter mark
+    [InlineData(0x2028)] // line separator
+    [InlineData(0x2029)] // paragraph separator
+    [InlineData(0x2060)] // word joiner
+    [InlineData(0x2061)]
+    [InlineData(0x2062)]
+    [InlineData(0x2063)]
+    [InlineData(0x2064)]
     public void BidiAndZeroWidthCharactersAreReplaced(int codePoint) =>
         Assert.Equal("a?b", JobRunner.SafeLine("a" + (char)codePoint + "b"));
 
@@ -627,5 +728,243 @@ public sealed class RunnerTests : IDisposable
     {
         var text = "caf" + (char)0xe9 + " " + char.ConvertFromUtf32(0x1F600) + " " + (char)0x4e2d + (char)0x09 + "ok";
         Assert.Equal(text, JobRunner.SafeLine(text));
+    }
+
+    private (JobRunner Runner, FakeSsh Ssh) WithMemory(string build01Mem, string build02Mem)
+    {
+        var (runner, ssh, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.5 : 0.1) + (char)10 + (m.Name == "build-01" ? build01Mem : build02Mem))
+            : new SshResult(0, "ran"));
+        return (runner, ssh);
+    }
+
+    [Fact]
+    public async Task MemOptionSkipsMachinesWithLessAvailableMemory()
+    {
+        var (runner, _) = WithMemory("mem_free_gb=8", "mem_free_gb=2");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { MinMemGb = 4 }, CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("build-01", r.Machine); // build-02 is less loaded but has only 2 GB
+    }
+
+    [Fact]
+    public async Task MemOptionDoesNotTrustAMachineThatCannotReportMemory()
+    {
+        var (runner, _) = WithMemory("", "mem_free_gb=2");
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { MinMemGb = 4 }, CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("build-01: free memory unknown", r.Message, StringComparison.Ordinal);
+        Assert.Contains("build-02: 2.0 GB free memory, --mem needs 4.0 GB", r.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WithoutMemOptionUnknownMemoryIsNoObstacle()
+    {
+        var (runner, _) = WithMemory("", "");
+        Assert.Equal(JobStatus.Completed, (await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None)).Status);
+    }
+
+    private static SshResult HealthyFleet(Config.Machine m, string cmd) =>
+        DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+        : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.5 : 0.1))
+        : new SshResult(0, "ran");
+
+    [Fact]
+    public async Task FirstGitJobSendsAFullBundleRecordsTheBaseAndTheNextJobAsksForAnIncrementalOne()
+    {
+        var (runner, _, payloads, _) = Make();
+        var first = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, first.Status);
+        Assert.Equal(payloads.Head, _bases.Get("build-02", T.RepoId));
+
+        var second = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, second.Status);
+        Assert.Equal([null, payloads.Head], payloads.BundleBases);
+        Assert.Null(_bases.Get("build-01", T.RepoId)); // bases are per machine
+    }
+
+    [Fact]
+    public async Task IncrementalBundleTheWorkerCannotUseIsReplacedByAFullBundleOnce()
+    {
+        _bases.Set("build-02", T.RepoId, new string('1', 40));
+        var prepares = 0;
+        var (runner, ssh, payloads, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "bundle verify") && ++prepares == 1 ? new SshResult(3, RemoteScripts.BundleNotUsable) : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal(2, prepares);
+        Assert.Equal([new string('1', 40), null], payloads.BundleBases);
+        Assert.Equal(2, ssh.Uploads.Count);
+        Assert.Single(_output, l => l.Contains("sending a full bundle", StringComparison.Ordinal));
+        Assert.Equal(payloads.Head, _bases.Get("build-02", T.RepoId));
+    }
+
+    [Fact]
+    public async Task RefusedFullBundleIsNotRetriedAndRecordsNoBase()
+    {
+        var prepares = 0;
+        var (runner, ssh, payloads, _) = Make((m, cmd) =>
+        {
+            var prepare = DecodedContains(m, cmd, "bundle verify");
+            prepares += prepare ? 1 : 0;
+            return prepare ? new SshResult(3, RemoteScripts.BundleNotUsable) : HealthyFleet(m, cmd);
+        });
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Equal(1, prepares);
+        Assert.Single(ssh.Uploads);
+        Assert.Equal([null], payloads.BundleBases);
+        Assert.Null(_bases.Get("build-02", T.RepoId));
+    }
+
+    [Fact]
+    public async Task BaseIsNotRecordedWhenPrepareFailsForAnotherReason()
+    {
+        var (runner, _, payloads, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "bundle verify") ? new SshResult(128, "fatal: disk full") : HealthyFleet(m, cmd));
+
+        await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal([null, null], payloads.BundleBases);
+        Assert.Null(_bases.Get("build-02", T.RepoId));
+    }
+
+    [Fact]
+    public async Task BaseThatIsNoLongerUsableLocallyMeansAFullBundleWithoutARetry()
+    {
+        _bases.Set("build-02", T.RepoId, new string('1', 40));
+        var prepares = 0;
+        var (runner, ssh, payloads, _) = Make((m, cmd) =>
+        {
+            prepares += DecodedContains(m, cmd, "bundle verify") ? 1 : 0;
+            return HealthyFleet(m, cmd);
+        });
+        payloads.BaseUsable = false;
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal(1, prepares);
+        Assert.Single(ssh.Uploads);
+        Assert.DoesNotContain(_output, l => l.Contains("full bundle", StringComparison.Ordinal));
+    }
+
+    /// <summary>bases.json shared with a parallel lanq (Windows sharing violation): a failing store is retried, then only costs a full bundle.</summary>
+    private sealed class FlakyBaseStore(int failingSets, int failingGets, Exception? error = null) : BaseStore(null)
+    {
+        private readonly Exception _error = error ?? new IOException("The process cannot access the file because it is being used by another process.");
+
+        public int Sets { get; private set; }
+
+        public int Gets { get; private set; }
+
+        public override string? Get(string machine, string repoId) => ++Gets <= failingGets ? throw _error : base.Get(machine, repoId);
+
+        public override void Set(string machine, string repoId, string sha)
+        {
+            if (++Sets <= failingSets)
+            {
+                throw _error;
+            }
+
+            base.Set(machine, repoId, sha);
+        }
+    }
+
+    [Fact]
+    public async Task ABaseStoreThatCannotBeWrittenNeverFailsTheJob()
+    {
+        var store = new FlakyBaseStore(failingSets: 99, failingGets: 0, new UnauthorizedAccessException("Access to the path is denied."));
+        _bases = store;
+        var (runner, _, _, _) = Make();
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal(3, store.Sets);
+        Assert.Single(_output, l => l.Contains("could not record", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ABriefSharingViolationOnTheBaseStoreIsRetried()
+    {
+        var store = new FlakyBaseStore(failingSets: 2, failingGets: 2);
+        _bases = store;
+        var (runner, _, payloads, _) = Make();
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal((3, 3), (store.Sets, store.Gets));
+        Assert.Equal(payloads.Head, store.Get("build-02", T.RepoId));
+        Assert.DoesNotContain(_output, l => l.Contains("warning", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ABaseStoreThatCannotBeReadMeansAFullBundle()
+    {
+        var store = new FlakyBaseStore(failingSets: 0, failingGets: 99);
+        store.Set("build-02", T.RepoId, new string('1', 40));
+        _bases = store;
+        var (runner, _, payloads, _) = Make();
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal([null], payloads.BundleBases);
+        Assert.Single(_output, l => l.Contains("could not read", StringComparison.Ordinal));
+    }
+
+    /// <summary>A git payload without a repository id must not make cleanup throw in its finally (that leaked the slot).</summary>
+    [Fact]
+    public async Task AGitPayloadWithoutARepositoryIdStillCleansUpTheSlot()
+    {
+        var (runner, ssh, payloads, _) = Make();
+        payloads.NoRepoId = true;
+
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "locks/slot-1"));
+    }
+
+    [Fact]
+    public void CleanupWithoutARepositoryIdSkipsOnlyTheCacheSteps()
+    {
+        foreach (var m in new[] { T.Linux(), T.Windows() })
+        {
+            var s = RemoteScripts.Cleanup(m, "j1", "1", null);
+            Assert.Contains("locks/slot-1", s, StringComparison.Ordinal);
+            Assert.Contains("jobs/", s, StringComparison.Ordinal);
+            Assert.DoesNotContain("repos/", s, StringComparison.Ordinal);
+        }
+
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j1", "1", "../../etc"));
+    }
+
+    [Fact]
+    public void BaseStorePersistsAtomicallyAndTreatsAnUnreadableFileAsEmpty()
+    {
+        var file = Path.Combine(_dir, "state", "bases.json");
+        var sha = new string('a', 40);
+        new BaseStore(file).Set("m1", T.RepoId, sha);
+        new BaseStore(file).Set("m2", T.RepoId, new string('b', 64));
+
+        var reread = new BaseStore(file);
+        Assert.Equal(sha, reread.Get("m1", T.RepoId));
+        Assert.Equal(new string('b', 64), reread.Get("m2", T.RepoId));
+        Assert.Null(reread.Get("m1", "fedcba9876543210"));
+        Assert.Equal(["bases.json"], Directory.GetFiles(Path.GetDirectoryName(file)!).Select(Path.GetFileName));
+
+        File.WriteAllText(file, "{ not json");
+        Assert.Null(new BaseStore(file).Get("m1", T.RepoId));
+        File.WriteAllText(file, "{\"m1\":{\"" + T.RepoId + "\":\"--upload-pack=x\"}}");
+        Assert.Null(new BaseStore(file).Get("m1", T.RepoId));
     }
 }

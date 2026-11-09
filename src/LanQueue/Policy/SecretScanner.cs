@@ -5,8 +5,19 @@ namespace LanQueue.Policy;
 public sealed record SecretFinding(string Rule, string Where);
 
 /// <summary>Refuses obvious secrets. Findings never echo the matched value.</summary>
-public static class SecretScanner
+public static partial class SecretScanner
 {
+    /// <summary>
+    /// An environment reference and nothing else: <c>${NAME}</c>, or npm's optional form <c>${NAME?}</c>. <c>${NAME:-default}</c> or
+    /// <c>${NAME?message}</c> carry a literal and do not count.
+    /// </summary>
+    [GeneratedRegex(@"^\$\{[A-Za-z_][A-Za-z0-9_]*\??\}\z", RegexOptions.None, 1000)]
+    private static partial Regex EnvReferenceRegex();
+
+    /// <summary>Where a YAML comment starts: whitespace followed by '#'.</summary>
+    [GeneratedRegex(@"\s#", RegexOptions.None, 1000)]
+    private static partial Regex YamlCommentRegex();
+
     private static readonly (string Name, Regex Pattern)[] Rules =
     [
         ("private-key-block", Make(@"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY")),
@@ -22,14 +33,21 @@ public static class SecretScanner
         ("connection-string-password", Make("""(?:;\s*(?:password|pwd)=(?![$<%{])[^;"'\s]{3,})|(?:(?:^|["'])[ \t]*(?:password|pwd)=(?![$<%{])[^;"'\s]{3,};\s*\w+=)""")),
     ];
 
+    /// <summary>
+    /// The one list of secret-looking file names, used for uncommitted changes (<see cref="ScanFileNames"/>) and for committed files
+    /// (<see cref="ScanCommittedFileNames"/>, which also lets obvious samples pass).
+    /// </summary>
     private static readonly string[] SecretFileNames =
     [
-        ".env", "id_rsa", "id_ed25519", "id_ecdsa", "secrets.json", "credentials.json", ".npmrc", ".pypirc",
-        ".git-credentials", "terraform.tfstate", "terraform.tfstate.backup",
+        ".env", ".envrc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "secrets.json", "credentials.json",
+        ".git-credentials", ".netrc", "_netrc", "terraform.tfstate", "terraform.tfstate.backup",
     ];
 
-    private static readonly string[] SecretFileSuffixes =
-        [".pem", ".pfx", ".p12", ".key", ".ppk", ".local.yml", ".local.yaml", ".tfvars", ".jks", ".keystore"];
+    /// <summary>The one list of secret-looking file suffixes, for both scans.</summary>
+    private static readonly string[] SecretFileSuffixes = [".pem", ".pfx", ".p12", ".key", ".ppk", ".kdbx", ".tfvars", ".jks", ".keystore"];
+
+    /// <summary>Local override files: refused when uncommitted only (committed ones such as docker-compose.local.yml are common).</summary>
+    private static readonly string[] UncommittedOnlySuffixes = [".local.yml", ".local.yaml"];
 
     private const string AwsCredentials = ".aws/credentials";
 
@@ -75,9 +93,164 @@ public static class SecretScanner
             if (isAwsCredentials
                 || SecretFileNames.Contains(file, StringComparer.OrdinalIgnoreCase)
                 || isEnvVariant
-                || SecretFileSuffixes.Any(s => file.EndsWith(s, StringComparison.OrdinalIgnoreCase)))
+                || SecretFileSuffixes.Concat(UncommittedOnlySuffixes).Any(s => file.EndsWith(s, StringComparison.OrdinalIgnoreCase)))
             {
                 found.Add(new SecretFinding("secret-file-name", path));
+            }
+        }
+
+        return found;
+    }
+
+    public const string CommittedFileRule = "committed-secret-file-name";
+
+    public const string CommittedConfigRule = "committed-credential";
+
+    /// <summary>Largest committed package-manager config that is read for the credential scan; a bigger one is refused unread.</summary>
+    public const int MaxConfigBytes = 64 * 1024;
+
+    private static readonly string[] NpmCredentialKeys = ["_authToken", "_auth", "_password", "password"];
+
+    /// <summary>Committed package-manager configs are checked by content, not refused by name: registry-only files are common.</summary>
+    public static bool IsPackageConfig(string path) => ConfigKind(path) is not null;
+
+    private static string? ConfigKind(string path) => path.Replace('\\', '/').Split('/')[^1].ToUpperInvariant() switch
+    {
+        ".NPMRC" => "npm",
+        ".PYPIRC" => "pypi",
+        ".YARNRC.YML" => "yarn",
+        _ => null,
+    };
+
+    private static readonly string[] YarnCredentialKeys = ["npmAuthToken", "npmAuthIdent"];
+
+    /// <summary>
+    /// Refuses a committed <c>.npmrc</c> with a non-empty <c>_authToken</c>, <c>_auth</c>, <c>_password</c> or <c>password</c> (also
+    /// registry-scoped, <c>//host/:_authToken=</c>) and a <c>.yarnrc.yml</c> with a non-empty <c>npmAuthToken</c> or <c>npmAuthIdent</c>
+    /// (also under <c>npmScopes</c> or <c>npmRegistries</c>), unless the value is just an environment reference such as
+    /// <c>${NPM_TOKEN}</c>, and a committed <c>.pypirc</c> with a non-empty <c>password</c>. Lines end at CR, LF or CRLF. Null content (over
+    /// <see cref="MaxConfigBytes"/>) is refused unchecked. Findings name the path and key, never the value.
+    /// </summary>
+    public static IReadOnlyList<SecretFinding> ScanCommittedConfig(string path, string? content)
+    {
+        if (content is null)
+        {
+            return [new SecretFinding(CommittedConfigRule + " (file over 64 KB, not checked)", path)];
+        }
+
+        var kind = ConfigKind(path);
+        var npm = kind == "npm";
+        var yarn = kind == "yarn";
+        var keys = npm ? NpmCredentialKeys : yarn ? YarnCredentialKeys : ["password"];
+        var found = new List<SecretFinding>();
+        var lines = content.Split(['\r', '\n']);
+        for (var n = 0; n < lines.Length; n++)
+        {
+            var raw = lines[n];
+            var line = raw.Trim();
+            if (line.Length == 0 || line[0] is '#' or ';')
+            {
+                continue;
+            }
+
+            // .yarnrc.yml is YAML: a key can also sit in flow style ({acme: {npmAuthToken: x}}). Any non-comment line that names a
+            // credential key and is not exactly "key: <empty or plain ${VAR}>" is refused.
+            var yarnKey = yarn ? keys.FirstOrDefault(k => line.Contains(k, StringComparison.OrdinalIgnoreCase)) : null;
+            var sep = npm ? line.IndexOf('=', StringComparison.Ordinal) : yarn ? line.IndexOf(':', StringComparison.Ordinal) : line.IndexOfAny(['=', ':']);
+            if (line[0] == '[' || sep <= 0)
+            {
+                if (yarnKey is not null)
+                {
+                    found.Add(new SecretFinding($"{CommittedConfigRule} (key {yarnKey})", path));
+                }
+
+                continue;
+            }
+
+            var key = line[..sep].Trim().Trim('"', '\'');
+            key = npm ? key[(key.LastIndexOf(':') + 1)..] : key; // "//registry.example/:_authToken" -> "_authToken"
+            if (yarn && key.Contains('\\', StringComparison.Ordinal))
+            {
+                // A double-quoted YAML key decodes escapes ("npm\x41uthToken" is npmAuthToken), so a key with any backslash is refused.
+                found.Add(new SecretFinding($"{CommittedConfigRule} (a key with a backslash escape; write key names plainly)", path));
+                continue;
+            }
+
+            var rest = line[(sep + 1)..];
+            if (yarn && YamlCommentRegex().Match(rest) is { Success: true } comment)
+            {
+                rest = rest[..comment.Index]; // a YAML comment: whitespace, then '#' to the end of the line
+            }
+
+            var value = rest.Trim().Trim('"', '\'').Trim();
+            var envReference = (npm || yarn) && EnvReferenceRegex().IsMatch(value);
+            var canonical = keys.FirstOrDefault(k => k.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (canonical is not null && value.Length > 0 && !envReference)
+            {
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {canonical})", path));
+            }
+            else if (yarn && canonical is not null && rest.Trim().Length == 0 && ContinuesOnADeeperLine(lines, n, raw))
+            {
+                // "npmAuthToken:" (or with only a comment) and the value on the next, more-indented line: a plain multi-line scalar.
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {canonical})", path));
+            }
+            else if (canonical is null && yarnKey is not null)
+            {
+                // Flow style ({acme: {npmAuthToken: ...}}) is refused whatever the value, even a plain reference.
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {yarnKey} in YAML flow style; write it as a block mapping with a ${{NAME}} reference)", path));
+            }
+        }
+
+        return found.DistinctBy(f => f.Rule).ToList();
+    }
+
+    /// <summary>
+    /// YAML: a key with an empty value takes the next non-blank, non-comment line as its value when that line is indented deeper than the
+    /// key (a tab counts as deeper indentation too, so nothing slips through).
+    /// </summary>
+    private static bool ContinuesOnADeeperLine(string[] lines, int keyLine, string keyRaw)
+    {
+        static int Indent(string s) => s.Length - s.TrimStart(' ', '\t').Length;
+        for (var i = keyLine + 1; i < lines.Length; i++)
+        {
+            var t = lines[i].Trim();
+            if (t.Length == 0 || t[0] == '#')
+            {
+                continue;
+            }
+
+            return Indent(lines[i]) > Indent(keyRaw);
+        }
+
+        return false;
+    }
+
+    private static readonly string[] SampleFolders = ["fixtures", "testdata"];
+
+    /// <summary>
+    /// Scans the names of committed files (every path of the HEAD tree) against <see cref="SecretFileNames"/>, <c>.env.*</c> and
+    /// <see cref="SecretFileSuffixes"/> (<c>.npmrc</c>, <c>.pypirc</c> and <c>.yarnrc.yml</c> are checked by content instead, see
+    /// <see cref="ScanCommittedConfig"/>).
+    /// Obvious samples are allowed: names ending in <c>.example</c> or <c>.sample</c>, names containing <c>.example.</c>, and anything
+    /// under a folder named <c>fixtures</c> or <c>testdata</c>. Names only: content and older commits are not looked at.
+    /// </summary>
+    public static IReadOnlyList<SecretFinding> ScanCommittedFileNames(IEnumerable<string> paths)
+    {
+        var found = new List<SecretFinding>();
+        foreach (var path in paths)
+        {
+            var segments = path.Replace('\\', '/').Split('/');
+            var file = segments[^1];
+            var secretLike = SecretFileNames.Contains(file, StringComparer.OrdinalIgnoreCase)
+                || file.StartsWith(".env.", StringComparison.OrdinalIgnoreCase)
+                || SecretFileSuffixes.Any(s => file.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+            var sample = file.EndsWith(".example", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith(".sample", StringComparison.OrdinalIgnoreCase)
+                || file.Contains(".example.", StringComparison.OrdinalIgnoreCase)
+                || segments[..^1].Any(d => SampleFolders.Contains(d, StringComparer.OrdinalIgnoreCase));
+            if (secretLike && !sample)
+            {
+                found.Add(new SecretFinding(CommittedFileRule, path));
             }
         }
 

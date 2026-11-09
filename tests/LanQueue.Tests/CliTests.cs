@@ -28,6 +28,53 @@ public class CliTests
     }
 
     [Fact]
+    public async Task AnUnknownCommandPrintsUsageOnStderrAndExits2()
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        var code = await Cli.RunAsync(["frobnicate"], o, e, CancellationToken.None);
+        Assert.Equal(2, code);
+        Assert.Equal("", o.ToString());
+        Assert.Contains("lanq health", e.ToString(), StringComparison.Ordinal);
+
+        o = new StringWriter();
+        Assert.Equal(0, await Cli.RunAsync(["--help"], o, new StringWriter(), CancellationToken.None));
+        Assert.Contains("lanq health", o.ToString(), StringComparison.Ordinal); // asked-for help stays on stdout
+    }
+
+    [Theory]
+    [InlineData("health")]
+    [InlineData("stats")]
+    [InlineData("unlock", "build-01")]
+    [InlineData("doctor")]
+    [InlineData("makeready", "build-01")]
+    public async Task OnlyRunTakesACommandAfterDoubleDash(params string[] args)
+    {
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse([.. args, "--", "rm", "-rf", "/"]));
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync([.. args, "--", "x"], new StringWriter(), e, CancellationToken.None));
+        Assert.Contains("--", e.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UserInputInArgumentErrorsIsSanitised()
+    {
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--bogus\u001b]0;pwned\u0007\u001b[2J"], new StringWriter(), e, CancellationToken.None));
+        Assert.DoesNotContain('\u001b', e.ToString());
+        Assert.DoesNotContain('\u0007', e.ToString());
+    }
+
+    [Fact]
+    public void UserInputInConfigErrorsIsSanitised()
+    {
+        var ex = Assert.Throws<LanQueue.Config.ConfigException>(() => LanQueue.Config.ConfigLoader.Parse(T.Yaml.Replace("name: build-01", "name: \"bad\\e[2J\\u202Ename\"", StringComparison.Ordinal)));
+        Assert.DoesNotContain('\u001b', ex.Message);
+        Assert.DoesNotContain('‮', ex.Message);
+        Assert.Contains("bad?[2J?name", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task MissingConfigFailsCleanlyWithExit2()
     {
         var err = new StringWriter();
@@ -113,5 +160,25 @@ public class CliTests
         var lines = o.ToString().Split((char)10, StringSplitOptions.RemoveEmptyEntries);
         Assert.StartsWith("build-01", lines[0], StringComparison.Ordinal); // but output keeps config order
         Assert.StartsWith("build-02", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MemOptionIsParsedInGigabytes()
+    {
+        Assert.Null(ParsedArgs.Parse(["run", "--", "dotnet", "test"]).MemGb);
+        Assert.Equal(2.5, ParsedArgs.Parse(["run", "--mem", "2.5", "--", "dotnet", "test"]).MemGb);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("abc")]
+    [InlineData("NaN")]
+    [InlineData("100000")]
+    public async Task BadMemExitsWith2(string value)
+    {
+        var err = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--mem", value, "--", "dotnet", "test"], new StringWriter(), err, CancellationToken.None));
+        Assert.Contains("--mem", err.ToString(), StringComparison.Ordinal);
     }
 }

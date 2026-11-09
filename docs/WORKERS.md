@@ -4,6 +4,22 @@ A *worker* is any machine on your network that `lanq` sends jobs to. Nothing fro
 your own PC runs `lanq`, ships the code over SSH (as a git bundle by default, or as a `tar.gz` with
 `transfer: archive`), and the worker only needs the pieces below. **An old PC needs only SSH, tar and your toolchain.**
 
+## Check a machine first: lanq-makeready
+
+Not sure an old PC is up to it? [lanq-makeready](https://github.com/jangolath/lanq-makeready) is a read-only check
+(Windows, Linux, macOS; no admin, no network, nothing installed) that reports what is missing or too old for this
+checklist, what would break an overnight job (sleep, pending reboot, update restarts), and a ready-to-paste
+`machines.yml` entry. Two ways to run it:
+
+- **From your PC, once SSH works** (the onboarding case): `lanq makeready --ssh <user>@<worker> --os windows` (or
+  `--os linux`). `lanq` has the script built in, sends it on ssh stdin and reads back a redacted JSON report; nothing
+  is written to the worker's disk. Later, for a machine already in `machines.yml`, `lanq makeready <name>` also shows
+  which capabilities are detected but not configured, or configured but not detected. It respects that machine's
+  `PAUSE` file and `allowed_hours` unless you add `--force`.
+- **On the PC itself**, before SSH is set up: download the script from its release page and run it there.
+
+Either way, lanq never changes a worker: every fix it suggests is for the PC's owner to run on that PC.
+
 ## Checklist
 
 | Need | Required? | Why | How to check on the worker |
@@ -49,15 +65,26 @@ Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
 
 1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
    `capabilities`, `max_jobs`, optional `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for
-   a worker without git).
+   a worker without git). For a PC someone else also uses, see the "family PC" example: hours by day, low priority
+   (the default), a memory floor, heap caps in `env:`, and a `PAUSE` file the people at that PC can create to hold it.
+   If a tool installed per user (nvm, pyenv, rustup, sdkman) works in your interactive shell but `lanq` jobs cannot
+   find it, list its folder under `path_prepend:`.
 2. Make sure the worker's host key is in your `known_hosts` (connect once with `ssh` and verify the fingerprint):
    lanq uses `StrictHostKeyChecking=yes`.
-3. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason.
+3. Run `lanq doctor --remote`: it checks your side (ssh, known_hosts, key) and, on each worker, that `work_root` is
+   writable, that git or tar is there, and that each capability's tool (`dotnet`, `node`, `npm`, `python`, `go`,
+   `rust`, `java`, `docker`) answers in the same non-login shell and environment a job gets. A tool that works when you
+   log in but fails here needs its folder in `path_prepend:`.
+4. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason.
+
+If a `lanq` process was killed mid-job, its slot on the worker is reclaimed 30 minutes after the slot's deadline.
+`lanq unlock <name>` clears expired slots at once; `lanq unlock <name> --all --yes` clears every slot (including ones
+left by a lanq before 0.4) when you are sure nothing is running there.
 
 ## For AI agents reading this
 
 - You may **use** workers through `lanq run --needs <capabilities> -- <allowlisted command>`; see
   `docs/agents/`.
 - You must **not** set up workers, edit `machines.yml`, change allowlists, install software on workers, or handle
-  SSH keys: that is the developer's job. If a job fails because a worker lacks a tool, report which capability is
+  SSH keys: that is the developer's job. Do not run `lanq makeready` or `lanq unlock` unless the developer asks. If a job fails because a worker lacks a tool, report which capability is
   missing instead of trying to fix the worker.

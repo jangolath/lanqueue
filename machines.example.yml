@@ -14,6 +14,11 @@
 policy:
   # A machine whose load ratio (0..1, load average per core on Linux, CPU% on Windows) is above this is "hold short".
   load_threshold: 0.80
+  # Memory and allowed-hours limits (these are the defaults; uncomment to change them):
+  # min_free_mem_gb: 1.0         # hold a machine with less available memory (GB)
+  # max_mem_pressure: 20         # Linux: hold when PSI memory "some avg10" (%) is above this
+  # window_grace_minutes: 15     # a running job may overrun the end of its machine's allowed_hours by this much
+  # min_window_minutes: 10       # do not start a job on a machine whose window ends sooner than this
   # A job's argv must start with one of these token sequences. Everything else is refused.
   allowed_commands:
     - dotnet build
@@ -36,6 +41,7 @@ machines:
     capabilities: [dotnet, node, linux]
     max_jobs: 2
     transfer: git              # git (default, recommended): bundle + per-job worktree; the worker needs git
+    priority: normal           # a dedicated build box; the default, low, yields to whoever uses the machine
 
   - name: build-02
     os: windows
@@ -44,7 +50,7 @@ machines:
     work_root: D:/lanq
     capabilities: [dotnet, windows]
     max_jobs: 1
-    allowed_hours: "22:00-07:00"   # optional; local time of the machine running lanq; may wrap midnight
+    allowed_hours: "22:00-07:00"   # optional; the worker's local time; may wrap midnight (or a list, see family-pc)
 
   # An old PC without git: it needs only SSH, tar (built into Linux and Windows 10 1803+) and your toolchain.
   - name: old-pc
@@ -54,3 +60,27 @@ machines:
     capabilities: [dotnet, linux]
     max_jobs: 1
     transfer: archive          # a tar.gz of the same snapshot, extracted into a fresh per-job folder (no git on the worker)
+
+  # A family PC that is used during the day. lanq stays a polite guest:
+  #   - it works only in the listed windows (worker's own clock; a window crossing midnight belongs to its start day),
+  #     starts nothing when fewer than 10 minutes are left, and stops a job 15 minutes after its window ends;
+  #   - anyone at the PC can pause it: create a file named PAUSE in work_root (Command Prompt:
+  #     type nul > D:\lanq\PAUSE), delete it to resume. A job that is already running is not affected;
+  #   - jobs run at low priority (BelowNormal on Windows, nice/ionice on Linux) and only with 2 GB+ free memory.
+  - name: family-pc
+    os: windows
+    ssh: build@family-pc.lan
+    work_root: D:/lanq
+    capabilities: [dotnet, node, windows]
+    max_jobs: 1
+    allowed_hours:
+      - "Mon-Fri 22:00-07:00"  # weeknights, into the next morning
+      - "Sat,Sun 01:00-09:00"  # weekend nights
+    priority: low              # the default; written out here for clarity
+    min_free_mem_gb: 2         # overrides policy.min_free_mem_gb for this machine
+    env:                       # for the job process only
+      DOTNET_GCHeapHardLimitPercent: "0x32"      # .NET GC heap at most 50% of RAM (hexadecimal)
+      NODE_OPTIONS: "--max-old-space-size=2048"  # Node heap at most 2 GB
+      MSBUILDNODECOUNT: "1"                      # one MSBuild worker node
+    path_prepend:              # tools installed per user that a non-login SSH session does not find
+      - C:/Users/build/AppData/Roaming/nvm/v22.11.0

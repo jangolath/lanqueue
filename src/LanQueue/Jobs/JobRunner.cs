@@ -17,21 +17,26 @@ public enum JobStatus
     NoCapacity,
     InfraError,
     TimedOut,
+
+    /// <summary>Stopped because the machine's allowed hours ended (plus policy.window_grace_minutes); exit 124 like TimedOut.</summary>
+    WindowClosed,
 }
 
 /// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
-public sealed record JobRequest(IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null)
+/// <param name="MinMemGb">lanq run --mem: only machines that report at least this much available memory (GB).</param>
+public sealed record JobRequest(
+    IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null, double? MinMemGb = null)
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
 public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, string? Machine, string Message)
 {
-    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out, 70 for infra.</summary>
+    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
         JobStatus.Completed or JobStatus.Failed => ExitCode,
-        JobStatus.TimedOut => ProcessSshClient.TimedOutExitCode,
+        JobStatus.TimedOut or JobStatus.WindowClosed => ProcessSshClient.TimedOutExitCode,
         JobStatus.NoCapacity => 75,
         JobStatus.Rejected => 2,
         _ => 70,
@@ -46,9 +51,15 @@ public sealed class JobRunner(
     JobLog log,
     string scratchDir,
     Action<string> output,
-    Func<TimeSpan, CancellationToken, Task>? delay = null)
+    Func<TimeSpan, CancellationToken, Task>? delay = null,
+    TimeProvider? clock = null,
+    BaseStore? bases = null)
 {
     private readonly Func<TimeSpan, CancellationToken, Task> delay = delay ?? Task.Delay;
+    private readonly TimeProvider clock = clock ?? TimeProvider.System;
+
+    /// <summary>Last commit each git worker has fetched, per repository: the base for incremental bundles (in memory unless given a file).</summary>
+    private readonly BaseStore bases = bases ?? new BaseStore(null);
 
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
@@ -76,7 +87,7 @@ public sealed class JobRunner(
         JobPayload payload;
         try
         {
-            // Only the bundle is built up front; an archive is built lazily, the first time an archive machine actually gets the job.
+            // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
             var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
             payload = await payloads.BuildAsync(jobId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
         }
@@ -86,32 +97,50 @@ public sealed class JobRunner(
         }
 
         var archive = new LazyArchive(payloads, jobId, req.RepoDir, scratchDir, payload.Sha, output);
+        var bundles = new LazyBundles(payloads, jobId, req.RepoDir, scratchDir, payload.Sha);
         try
         {
             var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
                 .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
+                .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
+                .Concat((payload.CommittedConfigs ?? new Dictionary<string, string?>()).SelectMany(c => SecretScanner.ScanCommittedConfig(c.Key, c.Value)))
                 .ToList();
             if (findings.Count > 0)
             {
                 return Rejected(jobId, findings);
             }
 
-            return await Dispatch(jobId, req, payload, archive, ct).ConfigureAwait(false);
+            return await Dispatch(jobId, req, payload, archive, bundles, ct).ConfigureAwait(false);
         }
         finally
         {
-            TryDelete(payload.BundlePath);
             TryDelete(payload.ArchivePath);
+            await bundles.DeleteAsync().ConfigureAwait(false);
             await archive.DeleteAsync().ConfigureAwait(false);
         }
     }
 
     internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
 
+    /// <summary>The worker enforces the job limit itself (timeout on Linux, a deadline wait on Windows) this long after lanq would stop it.</summary>
+    internal static readonly TimeSpan WorkerDeadlineMargin = TimeSpan.FromMinutes(1);
+
+    /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
+    private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
+        needGb is not { } need || !h.Reachable || h.Hold is not null || h.MemFreeGb >= need
+            ? h
+            : h with
+            {
+                HoldKind = HoldKind.Job,
+                Hold = h.MemFreeGb is { } free
+                    ? string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, --mem needs {need:0.0} GB")
+                    : "free memory unknown (--mem needs the machine to report it)",
+            };
+
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
 
-    private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, CancellationToken ct)
+    private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, LazyBundles bundles, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
         var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
@@ -123,13 +152,15 @@ public sealed class JobRunner(
             // Probe every machine at once; WhenAll keeps the config order whatever order the answers arrive in.
             var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
             var health = config.Machines.Zip(probes)
-                .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold }) : h)
+                .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold, HoldKind = HoldKind.Job }) : h)
+                .Select(h => (h.First, WithMemRequirement(h.Item2, req.MinMemGb)))
                 .ToList();
 
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
             foreach (var machine in ranked)
             {
-                var result = await TryOnMachine(jobId, req, payload, archive, machine, gitCanEverTakeIt, ct).ConfigureAwait(false);
+                var windowEnds = health.First(h => ReferenceEquals(h.Item1, machine)).Item2.WindowEndsUtc;
+                var result = await TryOnMachine(jobId, req, payload, archive, bundles, machine, windowEnds, gitCanEverTakeIt, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -149,7 +180,8 @@ public sealed class JobRunner(
     }
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
-    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, bool gitCanEverTakeIt, CancellationToken ct)
+    private async Task<JobResult?> TryOnMachine(
+        string jobId, JobRequest req, JobPayload payload, LazyArchive archive, LazyBundles bundles, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, CancellationToken ct)
     {
         string? archivePath = null;
         if (machine.Transfer == TransferMode.Archive)
@@ -184,7 +216,7 @@ public sealed class JobRunner(
         var clock = Stopwatch.StartNew();
         var command = string.Join(' ', req.Argv);
 
-        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.AcquireSlot(machine, jobId)), null, TimeSpan.FromSeconds(30), ct)
+        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.AcquireSlot(machine, jobId, req.Timeout ?? JobRequest.DefaultTimeout)), null, TimeSpan.FromSeconds(30), ct)
             .ConfigureAwait(false);
         var slot = ParseSlot(acquire.Output);
         if (!acquire.Ok || slot is null)
@@ -218,11 +250,13 @@ public sealed class JobRunner(
             JobResult result;
             try
             {
-                result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
+                result = await Transfer(jobId, req, payload, archivePath, bundles, machine, windowEnds, OnLine, ct).ConfigureAwait(false);
             }
             finally
             {
-                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
+                // Never throw from here (that would leak the slot): an unusable repository id only drops the cache steps.
+                var repoId = payload.RepoId is { } id && IsRepoId(id) ? id : null;
+                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot, repoId)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
                     .ConfigureAwait(false);
                 if (!cleanup.Ok)
                 {
@@ -244,20 +278,38 @@ public sealed class JobRunner(
         }
     }
 
-    private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, Action<string> onLine, CancellationToken ct)
+    private async Task<JobResult> Transfer(
+        string jobId, JobRequest req, JobPayload payload, string? archivePath, LazyBundles bundles, Machine machine, DateTimeOffset? windowEnds, Action<string> onLine, CancellationToken ct)
     {
         string executeCommand;
         try
         {
-            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv));
+            // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
+            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout));
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
             return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message);
         }
 
+        var git = machine.Transfer == TransferMode.Git;
+        var local = archivePath;
+        string? incrementalBase = null;
+        if (git && payload.RepoId is not null)
+        {
+            try
+            {
+                var known = await BaseStoreCall(() => bases.Get(machine.Name, payload.RepoId), "read", machine, onLine, ct).ConfigureAwait(false);
+                var bundle = await bundles.GetAsync(known, ct).ConfigureAwait(false);
+                (local, incrementalBase) = (bundle.Path, bundle.Base);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+            {
+                return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message);
+            }
+        }
+
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-        var local = machine.Transfer == TransferMode.Archive ? archivePath : payload.BundlePath;
         if (step.Ok && local is null)
         {
             return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine.");
@@ -265,12 +317,29 @@ public sealed class JobRunner(
 
         if (step.Ok)
         {
-            step = await ssh.UploadAsync(machine, local!, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
+            step = await UploadAndPrepare(jobId, payload, machine, local!, onLine, ct).ConfigureAwait(false);
         }
 
-        if (step.Ok)
+        // An incremental bundle the worker cannot use (its cache lost the base) is replaced by a full bundle, once.
+        if (!step.Ok && incrementalBase is not null && step.Output.Contains(RemoteScripts.BundleNotUsable, StringComparison.Ordinal))
         {
-            step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Prepare(machine, jobId)), onLine, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false);
+            onLine($"[lanq] {machine.Name}: the worker cache does not have the incremental base; sending a full bundle");
+            try
+            {
+                local = (await bundles.GetAsync(null, ct).ConfigureAwait(false)).Path;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+            {
+                return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message);
+            }
+
+            step = await UploadAndPrepare(jobId, payload, machine, local, onLine, ct).ConfigureAwait(false);
+        }
+
+        if (step.Ok && git)
+        {
+            // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
+            await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
         }
 
         if (!step.Ok)
@@ -279,13 +348,40 @@ public sealed class JobRunner(
                 "Could not prepare the job on the machine." + (step.TimedOut ? " (timed out)" : ""));
         }
 
+        // A machine with allowed hours stops the job when its window ends plus the grace period, if that comes before --timeout. The
+        // limit is taken now, after upload and prepare, so time spent getting here counts against the window.
         var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
+        var grace = TimeSpan.FromMinutes(config.Policy.WindowGraceMinutes);
+        var windowLimit = windowEnds + grace - clock.GetUtcNow();
+        var byWindow = windowLimit < timeout;
+        if (windowLimit is { } left && (left <= TimeSpan.Zero || left < TimeSpan.FromMinutes(config.Policy.MinWindowMinutes)))
+        {
+            // Upload and prepare used up the window: hold like a closing window (cleanup runs in the caller), never a job stopped after a second.
+            return new JobResult(jobId, JobStatus.NoCapacity, 75, machine.Name, string.Create(
+                CultureInfo.InvariantCulture,
+                $"{machine.Name}: window closing ({Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left of its allowed hours plus grace after upload and prepare); the job was not started"));
+        }
+
+        if (byWindow)
+        {
+            timeout = windowLimit!.Value;
+            onLine($"[lanq] {machine.Name}: allowed hours end soon; the job will be stopped after {ProcessSshClient.Describe(timeout)} (window end + {grace.TotalMinutes:0} min grace)");
+        }
+
+        // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
+        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin));
         var run = await ssh.RunAsync(
             machine,
             executeCommand,
             onLine,
             timeout,
             ct).ConfigureAwait(false);
+        if (run.TimedOut && byWindow)
+        {
+            return new JobResult(jobId, JobStatus.WindowClosed, ProcessSshClient.TimedOutExitCode, machine.Name,
+                $"stopped after {ProcessSshClient.Describe(timeout)}: {machine.Name}'s allowed hours ended (plus {grace.TotalMinutes:0} min grace)");
+        }
+
         if (run.TimedOut)
         {
             return new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
@@ -305,6 +401,40 @@ public sealed class JobRunner(
     }
 
     /// <summary>
+    /// bases.json can be briefly locked by a parallel lanq (a Windows sharing violation) or unwritable. A failing read or write is retried
+    /// twice, then reported in one line and ignored: losing a base only means the next job sends a full bundle.
+    /// </summary>
+    private async Task<string?> BaseStoreCall(Func<string?> call, string verb, Machine machine, Action<string> onLine, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return call();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 3)
+                {
+                    onLine($"[lanq] warning: could not {verb} the incremental-bundle base for {machine.Name} ({ex.Message}); "
+                        + (verb == "read" ? "sending a full bundle" : "the next job there sends a full bundle"));
+                    return null;
+                }
+
+                await delay(TimeSpan.FromMilliseconds(100 * attempt), ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<SshResult> UploadAndPrepare(string jobId, JobPayload payload, Machine machine, string local, Action<string> onLine, CancellationToken ct)
+    {
+        var step = await ssh.UploadAsync(machine, local, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
+        return step.Ok
+            ? await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Prepare(machine, jobId, payload.RepoId)), onLine, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false)
+            : step;
+    }
+
+    /// <summary>
     /// Remote output is untrusted: C0 controls (except tab), DEL, C1 controls, bidi controls and zero-width characters become '?', so a
     /// worker cannot move the cursor, retitle the window, send other terminal escape sequences or disguise text in the console or job log.
     /// </summary>
@@ -313,7 +443,10 @@ public sealed class JobRunner(
         static bool Unsafe(char c) =>
             (c < 0x20 && c != (char)0x09) || (c >= 0x7f && c <= 0x9f) // C0 (except tab), DEL, C1
             || (c >= 0x200b && c <= 0x200f) || c == 0xfeff // zero-width characters and marks
-            || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069); // bidi embeddings, overrides and isolates
+            || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) // bidi embeddings, overrides and isolates
+            || c == 0x061c // Arabic letter mark (a bidi mark)
+            || c == 0x2028 || c == 0x2029 // line and paragraph separators (a line break to some terminals and editors)
+            || (c >= 0x2060 && c <= 0x2064); // word joiner and invisible operators
         if (!line.Any(Unsafe))
         {
             return line;
@@ -337,9 +470,28 @@ public sealed class JobRunner(
             : null;
     }
 
-    private static JobResult Rejected(string jobId, IEnumerable<SecretFinding> findings) =>
-        new(jobId, JobStatus.Rejected, 2, null,
-            "Refused: possible secrets in payload (" + string.Join(", ", findings.Select(f => $"{f.Rule} in {f.Where}")) + "). Nothing was sent.");
+    private static bool IsRepoId(string id)
+    {
+        try
+        {
+            return RemoteScripts.SafeRepoId(id) == id;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static JobResult Rejected(string jobId, IReadOnlyList<SecretFinding> findings)
+    {
+        const int Shown = 10;
+        var listed = string.Join(", ", findings.Take(Shown).Select(f => $"{f.Rule} in {f.Where}"))
+            + (findings.Count > Shown ? $", and {findings.Count - Shown} more" : "");
+        var hint = findings.Any(f => f.Rule == SecretScanner.CommittedFileRule)
+            ? " Committed files named like secrets are refused because the bundle or archive would carry them; rename samples to *.example or keep them under a fixtures/ or testdata/ folder."
+            : "";
+        return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.");
+    }
 
     /// <summary>Builds the archive at most once per job, on first use, and reports what a tar.gz could not carry.</summary>
     private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output)
@@ -377,6 +529,39 @@ public sealed class JobRunner(
             catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException)
             {
                 // nothing was built
+            }
+        }
+    }
+
+    /// <summary>Builds each distinct bundle (full, or incremental on one base) at most once per job, on first use.</summary>
+    private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha)
+    {
+        private readonly Dictionary<string, Task<BundleBuild>> _built = new(StringComparer.Ordinal);
+
+        public Task<BundleBuild> GetAsync(string? baseSha, CancellationToken ct)
+        {
+            var key = baseSha ?? "";
+            if (!_built.TryGetValue(key, out var task))
+            {
+                task = builder.BuildBundleAsync(jobId, repoDir, dir, sha, baseSha, ct);
+                _built[key] = task;
+            }
+
+            return task;
+        }
+
+        public async Task DeleteAsync()
+        {
+            foreach (var task in _built.Values)
+            {
+                try
+                {
+                    TryDelete((await task.ConfigureAwait(false)).Path);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException or UnauthorizedAccessException)
+                {
+                    // nothing was built
+                }
             }
         }
     }

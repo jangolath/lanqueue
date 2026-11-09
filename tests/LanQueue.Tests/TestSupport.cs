@@ -1,10 +1,155 @@
+using System.Diagnostics;
+using System.Text;
 using LanQueue.Config;
 using LanQueue.Ssh;
+using Xunit;
 
 namespace LanQueue.Tests;
 
+/// <summary>Runs only where the local git can create a reftable repository (git 2.45 or later); otherwise reported as skipped.</summary>
+public sealed class ReftableGitFactAttribute : FactAttribute
+{
+    private static readonly bool Supported = Probe();
+
+    public ReftableGitFactAttribute()
+    {
+        if (!Supported)
+        {
+            Skip = "This git cannot create a reftable repository (needs git 2.45 or later).";
+        }
+    }
+
+    private static bool Probe()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "lanq-reftable-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            return Shells.Exec("git", ["init", "-q", "--bare", "--ref-format=reftable", dir]).Code == 0;
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
+}
+
+/// <summary>The shells a test can run generated worker scripts with, found once; a test that needs a missing one is reported as skipped.</summary>
+internal static class Shells
+{
+    /// <summary>A POSIX sh on PATH (on Windows, the one Git for Windows ships), or null.</summary>
+    public static readonly string? Sh = OnPath("sh") ? "sh" : null;
+
+    /// <summary>powershell.exe on Windows, pwsh elsewhere when it is on PATH, or null.</summary>
+    public static readonly string? PowerShell = OperatingSystem.IsWindows() ? "powershell.exe" : OnPath("pwsh") ? "pwsh" : null;
+
+    public const string NoSh = "No POSIX sh on this machine.";
+
+    public const string NoPowerShell = "No PowerShell on this machine (powershell.exe on Windows, or pwsh on PATH).";
+
+    /// <summary>Runs a generated script: "linux" in sh -c, "windows" from a temporary .ps1 file (with BOM) in PowerShell. Output + error.</summary>
+    public static (int Code, string Output) Run(string shell, string script, IReadOnlyDictionary<string, string>? env = null)
+    {
+        if (shell == "linux")
+        {
+            return Exec(Sh ?? throw new InvalidOperationException(NoSh), ["-c", script], env);
+        }
+
+        var ps1 = Path.Combine(Path.GetTempPath(), "lanq-script-" + Guid.NewGuid().ToString("N") + ".ps1");
+        File.WriteAllText(ps1, script, new UTF8Encoding(true));
+        try
+        {
+            return Exec(PowerShell ?? throw new InvalidOperationException(NoPowerShell), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", ps1], env);
+        }
+        finally
+        {
+            File.Delete(ps1);
+        }
+    }
+
+    public static (int Code, string Output) Exec(string file, IEnumerable<string> args, IReadOnlyDictionary<string, string>? env = null)
+    {
+        var psi = new ProcessStartInfo(file) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        foreach (var a in args)
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        foreach (var (k, v) in env ?? new Dictionary<string, string>())
+        {
+            psi.Environment[k] = v;
+        }
+
+        using var p = Process.Start(psi)!;
+        var err = p.StandardError.ReadToEndAsync();
+        var output = p.StandardOutput.ReadToEnd();
+        p.WaitForExit();
+        return (p.ExitCode, output + err.Result);
+    }
+
+    internal static bool OnPath(string exe)
+    {
+        var names = OperatingSystem.IsWindows() ? new[] { exe + ".exe", exe + ".cmd" } : new[] { exe };
+        return (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Any(d => names.Any(n => File.Exists(Path.Combine(d, n))));
+    }
+}
+
+/// <summary>Runs only where a POSIX sh is on PATH; otherwise reported as skipped.</summary>
+public sealed class ShFactAttribute : FactAttribute
+{
+    public ShFactAttribute()
+    {
+        if (Shells.Sh is null)
+        {
+            Skip = Shells.NoSh;
+        }
+    }
+}
+
+/// <summary>Runs only where PowerShell is available; otherwise reported as skipped.</summary>
+public sealed class PowerShellFactAttribute : FactAttribute
+{
+    public PowerShellFactAttribute()
+    {
+        if (Shells.PowerShell is null)
+        {
+            Skip = Shells.NoPowerShell;
+        }
+    }
+}
+
+/// <summary>Runs only on Linux (real process groups, setsid, a case-sensitive file system); otherwise reported as skipped.</summary>
+public sealed class LinuxFactAttribute : FactAttribute
+{
+    public LinuxFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Skip = "Linux only (the Linux CI leg and the sdk container run it).";
+        }
+    }
+}
+
+/// <summary>Runs only on Windows (real Windows PowerShell 5.1 and taskkill); otherwise reported as skipped.</summary>
+public sealed class WindowsFactAttribute : FactAttribute
+{
+    public WindowsFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Skip = "Windows only (the Windows CI leg runs it).";
+        }
+    }
+}
+
 internal static class T
 {
+    public const string RepoId = "0123456789abcdef";
+
     public const string Yaml = """
         policy:
           load_threshold: 0.8
@@ -58,6 +203,22 @@ internal sealed class FakeSsh : ISshClient
         Uploads.Add(machine.Name + ":" + remotePath);
         return Task.FromResult(new SshResult(0, ""));
     }
+
+    /// <summary>Every stdin run: the target, the remote command, the bytes sent, the output limit and the timeout.</summary>
+    public List<(Machine Machine, string Command, byte[] Input, int MaxOutputChars, TimeSpan Timeout)> InputRuns { get; } = [];
+
+    public Func<Machine, string, byte[], SshResult> InputHandler { get; set; } = (_, _, _) => new SshResult(0, "");
+
+    public Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct)
+    {
+        var bytes = input.ToArray();
+        lock (InputRuns)
+        {
+            InputRuns.Add((machine, remoteCommand, bytes, maxOutputChars, timeout));
+        }
+
+        return Task.FromResult(InputHandler(machine, remoteCommand, bytes));
+    }
 }
 
 /// <summary>
@@ -107,9 +268,10 @@ internal sealed class GatedProbeSsh : ISshClient
             : cmd;
 }
 
-internal sealed class FakeClock(DateTimeOffset now) : TimeProvider
+/// <summary>A fixed instant; the local zone is UTC unless a (fixed-offset, DST-free) zone is given.</summary>
+internal sealed class FakeClock(DateTimeOffset now, TimeZoneInfo? zone = null) : TimeProvider
 {
     public override DateTimeOffset GetUtcNow() => now;
 
-    public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+    public override TimeZoneInfo LocalTimeZone => zone ?? TimeZoneInfo.Utc;
 }

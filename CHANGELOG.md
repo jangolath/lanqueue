@@ -1,6 +1,178 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.4.0 (2026-11-09)
+
+Workers and windows: making old and shared PCs safe to lend to the queue.
+
+- **Memory in health.** The probe reports available memory (Linux `MemAvailable` and free swap, plus PSI memory
+  pressure `some avg10` where `/proc/pressure/memory` exists; Windows free physical memory) and `lanq health` shows
+  `mem free X.X GB`. A machine with less than `policy.min_free_mem_gb` (default 1.0, per-machine `min_free_mem_gb`)
+  is held ("low memory (x.x GB free)"), and on Linux one whose pressure is above `policy.max_mem_pressure` (default
+  20) is held ("memory pressure"). A machine that does not report memory is not held for it.
+- **`lanq run --mem <GB>`** sends a job only to a machine reporting at least that much available memory (never to one
+  that cannot report it).
+- **Per-machine `env:`** sets variables for the job process only, for example heap caps on small machines
+  (`DOTNET_GCHeapHardLimitPercent`, `NODE_OPTIONS=--max-old-space-size=2048`, `MSBUILDNODECOUNT`,
+  `CARGO_BUILD_JOBS`). Names must match `^[A-Za-z_][A-Za-z0-9_]*$`, values may not be empty (Windows PowerShell 5.1
+  cannot set an empty variable, so both platforms refuse one) or contain control characters, and, as a best-effort
+  guard, loader or shell hijack names (`LD_*`, `DYLD_*`, `GLIBC_TUNABLES`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
+  `PS4`, `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`) are refused. Values are passed as quoted data in both
+  shells.
+- On a Windows machine, `env:` and `path_prepend:` count toward the 8000-character encoded command line: a config whose
+  values alone would pass it in the job script (with no job arguments) is refused at load, naming the machine and how
+  much is over; `lanq doctor --remote` checks its own script and reports an overflow as a FAIL line for that machine; a job whose arguments pass it says the limit and the actual size.
+- **Per-machine `path_prepend:`** puts absolute directories in front of `PATH` for the job, so tools installed by nvm,
+  pyenv, rustup or sdkman are found in a non-login SSH session. `PATH` itself cannot be set through `env:`.
+- **`priority: low|normal`** (default `low`): Linux jobs run under `nice -n 10` and `ionice -c3` when available;
+  Windows jobs run at BelowNormal priority, inherited by their child processes. **This changes the default for
+  existing configs**; set `priority: normal` on a dedicated build box.
+- **PAUSE file.** If `<work_root>/PAUSE` exists on a worker, the machine is held ("paused on the machine"). Anyone at
+  that PC can create or delete it. On Linux `PAUSE` or `pause` counts (those two spellings), on Windows any case. A job
+  that is already running is not affected.
+- **The worker enforces the job limit itself.** A job's own limit (`--timeout`, or the window end plus grace) plus one
+  minute is enforced on the worker too, so a job outlives a vanished `lanq` by at most that minute: on Linux the job runs
+  under `timeout -k 30 <seconds>` when `timeout` works there (exit `124`, children included); on Windows it runs in a
+  child PowerShell that is killed with its whole tree (`taskkill /T /F`) when the wait runs out (exit `124`). The
+  Windows wrapper records both its own and the child's pid with their start times in `locks/job-<id>.pid`, so cleanup
+  and a stale-slot reclaim also reach a child whose wrapper died, and kill only processes whose start time matches. The Linux
+  job wrapper now runs `/bin/sh` by absolute path, so a `path_prepend:` folder cannot supply its own `sh`.
+- **Availability windows v2.** `allowed_hours` still accepts one string (a bare `allowed_hours:` or `~` still means any
+  time), and now also a list of entries
+  `[Days ]HH:mm-HH:mm` with days `Mon`..`Sun`, ranges (`Mon-Fri`) and lists (`Sat,Sun`). A window that crosses
+  midnight belongs to its start day. The start minute is inside a window and the end minute is not (0.3 also counted
+  the end minute). Errors name the bad entry.
+- **Windows use the worker's clock.** The probe reports the worker's local time; output from an older probe falls back
+  to the clock of the machine running `lanq`, and `lanq health` then says `time: local`.
+- **Daylight saving.** The probe also reports `now_epoch=`, `tz_start=` and `tz_offsets=`: the worker's UTC offset in
+  minutes on every UTC quarter hour from the one at or before now for the next 36 hours (PowerShell
+  `TimeZoneInfo.Local`; on Linux `date -f -` in one call with GNU date, else `date -d @EPOCH +%z` per value, which
+  busybox accepts). Clock changes happen on a UTC quarter hour, so the table places them exactly. The end of a window
+  is turned into a real instant with that table, so a window over a clock change counts real time: a local end time
+  that happens twice (clocks go back) is its earlier instant, and one that does not exist (clocks go forward) is the
+  instant of the jump. A worker whose `date` cannot do this (or an older probe) gets wall-clock time, which can be an
+  hour off on such a night.
+- **Window close.** On a machine with windows a job may run until the window ends plus `policy.window_grace_minutes`
+  (default 15) or until `--timeout`, whichever is sooner. If the window limit stops it, the job is cleaned up like a
+  timeout, exits `124`, and the status line is `[lanq] WindowClosed`. A machine whose window ends in less than
+  `policy.min_window_minutes` (default 10) takes no new job ("window closing"). The same check runs again after upload
+  and prepare: if what is left of the window plus grace is then below `policy.min_window_minutes`, the job is not
+  started, the machine is cleaned up, and the result is `NoCapacity` (exit `75`, "window closing").
+
+Transfer and supply chain:
+
+- **One cache per repository on git workers.** The single shared `<work_root>/repo.git` is replaced by
+  `<work_root>/repos/<repoid>.git`, where `<repoid>` is the first 16 hex digits of the repository's root commit (the
+  ordinally smallest one if the history has several roots). Different projects no longer share one object store. An
+  existing `repo.git` is left alone and no longer used; delete it whenever convenient.
+- **Hardened git on workers.** Every git call in the worker scripts (init, fetch, worktree add/remove/prune,
+  update-ref) runs with `-c core.hooksPath=<null device> -c core.fsmonitor=false -c protocol.allow=never
+  -c protocol.file.allow=never` (`/dev/null` on Linux, `NUL` on Windows); only the bundle fetch re-allows reading
+  that one local file. A hook planted in a worker cache, or a hooks path in the worker's git config, no longer runs.
+  Every git call also runs with `-c core.attributesFile=<null device>`, `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL`
+  at the null device (git 2.32 or later; `lanq doctor --remote` warns "git older than 2.32: global config not
+  isolated" for an older worker git, which still reads the global config). Before each fetch, prepare deletes the
+  cache's `info/attributes` and checks the cache's own `config`: any key besides the ones `git init --bare` writes
+  (`core.repositoryformatversion`, `filemode`, `bare`, `symlinks`, `ignorecase`, `precomposeunicode`,
+  `logallrefupdates`, `extensions.objectformat`, `refstorage`), for example `filter.*`, `include.*`, `includeIf.*`,
+  `alias.*`, `remote.*`, `credential.*` or `url.*`, or any top-level file git does not create there (above all a
+  `commondir` or `gitdir` file, which git follows even in a bare repository; a `reftable/` ref store is fine), makes it delete and recreate that cache (one line in the job output;
+  that job sends a full bundle). Tests plant a smudge filter, an `include.path`, a `commondir` to another repository
+  and a global config filter and check that none of them runs.
+- **Incremental bundles.** `lanq` records, per machine and repository, the last commit a worker has fetched
+  (`<state>/bases.json`, written atomically, updated only after a successful fetch), and the worker cache keeps
+  `refs/lanq/base` on the last fetched snapshot. The next job sends `git bundle create … --not <base>` when that commit
+  is still a local ancestor of the snapshot, so usually only the new commits and the uncommitted overlay travel. The
+  worker checks the bundle with `git bundle verify` before fetching; if its cache lost the base, the job falls back
+  once to a full bundle automatically (one log line says so). Rewritten history, a pruned base or a missing or
+  unreadable `bases.json` simply mean a full bundle. A `bases.json` that cannot be read or written (for example locked by a
+  parallel `lanq` on Windows) is retried twice, then one warning line is printed and the job goes on. Bundles are now built when a git machine actually gets the job.
+  Archive mode is unchanged.
+- **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
+  HEAD tree are checked against the same list as uncommitted files (one shared definition): `.env`, `.env.*`, `.envrc`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `secrets.json`, `credentials.json`,
+  `.git-credentials`, `.netrc`, `_netrc`, `terraform.tfstate` (and `.backup`), `*.pem`, `*.pfx`, `*.p12`, `*.key`,
+  `*.ppk`, `*.kdbx`, `*.tfvars`, `*.jks`, `*.keystore`
+  (`*.local.yml` / `*.local.yaml` only when uncommitted), because a bundle or archive would carry them. A match refuses
+  the job before anything is sent. `.npmrc`, `.pypirc` and `.yarnrc.yml` files, committed or uncommitted, are not
+  refused by name (registry-only ones are common): their content (up to 64 KB; lines end at CR, LF or CRLF) is checked,
+  and only a literal credential refuses the job (`.npmrc`: a non-empty `_authToken`, `_auth`, `_password` or
+  `password`, including `//host/:_authToken=`, unless it is just an environment reference such as `${NPM_TOKEN}`;
+  `.yarnrc.yml`: a non-empty `npmAuthToken` or `npmAuthIdent`, also under `npmScopes`, with the same environment
+  reference rule (a YAML comment after the value is ignored; a key left empty whose value continues on a more-indented
+  next line, a block scalar `|` / `>`, or any key containing a backslash, since a double-quoted key decodes escapes
+  such as `"npm\x41uthToken"`, is refused), and any other line naming one of those keys, such as
+  YAML flow style `{acme: {npmAuthToken: x}}`, which is refused even with a reference (the message says to use a
+  block mapping); an environment reference is exactly `${NAME}` or npm's optional `${NAME?}`, so
+  `${NPM_TOKEN:-literal}` counts as a literal; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
+  the value. Obvious samples pass: names ending in `.example` or `.sample`, names containing
+  `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
+  such a file (for example a test certificate outside those folders, or an `.npmrc` with a literal token) is now refused until the file is
+  renamed or moved. A long list of findings is cut to the first ten.
+- **Stale slots are reclaimed.** A slot file now records its own deadline (worker clock: now + the job's `--timeout`
+  + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline
+  (left by a crashed or killed `lanq`) is reclaimed: under an exclusive lock file `slot-N.reclaim` (one older than ten
+  minutes, left by a reclaimer that died, is renamed away and checked again, and put back if it turns out to be a
+  live reclaimer's fresh lock; each lock holds its creator's unique token, and a reclaimer removes only a lock that
+  still holds its own) the slot is read again, and only if it is still that stale file
+  is it renamed away to a unique name, deleted and created afresh like a free slot (if another job wins it, the next
+  slot is tried; nothing is ever put back, and no hard links are needed). If the stale slot's job is somehow still
+  running (its `locks/job-<id>.pid` names a live process: on Linux one whose working folder is in that job's folder,
+  on Windows a process whose start time also matches the one recorded with its pid), its process group or tree is
+  killed first; a pid Windows has since given to another process is never touched. A live slot, or one without a valid
+  deadline (written by an older lanq, or not 1 to 18 decimal digits; `08` is read as 8), is never touched.
+- **Supply chain.** Every project commits a `packages.lock.json` and CI restores in locked mode
+  (`RestoreLockedMode` when `CI=true`); Dependabot proposes grouped weekly NuGet and GitHub Actions updates; the
+  release workflow attests the `.nupkg`'s build provenance (`actions/attest-build-provenance`, pinned by SHA, with
+  `id-token`/`attestations` write granted to that one job). README: "Verify a release" with `gh attestation verify`.
+
+Command line:
+
+- **`lanq makeready <machine>`** and **`lanq makeready --ssh user@host --os windows|linux`** (for a PC not in
+  `machines.yml` yet) run the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) v0.1.0 check on a
+  worker. The two scripts are built in, byte-identical to that release (a test pins their SHA-256 from its
+  `SHA256SUMS`; `scripts/sync-makeready.sh <tag>` updates them only after `sha256sum -c` and `gh attestation verify`),
+  sent on ssh stdin with `-Redact`/`--redact` and run from memory: nothing is written to the worker. The JSON report
+  is treated as untrusted (1 MB cap, source-generated parsing, schema `lanq-makeready/v1`, every string sanitised,
+  nothing executed). Output: verdicts, each WARN/FAIL check with its advice, the capability diff against
+  `machines.yml`, a suggested entry, and "lanq never changes a worker". `--json` prints the validated report. Exit `0`
+  ready, `1` not ready, `2` bad arguments, `70` ssh or unusable report, `75` the machine is paused or outside its
+  allowed hours (`--force` scans anyway).
+- **`lanq doctor`** checks your own setup with no network: ssh/scp/git/ssh-keygen on PATH, the state folder, the
+  config, and per machine a `known_hosts` entry (resolved with `ssh -G`: `[host]:port` for other ports, a
+  `HostKeyAlias` as it is, and both the user and the global known_hosts files) and the `key_env` file and passphrase.
+  **`lanq doctor --remote`** first probes each machine and, like `makeready`, leaves one that is paused or outside its
+  `allowed_hours` alone (a `HOLD` line; `--force` checks it anyway). Then it makes one ssh call per machine (four at
+  a time): `work_root` writable, git or tar (and, for git, a WARN when the worker's git is older than 2.32), and each
+  capability's tool (`dotnet`, `node`, `npm`, `python`, `go` with `GOTOOLCHAIN=local`, `rust` with
+  `RUSTUP_AUTO_INSTALL=0`, `java`, `docker`) run in the job environment, so a tool missing from a non-login SSH session
+  (fix: `path_prepend:`) shows up before a job fails. Each check may take 20 seconds (Linux `timeout`, Windows a child
+  PowerShell killed with its tree); a hanging one is reported as timed out and the others still run, and if the whole
+  call runs out of time what did arrive is still reported. Exit `0` when no line is WARN or FAIL.
+- **`--json`** for `lanq health` (one array: `name`, `state`, `reasons`, `load`, `diskFreeGb`, `memFreeGb`,
+  `slotsUsed`, `maxJobs`, `localTime`) and `lanq run` (the job's output goes to stderr, then one object on stdout:
+  `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it. `run --json` prints
+  exactly one object even when no job ran: a bad argument or config (`Rejected`, exit `2`, `jobId` null), Ctrl+C
+  (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`, also for a cancellation nobody asked for); `health
+  --json` prints `{"status":"Rejected","exitCode":2,"message":...}` for a bad argument or a config that cannot be read,
+  and a `Cancelled` (130) or `InfraError` (70) object instead of its array when interrupted or broken. Usage text after an unknown command
+  goes to stderr (exit `2`); `lanq --help` still prints it on stdout. `makeready --json` likewise prints exactly one
+  object: the validated report, or `{"status","exitCode","message"}` with `Rejected` (2), `InfraError` (70), `Held` (75)
+  or `Cancelled` (130). (`lanq doctor` has no `--json`.)
+- **`lanq unlock <machine>`** removes slot files past their recorded deadline at once (the same locked reclaim, which
+  also stops such a slot's job if it is somehow still running) and says what it removed and kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running
+  job there would lose its slot. `--all` without `--yes` is refused.
+- Options are checked per command: an option the command does not use (for example `lanq health --needs x`) is now an
+  error (exit `2`) instead of being ignored, and only `lanq run` takes a command after `--` (anything else with `--` is
+  exit `2`).
+- Input checks: every pattern that validates user input or a worker's report (machine name, `ssh`, `work_root`, the
+  values of a makeready suggestion) must match to the very end (`\z`), so a value with a trailing newline is refused.
+  Error messages that quote what you typed (config errors, unknown options) are sanitised like worker output, and
+  that sanitising now also replaces U+061C, U+2028, U+2029 and U+2060 to U+2064.
+- `scripts/sync-makeready.sh` requires exactly one `SHA256SUMS` line for each of the two scripts (two lines for one
+  script no longer pass), and exits non-zero after cleaning up when interrupted (INT 130, TERM 143).
+- Fixes: an uncommitted `.npmrc` / `.pypirc` gets the same content check as a committed one (it was refused by
+  name); the health probe no longer counts the transient `slot-N.stale.<pid>` file of a slot reclaim as a used slot.
+
+## 0.3.1 (2026-11-09)
 
 - **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the
   typographic quotes U+201A and U+201B as single quotes. They were not escaped, so an argument containing one could

@@ -38,15 +38,15 @@ public class ScriptTests
     [Fact]
     public void SlotUsesExclusiveCreateAndHonoursMaxJobs()
     {
-        Assert.Contains("set -C", RemoteScripts.AcquireSlot(T.Linux(), "j"), StringComparison.Ordinal);
-        Assert.Contains("-le 2", RemoteScripts.AcquireSlot(T.Linux(), "j"), StringComparison.Ordinal);
-        Assert.Contains("CreateNew", RemoteScripts.AcquireSlot(T.Windows(), "j"), StringComparison.Ordinal);
+        Assert.Contains("set -C", RemoteScripts.AcquireSlot(T.Linux(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
+        Assert.Contains("-le 2", RemoteScripts.AcquireSlot(T.Linux(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
+        Assert.Contains("CreateNew", RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
     }
 
     [Fact]
     public void CleanupRemovesWorktreeBundleAndSlot()
     {
-        var s = RemoteScripts.Cleanup(T.Linux(), "j", "2");
+        var s = RemoteScripts.Cleanup(T.Linux(), "j", "2", T.RepoId);
         Assert.Contains("worktree remove --force", s, StringComparison.Ordinal);
         Assert.Contains("slot-2", s, StringComparison.Ordinal);
         Assert.Contains(".bundle", s, StringComparison.Ordinal);
@@ -54,7 +54,7 @@ public class ScriptTests
 
     [Fact]
     public void CleanupRejectsNonNumericSlot() =>
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", "1; rm -rf /"));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", "1; rm -rf /", T.RepoId));
 
     [Theory]
     [InlineData("SLOT=2\n", "2")]

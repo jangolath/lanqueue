@@ -40,6 +40,10 @@ public class ConfigTests
     [InlineData("work_root: /srv/lanq", "work_root: relative/path")]
     [InlineData("max_jobs: 2", "max_jobs: 0")]
     [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: \"nonsense\"")]
+    [InlineData("ssh: user@build-01.lan", "ssh: \"user@build-01.lan\\n\"")] // "$" would match before a trailing newline; "\z" does not
+    [InlineData("name: build-01", "name: \"build-01\\n\"")]
+    [InlineData("work_root: /srv/lanq", "work_root: \"/srv/lanq\\n\"")]
+    [InlineData("work_root: D:/lanq", "work_root: \"D:/lanq\\n\"")]
     public void UnsafeValuesAreRejected(string from, string to) =>
         Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace(from, to, StringComparison.Ordinal)));
 
@@ -130,5 +134,59 @@ public class ConfigTests
     {
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace("22:00-07:00", window, StringComparison.Ordinal)));
         Assert.Contains("start and end", ex.Message, StringComparison.Ordinal);
+    }
+
+    private const char NL = (char)10;
+
+    private static string WithPolicy(string line) => T.Yaml.Replace("load_threshold: 0.8", "load_threshold: 0.8" + NL + "  " + line, StringComparison.Ordinal);
+
+    private static string WithLinuxMachine(string line) => T.Yaml.Replace("max_jobs: 2", "max_jobs: 2" + NL + "    " + line, StringComparison.Ordinal);
+
+    [Fact]
+    public void MemoryPolicyDefaultsAndOverrides()
+    {
+        Assert.Equal(1.0, T.Config().Policy.MinFreeMemGb);
+        Assert.Equal(20, T.Config().Policy.MaxMemPressure);
+        Assert.Null(T.Linux().MinFreeMemGb);
+        Assert.Equal(2.5, ConfigLoader.Parse(WithPolicy("min_free_mem_gb: 2.5")).Policy.MinFreeMemGb);
+        Assert.Equal(40, ConfigLoader.Parse(WithPolicy("max_mem_pressure: 40")).Policy.MaxMemPressure);
+        Assert.Equal(0.5, ConfigLoader.Parse(WithLinuxMachine("min_free_mem_gb: 0.5")).Machines[0].MinFreeMemGb);
+    }
+
+    [Theory]
+    [InlineData("min_free_mem_gb: -1", "min_free_mem_gb")]
+    [InlineData("min_free_mem_gb: .nan", "min_free_mem_gb")]
+    [InlineData("max_mem_pressure: -5", "max_mem_pressure")]
+    [InlineData("max_mem_pressure: 101", "max_mem_pressure")]
+    public void BadMemoryPolicyIsRefused(string line, string named)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WithPolicy(line)));
+        Assert.Contains(named, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NegativeMachineMinFreeMemIsRefused()
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WithLinuxMachine("min_free_mem_gb: -0.5")));
+        Assert.Contains("min_free_mem_gb", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExampleShowsAFamilyPcUsingEveryWorkerSetting()
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "machines.example.yml")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        var path = Path.Combine(dir!, "machines.example.yml");
+        var family = Assert.Single(ConfigLoader.Load(path).Machines, m => m.Name == "family-pc");
+        Assert.True(family.AllowedHours!.Count > 1);
+        Assert.Equal(JobPriority.Low, family.Priority);
+        Assert.NotNull(family.MinFreeMemGb);
+        Assert.Contains("NODE_OPTIONS", family.Env.Keys);
+        Assert.NotEmpty(family.PathPrepend);
+        Assert.Contains("PAUSE", File.ReadAllText(path), StringComparison.Ordinal);
     }
 }
