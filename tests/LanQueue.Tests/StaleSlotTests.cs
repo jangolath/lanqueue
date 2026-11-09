@@ -154,6 +154,49 @@ public sealed class StaleSlotTests : IDisposable
         Assert.Equal(["slot-1", "slot-1.reclaim"], LockFiles());
     }
 
+    /// <summary>
+    /// A reclaimer only ever removes its OWN lock: if, by the time it is done, the lock file holds someone else's token (its lock was
+    /// renamed away by a stale-lock clearer and another reclaimer created a new one), that lock is left alone. Here a fake readlink, which
+    /// stop_job calls in the middle of the reclaim, plays the other reclaimer and replaces the lock.
+    /// </summary>
+    [LinuxFact]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void AReclaimerNeverRemovesSomeoneElsesLockSh()
+    {
+        WriteSlot(1, Lines("orphan-job", Now - RemoteScripts.StaleSlotGraceSeconds - 60));
+        File.WriteAllText(Path.Combine(_root, "locks", "job-orphan-job.pid"), "1\n"); // /proc/1 exists, so stop_job asks readlink
+        var bin = Path.Combine(_root, "fake-bin");
+        Directory.CreateDirectory(bin);
+        var lockFile = Slot(1) + ".reclaim";
+        File.WriteAllText(Path.Combine(bin, "readlink"), "#!/bin/sh\nprintf 'someone-else\\n' > '" + lockFile + "'\necho /nowhere\n");
+        File.SetUnixFileMode(Path.Combine(bin, "readlink"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        var env = new Dictionary<string, string> { ["PATH"] = bin + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH") };
+        Shells.Run("linux", RemoteScripts.AcquireSlot(Worker("linux", 1), "new-job", TimeSpan.FromMinutes(10)), env);
+
+        Assert.True(File.Exists(lockFile), "the other reclaimer's lock was removed");
+        Assert.Equal("someone-else\n", File.ReadAllText(lockFile));
+    }
+
+    [ShFact]
+    public void DropRemovesOnlyItsOwnLockSh() => DropRemovesOnlyItsOwnLock("linux");
+
+    [PowerShellFact]
+    public void DropRemovesOnlyItsOwnLockPowerShell() => DropRemovesOnlyItsOwnLock("windows");
+
+    private void DropRemovesOnlyItsOwnLock(string shell)
+    {
+        var f = Slot(1).Replace('\\', '/');
+        var script = shell == "linux"
+            ? "R='" + _root + "'\n" + RemoteScripts.LinuxSlotFunctions + "\nf='" + f + "'\ntake \"$f\" || exit 9\nprintf 'mine\\n' >/dev/null\ndrop \"$f\"; [ -e \"$f.reclaim\" ] && echo own-kept\ntake \"$f\" || exit 9\nprintf 'someone-else\\n' > \"$f.reclaim\"\ndrop \"$f\"; cat \"$f.reclaim\"; ls \"" + _root + "/locks\"\n"
+            : "$root = '" + _root + "'\n" + RemoteScripts.WindowsSlotFunctions + "\n$f = '" + f + "'\nif (-not (Take $f)) { exit 9 }\nDrop $f; if (Test-Path -LiteralPath \"$f.reclaim\") { 'own-kept' }\nif (-not (Take $f)) { exit 9 }\n[IO.File]::WriteAllText(\"$f.reclaim\", \"someone-else`n\")\nDrop $f; [IO.File]::ReadAllText(\"$f.reclaim\"); (Get-ChildItem -Name -LiteralPath \"$root/locks\") -join \"`n\"\n";
+        var (code, output) = Shells.Run(shell, script);
+        Assert.True(code == 0, output);
+        Assert.DoesNotContain("own-kept", output, StringComparison.Ordinal); // its own lock is removed
+        Assert.Contains("someone-else", output, StringComparison.Ordinal); // someone else's is not
+        Assert.Equal(["slot-1.reclaim"], LockFiles()); // and no leftovers
+    }
+
     /// <summary>A reclaim lock left by a reclaimer that died (older than ten minutes) does not block the slot for ever.</summary>
     /// <summary>
     /// The race in clearing an abandoned lock: it looked old, but by the time it is renamed away a live reclaimer's fresh lock is in its

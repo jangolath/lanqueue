@@ -145,18 +145,27 @@ public static class RemoteScripts
     /// stripped, so "08" is 8 and never octal) and fails unless it is 1 to 18 digits. <c>take</c> creates the slot's lock file exclusively
     /// (set -C), first clearing one older than ten minutes (a reclaimer that died): the old lock is renamed to a unique name
     /// (atomic, so one clearer wins) and checked again there; if what was renamed turns out to be fresh (a live reclaimer's lock that
-    /// replaced the old one in between), a lock is put back in its place, so the live reclaimer keeps the slot to itself. <c>stop_job</c> stops a stale slot's job if it is still
+    /// replaced the old one in between), it is put back with its owner's token. Every lock holds its creator's unique token, and <c>drop</c>
+    /// removes a lock only after renaming it away and finding its own token in it (otherwise it puts it back), so a reclaimer never removes
+    /// another one's lock. sh has no atomic compare-and-delete, so a narrow window remains (see SECURITY.md). <c>stop_job</c> stops a stale slot's job if it is still
     /// running: it reads locks/job-ID.pid and kills that process group only when /proc shows the process working inside that job's folder
     /// (so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
     /// </summary>
     internal const string LinuxSlotFunctions = """
         deadline_of() { d=$(printf '%s\n' "$1" | sed -n 2p); case "$d" in ''|*[!0-9]*) return 1 ;; esac; [ ${#d} -le 18 ] || return 1; d=$(printf '%s' "$d" | sed 's/^0*//'); echo "${d:-0}"; }
+        tok="$$.$(date +%s).$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
         take() {
           k="$1.reclaim"; o="$k.old.$$"
           if [ -n "$(find "$k" -mmin +10 2>/dev/null)" ] && mv "$k" "$o" 2>/dev/null; then
-            if [ -n "$(find "$o" -mmin +10 2>/dev/null)" ]; then rm -f "$o"; else ( set -C; : > "$k" ) 2>/dev/null; rm -f "$o"; fi
+            if [ -n "$(find "$o" -mmin +10 2>/dev/null)" ]; then rm -f "$o"; else ( set -C; cat "$o" > "$k" ) 2>/dev/null; rm -f "$o"; fi
           fi
-          ( set -C; : > "$k" ) 2>/dev/null
+          ( set -C; printf '%s\n' "$tok" > "$k" ) 2>/dev/null
+        }
+        drop() {
+          k="$1.reclaim"; o="$k.drop.$$"
+          [ "$(cat "$k" 2>/dev/null)" = "$tok" ] && mv "$k" "$o" 2>/dev/null || return 0
+          if [ "$(cat "$o" 2>/dev/null)" != "$tok" ]; then ( set -C; cat "$o" > "$k" ) 2>/dev/null; fi
+          rm -f "$o"
         }
         stop_job() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
@@ -174,24 +183,35 @@ public static class RemoteScripts
         """;
 
     /// <summary>
-    /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file (CreateNew; one older than ten minutes is
-    /// cleared first), and <c>StopJob</c>, which kills a stale slot's still-running job (wrapper and child, with their trees) through
+    /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file the same way as the sh ones (CreateNew with a
+    /// unique token; an abandoned lock renamed away and put back if fresh; Drop removes only a lock that still holds its own token), and <c>StopJob</c>, which kills a stale slot's still-running job (wrapper and child, with their trees) through
     /// <see cref="WindowsKillRecorded"/>: only processes whose pid AND start time match what the job recorded.
     /// </summary>
     internal const string WindowsSlotFunctions = """
+        $tok = "$PID." + [guid]::NewGuid().ToString('N')
         function Take([string]$f) {
           $k = "$f.reclaim"
           $o = "$k.old.$PID"; $old = [DateTime]::UtcNow.AddMinutes(-10)
           try {
             if ((Test-Path -LiteralPath $k) -and [IO.File]::GetLastWriteTimeUtc($k) -lt $old) {
               [IO.File]::Move($k, $o)
-              if ([IO.File]::GetLastWriteTimeUtc($o) -ge $old) { try { [IO.File]::Open($k, 'CreateNew', 'Write', 'None').Close() } catch { } }
-              [IO.File]::Delete($o)
+              if ([IO.File]::GetLastWriteTimeUtc($o) -ge $old) { try { [IO.File]::Move($o, $k) } catch { } }
+              if (Test-Path -LiteralPath $o) { [IO.File]::Delete($o) }
             }
           } catch { }
-          try { [IO.File]::Open($k, 'CreateNew', 'Write', 'None').Close(); $true } catch { $false }
+          try {
+            $s = [IO.File]::Open($k, 'CreateNew', 'Write', 'None'); $b = [Text.Encoding]::ASCII.GetBytes($tok); $s.Write($b, 0, $b.Length); $s.Close(); $true
+          } catch { $false }
         }
-        function Drop([string]$f) { try { [IO.File]::Delete("$f.reclaim") } catch { } }
+        function Drop([string]$f) {
+          $k = "$f.reclaim"; $o = "$k.drop.$PID"
+          try {
+            if ([IO.File]::ReadAllText($k) -cne $tok) { return }
+            [IO.File]::Move($k, $o)
+            if ([IO.File]::ReadAllText($o) -cne $tok) { try { [IO.File]::Move($o, $k) } catch { } }
+            if (Test-Path -LiteralPath $o) { [IO.File]::Delete($o) }
+          } catch { }
+        }
         function StopJob([string]$j) {
           if ($j -cnotmatch '^[A-Za-z0-9_-]{1,64}\z') { return }
           $kp = "$root/locks/job-$j.pid"
@@ -284,7 +304,7 @@ public static class RemoteScripts
                         stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
                         mv "$f" "$f.stale.$$" 2>/dev/null && rm -f "$f.stale.$$"
                       fi
-                      rm -f "$f.reclaim"
+                      drop "$f"
                     fi
                   fi
                   if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
@@ -426,7 +446,7 @@ public static class RemoteScripts
               else
                 echo "KEPT=$n changed"
               fi
-              rm -f "$f.reclaim"
+              drop "$f"
             done
             """,
     };

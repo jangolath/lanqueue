@@ -104,7 +104,8 @@ Transfer and supply chain:
   + 40 minutes for transfer and cleanup). When a job looks for a slot, a slot more than 30 minutes past its deadline
   (left by a crashed or killed `lanq`) is reclaimed: under an exclusive lock file `slot-N.reclaim` (one older than ten
   minutes, left by a reclaimer that died, is renamed away and checked again, and put back if it turns out to be a
-  live reclaimer's fresh lock) the slot is read again, and only if it is still that stale file
+  live reclaimer's fresh lock; each lock holds its creator's unique token, and a reclaimer removes only a lock that
+  still holds its own) the slot is read again, and only if it is still that stale file
   is it renamed away to a unique name, deleted and created afresh like a free slot (if another job wins it, the next
   slot is tried; nothing is ever put back, and no hard links are needed). If the stale slot's job is somehow still
   running (its `locks/job-<id>.pid` names a live process: on Linux one whose working folder is in that job's folder,

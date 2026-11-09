@@ -60,6 +60,13 @@ same worker user could change the cache in between. That user is already trusted
 guard against a planted cache, not against a concurrent attacker with the same rights. The repository's own committed `.gitattributes` still apply, but they can only name
 filter drivers, which are defined in config that lanq no longer reads.
 
+Slot files on a worker are coordinated with per-slot lock files that each hold their creator's unique token; a
+lanq process removes a lock only after renaming it away and finding its own token in it. On Linux this is done with
+`mv`, `cat` and `set -C`, which give no atomic compare-and-delete: if a reclaimer that held a lock for more than ten
+minutes is overtaken by two others at the same moment, two of them can briefly both believe they hold it. The worst
+outcome is that one slot is reclaimed twice, so one extra job may start beside another; no file outside the
+`work_root` locks folder is affected.
+
 It does not:
 - sandbox the allowlisted program (it runs with the remote user's rights; use a low-privilege account);
 - guarantee that no secret leaves your machine (the scan is pattern-based);
