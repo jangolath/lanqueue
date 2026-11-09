@@ -97,9 +97,84 @@ public sealed partial class SupplyChainTests
             ? n is YamlSequenceNode s ? s.Select(x => ((YamlScalarNode)x).Value!).ToList() : [((YamlScalarNode)n).Value!]
             : [];
 
+    private static IEnumerable<(string Job, YamlMappingNode Step)> Steps(YamlMappingNode workflow) =>
+        Map(workflow, "jobs").Children.SelectMany(c =>
+            ((YamlMappingNode)c.Value).Children.TryGetValue(new YamlScalarNode("steps"), out var s)
+                ? ((YamlSequenceNode)s).Cast<YamlMappingNode>().Select(step => (((YamlScalarNode)c.Key).Value!, step))
+                : []);
+
+    public static TheoryData<string> Workflows() =>
+        new(Directory.GetFiles(Path.Combine(FindRoot(), ".github", "workflows"), "*.yml").Select(f => Path.GetFileName(f)));
+
+    /// <summary>No ${{ }} inside a run: block: a ref name or step output there is pasted into the shell as code. Pass values via env:.</summary>
     [Theory]
-    [InlineData("ci.yml")]
-    [InlineData("release.yml")]
+    [MemberData(nameof(Workflows))]
+    public void NoExpressionIsInterpolatedIntoAShellScript(string workflow)
+    {
+        foreach (var (job, step) in Steps(Workflow(workflow)))
+        {
+            Assert.False(Scalar(step, "run")?.Contains("${{", StringComparison.Ordinal) == true, $"{workflow}: a run: step of job {job} interpolates an expression; pass it through env:");
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Workflows))]
+    public void EveryCheckoutDropsItsCredentials(string workflow)
+    {
+        foreach (var (job, step) in Steps(Workflow(workflow)).Where(s => Scalar(s.Step, "uses")?.StartsWith("actions/checkout@", StringComparison.Ordinal) == true))
+        {
+            Assert.True(Scalar(Map(step, "with"), "persist-credentials") == "false", $"{workflow}: checkout in job {job} must set persist-credentials: false");
+        }
+    }
+
+    [Fact]
+    public void ReleaseRunsAreSerialisedPerRefAndNeverCancelled()
+    {
+        var concurrency = Map(Workflow("release.yml"), "concurrency");
+        Assert.Equal("release-${{ github.ref }}", Scalar(concurrency, "group"));
+        Assert.Equal("false", Scalar(concurrency, "cancel-in-progress"));
+    }
+
+    [Fact]
+    public void TheVersionIsValidatedAndPrereleasesAreClassifiedByScript()
+    {
+        var workflow = Workflow("release.yml");
+        var ver = Steps(workflow).Single(s => s.Job == "pack" && Scalar(s.Step, "id") == "ver").Step;
+        Assert.Contains("scripts/release-version.sh", Scalar(ver, "run"), StringComparison.Ordinal);
+        var outputs = Map(Map(Map(workflow, "jobs"), "pack"), "outputs");
+        Assert.Equal("${{ steps.ver.outputs.version }}", Scalar(outputs, "version"));
+        Assert.Equal("${{ steps.ver.outputs.prerelease }}", Scalar(outputs, "prerelease"));
+        var publishRuns = string.Join('\n', Steps(workflow).Where(s => s.Job == "publish").Select(s => Scalar(s.Step, "run") ?? ""));
+        Assert.Contains("scripts/release-draft.sh draft", publishRuns, StringComparison.Ordinal);
+        Assert.Contains("scripts/release-draft.sh publish", publishRuns, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("release.yml", "pack")]
+    [InlineData("ci.yml", "aot-linux")]
+    public void BuildsFailWhenTheInstalledRuntimeIsNewerThanThePin(string workflow, string job)
+    {
+        var runs = string.Join('\n', Steps(Workflow(workflow)).Where(s => s.Job == job).Select(s => Scalar(s.Step, "run") ?? ""));
+        Assert.Contains("dotnet --list-runtimes", runs, StringComparison.Ordinal);
+        Assert.Contains("scripts/check-runtime-pin.sh installed", runs, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AWeeklyWorkflowComparesThePinWithTheLatestDotnetRelease()
+    {
+        Assert.True(File.Exists(Path.Combine(Root, ".github", "workflows", "runtime-pin.yml")), "runtime-pin.yml is missing");
+        var workflow = Workflow("runtime-pin.yml");
+        Assert.True(Map(workflow, "on").Children.TryGetValue(new YamlScalarNode("schedule"), out var schedule) && schedule is YamlSequenceNode { Children.Count: > 0 });
+        var permissions = Map(workflow, "permissions");
+        Assert.Equal("read", Scalar(permissions, "contents"));
+        Assert.Single(permissions.Children);
+        var runs = string.Join('\n', Steps(workflow).Select(s => Scalar(s.Step, "run") ?? ""));
+        Assert.Contains("releases.json", runs, StringComparison.Ordinal);
+        Assert.Contains("scripts/check-runtime-pin.sh latest", runs, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(Workflows))]
     public void EveryJobHasATimeout(string workflow)
     {
         foreach (var (name, job) in Map(Workflow(workflow), "jobs").Children.Select(c => (((YamlScalarNode)c.Key).Value, (YamlMappingNode)c.Value)))
@@ -137,10 +212,10 @@ public sealed partial class SupplyChainTests
             Assert.True(Scalar(Map(job, "permissions"), "contents") is null or "read", $"job {name} must not write contents");
         }
 
-        var publish = File.ReadAllText(Path.Combine(Root, ".github", "workflows", "release.yml"));
-        var draft = publish.IndexOf("--draft --title", StringComparison.Ordinal);
-        var push = publish.IndexOf("dotnet nuget push", StringComparison.Ordinal);
-        var undraft = publish.IndexOf("--draft=false", StringComparison.Ordinal);
+        var publish = Steps(Workflow("release.yml")).Where(s => s.Job == "publish").Select(s => Scalar(s.Step, "run") ?? "").ToList();
+        var draft = publish.FindIndex(r => r.Contains("scripts/release-draft.sh draft", StringComparison.Ordinal));
+        var push = publish.FindIndex(r => r.Contains("dotnet nuget push", StringComparison.Ordinal));
+        var undraft = publish.FindIndex(r => r.Contains("scripts/release-draft.sh publish", StringComparison.Ordinal));
         Assert.True(draft > 0 && push > draft && undraft > push, "publish must draft the release, then push to nuget.org, then make the release public");
 
         // The attestation covers every asset users download, not only the package.

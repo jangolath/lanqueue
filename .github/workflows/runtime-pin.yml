@@ -1,0 +1,35 @@
+name: runtime-pin
+# Weekly: fails when .NET has shipped a 10.0 runtime patch newer than LanqRuntimePackVersion (the runtime compiled into the native
+# binaries), so a .NET security fix does not go unnoticed. Also reports the age of the digest-pinned build images, which Dependabot
+# cannot update (see RELEASING.md, "Native binaries and the pinned runtime").
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Report the pinned build images (informational)
+        continue-on-error: true
+        run: |
+          grep -o -E '[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' .github/workflows/release.yml | sort -u | while read -r ref; do
+            name=${ref%@*}
+            created=$(skopeo inspect --no-tags "docker://$ref" 2>/dev/null | sed -n 's/^ *"Created": "\([^"]*\)".*/\1/p' | head -n 1)
+            current=$(skopeo inspect --no-tags "docker://$name" 2>/dev/null | sed -n 's/^ *"Digest": "\([^"]*\)".*/\1/p' | head -n 1)
+            if [ -n "$current" ] && [ "$current" != "${ref#*@}" ]; then
+              echo "::notice::$name has a newer digest than the pin (pinned image created ${created:-unknown}); refresh it with the next runtime bump"
+            else
+              echo "$name: pin is the current digest (created ${created:-unknown})"
+            fi
+          done
+      - name: The runtime pin is not behind the latest .NET 10 patch
+        run: |
+          curl -fsSL --retry 3 https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json -o "$RUNNER_TEMP/releases.json"
+          sh scripts/check-runtime-pin.sh latest "$RUNNER_TEMP/releases.json" src/LanQueue/LanQueue.csproj

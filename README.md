@@ -109,7 +109,9 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
 `https://github.com/jangolath/lanqueue/releases/download/v0.5.0/lanq.json`. Scoop checks each zip against the hash in
-the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation.
+the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
+(tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
+`latest` URL never installs one.
 
 ### .NET tool
 

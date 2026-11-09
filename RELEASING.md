@@ -20,9 +20,13 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
 ## Cutting a release
 
 1. Make sure `main` is green.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0` (the version is the tag without `v`).
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0` (the version is the tag without `v`). The tag must be
+   `v` + strict semver (`scripts/release-version.sh` refuses anything else, including build metadata such as `+abc`). A
+   tag with a pre-release part, such as `v0.5.0-rc.1`, becomes a GitHub **prerelease** that is never marked latest, so
+   `releases/latest` (and the Scoop URL) keep serving the last stable release; nuget.org lists it as a prerelease too.
 3. Watch the `release` run in the Actions tab. In order:
-   - `pack` builds with warnings as errors, runs the tests and packs the `.nupkg`;
+   - `pack` checks the runtime pin against the SDK's runtime, validates and classifies the version, builds with
+     warnings as errors, runs the tests and packs the `.nupkg`;
    - `native` publishes one NativeAOT binary per target (win-x64 and win-arm64 on Windows, osx-arm64 on macOS, linux-x64
      and linux-arm64 inside Microsoft's .NET 10 cross-build images against their glibc 2.27 sysroot), packages it and
      smoke-tests it where the runner can run it (`scripts/smoke-native.sh`);
@@ -33,8 +37,13 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    - `publish` (after any `nuget-release` approval) creates a **draft** GitHub Release with every asset, pushes the
      package to nuget.org with `--skip-duplicate`, then makes the release public.
 
-   If anything fails before `publish`, nothing is published. If `publish` fails part-way, re-run it: it reuses its own
-   draft (replacing the assets), and the NuGet push skips a version that is already there. Check an asset with
+   If anything fails before `publish`, nothing is published. After any failure use **Re-run failed jobs**, never
+   **Re-run all jobs**: re-running everything would rebuild every binary, and the new build's `SHA256SUMS` would no
+   longer match a draft the first attempt left, so `publish` would refuse it. `publish` (`scripts/release-draft.sh`)
+   reuses an existing draft only when the draft is empty or holds the same `SHA256SUMS` as the assets being published,
+   and never touches a published release; the NuGet push skips a version that is already there. If it refuses a stale
+   draft, check it, delete it (`gh release delete <tag> --repo jangolath/lanqueue`, which keeps the tag) and re-run.
+   Runs for the same tag are queued (workflow `concurrency`), never cancelled. Check an asset with
    `gh attestation verify <file> --repo jangolath/lanqueue` (see "Verify a release" in the README).
 
 To rehearse, run the `release` workflow manually (workflow_dispatch): it runs every job up to `assemble`, so every
@@ -52,6 +61,19 @@ patch a machine has. Bump it when .NET ships a patch, especially a security one 
 runtime): set the new `10.0.x`, then run `dotnet restore --force-evaluate` and
 `dotnet restore src/LanQueue -p:LanqNative=true --force-evaluate`, run the tests, and commit the project and both lock
 files together. Dependabot does not see these implicit packages.
+
+Nothing lets the pin fall behind silently: `scripts/check-runtime-pin.sh` fails the release's `pack` job and the CI
+`aot-linux` job when the SDK they install carries a newer `Microsoft.NETCore.App` 10.0 patch than the pin, and the weekly
+`runtime-pin` workflow fails when Microsoft's `releases.json` lists one. So when .NET ships a patch, CI turns red until the
+pin is bumped. Checklist for a bump:
+
+1. Set `LanqRuntimePackVersion` to the new `10.0.x`; refresh both lock files as above.
+2. Refresh the digest-pinned images in `.github/workflows/release.yml` (Dependabot cannot): the two .NET cross-build
+   images and the Ubuntu 18.04 smoke image. Get the current digest with
+   `docker buildx imagetools inspect <image>:<tag>` and replace the `@sha256:` part. The weekly `runtime-pin` run prints
+   a notice for each pinned image that has a newer digest.
+3. Run the tests and a manual `release` run (workflow_dispatch) to build and smoke-test every binary, then commit
+   everything together.
 
 ## Updating the embedded lanq-makeready
 

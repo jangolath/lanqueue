@@ -25,11 +25,25 @@ Native binaries: `lanq` without the .NET SDK.
   State files written by 0.4 read unchanged.
 - **Release order:** nothing is published unless every binary built and passed its smoke test. The publish job puts
   all assets on a draft GitHub release, pushes the package to nuget.org, then makes the release public; a re-run after
-  a failure reuses the draft. A manual (dry) run builds and smoke-tests everything and publishes nothing.
+  a failure reuses the draft only when it is empty or holds the same `SHA256SUMS` (`scripts/release-draft.sh`); a
+  stale draft or a published release is refused. Runs for one tag are queued, never cancelled. A manual (dry) run
+  builds and smoke-tests everything and publishes nothing.
+- **Tags are validated:** the version must be strict semver (`scripts/release-version.sh`, no build metadata) and is
+  passed to every step through `env:`, never pasted into a shell script. A tag with a pre-release part
+  (`v0.5.0-rc.1`) becomes a GitHub prerelease that is never marked latest, so the Scoop `latest` URL never serves a
+  release candidate. Workflow checkouts no longer keep the token (`persist-credentials: false`).
+- **Friendlier config errors.** A key left without a value (`max_jobs: ~`, a bare `os:`, `machines: ~`, `policy: ~`,
+  `env: ~`), an empty list entry (`allowed_commands: [x, ~]`, `""`), a file that is not a mapping, or a duplicate key
+  is now a config error that names the key and line, instead of a crash or a cryptic message; `--json` still prints its
+  one object. `os:` accepts only the words `windows` or `linux` (a number such as `os: 1` was read as an enum value
+  before). Only `allowed_hours`, `key_env` and a machine's `min_free_mem_gb` may be left empty, meaning "not set". A
+  YAML alias (`allowed_hours: *night`) works.
 - **CI** publishes and smoke-tests a linux-x64 native binary on every pull request, so AOT breakage shows up there.
 - The .NET runtime patch compiled into the binaries, and the trim/AOT analyzer package, are pinned
   (`LanqRuntimePackVersion`, 10.0.14) so builds and lock files do not move with the SDK patch; the native publish
-  restores in locked mode against its own `packages.native.lock.json`.
+  restores in locked mode against its own `packages.native.lock.json`. `scripts/check-runtime-pin.sh` fails the release
+  and the CI AOT job when the SDK carries a newer 10.0 runtime than the pin, and a weekly `runtime-pin` workflow fails
+  when Microsoft has shipped one, so a .NET security patch cannot be left out of the binaries unnoticed.
 
 ## 0.4.0 (2026-11-09)
 

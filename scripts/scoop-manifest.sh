@@ -7,8 +7,10 @@ set -eu
 
 version=${1:-}
 sums=${2:-}
-# Plain semver (an optional pre-release), so the version is safe inside both the JSON and the URLs.
-if ! printf '%s\n' "$version" | grep -q -E '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || [ "$(printf '%s\n' "$version" | wc -l)" -ne 1 ]; then
+# Strict semver (an optional pre-release, no build metadata), as in scripts/release-version.sh, so the version is safe inside both the
+# JSON and the URLs.
+semver='^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?$'
+if ! printf '%s\n' "$version" | grep -q -E "$semver" || [ "$(printf '%s\n' "$version" | wc -l)" -ne 1 ]; then
   echo "usage: scripts/scoop-manifest.sh <version, for example 0.5.0> <SHA256SUMS file>" >&2
   exit 2
 fi

@@ -80,6 +80,11 @@ outcome is that one slot is reclaimed twice, so one extra job may start beside a
   channel you trust. An attestation shows where and how a file was built, not that it is free of bugs.
 - Nothing is published unless every native binary built and passed its smoke test; the release is created as a draft,
   the package pushed to nuget.org (behind the `nuget-release` environment), and only then is the release made public.
+  A re-run reuses a draft only if it holds the same `SHA256SUMS`. Tags must be strict semver and reach the jobs only
+  through `env:`; a pre-release tag becomes a GitHub prerelease that is never marked latest. Checkouts do not keep the
+  workflow token.
+- The pinned .NET runtime cannot fall behind silently: CI and the release fail when the SDK carries a newer 10.0
+  patch, and a weekly workflow fails when Microsoft's `releases.json` lists one.
 - The Scoop manifest pins exact versioned URLs and SHA-256 hashes, and Scoop refuses a zip whose hash differs.
   Installing from the `releases/latest` URL means each `scoop update` trusts whatever manifest the latest release
   carries, which is the same trust as downloading the latest release by hand.
