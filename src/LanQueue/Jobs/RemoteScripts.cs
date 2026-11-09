@@ -33,7 +33,7 @@ public static class RemoteScripts
             $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
             if ($null -eq $cpu) { $cpu = 0 }
             $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
-            $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue).Count
+            $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+$' }).Count
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
             'slots_used=' + $slots
@@ -50,7 +50,7 @@ public static class RemoteScripts
             d="$R"; [ -d "$d" ] || d=/
             echo "load=$(awk -v l="$l" -v c="$cpus" 'BEGIN{printf "%.3f", l/c}')"
             echo "disk_free_gb=$(df -Pk "$d" | awk 'NR==2{printf "%.1f", $4/1048576}')"
-            echo "slots_used=$(ls -d "$R"/locks/slot-* 2>/dev/null | wc -l | tr -d ' ')"
+            echo "slots_used=$(ls "$R/locks" 2>/dev/null | grep -c '^slot-[0-9][0-9]*$')"
             awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
             if [ -e "$R/PAUSE" ]; then echo paused=1; else echo paused=0; fi

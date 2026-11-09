@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using LanQueue.Config;
+using LanQueue.Health;
 using LanQueue.Jobs;
 using Xunit;
 
@@ -26,17 +27,36 @@ public sealed class StaleSlotTests : IDisposable
 
     private static string Lines(params object[] parts) => string.Join('\n', parts.Select(p => Convert.ToString(p, CultureInfo.InvariantCulture))) + "\n";
 
-    /// <returns>The script output, or null when this machine has no such shell.</returns>
-    private string? Acquire(string shell, string jobId, TimeSpan timeout)
+    private Machine Worker(string shell) => new()
     {
-        var m = new Machine
+        Name = "w",
+        Os = shell == "windows" ? MachineOs.Windows : MachineOs.Linux,
+        WorkRoot = _root,
+        MaxJobs = 2,
+    };
+
+    /// <returns>The script output, or null when this machine has no such shell.</returns>
+    private string? Acquire(string shell, string jobId, TimeSpan timeout) => RunScript(shell, RemoteScripts.AcquireSlot(Worker(shell), jobId, timeout));
+
+    [Theory]
+    [MemberData(nameof(Shells))]
+    public void ProbeDoesNotCountTheTransientFileOfAReclaimAsAUsedSlot(string shell)
+    {
+        WriteSlot(1, Lines("live-job", Now + 3600));
+        File.WriteAllText(Slot(2) + ".stale.4242", Lines("crashed-job", Now - 7200)); // mid-reclaim: renamed away, about to be deleted
+
+        var output = RunScript(shell, RemoteScripts.Probe(Worker(shell)));
+        if (output is null)
         {
-            Name = "w",
-            Os = shell == "windows" ? MachineOs.Windows : MachineOs.Linux,
-            WorkRoot = _root,
-            MaxJobs = 2,
-        };
-        var script = RemoteScripts.AcquireSlot(m, jobId, timeout);
+            return;
+        }
+
+        Assert.Equal("1", HealthProbe.Parse(output)["slots_used"]);
+    }
+
+    /// <returns>The script output, or null when this machine has no such shell.</returns>
+    internal static string? RunScript(string shell, string script)
+    {
         if (shell == "linux")
         {
             return OnPath("sh") ? Exec("sh", "-c", script) : null;
