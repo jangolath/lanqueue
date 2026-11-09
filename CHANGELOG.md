@@ -72,11 +72,13 @@
   separate, sanitised diagnostic.
 - A job that timed out or was stopped by its window is stopped on the worker (recorded process group on Linux, pid
   and start time on Windows) before its files are fetched.
-- The Linux job wrapper now records the group leader's start time (field 22 of `/proc/PID/stat`) next to its process
-  group. Cleanup, that stop and stale-slot reclaim share one kill: the group is signalled only when the leader still
-  has that start time, or the leader is gone but the group lives on (Linux never reuses a pid while a group of that
-  number exists), so leftover group members are killed and a reused pid is left alone. A pid file without a start time,
-  or a worker without /proc, falls back to the leader's cwd inside the job folder, or `ps -o pgid=`.
+- The Linux job wrapper now records the group leader's start time (field 22 of `/proc/PID/stat`) and the boot id
+  (`/proc/sys/kernel/random/boot_id`) next to its process group, and every job runs with `LANQ_JOB=<job id>` in its
+  environment (Windows jobs get it too; `env:` names starting with `LANQ_` are now refused as reserved). Cleanup, that stop and stale-slot reclaim share one kill. It acts only in the
+  boot the pid file was written in, and then signals the group only when the leader still has that start time, or the
+  leader is gone and a live member of the group carries this job's `LANQ_JOB`. So leftover job processes are killed,
+  and a pid or group number reused by another program (after a reboot, say) is left alone. A pid file without a start
+  time, or a worker without /proc, falls back to the leader's cwd inside the job folder, or `ps -o pgid=`.
 - Caps: 500 files and 200 MB by default, `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (up to 2G); what
   fits is fetched in sorted order and the rest is listed.
 - The fetch has its own 10-minute limit and never runs more than 2 minutes past a machine's allowed hours plus grace.
