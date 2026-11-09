@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+- **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the
+  typographic quotes U+201A and U+201B as single quotes. They were not escaped, so an argument containing one could
+  close the string and run code on a Windows worker. All five single-quote characters are now doubled, checked by a
+  round trip through a real `powershell.exe` in the tests.
+- **Security: terminal escapes.** Output from a worker is untrusted. Control characters (C0 except tab, DEL, C1) are
+  now shown as `?` on the console and in the job log, so a job cannot move the cursor, clear the screen or retitle
+  the window. The same applies to the error line `lanq health` prints.
+- **ssh hardening.** ssh and scp always pass `ForwardAgent=no`, `ClearAllForwardings=yes` and
+  `PermitLocalCommand=no`, whatever `~/.ssh/config` says.
+- **Timeouts.** A job that runs past its limit now ends with exit code `124` and "timed out after N min" instead of
+  being reported as an SSH failure (`70`). New `lanq run --timeout <minutes>` (default 240).
+- **Bounded memory.** A long job no longer keeps all of its output in memory: only the last 64 KB is kept (the full
+  output still streams to the console and the log), and a single line longer than 16 KB is cut with a marker.
+- **Faster health checks.** `lanq health` and `lanq run` probe all machines at once instead of one after another;
+  output order is unchanged.
+- `allowed_hours` with the same start and end (for example `"22:00-22:00"`) is now a config error instead of a
+  window that matches a single minute.
+
 ## 0.3.0
 
 - **Archive transfer mode.** A machine can set `transfer: archive` in `machines.yml` (default stays `git`, the
