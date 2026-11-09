@@ -31,6 +31,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>--yes: confirms a destructive option such as unlock --all.</summary>
     public bool Yes { get; init; }
 
+    /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
+    public bool Remote { get; init; }
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
@@ -38,6 +41,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
+        ["doctor"] = ["--remote"],
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
@@ -58,6 +62,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var json = false;
         var all = false;
         var yes = false;
+        var remote = false;
         string? target = null;
         var seen = new List<string>();
         var command = own.Length > 0 ? own[0] : "help";
@@ -107,6 +112,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--yes":
                     yes = true;
                     break;
+                case "--remote":
+                    remote = true;
+                    break;
                 default:
                     if (TakesTarget.Contains(command) && target is null && !own[i].StartsWith('-'))
                     {
@@ -123,7 +131,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes };
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote };
     }
 }
 
@@ -136,12 +144,15 @@ public static partial class Cli
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--json] [--config FILE] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
+          lanq doctor [--remote] [--config FILE]
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
+        doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
+        each worker over ssh (work_root, git or tar, and each capability's tool in the job environment). Exit 0 all OK, 1 otherwise.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end.
         Exit codes: job's own code; 2 rejected by policy; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
@@ -166,16 +177,22 @@ public static partial class Cli
             return Stats(log, stdout);
         }
 
-        if (p.Command is not ("health" or "run" or "unlock"))
+        if (p.Command is not ("health" or "run" or "unlock" or "doctor"))
         {
             await stdout.WriteLineAsync(Usage).ConfigureAwait(false);
             return p.Command is "help" or "--help" or "-h" ? 0 : 2;
         }
 
+        FleetConfig LoadConfig() => ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
+        if (p.Command == "doctor")
+        {
+            return await Doctor(p, LoadConfig, DoctorHost.Real(home), new ProcessSshClient(Environment.GetEnvironmentVariable), stdout, ct).ConfigureAwait(false);
+        }
+
         FleetConfig config;
         try
         {
-            config = ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
+            config = LoadConfig();
         }
         catch (Exception ex) when (ex is ConfigException or IOException)
         {

@@ -68,9 +68,9 @@ public static class RemoteScripts
     /// <inheritdoc cref="GitHardeningLinux"/>
     internal const string GitHardeningWindows = "-c core.longpaths=true -c core.hooksPath=NUL -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
 
-    private const string GitProbeWindows = "'tool=' + $(if (Get-Command git -ErrorAction SilentlyContinue) { 'ok' } else { 'missing' })";
+    internal const string GitProbeWindows = "'tool=' + $(if (Get-Command git -ErrorAction SilentlyContinue) { 'ok' } else { 'missing' })";
 
-    private const string GitProbeLinux = "if git --version >/dev/null 2>&1; then echo tool=ok; else echo tool=missing; fi";
+    internal const string GitProbeLinux = "if git --version >/dev/null 2>&1; then echo tool=ok; else echo tool=missing; fi";
 
     /// <summary>
     /// Archive mode needs a tar whose -t listing can be trusted: GNU tar or bsdtar/libarchive (busybox tar hides hard links and strips
@@ -79,13 +79,13 @@ public static class RemoteScripts
     private const string LinuxTarSupportedFunction =
         "tar_supported() { v=$(tar --version 2>&1 | head -n 1); case \"$v\" in *\"GNU tar\"*|*bsdtar*|*libarchive*) command -v gzip >/dev/null 2>&1 ;; *) return 1 ;; esac; }";
 
-    private const string LinuxTarProbe = LinuxTarSupportedFunction + "\nif tar_supported; then echo tool=ok; else echo tool=missing; fi";
+    internal const string LinuxTarProbe = LinuxTarSupportedFunction + "\nif tar_supported; then echo tool=ok; else echo tool=missing; fi";
 
     /// <summary>
     /// The Windows built-in bsdtar, by full path so a GNU tar earlier on PATH (for example Git for Windows) is never used. It must also accept
     /// every restricting extract option: that is probed once here with an empty archive (extracts nothing), so Prepare never needs a fallback.
     /// </summary>
-    private const string WindowsTarProbe =
+    internal const string WindowsTarProbe =
         "$t = \"$env:SystemRoot\\System32\\tar.exe\"\n"
         + "$ok = (Test-Path -LiteralPath $t) -and (\"$(& $t --version 2>$null | Select-Object -First 1)\" -match 'bsdtar|libarchive')\n"
         + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
@@ -154,6 +154,66 @@ public static class RemoteScripts
                 done
                 echo "SLOT=FULL"
                 """;
+    }
+
+    /// <summary>
+    /// The tool command lanq doctor --remote runs for each capability it knows (Linux sh, Windows PowerShell). Version probes only: Go is
+    /// pinned to its local toolchain so the probe can never download one.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, (string Linux, string Windows)> ToolChecks =
+        new Dictionary<string, (string Linux, string Windows)>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["dotnet"] = ("dotnet --version", "dotnet --version"),
+            ["node"] = ("node --version", "node --version"),
+            ["npm"] = ("npm --version", "npm --version"),
+            ["python"] = ("python3 --version 2>&1 || python --version", "if (Get-Command python3 -ErrorAction SilentlyContinue) { python3 --version } else { python --version }"),
+            ["go"] = ("GOTOOLCHAIN=local go version", "$env:GOTOOLCHAIN = 'local'; go version"),
+            ["rust"] = ("cargo --version", "cargo --version"),
+            ["java"] = ("java -version", "java -version"),
+            ["docker"] = ("docker version --format '{{.Server.Version}}'", "docker version --format '{{.Server.Version}}'"),
+        };
+
+    /// <summary>
+    /// lanq doctor --remote, one ssh call per machine. Prints <c>root=ok|readonly|missing</c> (work_root writable, checked with a temporary
+    /// file that is removed again; a missing work_root is not created), <c>tool=ok|missing</c> (git or tar, as the health probe checks), and
+    /// <c>cap.NAME=EXITCODE|FIRST LINE</c> for each capability in <see cref="ToolChecks"/>, run in the job environment: the machine's
+    /// env: and path_prepend: applied exactly as for a job, in the same non-login shell.
+    /// </summary>
+    public static string Doctor(Machine m)
+    {
+        var caps = m.Capabilities.Where(ToolChecks.ContainsKey).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (m.Os == MachineOs.Windows)
+        {
+            var checks = string.Join('\n', caps.Select(c => $"Cap {ShellQuote.PowerShell(c.ToLowerInvariant())} {{ {ToolChecks[c].Windows} }}"));
+            return $$"""
+                $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+                if (Test-Path -LiteralPath $root -PathType Container) {
+                  try { $t = "$root/.lanq-doctor.$PID"; [IO.File]::WriteAllText($t, ''); [IO.File]::Delete($t); 'root=ok' } catch { 'root=readonly' }
+                } else { 'root=missing' }
+                {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
+                {{JobEnvironmentPowerShell(m)}}
+                $ErrorActionPreference = 'Continue'
+                function Cap([string]$n, [scriptblock]$b) {
+                  $global:LASTEXITCODE = 0
+                  try { $o = @(& $b 2>&1 | ForEach-Object { "$_" }); $rc = $LASTEXITCODE } catch { $o = @("$_"); $rc = 1 }
+                  "cap.$n=$rc|" + "$($o | Where-Object { $_ } | Select-Object -First 1)"
+                }
+                {{checks}}
+                """;
+        }
+
+        var env = JobEnvironmentPosix(m);
+        var lines = caps.Select(c =>
+            $"o=$({env}sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; echo \"cap.{c.ToLowerInvariant()}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"");
+        return $$"""
+            R={{ShellQuote.Posix(m.WorkRoot)}}
+            if [ -d "$R" ]; then
+              t="$R/.lanq-doctor.$$"
+              if ( : > "$t" ) 2>/dev/null; then rm -f "$t"; echo root=ok; else echo root=readonly; fi
+            else echo root=missing; fi
+            {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
+            {{string.Join('\n', lines)}}
+            """;
     }
 
     /// <summary>
@@ -387,7 +447,7 @@ public static class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    private static string JobEnvironmentPosix(Machine m)
+    internal static string JobEnvironmentPosix(Machine m)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
         if (m.PathPrepend.Count > 0)
@@ -399,7 +459,7 @@ public static class RemoteScripts
     }
 
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
-    private static string JobEnvironmentPowerShell(Machine m)
+    internal static string JobEnvironmentPowerShell(Machine m)
     {
         var lines = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => $"$env:{e.Key} = {ShellQuote.PowerShell(e.Value)}").ToList();
         if (m.PathPrepend.Count > 0)
