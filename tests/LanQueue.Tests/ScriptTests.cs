@@ -46,7 +46,7 @@ public class ScriptTests
     [Fact]
     public void CleanupRemovesWorktreeBundleAndSlot()
     {
-        var s = RemoteScripts.Cleanup(T.Linux(), "j", "2");
+        var s = RemoteScripts.Cleanup(T.Linux(), "j", "2", T.RepoId);
         Assert.Contains("worktree remove --force", s, StringComparison.Ordinal);
         Assert.Contains("slot-2", s, StringComparison.Ordinal);
         Assert.Contains(".bundle", s, StringComparison.Ordinal);
@@ -54,7 +54,7 @@ public class ScriptTests
 
     [Fact]
     public void CleanupRejectsNonNumericSlot() =>
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", "1; rm -rf /"));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", "1; rm -rf /", T.RepoId));
 
     [Theory]
     [InlineData("SLOT=2\n", "2")]

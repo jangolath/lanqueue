@@ -5,6 +5,8 @@ namespace LanQueue.Tests;
 
 internal static class T
 {
+    public const string RepoId = "0123456789abcdef";
+
     public const string Yaml = """
         policy:
           load_threshold: 0.8

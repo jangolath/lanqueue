@@ -222,7 +222,7 @@ public sealed class JobRunner(
             }
             finally
             {
-                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
+                var cleanup = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Cleanup(machine, jobId, slot, payload.RepoId)), null, TimeSpan.FromSeconds(60), CancellationToken.None)
                     .ConfigureAwait(false);
                 if (!cleanup.Ok)
                 {
@@ -270,7 +270,7 @@ public sealed class JobRunner(
 
         if (step.Ok)
         {
-            step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Prepare(machine, jobId)), onLine, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false);
+            step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Prepare(machine, jobId, payload.RepoId)), onLine, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false);
         }
 
         if (!step.Ok)

@@ -2,6 +2,11 @@
 
 ## Unreleased (0.4.0)
 
+- **One cache per repository on git workers.** The single shared `<work_root>/repo.git` is replaced by
+  `<work_root>/repos/<repoid>.git`, where `<repoid>` is the first 16 hex digits of the repository's root commit (the
+  ordinally smallest one if the history has several roots). Different projects no longer share one object store. An
+  existing `repo.git` is left alone and no longer used; delete it whenever convenient.
+
 ## 0.3.1 (2026-11-09)
 
 - **Security: PowerShell quoting.** Windows arguments are single-quoted for PowerShell, which also treats the

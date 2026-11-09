@@ -36,7 +36,7 @@ public sealed class RunnerTests : IDisposable
                 File.WriteAllText(archive, "x");
             }
 
-            return Task.FromResult(new JobPayload(bundle, "abc", files, diff, archive));
+            return Task.FromResult(new JobPayload(bundle, "abc", files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null));
         }
 
         public int ArchivesBuilt { get; private set; }
@@ -112,6 +112,7 @@ public sealed class RunnerTests : IDisposable
         Assert.Single(ssh.Uploads);
         Assert.EndsWith(".bundle", ssh.Uploads[0], StringComparison.Ordinal);
         Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "worktree remove --force"));
+        Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "fetch -q") && DecodedContains(T.Windows(), c.Command, "repos/" + T.RepoId + ".git"));
         var rec = Assert.Single(log.ReadAll());
         Assert.Equal("build-02", rec.Machine);
         Assert.Equal("Completed", rec.Status);

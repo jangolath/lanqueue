@@ -6,6 +6,7 @@ namespace LanQueue.Payload;
 /// <param name="ArchivePath">Local tar.gz of the same snapshot, only when <see cref="PayloadKinds.Archive"/> was asked for up front (null otherwise).</param>
 /// <param name="SkippedSymlinks">Symlinks left out of that archive.</param>
 /// <param name="SkippedSubmodules">Submodules left out of that archive.</param>
+/// <param name="RepoId">Names the worker's per-repository cache (<c>repos/&lt;RepoId&gt;.git</c>): the first 16 hex digits of the root commit; set when a bundle was asked for.</param>
 public sealed record JobPayload(
     string? BundlePath,
     string Sha,
@@ -13,7 +14,8 @@ public sealed record JobPayload(
     string OverlayDiff,
     string? ArchivePath = null,
     int SkippedSymlinks = 0,
-    int SkippedSubmodules = 0);
+    int SkippedSubmodules = 0,
+    string? RepoId = null);
 
 /// <summary>A built archive plus how many entries a tar.gz cannot carry (symlinks, submodules) were left out.</summary>
 public sealed record ArchiveBuild(string Path, int SkippedSymlinks, int SkippedSubmodules);

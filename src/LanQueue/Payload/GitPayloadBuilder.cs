@@ -43,9 +43,10 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 ? head
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
 
-            string? bundle = null;
+            string? bundle = null, repoId = null;
             if (kinds.HasFlag(PayloadKinds.Bundle))
             {
+                repoId = await RepoIdAsync(top, ct).ConfigureAwait(false);
                 bundle = Path.Combine(outputDir, jobId + ".bundle");
                 await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
                 await Git(top, null, ct, "bundle", "create", bundle, refName).ConfigureAwait(false);
@@ -57,7 +58,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 built = await WriteArchiveAsync(top, tree, Path.Combine(outputDir, jobId + ".tar.gz"), ct).ConfigureAwait(false);
             }
 
-            return new JobPayload(bundle, sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0);
+            return new JobPayload(bundle, sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId);
         }
         finally
         {
@@ -72,6 +73,18 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
 
             File.Delete(tmpIndex);
         }
+    }
+
+    /// <summary>
+    /// Names the worker's cache for this repository: the first 16 hex digits of its root commit (the parentless commit reachable from
+    /// HEAD; with several roots, the ordinally smallest sha), so every clone of the same project shares one cache and unrelated
+    /// projects never do.
+    /// </summary>
+    internal static async Task<string> RepoIdAsync(string top, CancellationToken ct)
+    {
+        var roots = (await Git(top, null, ct, "rev-list", "--max-parents=0", "HEAD").ConfigureAwait(false))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return roots.Min(StringComparer.Ordinal)![..16];
     }
 
     /// <summary>

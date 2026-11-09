@@ -151,8 +151,10 @@ Where each safety check sits (numbers are the diagram steps):
 
 Each machine in `machines.yml` has an optional `transfer` setting:
 
-- **`git`** (the default, recommended): `lanq` sends a git bundle and the worker keeps a bare cache repo with a
-  detached worktree per job. Later jobs on the same worker are cheaper to prepare. The worker needs `git`.
+- **`git`** (the default, recommended): `lanq` sends a git bundle and the worker keeps one bare cache repo per
+  repository (`<work_root>/repos/<repoid>.git`, named after the first 16 hex digits of the root commit) with a
+  detached worktree per job. Later jobs on the same worker are cheaper to prepare. The worker needs `git`. (Versions
+  before 0.4 used a single shared `<work_root>/repo.git`; it is no longer used and can be deleted.)
 - **`archive`**: `lanq` builds the same snapshot (HEAD plus uncommitted and untracked files, honouring `.gitignore`,
   never `.lanq/`) on your PC and sends it as a `tar.gz`; the worker extracts it into a fresh per-job folder with its
   own `tar`: GNU tar (with gzip) on Linux, or the bsdtar built into Windows 10 1803+ / Server 2019+. **The worker does

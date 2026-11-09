@@ -98,8 +98,12 @@ public static class RemoteScripts
             echo "SLOT=FULL"
             """;
 
-    /// <summary>Fetches the uploaded bundle into a bare cache repo and adds a detached per-job worktree.</summary>
-    public static string Prepare(Machine m, string jobId) => m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId);
+    /// <summary>
+    /// Git mode: fetches the uploaded bundle into the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> and adds a detached
+    /// per-job worktree. Archive mode ignores <paramref name="repoId"/>.
+    /// </summary>
+    public static string Prepare(Machine m, string jobId, string? repoId = null) =>
+        m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId, SafeRepoId(repoId));
 
     /// <summary>
     /// Extracts the uploaded tar.gz into a fresh per-job folder with the platform's own tar. Only GNU tar or bsdtar is accepted. The archive is
@@ -149,23 +153,24 @@ public static class RemoteScripts
             tar -xzf "$A" -C "$J" --no-same-owner --no-same-permissions
             """;
 
-    private static string PrepareGit(Machine m, string jobId) => m.Os == MachineOs.Windows
+    private static string PrepareGit(Machine m, string jobId, string repoId) => m.Os == MachineOs.Windows
         ? $$"""
             $ErrorActionPreference = 'Stop'
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $c = "$root/repos/{{repoId}}.git"
             function G { & git -c core.longpaths=true @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
-            New-Item -ItemType Directory -Force -Path "$root/jobs" | Out-Null
-            if (-not (Test-Path "$root/repo.git")) { G init --bare -q "$root/repo.git" }
-            G -C "$root/repo.git" fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
-            G -C "$root/repo.git" worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
+            New-Item -ItemType Directory -Force -Path "$root/jobs", "$root/repos" | Out-Null
+            if (-not (Test-Path -LiteralPath $c)) { G init --bare -q $c }
+            G -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
+            G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
             set -e
-            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
-            mkdir -p "$R/jobs"
-            [ -d "$R/repo.git" ] || git init --bare -q "$R/repo.git"
-            git -C "$R/repo.git" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
-            git -C "$R/repo.git" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}; C="$R/repos/{{repoId}}.git"
+            mkdir -p "$R/jobs" "$R/repos"
+            [ -d "$C" ] || git init --bare -q "$C"
+            git -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
+            git -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
@@ -231,8 +236,8 @@ public static class RemoteScripts
     }
 
     /// <summary>Best-effort teardown: worktree, ref, bundle, slot. Never fails the job.</summary>
-    public static string Cleanup(Machine m, string jobId, string slot) =>
-        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot);
+    public static string Cleanup(Machine m, string jobId, string slot, string? repoId = null) =>
+        m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot, SafeRepoId(repoId));
 
     private static string CleanupArchive(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
         ? $$"""
@@ -273,7 +278,7 @@ public static class RemoteScripts
             exit 0
             """;
 
-    private static string CleanupGit(Machine m, string jobId, string slot) => m.Os == MachineOs.Windows
+    private static string CleanupGit(Machine m, string jobId, string slot, string repoId) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $pf = "$root/locks/job-$id.pid"
@@ -285,10 +290,11 @@ public static class RemoteScripts
               }
               Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
             }
-            & git -C "$root/repo.git" worktree remove --force "$root/jobs/$id" 2>$null
+            $c = "$root/repos/{{repoId}}.git"
+            & git -C $c worktree remove --force "$root/jobs/$id" 2>$null
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
-            & git -C "$root/repo.git" worktree prune 2>$null
-            & git -C "$root/repo.git" update-ref -d "refs/lanq/$id" 2>$null
+            & git -C $c worktree prune 2>$null
+            & git -C $c update-ref -d "refs/lanq/$id" 2>$null
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
             exit 0
@@ -304,13 +310,20 @@ public static class RemoteScripts
               esac
               rm -f "$P"
             fi
-            git -C "$R/repo.git" worktree remove --force "$R/jobs/$ID" 2>/dev/null
+            C="$R/repos/{{repoId}}.git"
+            git -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
             rm -rf "$R/jobs/$ID"
-            git -C "$R/repo.git" worktree prune 2>/dev/null
-            git -C "$R/repo.git" update-ref -d "refs/lanq/$ID" 2>/dev/null
+            git -C "$C" worktree prune 2>/dev/null
+            git -C "$C" update-ref -d "refs/lanq/$ID" 2>/dev/null
             rm -f "$R/incoming/$ID.bundle" "$R/locks/slot-{{SafeSlot(slot)}}"
             exit 0
             """;
+
+    /// <summary>A repository id is exactly 16 lowercase hex digits, so it can never carry a path or shell syntax into a script.</summary>
+    internal static string SafeRepoId(string? repoId) =>
+        repoId is { Length: 16 } && repoId.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'))
+            ? repoId
+            : throw new ArgumentException("Invalid repository id.", nameof(repoId));
 
     private static string SafeSlot(string slot) =>
         int.TryParse(slot, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0
