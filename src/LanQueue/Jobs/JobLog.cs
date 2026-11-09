@@ -19,10 +19,16 @@ public sealed class JobLog(string folder)
 
     public string LogPathFor(string jobId) => Path.Combine(folder, "logs", jobId + ".log");
 
+    /// <summary>Shards of one run can finish at the same moment: one append at a time within this lanq (parallel appends can fail on Windows).</summary>
+    private static readonly Lock AppendGate = new();
+
     public void Append(JobRecord record)
     {
-        Directory.CreateDirectory(folder);
-        File.AppendAllText(FilePath, JsonSerializer.Serialize(record, StateJson.Default.JobRecord) + "\n");
+        lock (AppendGate)
+        {
+            Directory.CreateDirectory(folder);
+            File.AppendAllText(FilePath, JsonSerializer.Serialize(record, StateJson.Default.JobRecord) + "\n");
+        }
     }
 
     public IReadOnlyList<JobRecord> ReadAll()

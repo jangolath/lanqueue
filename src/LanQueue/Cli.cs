@@ -66,11 +66,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
     public bool NoWake { get; init; }
 
+    /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
+    public ShardOptions? Shards { get; init; }
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json", "--wake"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
@@ -111,6 +114,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         long? fetchMax = null;
         int? fetchMaxFiles = null;
         var seen = new List<string>();
+        var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
         for (var i = 1; i < own.Length; i++)
         {
@@ -176,6 +180,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     }
 
                     fetchMaxFiles = files;
+                    break;
+                case "--shards" or "--shard-retries" when i + 1 < own.Length:
+                    shards.Set(own[i], own[++i]);
+                    break;
+                case "--fail-fast":
+                    shards.FailFast = true;
                     break;
                 case "--all":
                     all = true;
@@ -251,6 +261,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
+            Shards = shards.Build(),
         };
     }
 
@@ -285,6 +296,7 @@ public static partial class Cli
           lanq health [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
+          lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
@@ -312,6 +324,8 @@ public static partial class Cli
         inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report; wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
+        --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
+        in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed.
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
@@ -346,7 +360,9 @@ public static partial class Cli
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
-                await WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch")).ConfigureAwait(false);
+                await (own[0] == "run" && own.Contains("--shards")
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
+                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"))).ConfigureAwait(false);
             }
 
             return 2;
@@ -397,7 +413,9 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             if (p.Json)
             {
-                await WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0).ConfigureAwait(false);
+                await (p.Shards is not null
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
+                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0)).ConfigureAwait(false);
             }
 
             return 2;
@@ -439,6 +457,11 @@ public static partial class Cli
         }
 
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
+        if (p.Shards is { } shards)
+        {
+            return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
         var started = System.Diagnostics.Stopwatch.StartNew();
         JobResult result;
         try
@@ -640,8 +663,9 @@ public static partial class Cli
         {
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
-                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots {h.SlotsUsed}/{m.MaxJobs}")
+                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
                     + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
+                    + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
                 : h.Error ?? "";
             await stdout.WriteLineAsync($"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd()).ConfigureAwait(false);
         }
@@ -654,8 +678,22 @@ public static partial class Cli
         var state = !h.Reachable ? "down" : h.Hold is not null ? "hold" : "ok";
         var reason = !h.Reachable ? h.Error ?? h.Hold : h.Hold;
         return new HealthJson(
-            m.Name, state, reason is null ? [] : [JobRunner.SafeLine(reason)], h.LoadRatio, h.DiskFreeGb, h.MemFreeGb, h.SlotsUsed, m.MaxJobs, h.LocalTime);
+            m.Name, state, reason is null ? [] : [JobRunner.SafeLine(reason)], h.LoadRatio, h.DiskFreeGb, h.MemFreeGb, h.SlotsUsed, m.MaxJobs, h.LocalTime)
+        {
+            Cores = h.Cores,
+            MemTotalGb = h.MemTotalGb,
+            FreeSlots = h.Reachable ? FreeSlots(m, h) : 0,
+            Size = MachineSize.Classify(h.MemTotalGb, h.Cores).ToString().ToLowerInvariant(),
+            SuitedFor = MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores),
+        };
     }
+
+    /// <summary>Slots a job could take now: max_jobs minus the slots in use (never below 0).</summary>
+    private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsUsed);
+
+    private static string Size(MachineHealth h) =>
+        (h.Cores is { } c ? string.Create(CultureInfo.InvariantCulture, $"cores {c}") : "cores ?")
+        + (h.MemTotalGb is { } t ? string.Create(CultureInfo.InvariantCulture, $"  ram {t:0.#} GB") : "  ram ?");
 
     private static string Memory(MachineHealth h) =>
         (h.MemFreeGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"mem free {mem:0.0} GB") : "mem free ?")

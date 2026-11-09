@@ -129,6 +129,8 @@ public class ScriptSafetyTests
             ["acquire"] = RemoteScripts.AcquireSlot(m, Job, TimeSpan.FromHours(4)),
             ["prepare"] = RemoteScripts.Prepare(m, Job, T.RepoId),
             ["execute"] = RemoteScripts.Execute(m, Job, "src", ["dotnet", "test"], TimeSpan.FromHours(4)),
+            ["execute-shard"] = RemoteScripts.Execute(m, Job, "src", ["dotnet", "test"], TimeSpan.FromHours(4), new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards)),
+            ["prepare-shared-bundle"] = RemoteScripts.Prepare(m, Job, T.RepoId, "20261109-221500-d4e5f6"),
             ["cleanup"] = RemoteScripts.Cleanup(m, Job, "1", T.RepoId),
             ["unlock"] = RemoteScripts.Unlock(m, all: false),
             ["doctor"] = RemoteScripts.Doctor(m),
