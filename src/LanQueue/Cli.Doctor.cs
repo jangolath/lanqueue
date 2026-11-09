@@ -35,7 +35,8 @@ public static partial class Cli
     /// key_env file and its passphrase, work_root; the state folder. With --remote, one ssh call per machine (a few at a time) checks
     /// work_root, git or tar, and each known capability's tool in the job environment. Exit 0 when every line is OK, else 1.
     /// </summary>
-    internal static async Task<int> Doctor(ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, LanQueue.Health.HealthProbe probe, TextWriter stdout, CancellationToken ct)
+    internal static async Task<int> Doctor(ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, LanQueue.Health.HealthProbe probe, TextWriter stdout, CancellationToken ct,
+        Func<Machine, string>? doctorScript = null)
     {
         var problems = 0;
         async Task Say(string level, string text)
@@ -95,7 +96,7 @@ public static partial class Cli
                         }
                     }
 
-                    return await RemoteMachineChecks(m, ssh, ct).ConfigureAwait(false);
+                    return await RemoteMachineChecks(m, ssh, doctorScript ?? (x => RemoteScripts.Doctor(x, DoctorCheckSeconds)), ct).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -235,14 +236,25 @@ public static partial class Cli
         return string.IsNullOrEmpty(home) ? null : home.Replace('\\', '/') + file[1..];
     }
 
-    private static async Task<List<(string Level, string Text)>> RemoteMachineChecks(Machine m, ISshClient ssh, CancellationToken ct)
+    private static async Task<List<(string Level, string Text)>> RemoteMachineChecks(Machine m, ISshClient ssh, Func<Machine, string> doctorScript, CancellationToken ct)
     {
+        // Loading the config only checks the job script against the Windows command-line cap (lanq run must not be blocked by doctor);
+        // the doctor script, which also carries a tool check per capability, is checked here and reported, never thrown.
+        var script = doctorScript(m);
+        if (m.Os == MachineOs.Windows && RemoteScripts.WindowsCommand(script).Length is var size && size > RemoteScripts.MaxWindowsCommandLength)
+        {
+            return [("FAIL", $"not checked: with its env: ({m.Env.Count} entries), path_prepend: ({m.PathPrepend.Count} entries) and "
+                + $"{m.Capabilities.Count(RemoteScripts.ToolChecks.ContainsKey)} tool checks, the doctor script is {size} characters once encoded, "
+                + $"{size - RemoteScripts.MaxWindowsCommandLength} over the {RemoteScripts.MaxWindowsCommandLength}-character Windows command-line limit. "
+                + "Shorten env: or path_prepend: for this machine")];
+        }
+
         SshResult r;
         try
         {
             // Every check has its own limit on the worker; the call as a whole gets room for all of them.
             var checks = m.Capabilities.Count(RemoteScripts.ToolChecks.ContainsKey);
-            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.Doctor(m, DoctorCheckSeconds)), null, TimeSpan.FromSeconds(60 + ((DoctorCheckSeconds + 10) * checks)), ct)
+            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, script), null, TimeSpan.FromSeconds(60 + ((DoctorCheckSeconds + 10) * checks)), ct)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)

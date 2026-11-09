@@ -47,6 +47,20 @@ public sealed class JobEnvironmentTests : IDisposable
         Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(paths)));
     }
 
+    /// <summary>
+    /// Loading measures the job script only. Its fixed part is today larger than the doctor script's with every tool check, so a doctor
+    /// script cannot overflow on its own yet; doctor still checks its own size (DoctorTests) in case that changes.
+    /// </summary>
+    [Fact]
+    public void TheJobScriptIsTheOneThatGatesLoading()
+    {
+        var m = ConfigLoader.Parse(Windows(ManyEnv(4, 60))).Machines[1];
+        m.Capabilities = [.. RemoteScripts.ToolChecks.Keys];
+        var job = RemoteScripts.WindowsCommand(RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], JobRequest.DefaultTimeout)).Length;
+        var doctor = RemoteScripts.WindowsCommand(RemoteScripts.Doctor(m)).Length;
+        Assert.True(doctor < job, $"doctor {doctor}, job {job}");
+    }
+
     [Fact]
     public void AModestWindowsEnvLoadsAndTheSameEnvOnLinuxIsNotLimited()
     {

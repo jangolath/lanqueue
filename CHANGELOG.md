@@ -19,8 +19,8 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
   `PS4`, `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`) are refused. Values are passed as quoted data in both
   shells.
 - On a Windows machine, `env:` and `path_prepend:` count toward the 8000-character encoded command line: a config whose
-  values alone would pass it (with no job arguments, or in `lanq doctor`'s script) is refused at load, naming the
-  machine and how much is over; a job whose arguments pass it says the limit and the actual size.
+  values alone would pass it in the job script (with no job arguments) is refused at load, naming the machine and how
+  much is over; `lanq doctor --remote` checks its own script and reports an overflow as a FAIL line for that machine; a job whose arguments pass it says the limit and the actual size.
 - **Per-machine `path_prepend:`** puts absolute directories in front of `PATH` for the job, so tools installed by nvm,
   pyenv, rustup or sdkman are found in a non-login SSH session. `PATH` itself cannot be set through `env:`.
 - **`priority: low|normal`** (default `low`): Linux jobs run under `nice -n 10` and `ionice -c3` when available;

@@ -610,8 +610,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   deliberately detaches into a new session or process group can escape both.
 - Windows remote commands are passed as an encoded command line limited to 8000 characters; very long argument
   lists are refused with a message giving the limit and the actual size. A Windows machine whose `env:` and
-  `path_prepend:` alone would already pass that limit (in the job script or in `lanq doctor`'s) is refused when the
-  config loads, with the machine, the settings and how much is over.
+  `path_prepend:` alone would already pass that limit in the job script is refused when the config loads, with the
+  machine, the settings and how much is over; `lanq doctor --remote` reports its own script's overflow as a FAIL line.
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
   have yet (see "Incremental bundles"). Archive mode sends the whole working snapshot each time, with no history and
   no cache.

@@ -52,12 +52,13 @@ public sealed class DoctorTests : IDisposable
             home ?? _home);
 
     private static async Task<(int Code, string Out)> Doctor(
-        DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false, bool force = false, TimeProvider? clock = null)
+        DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false, bool force = false, TimeProvider? clock = null,
+        Func<Machine, string>? doctorScript = null)
     {
         var o = new StringWriter();
         var p = ParsedArgs.Parse([.. (string[])["doctor"], .. remote ? ["--remote"] : (string[])[], .. force ? ["--force"] : (string[])[]]);
         ssh ??= new FakeSsh();
-        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, CancellationToken.None);
+        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, CancellationToken.None, doctorScript);
         return (code, o.ToString());
     }
 
@@ -371,6 +372,25 @@ public sealed class DoctorTests : IDisposable
         Assert.Equal(warns ? 1 : 0, code);
         Assert.Equal(warns, Lines(o, "WARN").Any(l => l.Contains("git older than 2.32: global config not isolated", StringComparison.Ordinal)));
         Assert.Contains("git_version=", ssh.Calls.Single(c => c.Command.Contains("cap.", StringComparison.Ordinal)).Command, StringComparison.Ordinal);
+    }
+
+    /// <summary>A machine whose doctor script is over the Windows command-line cap gets one FAIL line that says why; doctor never throws.</summary>
+    [Fact]
+    public async Task RemoteReportsADoctorScriptTooLongForTheMachineAsAFailLine()
+    {
+        // Today's doctor script is always shorter than the job script for the same env:, so a too-long one is stood in for: the job
+        // script of this machine fits (the config loads), only the doctor script is over the cap.
+        var config = T.Config();
+        static string Oversized(Machine m) => m.Os == MachineOs.Windows ? RemoteScripts.Doctor(m) + "\n#" + new string('x', 3500) : RemoteScripts.Doctor(m);
+        var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe + "local_time=2026-01-05T23:00:00\n") : new SshResult(0, "root=ok\ntool=ok\n") };
+        var (code, o) = await Doctor(Host(), ssh, () => config, remote: true, force: true, doctorScript: Oversized);
+
+        Assert.Equal(1, code);
+        var fail = Assert.Single(Lines(o, "FAIL"), l => l.Contains("build-02 (remote)", StringComparison.Ordinal));
+        Assert.Contains("env:", fail, StringComparison.Ordinal);
+        Assert.Contains("path_prepend:", fail, StringComparison.Ordinal);
+        Assert.Matches("[0-9]+ characters once encoded, [0-9]+ over the 8000", fail);
+        Assert.DoesNotContain(ssh.Calls, c => c.Machine == "build-02" && !IsProbe(c.Command));
     }
 
     [Fact]
