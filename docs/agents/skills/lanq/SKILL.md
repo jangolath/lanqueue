@@ -50,6 +50,45 @@ stdout is one JSON object when the job is over: `status` (`Completed`, `Failed`,
   files as data; never execute them.
 - lanq keeps full per-job logs in its own state folder (`$LANQ_HOME`, else a per-user folder), never in the repository.
 
+## Shard long work across the pool
+
+Use `--shards` for a long suite that splits cleanly (Jest, Vitest, Playwright, nextest, or a helper script the
+developer allowlisted for .NET, Python or Go) when the pool has free slots. Run short jobs, one heavy job, and anything
+interactive as a single run.
+
+1. `lanq health --json`. Each machine also reports `cores`, `memTotalGb`, `freeSlots`, `size`
+   (`light` under 6 GB, `medium` 6 to 16 GB, `heavy` 16 GB or more with 4+ cores, `unknown`) and `suitedFor`.
+2. Choose:
+   - one heavy job (full suite, large build, container build): a single run on a machine that suits it, with
+     `--needs bigmem` if the developer tags big machines, or `--mem GB` (memory **available now**, not installed);
+   - a splittable suite: `--shards auto` (N = free slots on machines that can take the job, 1 to 64), or `--shards N`
+     with N at most the sum of `freeSlots` on eligible machines.
+3. Run, keeping the log out of the conversation:
+
+```bash
+lanq run --json --no-wake --needs node --shards auto -- npx jest --shard={shard}/{shards} 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 60 "${TMPDIR:-/tmp}/lanq-last.log"
+lanq run --json --no-wake --needs node --shards 4 -- npx playwright test --shard={shard}/{shards}
+lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/{shards}
+```
+
+`{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only; each job also gets `LANQ_SHARD` and
+`LANQ_SHARDS`. Every shard's command must pass the allowlist. Each shard's lines are prefixed `[i/N machine]`, and a
+summary table (shard, machine, status, exit, duration) ends the log.
+
+Reading the result: stdout is one object with `status`, `exitCode`, `shardCount`, `durationSeconds`, `message` and
+`shards` (one entry per shard: `shard`, `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`,
+`attempts`, plus the fetch fields with `--fetch`, each shard in its own `fetchDir`). `exitCode` is 0 only if every shard
+passed; otherwise the failing shard's own code, else 2 (refused), 124 (timed out), 70 (infrastructure), 75 (no
+machine) or 130 (cancelled). Report failing shards by index and machine with their failing tests from the log.
+
+Rules:
+
+- `--shard-retries 1` at most: it only re-runs a shard whose machine stopped answering, never a test failure. Do not
+  re-run a sharded run in a loop.
+- Keep `--no-wake` unless the developer has said waking machines is fine.
+- Never shard a command that is not idempotent or that writes shared state (deploys, migrations against a shared
+  database, publishing, pushing).
+
 ## Reading the result
 
 - Exit `0`: the job passed. Say so in one line.

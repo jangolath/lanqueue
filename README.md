@@ -200,6 +200,7 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 | --- | --- |
 | `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. `--wake` also wakes machines that look asleep. |
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
+| `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
@@ -581,6 +582,35 @@ shell are refused (`LD_*`, `DYLD_*`, `GLIBC_TUNABLES`, `BASH_ENV`, `ENV`, `SHELL
 directories; a drive path such as `C:/Users/build/.cargo/bin` on Windows). Values reach the job as data: on Linux each
 `NAME=value` is one single-quoted word passed to `env`, on Windows a single-quoted PowerShell string, so quotes,
 `$( )` or backticks in a value are never run.
+
+## Sharding long work across the pool
+
+A long test suite can run as N pieces at once, one per free slot, while your dev PC keeps working:
+
+```bash
+lanq run --needs node --shards 4 -- npx jest --shard={shard}/{shards}
+lanq run --needs node --shards auto -- npx playwright test --shard={shard}/{shards}
+lanq run --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/{shards}
+```
+
+- `--shards N` (1 to 64) starts N jobs of one command, each with its own job id; `--shards auto` uses the number of
+  free slots on the machines that can take the job now (and says why). A machine with `max_jobs: 4` takes up to four
+  shards at once, a `max_jobs: 1` micro PC one.
+- `{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only, and each job also gets `LANQ_SHARD`
+  and `LANQ_SHARDS`. Every shard's command line passes the allowlist, the permission-flag ban and the secret scan before
+  anything is sent.
+- The repository is snapshotted once and each bundle or archive built once for all shards. Shards beyond the free
+  slots wait for a sibling to finish; `--wait` counts only while none of the run's shards is running.
+- Output lines are prefixed `[i/N machine]`, and a summary table ends the run. Exit 0 only if every shard passed;
+  otherwise the failing shard's own code, else 2, 124, 70 or 75. `--json` prints one object with a `shards` array.
+- `--fail-fast` cancels the rest after the first shard that fails; `--shard-retries R` (0 to 3) re-runs only a shard
+  whose machine stopped answering, never a test failure. Ctrl+C cancels every shard and cleans each one up.
+
+`lanq health` also shows each machine's cores, total RAM, free/total slots and what it is suited for (light under
+6 GB, medium 6 to 16 GB, heavy 16 GB or more with 4+ cores, plus container builds with a `docker` capability);
+`health --json` adds `cores`, `memTotalGb`, `freeSlots`, `size` and `suitedFor`.
+[docs/SHARDING.md](docs/SHARDING.md) has per-ecosystem recipes (.NET, Node, Python, Go, Rust), a sizing table for
+`max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs.
 
 ## Keeping your keys safe
 

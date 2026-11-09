@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased (0.5.1)
+
+### Sharding: `lanq run --shards`
+
+- **`lanq run --shards N|auto -- CMD`** runs N jobs of one command at once (1 to 64), each its own lanq job with its
+  own id, slot, log and cleanup. `{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only (no
+  other expansion), and each job also gets `LANQ_SHARD` and `LANQ_SHARDS` next to `LANQ_JOB` (Linux env prefix and
+  Windows wrapper). Every shard's substituted command line passes the allowlist, permission-flag ban, secret scan and
+  Windows argument rule before anything is built or sent.
+- **`--shards auto`** sets N to the free slots on the machines that can take the job now (capabilities, hours, `--mem`,
+  holds), at least 1, at most 64, and prints the choice and why.
+- **Placement:** shards are dealt round-robin over free slots, so a machine with `max_jobs: 4` runs up to four at once.
+  Shards beyond the free slots wait for a sibling to finish; `--wait` counts only while none of the run's shards runs.
+- **One payload:** the snapshot is taken and scanned once, and each bundle (full or incremental) or archive is built at
+  most once for the whole run. The bundle carries the snapshot under a shared ref that each shard's prepare fetches into
+  its own; lanq prepares (and cleans up) one job at a time per machine within a run, so shards on one worker do not race
+  on its repository cache.
+- **Results:** lines prefixed `[i/N machine]`, a summary table (shard, machine, status, exit, duration), exit 0 only if
+  every shard passed (otherwise the failing shard's own code, then 2, 124, 70, 75; Ctrl+C 130). `--json` prints one
+  object with `status`, `exitCode`, `shardCount`, `durationSeconds`, `message` and a `shards` array of run objects with
+  `shard` and `attempts`. `--fetch` puts each shard's files in its own job-id folder.
+- **`--fail-fast`** cancels the other shards after the first one that does not complete; **`--shard-retries R`** (0 to
+  3) re-runs only a shard whose machine stopped answering ssh (never a test failure or a job that exited 255 itself).
+  Ctrl+C cancels every shard and still cleans each one up.
+- **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (light under 6 GB, medium 6 to 16 GB,
+  heavy 16 GB or more with 4+ cores, "+docker: container builds"); the probe now reports `mem_total_gb` and `cores` on
+  Linux and Windows (unknown values are shown as `?`, never a hold). `health --json` adds `cores`, `memTotalGb`,
+  `freeSlots`, `size` and `suitedFor`; earlier fields are unchanged. The text line now says `slots free F/M` instead
+  of `slots U/M`.
+- The Windows env cap checked at config load now includes the largest shard variables.
+- New [docs/SHARDING.md](docs/SHARDING.md): per-ecosystem recipes (.NET helper scripts for sh and PowerShell, Jest,
+  Vitest, Playwright, pytest-split, Go, cargo-nextest), what to keep local, sizing `max_jobs` and `min_free_mem_gb`,
+  routing in a mixed pool, a worked 2 dev boxes + 4 micro PCs plan, and guidance for coding agents. The agent snippet and
+  skill gained a "Shard long work across the pool" section.
+
 ## 0.5.0 (2026-11-09)
 
 ### Native binaries: `lanq` without the .NET SDK

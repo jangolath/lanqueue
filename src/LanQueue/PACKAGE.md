@@ -63,6 +63,15 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 - Per-machine `env:` (for example `NODE_OPTIONS: "--max-old-space-size=2048"`) and `path_prepend:` (for nvm, pyenv,
   rustup or sdkman tools a non-login SSH session cannot find).
 
+## Split long work across the pool
+
+`lanq run --shards 4 -- npx jest --shard={shard}/{shards}` runs four pieces at once on free slots (`--shards auto`
+uses every free slot that can take the job); each gets `{shard}`/`{shards}` in its arguments and `LANQ_SHARD`/
+`LANQ_SHARDS` in its environment, and the snapshot is built once. Exit 0 only if every shard passed; `--json` prints
+one object with a `shards` array. `lanq health` shows cores, total RAM, free slots and what each machine suits.
+Recipes for .NET, Node, Python, Go and Rust:
+[docs/SHARDING.md](https://github.com/jangolath/lanqueue/blob/main/docs/SHARDING.md).
+
 ## Safe by default
 
 - Key-only SSH with strict host-key checking; there is no password option.
