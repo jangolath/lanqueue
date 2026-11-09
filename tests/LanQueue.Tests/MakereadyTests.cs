@@ -149,6 +149,55 @@ public class MakereadyTests
     public void AnUnknownOsIsABadArgument() =>
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "--ssh", "me@pc", "--os", "macos"]));
 
+    /// <summary>With --json, stdout is exactly one JSON object on every path: the report, or status/exitCode/message.</summary>
+    private static void OneJsonObject(string stdout, string status, int exitCode)
+    {
+        using var doc = JsonDocument.Parse(stdout);
+        Assert.Equal(status, doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal(exitCode, doc.RootElement.GetProperty("exitCode").GetInt32());
+        Assert.False(string.IsNullOrEmpty(doc.RootElement.GetProperty("message").GetString()));
+    }
+
+    [Fact]
+    public async Task JsonPrintsOneObjectForAnArgumentError()
+    {
+        var o = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["makeready", "--json", "--bogus"], o, new StringWriter(), CancellationToken.None));
+        OneJsonObject(o.ToString(), "Rejected", 2);
+    }
+
+    [Fact]
+    public async Task JsonPrintsOneObjectWhenTheMachineIsUnknownHeldOrUnreachable()
+    {
+        var (code, o, _, _) = await Run(Report(), ["no-such-machine", "--json"]);
+        Assert.Equal(2, code);
+        OneJsonObject(o, "Rejected", 2);
+
+        (code, o, _, _) = await Run(Report(), ["build-01", "--json"], (_, _) => new SshResult(0, Healthy.Replace("paused=0", "paused=1", StringComparison.Ordinal)));
+        Assert.Equal(75, code);
+        OneJsonObject(o, "Held", 75);
+
+        (code, o, _, _) = await Run(Report(), ["build-01", "--json"], result: new SshResult(255, "") { ErrorOutput = "ssh: connect to host build-01.lan port 22: No route to host" });
+        Assert.Equal(70, code);
+        OneJsonObject(o, "InfraError", 70);
+
+        (code, o, _, _) = await Run("not json", ["build-01", "--json"]);
+        Assert.Equal(70, code);
+        OneJsonObject(o, "InfraError", 70);
+    }
+
+    [Fact]
+    public async Task JsonPrintsOneObjectWhenCancelled()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, Healthy), InputHandler = (_, _, _) => throw new OperationCanceledException() };
+        var o = new StringWriter();
+        var code = await Cli.Makeready(ParsedArgs.Parse(["makeready", "build-01", "--json"]), T.Config, ssh, new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), cts.Token);
+        Assert.Equal(130, code);
+        OneJsonObject(o.ToString(), "Cancelled", 130);
+    }
+
     [Fact]
     public async Task APausedMachineIsHeldUnlessForced()
     {

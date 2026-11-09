@@ -56,6 +56,45 @@ public static partial class Cli
     internal static async Task<int> Makeready(
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
+        if (!p.Json)
+        {
+            return await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
+        // --json: stdout is exactly one object on every path, the validated report (exit 0 or 1) or status/exitCode/message. The
+        // people-readable messages still go to stderr.
+        var errors = new StringWriter();
+        int code;
+        try
+        {
+            code = await MakereadyCore(p, loadConfig, ssh, probe, stdout, errors, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            errors.WriteLine("cancelled (Ctrl+C)");
+            code = 130;
+        }
+        catch (Exception ex)
+        {
+            errors.WriteLine(JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
+            code = 70;
+        }
+
+        var text = errors.ToString();
+        await stderr.WriteAsync(text).ConfigureAwait(false);
+        if (code is not (0 or 1))
+        {
+            var message = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
+            var status = code switch { 2 => "Rejected", 75 => "Held", 130 => "Cancelled", _ => "InfraError" };
+            await WriteJsonError("makeready", status, code, message, stdout).ConfigureAwait(false);
+        }
+
+        return code;
+    }
+
+    private static async Task<int> MakereadyCore(
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    {
         Machine machine;
         Machine? configured = null;
         if ((p.Target is null) == (p.SshTarget is null) || (p.SshTarget is null) != (p.Os is null))

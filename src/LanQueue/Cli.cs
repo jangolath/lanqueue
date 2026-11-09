@@ -212,7 +212,7 @@ public static partial class Cli
             var message = JobRunner.SafeLine(ex.Message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" && own.Contains("--json"))
             {
                 await WriteJsonError(own[0], "Rejected", 2, message, stdout).ConfigureAwait(false);
             }

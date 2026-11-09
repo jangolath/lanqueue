@@ -18,7 +18,10 @@ internal sealed record HealthJson(
 /// <param name="ExitCode">lanq's own exit code (the job's code, or 2, 70, 75, 124, 130).</param>
 internal sealed record RunJson(string Status, int ExitCode, string? Machine, string? JobId, double DurationSeconds, string Message);
 
-/// <summary>What <c>lanq health --json</c> prints instead of its array when it cannot run (bad arguments or config: Rejected, exit 2).</summary>
+/// <summary>
+/// What <c>lanq health --json</c> and <c>lanq makeready --json</c> print instead of their normal output when there is none: Rejected (2),
+/// InfraError (70), Held (75, makeready only) or Cancelled (130).
+/// </summary>
 internal sealed record ErrorJson(string Status, int ExitCode, string Message);
 
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>

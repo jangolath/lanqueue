@@ -149,7 +149,9 @@ Command line:
   (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`, also for a cancellation nobody asked for); `health
   --json` prints `{"status":"Rejected","exitCode":2,"message":...}` for a bad argument or a config that cannot be read,
   and a `Cancelled` (130) or `InfraError` (70) object instead of its array when interrupted or broken. Usage text after an unknown command
-  goes to stderr (exit `2`); `lanq --help` still prints it on stdout.
+  goes to stderr (exit `2`); `lanq --help` still prints it on stdout. `makeready --json` likewise prints exactly one
+  object: the validated report, or `{"status","exitCode","message"}` with `Rejected` (2), `InfraError` (70), `Held` (75)
+  or `Cancelled` (130). (`lanq doctor` has no `--json`.)
 - **`lanq unlock <machine>`** removes slot files past their recorded deadline at once (the same locked reclaim, which
   also stops such a slot's job if it is somehow still running) and says what it removed and kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running
   job there would lose its slot. `--all` without `--yes` is refused.
