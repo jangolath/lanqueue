@@ -61,8 +61,8 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
-            n=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || n=$(nproc 2>/dev/null) || n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null) || n=
-            case "$n" in ''|*[!0-9]*|0) n= ;; esac
+            pos() { case "$1" in ''|*[!0-9]*|0*) return 1 ;; esac; }
+            n=$(getconf _NPROCESSORS_ONLN 2>/dev/null); pos "$n" || n=$(nproc 2>/dev/null); pos "$n" || n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null); pos "$n" || n=
             cpus=${n:-1}
             l=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)
             d="$R"; [ -d "$d" ] || d=/

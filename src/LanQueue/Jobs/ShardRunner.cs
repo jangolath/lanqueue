@@ -109,12 +109,14 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// How many shards a machine can take now: max_jobs minus the slots in use (or this run's own shards there, if more), and with --mem no more
-    /// than the shards its free memory covers (floor of free memory / --mem). A machine that does not report memory is already held under --mem.
+    /// than the shards its free memory covers: floor((free memory - --mem for each of this run's shards placed there but not running yet) /
+    /// --mem). A placed shard still uploading or preparing uses no memory yet, so the probe cannot see what it will need. A machine that does
+    /// not report memory is already held under --mem.
     /// </summary>
-    private static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours)
+    private static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours, int oursNotRunning)
     {
         var slots = machine.MaxJobs - Math.Max(h.SlotsUsed, ours);
-        return memGb is { } need && h.MemFreeGb is { } free ? Math.Min(slots, (int)Math.Floor(free / need)) : slots;
+        return memGb is { } need && h.MemFreeGb is { } free ? Math.Min(slots, Math.Max(0, (int)Math.Floor((free - (oursNotRunning * need)) / need))) : slots;
     }
 
     /// <summary>
@@ -126,7 +128,7 @@ public sealed partial class JobRunner
         var argv = new ShardInfo(1, 1).Substitute(template.Argv);
         var (_, health) = await ProbeForJobAsync(template, !JobPolicy.ValidateForWindows(argv).Ok, ct).ConfigureAwait(false);
         var free = Scheduler.Rank(health, template.Needs)
-            .Select(m => (m.Name, Free: FreeFor(m, health.First(h => ReferenceEquals(h.Item1, m)).Item2, template.MinMemGb, 0)))
+            .Select(m => (m.Name, Free: FreeFor(m, health.First(h => ReferenceEquals(h.Item1, m)).Item2, template.MinMemGb, 0, 0)))
             .Where(f => f.Free > 0)
             .ToList();
         var total = free.Sum(f => f.Free);
@@ -185,16 +187,21 @@ public sealed partial class JobRunner
     /// <param name="HadSlot">The attempt held a slot on its machine at some point (null results never did).</param>
     private sealed record Attempt(ShardState State, Machine Machine, JobResult? Result, TimeSpan Duration, bool Cancelled, bool HadSlot);
 
-    /// <summary>One started attempt: its machine and whether it holds a slot yet (set from the attempt's own thread).</summary>
+    /// <summary>One started attempt: its machine, whether it holds a slot yet and whether its command runs yet (set from the attempt's own thread).</summary>
     private sealed class Running(string machine)
     {
         private volatile bool _holding;
+        private volatile bool _started;
 
         public string Machine => machine;
 
         public bool Holding => _holding;
 
+        public bool Started => _started;
+
         public void Hold() => _holding = true;
+
+        public void Start() => _started = true;
     }
 
     private async Task<List<ShardResult>> DispatchShards(JobRequest template, List<ShardInfo> shards, ShardOptions options, PreparedPayload prepared, CancellationToken ct)
@@ -222,6 +229,9 @@ public sealed partial class JobRunner
         var held = "";
         Exception? loopError = null;
 
+        // The latest probe (with this job's holds), for choosing another machine for a re-run by the same rules as placement.
+        List<(Machine, MachineHealth)> lastHealth = [];
+
         Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot)
         {
             st.Attempts++;
@@ -232,7 +242,7 @@ public sealed partial class JobRunner
                 var clock = Stopwatch.StartNew();
                 try
                 {
-                    var r = await TryOnMachine(NewId(), req, prepared, machine, windowEnds, gitCanEverTakeIt, line => Emit(prefix + line), stop.Token, slot.Hold).ConfigureAwait(false);
+                    var r = await TryOnMachine(NewId(), req, prepared, machine, windowEnds, gitCanEverTakeIt, line => Emit(prefix + line), stop.Token, slot.Hold, slot.Start).ConfigureAwait(false);
                     return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
@@ -276,7 +286,8 @@ public sealed partial class JobRunner
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
                     var free = Scheduler.Rank(health, template.Needs)
                         .Select(m => (Machine: m, Health: health.First(x => ReferenceEquals(x.Item1, m)).Item2))
-                        .Select(x => (x.Machine, x.Health, Free: FreeFor(x.Machine, x.Health, template.MinMemGb, running.Values.Count(r => r.Machine == x.Machine.Name))))
+                        .Select(x => (x.Machine, x.Health, Free: FreeFor(
+                            x.Machine, x.Health, template.MinMemGb, running.Values.Count(r => r.Machine == x.Machine.Name), running.Values.Count(r => r.Machine == x.Machine.Name && !r.Started))))
                         .Where(x => x.Free > 0)
                         .ToList();
                     for (var round = 0; pending.Count > 0 && free.Any(f => f.Free > round); round++)
@@ -296,6 +307,7 @@ public sealed partial class JobRunner
                         }
                     }
 
+                    lastHealth = health;
                     held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
                     if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
                     {
@@ -361,7 +373,7 @@ public sealed partial class JobRunner
                         idle.Restart();
                     }
 
-                    if (Settle(a, template, options, pending, Emit) && options.FailFast && !stop.IsCancellationRequested)
+                    if (Settle(a, template, options, pending, Emit, lastHealth) && options.FailFast && !stop.IsCancellationRequested)
                     {
                         Emit($"[lanq] --fail-fast: shard {a.State.Shard} {a.State.Final!.Status}; cancelling the other shards");
                         await stop.CancelAsync().ConfigureAwait(false);
@@ -387,7 +399,7 @@ public sealed partial class JobRunner
         // everything itself, so none of these awaits throws.
         foreach (var task in running.Keys)
         {
-            Settle(await task.ConfigureAwait(false), template, options, pending, Emit);
+            Settle(await task.ConfigureAwait(false), template, options, pending, Emit, lastHealth);
         }
 
         foreach (var st in states.Where(s => s.Final is null))
@@ -406,7 +418,9 @@ public sealed partial class JobRunner
     /// finish, the job may still be running there, so the re-run must go to another machine; if no other machine could take it, it is not
     /// re-run. Otherwise final. True when the shard ended without completing.
     /// </summary>
-    private bool Settle(Attempt a, JobRequest template, ShardOptions options, List<ShardState> pending, Action<string> emit)
+    /// <param name="health">The latest probe with this job's holds: another machine qualifies for a re-run only when placement could use it
+    /// (reachable, not held by hours, pause, memory, load, --mem or Windows-unsafe arguments, and with the capabilities).</param>
+    private bool Settle(Attempt a, JobRequest template, ShardOptions options, List<ShardState> pending, Action<string> emit, List<(Machine, MachineHealth)> health)
     {
         var st = a.State;
         var prefix = $"[{st.Shard} {a.Machine.Name}] ";
@@ -434,7 +448,7 @@ public sealed partial class JobRunner
                 return false;
             }
 
-            if (config.Machines.Any(m => m.Name != a.Machine.Name && !st.Avoid.Contains(m.Name) && HasCapabilities(m, template.Needs)))
+            if (health.Any(h => h.Item1.Name != a.Machine.Name && !st.Avoid.Contains(h.Item1.Name) && h.Item2.Reachable && h.Item2.Hold is null && HasCapabilities(h.Item1, template.Needs)))
             {
                 st.Avoid.Add(a.Machine.Name);
                 emit(prefix + string.Create(

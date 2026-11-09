@@ -342,9 +342,10 @@ public sealed partial class JobRunner(
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
     /// <param name="emit">Where this job's lines go (lanq's own and the job's output, already sanitised).</param>
     /// <param name="onSlot">Called once the job holds a slot on the machine (the sharded run counts --wait only while no shard holds one).</param>
+    /// <param name="onRunning">Called just before the job's command starts on the machine (after upload and prepare).</param>
     private async Task<JobResult?> TryOnMachine(
         string jobId, JobRequest req, PreparedPayload prepared, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, Action<string> emit, CancellationToken ct,
-        Action? onSlot = null)
+        Action? onSlot = null, Action? onRunning = null)
     {
         var (payload, archive) = (prepared.Payload, prepared.Archive);
         string? archivePath = null;
@@ -353,6 +354,7 @@ public sealed partial class JobRunner(
             try
             {
                 archivePath = await archive.GetAsync(ct).ConfigureAwait(false);
+                archive.Failure = null; // a retried build that worked leaves no stale failure note
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
@@ -415,7 +417,7 @@ public sealed partial class JobRunner(
             JobResult result;
             try
             {
-                result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct).ConfigureAwait(false);
+                result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
             }
             finally
             {
@@ -450,7 +452,8 @@ public sealed partial class JobRunner(
     }
 
     private async Task<JobResult> Transfer(
-        string jobId, JobRequest req, PreparedPayload prepared, string? archivePath, Machine machine, DateTimeOffset? windowEnds, Action<string> onLine, CancellationToken ct)
+        string jobId, JobRequest req, PreparedPayload prepared, string? archivePath, Machine machine, DateTimeOffset? windowEnds, Action<string> onLine, CancellationToken ct,
+        Action? onRunning = null)
     {
         string executeCommand;
         try
@@ -530,6 +533,7 @@ public sealed partial class JobRunner(
             }
         }
 
+        onRunning?.Invoke();
         var run = await ssh.RunAsync(
             machine,
             executeCommand,

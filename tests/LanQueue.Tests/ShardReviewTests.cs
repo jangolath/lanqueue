@@ -430,4 +430,157 @@ public sealed class ShardReviewTests : IDisposable
         Assert.False(nothing.ContainsKey("cores"));
         Assert.True(nothing.ContainsKey("load"));
     }
+
+    private const string ArchiveAndGit = """
+        policy:
+          load_threshold: 0.8
+          allowed_commands: ["npx jest"]
+          allowed_directories: ["."]
+        machines:
+          - name: arc-01
+            os: linux
+            ssh: user@10.20.30.41
+            work_root: /srv/lanq
+            transfer: archive
+            capabilities: [node]
+            max_jobs: 1
+          - name: git-01
+            os: linux
+            ssh: user@10.20.30.51
+            work_root: /srv/lanq
+            capabilities: [node]
+            max_jobs: 1
+        """;
+
+    /// <summary>The first archive build fails, the next one works: a later NoCapacity message carries no stale "Archive build failed" note.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ARetriedArchiveBuildThatWorkedLeavesNoStaleFailureNote()
+    {
+        var ssh = new PoolSsh();
+        ssh.RefuseSlot = m => m.Name == "git-01" || (m.Name == "arc-01" && ssh.Peak.ContainsKey("arc-01"));
+        var payloads = new FailOnceArchive();
+        var runner = Runner(ssh, payloads, ArchiveAndGit, delay: (_, ct) => Task.Delay(TimeSpan.FromMilliseconds(10), ct));
+
+        var r = await runner.RunShardsAsync(Jest(wait: TimeSpan.FromMilliseconds(300)), new ShardOptions(2), CancellationToken.None);
+
+        Assert.Equal(2, payloads.ArchiveBuilds);
+        Assert.Contains(r.Shards, s => s.Status == "Completed" && s.Machine == "arc-01");
+        var waiting = Assert.Single(r.Shards, s => s.Status == "NoCapacity");
+        Assert.DoesNotContain("Archive build failed", waiting.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// --mem 4 on a box with 9 GB free: two shards placed there are still uploading (no memory used yet) when the next placement round looks
+    /// (the other machine has finished its shard and is now short of memory). That round must count them, so the box never holds a third.
+    /// The uploads are released when a round places nothing (the wait timer) or, on a scheduler that over-places, at the third slot claim.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task MemCountsPlacedShardsThatAreNotRunningYet()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tinyRan = false;
+        var ssh = new PoolSsh
+        {
+            ProbeExtra = m => m.Name == "big-01" ? "mem_free_gb=9" : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5",
+            OnUpload = async (m, ct) =>
+            {
+                if (m.Name == "big-01")
+                {
+                    await release.Task.WaitAsync(ct);
+                }
+
+                return new SshResult(0, "");
+            },
+        };
+        ssh.RefuseSlot = m =>
+        {
+            if (m.Name == "big-01" && ssh.Peak.TryGetValue("big-01", out var peak) && peak >= 2)
+            {
+                release.TrySetResult(); // a third claim on big-01 while two are still uploading: over-placed
+            }
+
+            return false;
+        };
+        ssh.OnExecute = (e, _) =>
+        {
+            if (e.Machine.Name == "tiny-01")
+            {
+                Volatile.Write(ref tinyRan, true);
+            }
+
+            return Task.FromResult(e.Exit(0));
+        };
+        var runner = Runner(ssh, new RunnerTests.FakePayloads(""), delay: (_, ct) =>
+        {
+            release.TrySetResult();
+            return Task.Delay(TimeSpan.FromMilliseconds(10), ct);
+        });
+
+        var r = await runner.RunShardsAsync(Jest(wait: TimeSpan.FromMinutes(5)) with { MinMemGb = 4 }, new ShardOptions(4), CancellationToken.None);
+
+        Assert.Equal("Completed", r.Status);
+        Assert.Equal(2, ssh.Peak["big-01"]);
+    }
+
+    /// <summary>
+    /// The other machine has the capabilities but is held (paused): placement could not use it, so a shard that may still run on its first
+    /// machine is not re-run, and says so.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ARetryOnlyGoesToAMachinePlacementCouldUse()
+    {
+        var ssh = new PoolSsh
+        {
+            ProbeExtra = m => m.Name == "tiny-01" ? "mem_free_gb=3\npaused=1" : "mem_free_gb=3",
+            OnExecute = (_, _) => Task.FromResult(new SshResult(255, "Connection to 10.20.30.12 closed by remote host.")),
+            OnCleanup = _ => new SshResult(255, "ssh: connect to host 10.20.30.12 port 22: No route to host"),
+        };
+
+        var r = await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest(), new ShardOptions(1, Retries: 2), CancellationToken.None);
+
+        Assert.Equal(("InfraError", 70), (r.Status, r.ExitCode));
+        Assert.Contains("Not re-run", r.Shards[0].Message, StringComparison.Ordinal);
+        Assert.Single(ssh.Executes);
+    }
+
+    /// <summary>getconf answering something that is not a positive whole number ("undefined") counts as failed: nproc is asked next.</summary>
+    [LinuxFact]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void AnUndefinedGetconfFallsThroughToNproc()
+    {
+        var root = Path.Combine(_dir, "worker2");
+        var bin = Path.Combine(_dir, "bin2");
+        Directory.CreateDirectory(Path.Combine(root, "locks"));
+        Directory.CreateDirectory(bin);
+        foreach (var (tool, body) in new[] { ("getconf", "echo undefined"), ("nproc", "echo 3") })
+        {
+            File.WriteAllText(Path.Combine(bin, tool), "#!/bin/sh\n" + body + "\n");
+            File.SetUnixFileMode(Path.Combine(bin, tool), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        var m = T.Linux();
+        m.WorkRoot = root;
+        var values = HealthProbe.Parse(Shells.Exec("sh", ["-c", RemoteScripts.Probe(m)], new Dictionary<string, string> { ["PATH"] = bin + ":" + Environment.GetEnvironmentVariable("PATH") }).Output);
+        Assert.Equal("3", values["cores"]);
+    }
+}
+
+/// <summary>The first archive build fails (a disk error), every later one works.</summary>
+internal sealed class FailOnceArchive : IPayloadBuilder
+{
+    private readonly RunnerTests.FakePayloads _inner = new("");
+    private int _archives;
+
+    public int ArchiveBuilds => _archives;
+
+    public Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct) =>
+        _inner.BuildAsync(jobId, repoDir, outputDir, kinds, ct);
+
+    public Task<BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct) =>
+        _inner.BuildBundleAsync(jobId, repoDir, outputDir, sha, baseSha, ct);
+
+    public Task<ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct) =>
+        Interlocked.Increment(ref _archives) == 1
+            ? throw new IOException("disk said no")
+            : _inner.BuildArchiveAsync(jobId, repoDir, outputDir, sha, ct);
 }

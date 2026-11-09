@@ -29,8 +29,9 @@ route work in a pool of mixed machines.
   with five shards, a 1-slot box and an equally loaded 4-slot box run one and four.
 - **`--mem` is per shard.** With `--mem GB`, a machine takes no more shards at once than its free memory covers
   (free memory divided by `--mem`, rounded down), whatever its `max_jobs`: a 4-slot box with 5 GB free and `--mem 4`
-  takes one shard at a time. `--shards auto` counts the same way. The free figure comes from the last probe, so shards
-  already running there count only as far as they have used memory by then.
+  takes one shard at a time. `--shards auto` counts the same way. The free figure comes from the last probe; shards of
+  this run placed there but still uploading or preparing are counted as using `--mem` each, since they have not used
+  their memory yet.
 - **More shards than slots.** The rest wait for a sibling shard to finish, then take the slot it freed. That wait does
   not count against `--wait`: `--wait` is how long lanq waits while no shard of this run holds a slot. When it runs
   out, the shards still waiting end `NoCapacity` (75). A machine that the probe shows free but that refuses the slot
@@ -48,7 +49,7 @@ route work in a pool of mixed machines.
   own exit marker). A test failure, a timeout, a refusal or a job that itself exited 255 is never re-run. A re-run never
   risks running the same shard twice at once: when the connection dropped while the job was running and lanq's cleanup
   on that machine did not finish either, the job may still be running there, so the re-run goes to another machine that
-  can take the shard; if there is none, the shard is not re-run and its message says so (`InfraError`, 70). When the
+  placement could use now (capabilities, hours, pause, memory, `--mem`, load, Windows-safe arguments); if there is none, the shard is not re-run and its message says so (`InfraError`, 70). When the
   connection dropped during upload or prepare, or the cleanup finished, the job is known not to be running and the
   re-run may use any machine.
 - **Ctrl+C** cancels every shard. Each started shard's cleanup still runs (its process is stopped, its worktree and
