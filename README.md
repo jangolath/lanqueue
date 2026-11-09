@@ -95,7 +95,9 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    wall-clock time from your local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
-`75` no eligible machine; `124` the job ran past `--timeout` and was stopped.
+`75` no eligible machine; `124` the job ran past `--timeout` and was stopped. A job that itself exits with `124`
+gives the same code; the last stderr line tells them apart (`[lanq] TimedOut: timed out after N min` versus
+`[lanq] Failed: exit 124`).
 
 ## How it works
 

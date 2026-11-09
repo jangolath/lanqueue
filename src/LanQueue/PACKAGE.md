@@ -27,6 +27,10 @@ Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, plus `gi
 `lanq` picks the least loaded machine that has what the job needs, ships your current git state (including
 uncommitted changes) to a throw-away worktree, runs the one allowlisted command, streams the log back and cleans up.
 
+`lanq`'s exit code is the job's own exit code; `2` means rejected by policy or bad arguments, `70` an infrastructure
+error, `75` no eligible machine and `124` that the job ran past `--timeout <minutes>` (default 240) and was stopped.
+A job that itself exits with 124 looks the same; the `[lanq] TimedOut: ...` status line on stderr tells them apart.
+
 ## What a worker needs
 
 An SSH server, the toolchain your jobs use, and git (recommended, the default) or, with `transfer: archive`, just
@@ -36,7 +40,9 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 ## Safe by default
 
 - Key-only SSH with strict host-key checking; there is no password option.
-- Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell.
+- Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell (Windows
+  workers refuse arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
+- Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
 - Best-effort secret scan of the command and uncommitted changes before anything leaves your machine.
 - No daemon, no telemetry, and no network access except the SSH hosts you list.
 
