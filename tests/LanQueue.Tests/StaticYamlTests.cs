@@ -235,10 +235,24 @@ public sealed class StaticYamlTests
     [Fact]
     public void ATaggedNullIsTreatedAsIn04()
     {
-        // 0.4: a bare !!null means "not set"; !!null '' is an empty (invalid) entry.
+        // 0.4: a bare (plain) !!null means "not set"; a quoted one is refused (0.4 refused !!null '' too, as an empty entry).
         Assert.Null(ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null", StringComparison.Ordinal)).Machines[0].AllowedHours);
+        Assert.Null(ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null ~", StringComparison.Ordinal)).Machines[0].AllowedHours);
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null ''", StringComparison.Ordinal)));
-        Assert.Contains("allowed_hours entry ''", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("YAML tag 'tag:yaml.org,2002:null'", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A quoted scalar is a string, so a !!null on it would let the string "null" through as a value: refused.</summary>
+    [Theory]
+    [InlineData("MSBUILDNODECOUNT: \"1\"", "MSBUILDNODECOUNT: !!null \"null\"")]
+    [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - !!null \"null\"\n    - dotnet build")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: [dotnet, !!null '~']")]
+    public void ANullTagOnAQuotedScalarIsRefused(string from, string to)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+        Assert.Contains("YAML tag 'tag:yaml.org,2002:null' does not fit", ex.Message, StringComparison.Ordinal);
     }
 
     [Theory]

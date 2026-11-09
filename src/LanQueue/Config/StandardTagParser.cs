@@ -94,7 +94,7 @@ internal sealed partial class StandardTagParser(IParser inner) : IParser
             (Int, Scalar s) => IntRegex().IsMatch(s.Value),
             (Float, Scalar s) => IsNumber(s.Value),
             (Bool, Scalar s) => BoolRegex().IsMatch(s.Value),
-            (Null, Scalar s) => s.Value is "" or "~" or "null" or "Null" or "NULL",
+            (Null, Scalar s) => s.Style == ScalarStyle.Plain && s.Value is "" or "~" or "null" or "Null" or "NULL", // quoted is a string, never null
             _ => false,
         };
         return fits ? true : throw new ConfigException($"Invalid config: the YAML tag '{tag.Value}' does not fit this value (line {at.Line}); remove it.");

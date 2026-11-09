@@ -20,6 +20,11 @@ jobs:
         continue-on-error: true
         run: |
           grep -o -E '[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' .github/workflows/release.yml | sort -u | while read -r ref; do
+            # Fully qualified (docker.io/library/ubuntu:18.04, mcr.microsoft.com/...), so skopeo never relies on short-name resolution.
+            case "$ref" in
+              */*) case "${ref%%/*}" in *.*|*:*) ;; *) ref="docker.io/$ref" ;; esac ;;
+              *) ref="docker.io/library/$ref" ;;
+            esac
             name=${ref%@*}
             created=$(skopeo inspect --no-tags "docker://$ref" 2>/dev/null | sed -n 's/^ *"Created": "\([^"]*\)".*/\1/p' | head -n 1)
             # The digest of what the tag points at now: the hash of its raw manifest (for a multi-arch image, the index itself, the same
