@@ -496,7 +496,8 @@ public sealed class ShardReviewTests : IDisposable
         var payloads = new FailOnceArchive();
         var runner = Runner(ssh, payloads, ArchiveAndGit, delay: (_, ct) => Task.Delay(TimeSpan.FromMilliseconds(10), ct));
 
-        var r = await runner.RunShardsAsync(Jest(wait: TimeSpan.FromMilliseconds(300)), new ShardOptions(2), CancellationToken.None);
+        // The failed build, the retry and the run must all fit inside --wait; 300 ms was too tight on a slow Windows CI runner.
+        var r = await runner.RunShardsAsync(Jest(wait: TimeSpan.FromSeconds(3)), new ShardOptions(2), CancellationToken.None);
 
         Assert.Equal(2, payloads.ArchiveBuilds);
         Assert.Contains(r.Shards, s => s.Status == "Completed" && s.Machine == "arc-01");
