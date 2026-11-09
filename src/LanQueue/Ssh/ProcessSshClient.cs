@@ -13,6 +13,152 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     public Task<SshResult> UploadAsync(Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
         Execute("scp", SshArgs.Scp(machine, ResolveKey(machine), localPath, remotePath), null, timeout, ct);
 
+    public Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct) =>
+        ExecuteWithInput("ssh", SshArgs.Ssh(machine, ResolveKey(machine), remoteCommand), input, maxOutputChars, timeout, ct);
+
+    /// <summary>The most lanq ever sends on stdin (a script); a bigger input is a bug, not something to stream.</summary>
+    internal const int MaxInputBytes = 1024 * 1024;
+
+    /// <summary>
+    /// Writes <paramref name="input"/> to the process's stdin and closes it. Stdout is read raw (no line splitting) and only its first
+    /// <paramref name="maxOutputChars"/> are kept, the rest is read and dropped; stderr is kept apart, bounded like a probe's output.
+    /// </summary>
+    internal static async Task<SshResult> ExecuteWithInput(string exe, List<string> args, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct)
+    {
+        if (input.Length > MaxInputBytes)
+        {
+            throw new ArgumentException("Input too large.", nameof(input));
+        }
+
+        var psi = new ProcessStartInfo(exe)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        foreach (var a in args)
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        var gate = new object();
+        var stdout = new StringBuilder();
+        var truncated = false;
+        var errors = new OutputCollector(keepTailOnly: false);
+        var closed = false;
+        using var proc = new Process { StartInfo = psi };
+        try
+        {
+            proc.Start();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            return new SshResult(255, "") { ErrorOutput = $"Could not start {exe}: {ex.Message}" };
+        }
+
+        async Task ReadStdout()
+        {
+            var buffer = new char[4096];
+            try
+            {
+                int n;
+                while ((n = await proc.StandardOutput.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) > 0)
+                {
+                    lock (gate)
+                    {
+                        var room = closed ? 0 : Math.Max(0, maxOutputChars - stdout.Length);
+                        stdout.Append(buffer, 0, Math.Min(room, n));
+                        truncated |= n > room;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // killed or disposed: stop reading
+            }
+        }
+
+        async Task WriteInput()
+        {
+            try
+            {
+                var stream = proc.StandardInput.BaseStream;
+                await stream.WriteAsync(input, CancellationToken.None).ConfigureAwait(false);
+                await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // the other side stopped reading (exited early or was killed); its exit code tells the rest
+            }
+            finally
+            {
+                try
+                {
+                    proc.StandardInput.Close();
+                }
+                catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+                {
+                    // already broken
+                }
+            }
+        }
+
+        void OnError(string line)
+        {
+            lock (gate)
+            {
+                if (!closed)
+                {
+                    errors.Add(line);
+                }
+            }
+        }
+
+        var pumps = Task.WhenAll(ReadStdout(), LineReader.PumpAsync(proc.StandardError, OnError), WriteInput());
+
+        SshResult Finish(int exitCode, bool timedOut)
+        {
+            lock (gate)
+            {
+                closed = true;
+                var err = errors.ToString();
+                return new SshResult(exitCode, stdout.ToString(), timedOut)
+                {
+                    OutputTruncated = truncated,
+                    ErrorOutput = timedOut ? err + "[lanq] timed out after " + Describe(timeout) : err,
+                };
+            }
+        }
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try
+        {
+            await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // it exited on its own in the meantime
+            }
+
+            await Drain(pumps).ConfigureAwait(false);
+            var timedOut = Finish(TimedOutExitCode, timedOut: true);
+            ct.ThrowIfCancellationRequested();
+            return timedOut;
+        }
+
+        await Drain(pumps).ConfigureAwait(false);
+        return Finish(proc.ExitCode, timedOut: false);
+    }
+
     /// <summary>Exit code for a command lanq stopped at its time limit (the same code coreutils timeout uses).</summary>
     public const int TimedOutExitCode = 124;
 

@@ -60,6 +60,22 @@ internal sealed class FakeSsh : ISshClient
         Uploads.Add(machine.Name + ":" + remotePath);
         return Task.FromResult(new SshResult(0, ""));
     }
+
+    /// <summary>Every stdin run: the target, the remote command, the bytes sent, the output limit and the timeout.</summary>
+    public List<(Machine Machine, string Command, byte[] Input, int MaxOutputChars, TimeSpan Timeout)> InputRuns { get; } = [];
+
+    public Func<Machine, string, byte[], SshResult> InputHandler { get; set; } = (_, _, _) => new SshResult(0, "");
+
+    public Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct)
+    {
+        var bytes = input.ToArray();
+        lock (InputRuns)
+        {
+            InputRuns.Add((machine, remoteCommand, bytes, maxOutputChars, timeout));
+        }
+
+        return Task.FromResult(InputHandler(machine, remoteCommand, bytes));
+    }
 }
 
 /// <summary>

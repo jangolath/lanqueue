@@ -125,6 +125,41 @@ public class ProcessSshClientTests
         Assert.Contains("timed out after", r.Output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task InputIsWrittenToStdinWhichIsThenClosedAndStdoutIsKeptApartFromStderr()
+    {
+        // The child reads stdin to its end: if stdin were never closed this would hang until the timeout.
+        var (exe, args) = Shell(
+            "$in = [Console]::In.ReadToEnd(); [Console]::Error.WriteLine('noise'); [Console]::Out.Write('got:' + $in.Length)",
+            "n=$(cat | wc -c | tr -d ' '); echo noise >&2; printf 'got:%s' \"$n\"");
+        var input = System.Text.Encoding.ASCII.GetBytes(new string('a', 300_000)); // bigger than a pipe buffer
+        var r = await ProcessSshClient.ExecuteWithInput(exe, args, input, 1000, TimeSpan.FromSeconds(60), CancellationToken.None);
+
+        Assert.Equal(0, r.ExitCode);
+        Assert.False(r.TimedOut);
+        Assert.Equal("got:300000", r.Output.Trim());
+        Assert.Contains("noise", r.ErrorOutput, StringComparison.Ordinal);
+        Assert.False(r.OutputTruncated);
+    }
+
+    [Fact]
+    public async Task StdoutPastTheLimitIsCutAndFlagged()
+    {
+        var (exe, args) = Shell(
+            "$null = [Console]::In.ReadToEnd(); [Console]::Out.Write('x' * 200000)",
+            "cat >/dev/null; dd if=/dev/zero bs=1000 count=200 2>/dev/null | tr '\\0' x");
+        var r = await ProcessSshClient.ExecuteWithInput(exe, args, new byte[] { 1, 2, 3 }, 5000, TimeSpan.FromSeconds(60), CancellationToken.None);
+
+        Assert.Equal(0, r.ExitCode);
+        Assert.True(r.OutputTruncated);
+        Assert.Equal(5000, r.Output.Length);
+    }
+
+    [Fact]
+    public async Task InputOverTheCapIsRefused() =>
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            ProcessSshClient.ExecuteWithInput("sh", ["-c", "true"], new byte[ProcessSshClient.MaxInputBytes + 1], 10, TimeSpan.FromSeconds(5), CancellationToken.None));
+
     private static (string Exe, List<string> Args) Shell(string powershell, string sh) => OperatingSystem.IsWindows()
         ? ("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", powershell])
         : ("sh", ["-c", sh]);
