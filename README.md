@@ -551,8 +551,11 @@ Each default below is enforced in code and covered by a unit test.
   afterwards. Gitignored files are never shipped.
 - **git on the worker runs no hooks and no transports.** Every git call in the worker scripts passes
   `-c core.hooksPath=/dev/null` (`NUL` on Windows), `-c core.fsmonitor=false`, `-c protocol.allow=never` and
-  `-c protocol.file.allow=never`; only the fetch of the uploaded bundle re-allows reading that local file. Tests plant
-  hooks in a worker cache and check that none of them runs.
+  `-c protocol.file.allow=never`; only the fetch of the uploaded bundle re-allows reading that local file. It also
+  passes `-c core.attributesFile=/dev/null` and runs with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`
+  (git 2.32 or later; `lanq doctor --remote` warns about an older git), and prepare recreates a cache whose own config
+  holds anything but what `git init --bare` writes and deletes its `info/attributes`. Tests plant hooks, a smudge
+  filter, an `include.path` and a global-config filter and check that none of them runs.
 - **Archive extraction is checked before it happens.** `lanq` refuses to create an archive with an absolute path, a
   `..` segment, a backslash or a name Windows cannot store; non-regular entries (symlinks, submodules) are skipped
   and reported, never archived. The worker uses only GNU tar or bsdtar (busybox tar is refused, because it hides hard

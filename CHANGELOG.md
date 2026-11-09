@@ -62,6 +62,15 @@ Transfer and supply chain:
   update-ref) runs with `-c core.hooksPath=<null device> -c core.fsmonitor=false -c protocol.allow=never
   -c protocol.file.allow=never` (`/dev/null` on Linux, `NUL` on Windows); only the bundle fetch re-allows reading
   that one local file. A hook planted in a worker cache, or a hooks path in the worker's git config, no longer runs.
+  Every git call also runs with `-c core.attributesFile=<null device>`, `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL`
+  at the null device (git 2.32 or later; `lanq doctor --remote` warns "git older than 2.32: global config not
+  isolated" for an older worker git, which still reads the global config). Before each fetch, prepare deletes the
+  cache's `info/attributes` and checks the cache's own `config`: any key besides the ones `git init --bare` writes
+  (`core.repositoryformatversion`, `filemode`, `bare`, `symlinks`, `ignorecase`, `precomposeunicode`,
+  `logallrefupdates`, `extensions.objectformat`, `refstorage`), for example `filter.*`, `include.*`, `includeIf.*`,
+  `alias.*`, `remote.*`, `credential.*` or `url.*`, makes it delete and recreate that cache (one line in the job output;
+  that job sends a full bundle). Tests plant a smudge filter, an `include.path` and a global config filter and check
+  that none of them runs.
 - **Incremental bundles.** `lanq` records, per machine and repository, the last commit a worker has fetched
   (`<state>/bases.json`, written atomically, updated only after a successful fetch), and the worker cache keeps
   `refs/lanq/base` on the last fetched snapshot. The next job sends `git bundle create … --not <base>` when that commit

@@ -53,6 +53,117 @@ public sealed partial class GitHardeningTests
             script.Split('\n').Count(l => l.Contains("protocol.file.allow=always", StringComparison.Ordinal)));
     }
 
+    [Theory]
+    [MemberData(nameof(GitScripts))]
+    public void EveryGitCallIgnoresSystemAndGlobalConfigAndAttributeFiles(string name, string script)
+    {
+        var windows = name.StartsWith(nameof(MachineOs.Windows), StringComparison.Ordinal);
+        var call = GitCall().Matches(script).Select(m => script[m.Index..].Split('\n')[0]).Single();
+        Assert.Contains("-c core.attributesFile=" + (windows ? "NUL" : "/dev/null"), call, StringComparison.Ordinal);
+        if (windows)
+        {
+            Assert.Contains("$env:GIT_CONFIG_NOSYSTEM = '1'", script, StringComparison.Ordinal);
+            Assert.Contains("$env:GIT_CONFIG_GLOBAL = 'NUL'", script, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git ", script, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Prepares a worker cache for <paramref name="repo"/>'s snapshot, lets <paramref name="plant"/> tamper with it, runs prepare.</summary>
+    private static async Task<(int Code, string Output, string Cache)> PrepareWithPlantedCache(
+        TempRepo repo, LocalWorker worker, Action<string> plant, IReadOnlyDictionary<string, string>? env = null)
+    {
+        File.WriteAllText(Path.Combine(repo.Dir, "b.txt"), "content");
+        repo.Commit("b.txt", "content", "file for checkout");
+        var p = await new GitPayloadBuilder().BuildAsync(Job, repo.Dir, repo.Out, PayloadKinds.Bundle, CancellationToken.None);
+        var cache = Path.Combine(worker.Root, "repos", p.RepoId + ".git").Replace('\\', '/');
+        repo.Git("init", "-q", "--bare", cache);
+        plant(cache);
+        File.Copy((await new GitPayloadBuilder().BuildBundleAsync(Job, repo.Dir, repo.Out, p.Sha, null, CancellationToken.None)).Path, Path.Combine(worker.Root, "incoming", Job + ".bundle"));
+        var (code, output) = Shells.Run(OperatingSystem.IsWindows() ? "windows" : "linux", RemoteScripts.Prepare(worker.Machine, Job, p.RepoId), env);
+        return (code, output, cache);
+    }
+
+    private static string Smudge(string marker) => "touch '" + marker + "'; cat";
+
+    [Fact]
+    public async Task ASmudgeFilterPlantedInTheCacheConfigAndInfoAttributesNeverRuns()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var marker = Path.Combine(worker.Root, "filter-ran").Replace('\\', '/');
+
+        var (code, output, cache) = await PrepareWithPlantedCache(repo, worker, c =>
+        {
+            repo.Git("config", "--file", c + "/config", "filter.evil.smudge", Smudge(marker));
+            Directory.CreateDirectory(c + "/info");
+            File.WriteAllText(c + "/info/attributes", "* filter=evil\n");
+        });
+
+        Assert.True(code == 0, output);
+        Assert.False(File.Exists(marker), "a smudge filter planted in the worker cache ran");
+        Assert.Contains("unexpected config keys", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("filter.", repo.Git("config", "--file", cache + "/config", "--name-only", "--list"), StringComparison.Ordinal);
+        Assert.Equal("content", File.ReadAllText(Path.Combine(worker.Root, "jobs", Job, "b.txt")));
+    }
+
+    [Fact]
+    public async Task AnInfoAttributesFileAloneIsRemoved()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+
+        var (code, output, cache) = await PrepareWithPlantedCache(repo, worker, c =>
+        {
+            Directory.CreateDirectory(c + "/info");
+            File.WriteAllText(c + "/info/attributes", "* -text\n");
+        });
+
+        Assert.True(code == 0, output);
+        Assert.DoesNotContain("unexpected config keys", output, StringComparison.Ordinal); // a clean config keeps its cache
+        Assert.False(File.Exists(cache + "/info/attributes"));
+    }
+
+    [Fact]
+    public async Task AnIncludePathPlantedInTheCacheConfigNeverRuns()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var marker = Path.Combine(worker.Root, "include-ran").Replace('\\', '/');
+        var evil = Path.Combine(worker.Root, "evil.config").Replace('\\', '/');
+        var attributes = Path.Combine(worker.Root, "evil.attributes").Replace('\\', '/');
+        File.WriteAllText(attributes, "* filter=evil\n");
+        repo.Git("config", "--file", evil, "filter.evil.smudge", Smudge(marker));
+        repo.Git("config", "--file", evil, "core.attributesFile", attributes);
+
+        var (code, output, _) = await PrepareWithPlantedCache(repo, worker, c => repo.Git("config", "--file", c + "/config", "include.path", evil));
+
+        Assert.True(code == 0, output);
+        Assert.False(File.Exists(marker), "a filter from an include.path planted in the worker cache ran");
+        Assert.Contains("unexpected config keys", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheWorkerUsersGlobalAndSystemConfigAreNotRead()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var marker = Path.Combine(worker.Root, "global-ran").Replace('\\', '/');
+        var global = Path.Combine(worker.Root, "global.gitconfig").Replace('\\', '/');
+        var attributes = Path.Combine(worker.Root, "global.attributes").Replace('\\', '/');
+        File.WriteAllText(attributes, "* filter=evil\n");
+        repo.Git("config", "--file", global, "filter.evil.smudge", Smudge(marker));
+        repo.Git("config", "--file", global, "core.attributesFile", attributes);
+
+        var (code, output, _) = await PrepareWithPlantedCache(
+            repo, worker, _ => { }, new Dictionary<string, string> { ["GIT_CONFIG_GLOBAL"] = global, ["GIT_CONFIG_SYSTEM"] = global });
+
+        Assert.True(code == 0, output);
+        Assert.False(File.Exists(marker), "a filter from the worker user's global or system git config ran");
+    }
+
     [Fact]
     public async Task HooksPlantedInTheWorkerCacheNeverRun()
     {

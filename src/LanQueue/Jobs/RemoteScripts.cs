@@ -77,12 +77,35 @@ public static class RemoteScripts
     /// anything). Hooks are pointed at the null device, the fsmonitor daemon is off, and every transport is refused; only the
     /// bundle fetch re-allows reading a local file, with <c>-c protocol.file.allow=always</c> on that one call.
     /// </summary>
-    internal const string GitHardeningLinux = "-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+    internal const string GitHardeningLinux = "-c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+
+    /// <summary>
+    /// The sh git wrapper: besides <see cref="GitHardeningLinux"/>, the system config (GIT_CONFIG_NOSYSTEM) and the worker user's global
+    /// config (GIT_CONFIG_GLOBAL at the null device, git 2.32 and later) are never read, so a filter, include or attributes file set
+    /// there (git-lfs, for example) never runs for a lanq job.
+    /// </summary>
+    internal const string LinuxGitFunction = "G() { GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git " + GitHardeningLinux + " \"$@\"; }";
+
+    /// <summary>
+    /// The only keys a worker cache's own config may hold: what <c>git init --bare</c> writes. Anything else (filter.*, include.*,
+    /// includeIf.*, alias.*, remote.*, credential.*, url.*, any other core.* key...) means someone changed the cache, so prepare deletes and
+    /// recreates it (one full bundle).
+    /// </summary>
+    internal const string CacheConfigKeys = @"core\.(repositoryformatversion|filemode|bare|symlinks|ignorecase|precomposeunicode|logallrefupdates)|extensions\.(objectformat|refstorage)";
+
+    /// <summary>Printed by prepare when it recreated a worker cache whose config held anything but <see cref="CacheConfigKeys"/>.</summary>
+    internal const string CacheRecreated = "the worker cache had unexpected config keys; deleted and recreated it (this job sends a full bundle)";
 
     /// <inheritdoc cref="GitHardeningLinux"/>
-    internal const string GitHardeningWindows = "-c core.longpaths=true -c core.hooksPath=NUL -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
+    internal const string GitHardeningWindows = "-c core.longpaths=true -c core.hooksPath=NUL -c core.attributesFile=NUL -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=never";
 
     internal const string GitProbeWindows = "'tool=' + $(if (Get-Command git -ErrorAction SilentlyContinue) { 'ok' } else { 'missing' })";
+
+    /// <summary>lanq doctor --remote: the worker git's version line (GIT_CONFIG_GLOBAL, which isolates the global config, needs 2.32).</summary>
+    internal const string GitVersionWindows = """'git_version=' + "$(& git --version 2>$null | Select-Object -First 1)" """;
+
+    /// <inheritdoc cref="GitVersionWindows"/>
+    internal const string GitVersionLinux = """echo "git_version=$(git --version 2>/dev/null | sed -n 1p)" """;
 
     internal const string GitProbeLinux = "if git --version >/dev/null 2>&1; then echo tool=ok; else echo tool=missing; fi";
 
@@ -257,7 +280,7 @@ public static class RemoteScripts
                 if (Test-Path -LiteralPath $root -PathType Container) {
                   try { $t = "$root/.lanq-doctor.$PID"; [IO.File]::WriteAllText($t, ''); [IO.File]::Delete($t); 'root=ok' } catch { 'root=readonly' }
                 } else { 'root=missing' }
-                {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
+                {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows + "\n" + GitVersionWindows)}}
                 {{JobEnvironmentPowerShell(m)}}
                 $ErrorActionPreference = 'Continue'
                 function Cap([string]$n, [scriptblock]$b) {
@@ -278,7 +301,7 @@ public static class RemoteScripts
               t="$R/.lanq-doctor.$$"
               if ( : > "$t" ) 2>/dev/null; then rm -f "$t"; echo root=ok; else echo root=readonly; fi
             else echo root=missing; fi
-            {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux)}}
+            {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux + "\n" + GitVersionLinux)}}
             {{string.Join('\n', lines)}}
             """;
     }
@@ -411,10 +434,21 @@ public static class RemoteScripts
             $ErrorActionPreference = 'Stop'
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $c = "$root/repos/{{repoId}}.git"
-            function Q { & git {{GitHardeningWindows}} @args }
+            function Q { $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = 'NUL'; & git {{GitHardeningWindows}} @args }
             function G { Q @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
             New-Item -ItemType Directory -Force -Path "$root/jobs", "$root/repos" | Out-Null
+            $ErrorActionPreference = 'Continue'
+            if (Test-Path -LiteralPath $c) {
+              $keys = @(Q config --file "$c/config" --name-only --list 2>$null); $read = $LASTEXITCODE -eq 0
+              if (-not $read -or @($keys | Where-Object { $_ -and $_ -cnotmatch '^({{CacheConfigKeys}})\z' }).Count -gt 0) {
+                'lanq: {{CacheRecreated}}'
+                cmd /c rd /s /q ($c.Replace('/', '\')) 2>$null | Out-Null
+                if (Test-Path -LiteralPath $c) { 'lanq: could not remove the worker cache'; exit 1 }
+              }
+            }
+            $ErrorActionPreference = 'Stop'
             if (-not (Test-Path -LiteralPath $c)) { G init --bare -q $c }
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath "$c/info/attributes"
             $ErrorActionPreference = 'Continue'
             Q -C $c bundle verify "$root/incoming/$id.bundle" 2>&1 | Out-Null
             $ok = $LASTEXITCODE -eq 0
@@ -428,8 +462,13 @@ public static class RemoteScripts
             set -e
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}; C="$R/repos/{{repoId}}.git"
             mkdir -p "$R/jobs" "$R/repos"
-            G() { git {{GitHardeningLinux}} "$@"; }
+            {{LinuxGitFunction}}
+            if [ -d "$C" ]; then
+              k=$(G config --file "$C/config" --name-only --list 2>/dev/null) && [ -z "$(printf '%s\n' "$k" | grep -v -x -E '{{CacheConfigKeys}}' | grep -v -x '')" ] \
+                || { echo 'lanq: {{CacheRecreated}}'; rm -rf "$C"; }
+            fi
             [ -d "$C" ] || G init --bare -q "$C"
+            rm -rf "$C/info/attributes"
             G -C "$C" bundle verify "$R/incoming/$ID.bundle" >/dev/null 2>&1 || { echo '{{BundleNotUsable}}'; exit 3; }
             G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
             G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
@@ -653,7 +692,7 @@ public static class RemoteScripts
 
     private static string WindowsCacheCleanupBefore(string repoId) => $$"""
         $c = "$root/repos/{{repoId}}.git"
-        function Q { & git {{GitHardeningWindows}} @args 2>$null }
+        function Q { $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = 'NUL'; & git {{GitHardeningWindows}} @args 2>$null }
         Q -C $c worktree remove --force "$root/jobs/$id"
         """;
 
@@ -664,7 +703,7 @@ public static class RemoteScripts
 
     private static string LinuxCacheCleanupBefore(string repoId) => $$"""
         C="$R/repos/{{repoId}}.git"
-        G() { git {{GitHardeningLinux}} "$@"; }
+        {{LinuxGitFunction}}
         G -C "$C" worktree remove --force "$R/jobs/$ID" 2>/dev/null
         """;
 

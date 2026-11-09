@@ -102,6 +102,20 @@ public static partial class Cli
         return problems == 0 ? 0 : 1;
     }
 
+    /// <summary>"git version 2.48.1.windows.1" -> 2.48; null when the line is missing or does not look like that.</summary>
+    internal static Version? GitVersion(string? line)
+    {
+        var match = GitVersionRegex().Match(line ?? "");
+        return match.Success
+            && int.TryParse(match.Groups["major"].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var major)
+            && int.TryParse(match.Groups["minor"].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minor)
+                ? new Version(major, minor)
+                : null;
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^git version (?<major>[0-9]{1,4})\.(?<minor>[0-9]{1,4})", System.Text.RegularExpressions.RegexOptions.ExplicitCapture, 1000)]
+    private static partial System.Text.RegularExpressions.Regex GitVersionRegex();
+
     private static string FirstLine(string text) =>
         text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
 
@@ -236,6 +250,12 @@ public static partial class Cli
                     ? "no usable tar for transfer: archive (see docs/WORKERS.md)"
                     : "git not found in a non-login ssh session (install it, or set transfer: archive)"),
         };
+        if (m.Transfer == TransferMode.Git && GitVersion(values.GetValueOrDefault("git_version")) is { } git && git < new Version(2, 32))
+        {
+            lines.Add(("WARN", $"git older than 2.32: global config not isolated (git {git} ignores GIT_CONFIG_GLOBAL, so a filter or "
+                + "attributes file in the ssh user's ~/.gitconfig can still run during a job's checkout; update git on that machine)"));
+        }
+
         foreach (var cap in m.Capabilities.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!RemoteScripts.ToolChecks.TryGetValue(cap, out var commands))

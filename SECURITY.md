@@ -40,8 +40,16 @@ executed. `lanq doctor --remote` writes and removes one empty temporary file in 
 commands (`go` with `GOTOOLCHAIN=local`) in the job environment; `lanq doctor` without `--remote` makes no network
 connection.
 
-On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off and
-all transports refused except reading the uploaded bundle.
+On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off,
+`core.attributesFile` at the null device, all transports refused except reading the uploaded bundle, and with
+`GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL` at the null device, so the system and the ssh user's global git config
+(git-lfs filters, includes, aliases) are not read. `GIT_CONFIG_GLOBAL` needs git 2.32 or later; with an older git the
+global config is still read, and `lanq doctor --remote` warns. Before each fetch the per-repository cache's own `config`
+is checked: anything but the keys `git init --bare` writes (`core.repositoryformatversion`, `core.filemode`,
+`core.bare`, `core.symlinks`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
+`extensions.objectformat`, `extensions.refstorage`) makes lanq delete and recreate that cache, and the cache's
+`info/attributes` is deleted. The repository's own committed `.gitattributes` still apply, but they can only name
+filter drivers, which are defined in config that lanq no longer reads.
 
 It does not:
 - sandbox the allowlisted program (it runs with the remote user's rights; use a low-privilege account);

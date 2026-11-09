@@ -174,6 +174,24 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains(Lines(o, "FAIL"), l => l.Contains("build-02", StringComparison.Ordinal) && l.Contains("Connection timed out", StringComparison.Ordinal));
     }
 
+    /// <summary>GIT_CONFIG_GLOBAL needs git 2.32: an older worker git still reads the user's global config, and doctor says so.</summary>
+    [Theory]
+    [InlineData("git version 2.25.1", true)]
+    [InlineData("git version 2.31.9.windows.1", true)]
+    [InlineData("git version 2.32.0", false)]
+    [InlineData("git version 2.48.1.windows.1", false)]
+    [InlineData("git version 3.0.0", false)]
+    public async Task RemoteWarnsAboutAGitTooOldToIgnoreTheGlobalConfig(string version, bool warns)
+    {
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, "root=ok\ntool=ok\ngit_version=" + version + "\ncap.dotnet=0|10.0.100\ncap.node=0|v22\n") };
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
+        Assert.Equal(warns ? 1 : 0, code);
+        Assert.Equal(warns, Lines(o, "WARN").Any(l => l.Contains("git older than 2.32: global config not isolated", StringComparison.Ordinal)));
+        Assert.Contains("git_version=", ssh.Calls.Single(c => c.Command.Contains("cap.", StringComparison.Ordinal)).Command, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RemoteReportsAReadOnlyWorkRootAndAMissingTransferTool()
     {
