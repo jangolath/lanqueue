@@ -148,4 +148,12 @@ public class HealthTests
     [InlineData("09:00-17:00", 18, 0, false)]
     public void HoursWindowMath(string window, int h, int m, bool expected) =>
         Assert.Equal(expected, HoursWindow.IsAllowed(window, new TimeOnly(h, m)));
+
+    [Fact]
+    public async Task UnreachableErrorTextHasNoTerminalEscapes()
+    {
+        var esc = (char)0x1b;
+        var h = await Probe(T.Linux(), $"{esc}[31mssh: connect refused{esc}[0m", 255, Noon);
+        Assert.Equal("?[31mssh: connect refused?[0m", h.Error);
+    }
 }

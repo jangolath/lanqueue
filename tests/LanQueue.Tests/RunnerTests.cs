@@ -10,6 +10,8 @@ public sealed class RunnerTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "lanq-test-" + Guid.NewGuid().ToString("N"));
 
+    private readonly List<string> _output = [];
+
     private sealed class FakePayloads(string diff, params string[] files) : IPayloadBuilder
     {
         public int Built { get; private set; }
@@ -85,7 +87,7 @@ public sealed class RunnerTests : IDisposable
 
             return new SshResult(0, "ran");
         });
-        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), log, Path.Combine(_dir, "tmp"), _ => { });
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, TimeProvider.System), log, Path.Combine(_dir, "tmp"), _output.Add);
         return (runner, ssh, payloads, log);
     }
 
@@ -422,5 +424,24 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(75, r.ExitCode);
         Assert.Contains("z-rule", r.Message, StringComparison.Ordinal);
         Assert.Equal(1, lines.Count(l => l.Contains("z-rule", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task RemoteControlCharactersNeverReachTheTerminalOrTheLog()
+    {
+        const char Esc = (char)0x1b, Bel = (char)0x07, Csi = (char)0x9b, Del = (char)0x7f, Cr = (char)0x0d, Tab = (char)0x09;
+        var hostile = $"a{Esc}]0;pwned{Bel}b{Esc}[2Jc{Csi}d{Del}e{Cr}f{Tab}g";
+        var (runner, _, _, log) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+            : DecodedContains(m, cmd, "LASTEXITCODE") || cmd.Contains("setsid -w", StringComparison.Ordinal) ? new SshResult(0, hostile)
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        var safe = $"a?]0;pwned?b?[2Jc?d?e?f{Tab}g";
+        Assert.Contains(safe, _output);
+        Assert.Contains(safe, File.ReadAllText(log.LogPathFor(r.JobId)), StringComparison.Ordinal);
+        Assert.DoesNotContain(_output, l => l.Contains(Esc, StringComparison.Ordinal));
     }
 }

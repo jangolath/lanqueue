@@ -178,6 +178,7 @@ public sealed class JobRunner(
         await using var logFile = new StreamWriter(logPath, append: false);
         void OnLine(string line)
         {
+            line = SafeLine(line);
             logFile.WriteLine(line);
             output(line);
         }
@@ -252,6 +253,27 @@ public sealed class JobRunner(
             run.ExitCode,
             machine.Name,
             $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+    }
+
+    /// <summary>
+    /// Remote output is untrusted: C0 controls (except tab), DEL and C1 controls become '?', so a worker cannot move the cursor,
+    /// retitle the window or send other terminal escape sequences to the console or the job log.
+    /// </summary>
+    internal static string SafeLine(string line)
+    {
+        static bool Unsafe(char c) => (c < 0x20 && c != (char)0x09) || (c >= 0x7f && c <= 0x9f);
+        if (!line.Any(Unsafe))
+        {
+            return line;
+        }
+
+        return string.Create(line.Length, line, (span, src) =>
+        {
+            for (var i = 0; i < src.Length; i++)
+            {
+                span[i] = Unsafe(src[i]) ? '?' : src[i];
+            }
+        });
     }
 
     internal static string? ParseSlot(string output)

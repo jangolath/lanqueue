@@ -102,6 +102,6 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
             && double.IsFinite(value);
     }
 
-    private static string FirstLine(string text) =>
-        text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "no output";
+    private static string FirstLine(string text) => JobRunner.SafeLine(
+        text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "no output");
 }
