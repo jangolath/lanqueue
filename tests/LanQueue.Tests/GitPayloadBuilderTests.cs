@@ -48,7 +48,10 @@ public sealed class GitPayloadBuilderTests : IDisposable
         var p = await new GitPayloadBuilder().BuildAsync("j1", _repo, Path.Combine(_repo, ".out"), PayloadKinds.Bundle, CancellationToken.None);
         Assert.Empty(p.ChangedFiles);
         Assert.Equal(Git("rev-parse", "HEAD").Trim(), p.Sha);
-        Assert.True(File.Exists(p.BundlePath));
+        Assert.Equal(Git("rev-parse", "HEAD").Trim(), p.Head);
+        var b = await new GitPayloadBuilder().BuildBundleAsync("j1", _repo, Path.Combine(_repo, ".out"), p.Sha, null, CancellationToken.None);
+        Assert.True(File.Exists(b.Path));
+        Assert.Null(b.Base);
     }
 
     [Fact]
@@ -67,7 +70,9 @@ public sealed class GitPayloadBuilderTests : IDisposable
         Assert.NotEqual(Git("rev-parse", "HEAD").Trim(), p.Sha);
         Assert.Equal(statusBefore, Git("status", "--porcelain"));
         Assert.Empty(Git("for-each-ref", "refs/lanq"));
-        Assert.Contains("lanq/j2", Git("bundle", "list-heads", p.BundlePath!), StringComparison.Ordinal);
+        var b = await new GitPayloadBuilder().BuildBundleAsync("j2", _repo, Path.Combine(_repo, ".out"), p.Sha, null, CancellationToken.None);
+        Assert.Contains("lanq/j2", Git("bundle", "list-heads", b.Path), StringComparison.Ordinal);
+        Assert.Empty(Git("for-each-ref", "refs/lanq"));
     }
 
     [Fact]
@@ -107,7 +112,6 @@ public sealed class GitPayloadBuilderTests : IDisposable
         var p = await new GitPayloadBuilder().BuildAsync("j5", _repo, Path.Combine(_repo, ".out"), PayloadKinds.Archive, CancellationToken.None);
 
         Assert.NotNull(p.ArchivePath);
-        Assert.Null(p.BundlePath);
         using var gz = new System.IO.Compression.GZipStream(File.OpenRead(p.ArchivePath), System.IO.Compression.CompressionMode.Decompress);
         using var reader = new System.Formats.Tar.TarReader(gz);
         var files = new Dictionary<string, string>();

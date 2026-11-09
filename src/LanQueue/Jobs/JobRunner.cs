@@ -46,9 +46,13 @@ public sealed class JobRunner(
     JobLog log,
     string scratchDir,
     Action<string> output,
-    Func<TimeSpan, CancellationToken, Task>? delay = null)
+    Func<TimeSpan, CancellationToken, Task>? delay = null,
+    BaseStore? bases = null)
 {
     private readonly Func<TimeSpan, CancellationToken, Task> delay = delay ?? Task.Delay;
+
+    /// <summary>Last commit each git worker has fetched, per repository: the base for incremental bundles (in memory unless given a file).</summary>
+    private readonly BaseStore bases = bases ?? new BaseStore(null);
 
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
@@ -76,7 +80,7 @@ public sealed class JobRunner(
         JobPayload payload;
         try
         {
-            // Only the bundle is built up front; an archive is built lazily, the first time an archive machine actually gets the job.
+            // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
             var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
             payload = await payloads.BuildAsync(jobId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
         }
@@ -86,6 +90,7 @@ public sealed class JobRunner(
         }
 
         var archive = new LazyArchive(payloads, jobId, req.RepoDir, scratchDir, payload.Sha, output);
+        var bundles = new LazyBundles(payloads, jobId, req.RepoDir, scratchDir, payload.Sha);
         try
         {
             var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
@@ -96,12 +101,12 @@ public sealed class JobRunner(
                 return Rejected(jobId, findings);
             }
 
-            return await Dispatch(jobId, req, payload, archive, ct).ConfigureAwait(false);
+            return await Dispatch(jobId, req, payload, archive, bundles, ct).ConfigureAwait(false);
         }
         finally
         {
-            TryDelete(payload.BundlePath);
             TryDelete(payload.ArchivePath);
+            await bundles.DeleteAsync().ConfigureAwait(false);
             await archive.DeleteAsync().ConfigureAwait(false);
         }
     }
@@ -111,7 +116,7 @@ public sealed class JobRunner(
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
 
-    private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, CancellationToken ct)
+    private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, LazyBundles bundles, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
         var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
@@ -129,7 +134,7 @@ public sealed class JobRunner(
             var ranked = Scheduler.Rank(health, req.Needs).ToList();
             foreach (var machine in ranked)
             {
-                var result = await TryOnMachine(jobId, req, payload, archive, machine, gitCanEverTakeIt, ct).ConfigureAwait(false);
+                var result = await TryOnMachine(jobId, req, payload, archive, bundles, machine, gitCanEverTakeIt, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
@@ -149,7 +154,7 @@ public sealed class JobRunner(
     }
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
-    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, Machine machine, bool gitCanEverTakeIt, CancellationToken ct)
+    private async Task<JobResult?> TryOnMachine(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, LazyBundles bundles, Machine machine, bool gitCanEverTakeIt, CancellationToken ct)
     {
         string? archivePath = null;
         if (machine.Transfer == TransferMode.Archive)
@@ -218,7 +223,7 @@ public sealed class JobRunner(
             JobResult result;
             try
             {
-                result = await Transfer(jobId, req, payload, archivePath, machine, OnLine, ct).ConfigureAwait(false);
+                result = await Transfer(jobId, req, payload, archivePath, bundles, machine, OnLine, ct).ConfigureAwait(false);
             }
             finally
             {
@@ -244,7 +249,7 @@ public sealed class JobRunner(
         }
     }
 
-    private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, Machine machine, Action<string> onLine, CancellationToken ct)
+    private async Task<JobResult> Transfer(string jobId, JobRequest req, JobPayload payload, string? archivePath, LazyBundles bundles, Machine machine, Action<string> onLine, CancellationToken ct)
     {
         string executeCommand;
         try
@@ -256,8 +261,23 @@ public sealed class JobRunner(
             return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message);
         }
 
+        var git = machine.Transfer == TransferMode.Git;
+        var local = archivePath;
+        string? incrementalBase = null;
+        if (git && payload.RepoId is not null)
+        {
+            try
+            {
+                var bundle = await bundles.GetAsync(bases.Get(machine.Name, payload.RepoId), ct).ConfigureAwait(false);
+                (local, incrementalBase) = (bundle.Path, bundle.Base);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+            {
+                return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message);
+            }
+        }
+
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-        var local = machine.Transfer == TransferMode.Archive ? archivePath : payload.BundlePath;
         if (step.Ok && local is null)
         {
             return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine.");
@@ -265,12 +285,29 @@ public sealed class JobRunner(
 
         if (step.Ok)
         {
-            step = await ssh.UploadAsync(machine, local!, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
+            step = await UploadAndPrepare(jobId, payload, machine, local!, onLine, ct).ConfigureAwait(false);
         }
 
-        if (step.Ok)
+        // An incremental bundle the worker cannot use (its cache lost the base) is replaced by a full bundle, once.
+        if (!step.Ok && incrementalBase is not null && step.Output.Contains(RemoteScripts.BundleNotUsable, StringComparison.Ordinal))
         {
-            step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Prepare(machine, jobId, payload.RepoId)), onLine, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false);
+            onLine($"[lanq] {machine.Name}: the worker cache does not have the incremental base; sending a full bundle");
+            try
+            {
+                local = (await bundles.GetAsync(null, ct).ConfigureAwait(false)).Path;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+            {
+                return new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message);
+            }
+
+            step = await UploadAndPrepare(jobId, payload, machine, local, onLine, ct).ConfigureAwait(false);
+        }
+
+        if (step.Ok && git)
+        {
+            // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
+            bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha);
         }
 
         if (!step.Ok)
@@ -302,6 +339,14 @@ public sealed class JobRunner(
             run.ExitCode,
             machine.Name,
             $"exit {run.ExitCode.ToString(CultureInfo.InvariantCulture)}");
+    }
+
+    private async Task<SshResult> UploadAndPrepare(string jobId, JobPayload payload, Machine machine, string local, Action<string> onLine, CancellationToken ct)
+    {
+        var step = await ssh.UploadAsync(machine, local, RemoteScripts.Incoming(machine, jobId), TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
+        return step.Ok
+            ? await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.Prepare(machine, jobId, payload.RepoId)), onLine, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false)
+            : step;
     }
 
     /// <summary>
@@ -377,6 +422,39 @@ public sealed class JobRunner(
             catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException)
             {
                 // nothing was built
+            }
+        }
+    }
+
+    /// <summary>Builds each distinct bundle (full, or incremental on one base) at most once per job, on first use.</summary>
+    private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha)
+    {
+        private readonly Dictionary<string, Task<BundleBuild>> _built = new(StringComparer.Ordinal);
+
+        public Task<BundleBuild> GetAsync(string? baseSha, CancellationToken ct)
+        {
+            var key = baseSha ?? "";
+            if (!_built.TryGetValue(key, out var task))
+            {
+                task = builder.BuildBundleAsync(jobId, repoDir, dir, sha, baseSha, ct);
+                _built[key] = task;
+            }
+
+            return task;
+        }
+
+        public async Task DeleteAsync()
+        {
+            foreach (var task in _built.Values)
+            {
+                try
+                {
+                    TryDelete((await task.ConfigureAwait(false)).Path);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException or IOException or UnauthorizedAccessException)
+                {
+                    // nothing was built
+                }
             }
         }
     }

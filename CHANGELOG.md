@@ -10,6 +10,14 @@
   update-ref) runs with `-c core.hooksPath=<null device> -c core.fsmonitor=false -c protocol.allow=never
   -c protocol.file.allow=never` (`/dev/null` on Linux, `NUL` on Windows); only the bundle fetch re-allows reading
   that one local file. A hook planted in a worker cache, or a hooks path in the worker's git config, no longer runs.
+- **Incremental bundles.** `lanq` records, per machine and repository, the last commit a worker has fetched
+  (`<state>/bases.json`, written atomically, updated only after a successful fetch), and the worker cache keeps
+  `refs/lanq/base` on the last fetched snapshot. The next job sends `git bundle create … --not <base>` when that commit
+  is still a local ancestor of the snapshot, so usually only the new commits and the uncommitted overlay travel. The
+  worker checks the bundle with `git bundle verify` before fetching; if its cache lost the base, the job falls back
+  once to a full bundle automatically (one log line says so). Rewritten history, a pruned base or a missing or
+  unreadable `bases.json` simply mean a full bundle. Bundles are now built when a git machine actually gets the job.
+  Archive mode is unchanged.
 
 ## 0.3.1 (2026-11-09)
 

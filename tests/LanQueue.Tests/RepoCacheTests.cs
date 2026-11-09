@@ -77,7 +77,7 @@ public sealed class RepoCacheTests : IDisposable
     public async Task RealPrepareCreatesThePerRepositoryCacheAndCleanupRemovesTheWorktree()
     {
         var p = await new GitPayloadBuilder().BuildAsync(Job, _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
-        File.Copy(p.BundlePath!, Path.Combine(_worker.Root, "incoming", Job + ".bundle"));
+        File.Copy((await new GitPayloadBuilder().BuildBundleAsync(Job, _repo.Dir, _repo.Out, p.Sha, null, CancellationToken.None)).Path, Path.Combine(_worker.Root, "incoming", Job + ".bundle"));
 
         var (code, output) = _worker.Run(RemoteScripts.Prepare(_worker.Machine, Job, p.RepoId));
 

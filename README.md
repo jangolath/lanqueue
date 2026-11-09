@@ -171,6 +171,16 @@ Paths that Windows cannot store (names ending in a dot or space, the characters 
 `CON`, `NUL` or `COM1`) make the archive build fail with the offending path and rule, because any worker could be a
 Windows one.
 
+### Incremental bundles (git mode)
+
+The first job for a repository on a machine sends a full bundle. After a worker has fetched a snapshot, `lanq`
+records the commit it was taken on in `<state>/bases.json` (per machine and repository; written atomically), and the
+worker's cache keeps `refs/lanq/base` on that snapshot so the objects stay put. The next job bundles only what is new
+(`git bundle create … --not <base>`), as long as the base is still a local ancestor of the new snapshot. The worker
+runs `git bundle verify` before fetching; if its cache no longer has the base (for example it was deleted), the job
+falls back once to a full bundle automatically and the log says so. Rewritten history (rebase, amend, reset) or a
+missing `bases.json` simply mean a full bundle; deleting `bases.json` is always safe.
+
 `lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
 (plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
 
@@ -287,7 +297,7 @@ machines:
 
 Unknown keys are an error (so a `password:` field is refused rather than ignored). Config lookup: `--config`,
 then `$LANQ_CONFIG`, then the per-user config folder (`~/.config/lanq/machines.yml` or `%APPDATA%\lanq\machines.yml`).
-`LANQ_HOME` moves the state folder (job log, logs, scratch); it defaults to a per-user folder outside any repository.
+`LANQ_HOME` moves the state folder (job log, logs, scratch, `bases.json`); it defaults to a per-user folder outside any repository.
 
 ## Security model
 
@@ -344,8 +354,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   job that deliberately detaches into a new session or process group can escape it.
 - Windows remote commands are passed as an encoded command line limited to roughly 8000 characters; very long
   argument lists are refused with a clear message.
-- The full HEAD history is bundled on every run in git mode (no incremental transfer yet). Archive mode sends the
-  whole working snapshot each time, with no history and no cache.
+- In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
+  have yet (see "Incremental bundles"). Archive mode sends the whole working snapshot each time, with no history and
+  no cache.
 - A crashed orchestrator can leave a slot file behind; delete `locks/slot-N` (and any stale `locks/job-*.pid`) under
   the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.

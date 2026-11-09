@@ -72,7 +72,7 @@ public sealed partial class GitHardeningTests
             }
         }
 
-        File.Copy(p.BundlePath!, Path.Combine(worker.Root, "incoming", Job + ".bundle"));
+        File.Copy((await new GitPayloadBuilder().BuildBundleAsync(Job, repo.Dir, repo.Out, p.Sha, null, CancellationToken.None)).Path, Path.Combine(worker.Root, "incoming", Job + ".bundle"));
         var (code, output) = worker.Run(RemoteScripts.Prepare(worker.Machine, Job, p.RepoId));
         Assert.True(code == 0, output);
         (code, output) = worker.Run(RemoteScripts.Cleanup(worker.Machine, Job, "1", p.RepoId));

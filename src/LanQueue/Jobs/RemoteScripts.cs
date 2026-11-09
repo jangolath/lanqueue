@@ -109,8 +109,9 @@ public static class RemoteScripts
             """;
 
     /// <summary>
-    /// Git mode: fetches the uploaded bundle into the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> and adds a detached
-    /// per-job worktree. Archive mode ignores <paramref name="repoId"/>.
+    /// Git mode: verifies the uploaded bundle against the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> (printing
+    /// <see cref="BundleNotUsable"/> and failing if its prerequisites are missing), fetches it, moves <c>refs/lanq/base</c> to the snapshot
+    /// (keeping it alive as the next incremental base) and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
     /// </summary>
     public static string Prepare(Machine m, string jobId, string? repoId = null) =>
         m.Transfer == TransferMode.Archive ? PrepareArchive(m, jobId) : PrepareGit(m, jobId, SafeRepoId(repoId));
@@ -168,10 +169,17 @@ public static class RemoteScripts
             $ErrorActionPreference = 'Stop'
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
             $c = "$root/repos/{{repoId}}.git"
-            function G { & git {{GitHardeningWindows}} @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+            function Q { & git {{GitHardeningWindows}} @args }
+            function G { Q @args; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
             New-Item -ItemType Directory -Force -Path "$root/jobs", "$root/repos" | Out-Null
             if (-not (Test-Path -LiteralPath $c)) { G init --bare -q $c }
+            $ErrorActionPreference = 'Continue'
+            Q -C $c bundle verify "$root/incoming/$id.bundle" 2>&1 | Out-Null
+            $ok = $LASTEXITCODE -eq 0
+            $ErrorActionPreference = 'Stop'
+            if (-not $ok) { '{{BundleNotUsable}}'; exit 3 }
             G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${id}:refs/lanq/${id}"
+            G -C $c update-ref refs/lanq/base "refs/lanq/$id"
             G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
@@ -180,9 +188,17 @@ public static class RemoteScripts
             mkdir -p "$R/jobs" "$R/repos"
             G() { git {{GitHardeningLinux}} "$@"; }
             [ -d "$C" ] || G init --bare -q "$C"
+            G -C "$C" bundle verify "$R/incoming/$ID.bundle" >/dev/null 2>&1 || { echo '{{BundleNotUsable}}'; exit 3; }
             G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$ID:refs/lanq/$ID"
+            G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
             G -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
+
+    /// <summary>
+    /// Printed by the git prepare step when the cache cannot take the uploaded bundle (<c>git bundle verify</c> failed: for an incremental
+    /// bundle, the worker no longer has the base). The runner then sends a full bundle, once.
+    /// </summary>
+    internal const string BundleNotUsable = "lanq: bundle not usable by the worker cache (missing prerequisites)";
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
 
