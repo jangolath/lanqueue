@@ -561,9 +561,10 @@ Build tools size themselves to the machine, which on a 4 GB box usually means sw
 env:
   DOTNET_GCHeapHardLimitPercent: "0x32"        # .NET: GC heap at most 50% of RAM (the value is hexadecimal)
   NODE_OPTIONS: "--max-old-space-size=2048"    # Node: 2 GB heap
-  MSBUILDNODECOUNT: "1"                        # MSBuild: one worker node
   CARGO_BUILD_JOBS: "2"                        # Rust: two parallel compile jobs
 ```
+
+For .NET on a small box, also pass `-m:1` to `dotnet build` and `dotnet test` (one MSBuild node at a time).
 
 Tools installed per user (nvm, pyenv, rustup, sdkman) are often missing in a non-login SSH session, because they put
 themselves on `PATH` from `.bashrc` or `.profile`. List their folders under `path_prepend:` and the job finds them:
@@ -607,7 +608,7 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition count:{shard}/
   whose machine stopped answering, never a test failure. Ctrl+C cancels every shard and cleans each one up.
 
 `lanq health` also shows each machine's cores, total RAM, free/total slots and what it is suited for (light under
-6 GB, medium 6 to 16 GB, heavy 16 GB or more with 4+ cores, plus container builds with a `docker` capability);
+6 GB, medium 6 to 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a `docker` capability);
 `health --json` adds `cores`, `memTotalGb`, `freeSlots`, `size` and `suitedFor`.
 [docs/SHARDING.md](docs/SHARDING.md) has per-ecosystem recipes (.NET, Node, Python, Go, Rust), a sizing table for
 `max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs.

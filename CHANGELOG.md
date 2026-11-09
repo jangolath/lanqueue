@@ -25,7 +25,8 @@
   3) re-runs only a shard whose machine stopped answering ssh (never a test failure or a job that exited 255 itself).
   Ctrl+C cancels every shard and still cleans each one up.
 - **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (light under 6 GB, medium 6 to 16 GB,
-  heavy 16 GB or more with 4+ cores, "+docker: container builds"); the probe now reports `mem_total_gb` and `cores` on
+  heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; the same thresholds as
+  lanq-makeready); the probe now reports `mem_total_gb` and `cores` on
   Linux and Windows (unknown values are shown as `?`, never a hold). `health --json` adds `cores`, `memTotalGb`,
   `freeSlots`, `size` and `suitedFor`; earlier fields are unchanged. The text line now says `slots free F/M` instead
   of `slots U/M`.

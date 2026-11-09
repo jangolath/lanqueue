@@ -57,7 +57,7 @@ developer allowlisted for .NET, Python or Go) when the pool has free slots. Run 
 interactive as a single run.
 
 1. `lanq health --json`. Each machine also reports `cores`, `memTotalGb`, `freeSlots`, `size`
-   (`light` under 6 GB, `medium` 6 to 16 GB, `heavy` 16 GB or more with 4+ cores, `unknown`) and `suitedFor`.
+   (`light` under 6 GB, `medium` 6 to under 16 GB, `heavy` 16 GB or more with 4+ cores, `unknown`) and `suitedFor`.
 2. Choose:
    - one heavy job (full suite, large build, container build): a single run on a machine that suits it, with
      `--needs bigmem` if the developer tags big machines, or `--mem GB` (memory **available now**, not installed);

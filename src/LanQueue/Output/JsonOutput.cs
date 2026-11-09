@@ -22,7 +22,7 @@ internal sealed record HealthJson(
     /// <summary>light, medium, heavy or unknown (see <see cref="Health.MachineSize"/>).</summary>
     public string Size { get; init; } = "unknown";
 
-    /// <summary>What the machine suits, for example "light: lint, type-check, unit-test shards; +docker: container builds".</summary>
+    /// <summary>What the machine suits, for example "light: lint, type-check, unit-test shards + container builds".</summary>
     public string SuitedFor { get; init; } = "";
 }
 

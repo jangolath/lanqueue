@@ -240,29 +240,38 @@ slow integration suites, and container builds on workers that have Docker (`--ne
 
 ## Sizing machines
 
-Give each machine a `max_jobs` and a `min_free_mem_gb` that fit it. A test shard or build usually needs 1.5 to 3 GB
-(a .NET or Node test host, a compiler, the build server), the operating system and whoever uses the PC need 1 to 2 GB,
-and a shard wants about two cores. So: roughly one job per 3 to 4 GB of RAM after 2 GB for the system, never more
-than half the cores, and a `min_free_mem_gb` about one job's worth so a busy machine stops taking new work.
+Give each machine a `max_jobs` and a `min_free_mem_gb` that fit it. These are the rules `lanq-makeready` uses for its
+suggested `machines.yml` entry:
 
-| Machine | Suggested `max_jobs` | Suggested `min_free_mem_gb` | `lanq health` says |
-| --- | --- | --- | --- |
-| 4 GB, 2 to 4 cores | 1 | 0.8 | light: lint, type-check, unit-test shards |
-| 8 GB, 4 cores | 2 | 1.5 | medium: test shards, builds |
-| 16 GB, 4 to 8 cores | 2 (4 cores) to 4 (8 cores) | 2 | heavy: full test suites, large builds |
-| 32 GB, 8 to 16 cores | 4 (8 cores) to 8 (16 cores) | 3 | heavy |
+| Total RAM | Suggested `max_jobs` | Suggested `min_free_mem_gb` |
+| --- | --- | --- |
+| under 6 GB | 1 | 1.5 |
+| 6 to under 12 GB | 2 | 2 |
+| 12 to under 24 GB | 3, or 4 with 8 or more logical CPUs | 2 |
+| 24 GB or more | 6, or 8 with 16 or more logical CPUs | 2 |
 
-`max_jobs` is the hard limit on shards running at once on a machine. `min_free_mem_gb` (and `policy.max_mem_pressure`
-on Linux) is checked when work is placed, so it stops new shards when memory is already short, including from the
-owner's own use; it cannot stop shards already placed in the same moment, which is why `max_jobs` must fit the RAM.
+`max_jobs` is never above the machine's logical CPU count. Why: a test shard or build (a .NET or Node test host, a
+compiler, the build server) usually needs 1.5 to 3 GB and about a core or two, and the operating system and whoever
+uses the PC need the rest; more jobs than cores only makes every job slower.
+
+`max_jobs` is the hard limit on shards running at once on a machine. `min_free_mem_gb` is the headroom kept free
+before the next job starts, not an amount per job (it is not multiplied by `max_jobs`): when available memory is
+below it (or, on Linux, `policy.max_mem_pressure` is exceeded), the machine is held and takes no new work, including
+when the owner's own programs use the memory. It is checked when work is placed, so it cannot stop shards placed in
+the same moment; that is why `max_jobs` must fit the RAM.
+
 Keep a shard under a few minutes: a short shard loses little when a machine goes away or its hours end, and spreads
-evenly. On a 2 to 4 GB machine, run one shard at a time (`max_jobs: 1`) and cap tool memory with `env:`.
+evenly. On a machine under 6 GB, run one shard at a time and cap tool memory with `env:` (`NODE_OPTIONS`,
+`DOTNET_GCHeapHardLimitPercent`, `CARGO_BUILD_JOBS`), and for .NET pass `-m:1` to `dotnet build` and `dotnet test`
+(one MSBuild node).
 
-`lanq health` shows each machine's cores, total RAM, free memory, free/total slots and what it suits. The classes are
-derived from the reported total (the OS keeps some back, so a nominal 16 GB PC that reports 15.5 GB still counts as
-16): **light** under 6 GB (reported under 5.5), **medium** 6 to 16 GB, **heavy** 16 GB or more (reported 14.5 or more)
-with at least 4 cores (a big machine with fewer cores is medium). A `docker` capability adds "+docker: container
-builds". `lanq health --json` has the same as `cores`, `memTotalGb`, `freeSlots`, `size` and `suitedFor`.
+`lanq health` shows each machine's cores, total RAM, free memory, free/total slots and what it suits, from the
+reported total memory, cores and capabilities, with the same thresholds as `lanq-makeready`: **light** under 6 GB
+(lint, type-check, unit-test shards), **medium** 6 to under 16 GB (test shards, builds), **heavy** 16 GB or more with at
+least 4 cores (full test suites, large builds; a big machine with fewer cores is medium), and "+ container builds" when
+the machine has a `docker` capability. The OS keeps some memory back, so a PC with 16 GB installed may report a little
+less and show as medium. `lanq health --json` has the same as `cores`, `memTotalGb`, `freeSlots`, `size` and
+`suitedFor`.
 
 ## Routing work in a mixed pool
 
@@ -289,7 +298,7 @@ machines:
     work_root: /srv/lanq
     capabilities: [dotnet, node, linux]
     max_jobs: 1
-    min_free_mem_gb: 0.8
+    min_free_mem_gb: 1.5
     env:
       DOTNET_GCHeapHardLimitPercent: "0x32"
       NODE_OPTIONS: "--max-old-space-size=2048"
@@ -298,8 +307,8 @@ machines:
     ssh: build@10.20.30.11
     work_root: /srv/lanq
     capabilities: [dotnet, node, linux, docker, bigmem]
-    max_jobs: 4               # 16 cores could take 8; 4 leaves the developer room
-    min_free_mem_gb: 6        # jobs run at low priority by default
+    max_jobs: 4               # the sizing rule gives 8 (32 GB, 16 CPUs); lending 4 leaves the developer room
+    min_free_mem_gb: 2        # jobs run at low priority by default
 ```
 
 What runs where:

@@ -19,18 +19,17 @@ public enum SizeClass
 }
 
 /// <summary>
-/// "Suited for", from total memory, cores and capabilities. Thresholds are nominal installed sizes; the OS and firmware keep part of the
-/// RAM back (a 16 GB PC reports about 15.5 GB, a 6 GB one about 5.8 GB), so the reported total is compared with an allowance: under 5.5 GB is
-/// light, from 14.5 GB with 4 or more cores is heavy, anything between (or a big machine with fewer than 4 cores) is medium. A docker
-/// capability adds container builds.
+/// "Suited for", from the reported total memory, cores and capabilities, with the same thresholds as lanq-makeready: under 6 GB is light,
+/// 16 GB or more with 4 or more cores is heavy, anything between (or a big machine with fewer than 4 cores) is medium. A docker capability
+/// adds container builds.
 /// </summary>
 public static class MachineSize
 {
-    /// <summary>Reported total memory below this (nominal 6 GB) is light.</summary>
-    public const double LightBelowGb = 5.5;
+    /// <summary>Total memory below this is light.</summary>
+    public const double LightBelowGb = 6;
 
-    /// <summary>Reported total memory from this (nominal 16 GB) is heavy, with <see cref="HeavyMinCores"/>.</summary>
-    public const double HeavyFromGb = 14.5;
+    /// <summary>Total memory from this is heavy, with <see cref="HeavyMinCores"/>.</summary>
+    public const double HeavyFromGb = 16;
 
     public const int HeavyMinCores = 4;
 
@@ -42,7 +41,7 @@ public static class MachineSize
         _ => SizeClass.Medium,
     };
 
-    /// <summary>The "suited for" text: the class name, what it suits, and "+docker: container builds" when the machine has a docker capability.</summary>
+    /// <summary>The "suited for" text: the class name, what it suits, and " + container builds" when the machine has a docker capability.</summary>
     public static string SuitedFor(Machine machine, double? memTotalGb, int? cores)
     {
         var size = Classify(memTotalGb, cores);
@@ -53,6 +52,6 @@ public static class MachineSize
             SizeClass.Heavy => "heavy: full test suites, large builds",
             _ => "unknown: the machine did not report its memory",
         };
-        return machine.Capabilities.Contains("docker", StringComparer.OrdinalIgnoreCase) ? text + "; +docker: container builds" : text;
+        return machine.Capabilities.Contains("docker", StringComparer.OrdinalIgnoreCase) ? text + " + container builds" : text;
     }
 }

@@ -49,11 +49,13 @@ public sealed class MachineSizeTests : IDisposable
 
     [Theory]
     [InlineData(3.7, 4, SizeClass.Light)]
-    [InlineData(5.4, 8, SizeClass.Light)]
-    [InlineData(5.8, 2, SizeClass.Medium)]
+    [InlineData(5.99, 8, SizeClass.Light)]
+    [InlineData(6.0, 2, SizeClass.Medium)]
     [InlineData(7.6, 4, SizeClass.Medium)]
-    [InlineData(15.5, 2, SizeClass.Medium)]
-    [InlineData(15.5, 4, SizeClass.Heavy)]
+    [InlineData(15.9, 8, SizeClass.Medium)]
+    [InlineData(16.0, 2, SizeClass.Medium)]
+    [InlineData(16.0, 3, SizeClass.Medium)]
+    [InlineData(16.0, 4, SizeClass.Heavy)]
     [InlineData(31.2, 16, SizeClass.Heavy)]
     [InlineData(31.2, null, SizeClass.Medium)]
     [InlineData(null, 8, SizeClass.Unknown)]
@@ -66,7 +68,7 @@ public sealed class MachineSizeTests : IDisposable
         Assert.Equal("light: lint, type-check, unit-test shards", MachineSize.SuitedFor(m, 3.7, 4));
         Assert.Equal("medium: test shards, builds", MachineSize.SuitedFor(m, 7.6, 4));
         m.Capabilities = [.. m.Capabilities, "Docker"];
-        Assert.Equal("heavy: full test suites, large builds; +docker: container builds", MachineSize.SuitedFor(m, 31, 8));
+        Assert.Equal("heavy: full test suites, large builds + container builds", MachineSize.SuitedFor(m, 31, 8));
     }
 
     /// <summary>lanq health shows cores, total RAM, free memory, free/total slots and what each machine suits.</summary>
