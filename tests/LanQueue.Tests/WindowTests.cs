@@ -545,6 +545,10 @@ public sealed class WindowTests : IDisposable
 
         public Task<SshResult> UploadAsync(Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
             inner.UploadAsync(machine, localPath, remotePath, timeout, ct);
+
+        public Task<SshResult> RunSplitAsync(
+            Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+            inner.RunSplitAsync(machine, remoteCommand, input, onStdout, onStderr, timeout, ct);
     }
 
     private sealed class EmptyPayloads : IPayloadBuilder

@@ -102,6 +102,26 @@ public sealed class JobEnvironmentTests : IDisposable
         Assert.Contains("env", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>LANQ_ is lanq's own prefix: env: could otherwise override LANQ_JOB, the marker the Linux kill relies on.</summary>
+    [Theory]
+    [InlineData("LANQ_JOB")]
+    [InlineData("lanq_job")]
+    [InlineData("Lanq_Anything")]
+    public void TheLanqPrefixIsReserved(string name)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Linux($"    env:\n      {name}: x")));
+        Assert.Contains($"'{name}'", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("reserved", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Belt and braces: on Linux the marker comes after the machine's env words, so it would win even if one named it.</summary>
+    [Fact]
+    public void TheJobMarkerComesAfterTheMachinesEnvOnLinux()
+    {
+        var m = WithEnv(T.Linux(), ("FOO", "1"));
+        Assert.Contains("env 'FOO=1' 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("LD_PRELOAD")]
     [InlineData("ld_preload")]
@@ -215,12 +235,16 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("NODE_OPTIONS", "--max-old-space-size=2048"));
         m.PathPrepend.AddRange(["/home/u/.nvm/bin", "/opt/x"]);
         var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
-        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'LANQ_JOB=j1' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void LinuxJobWithoutEnvHasNoEnvPrefix() =>
-        Assert.DoesNotContain(" env ", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+    public void LinuxJobWithoutEnvGetsOnlyTheJobMarker() =>
+        Assert.Contains(" env 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+
+    [Fact]
+    public void AnUnsafeJobIdNeverReachesTheEnvironment() =>
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1'; touch x", ".", ["npm", "test"]));
 
     [Fact]
     public void LinuxHostileValueIsOneSingleQuotedWord()
@@ -253,7 +277,7 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("FOO", Hostile));
         m.WorkRoot = _root;
         m.PathPrepend.Add(bin);
-        var output = WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["lanq-test-tool"]));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["lanq-test-tool"])));
         Assert.Equal(Hostile + "|", output);
         Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
     }
@@ -274,7 +298,7 @@ public sealed class JobEnvironmentTests : IDisposable
         File.WriteAllText(file, "\ufeff" + script);
         try
         {
-            var output = WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file);
+            var output = T.JobOutput(WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file));
             Assert.Equal("found" + Environment.NewLine + "True", output);
             Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
         }

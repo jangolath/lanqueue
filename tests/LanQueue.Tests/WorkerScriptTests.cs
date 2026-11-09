@@ -84,12 +84,28 @@ public sealed class WorkerScriptTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
     }
 
+    /// <summary>The wrapper's last stdout line is its exit marker with the job's real code, also after output without a final newline.</summary>
+    [ShFact]
+    public void TheLinuxWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("linux", ["sh", "-c", "printf partial; exit 255"]);
+
+    [PowerShellFact]
+    public void TheWindowsWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("windows", [OperatingSystem.IsWindows() ? "powershell" : "pwsh", "-NoProfile", "-Command", "[Console]::Out.Write('partial'); exit 255"]);
+
+    private void TheWrapperEndsWithTheJobsExitMarker(string shell, string[] argv)
+    {
+        var (code, output) = Shells.Run(shell, RemoteScripts.Execute(Worker(shell == "linux" ? MachineOs.Linux : MachineOs.Windows), "j1", ".", argv, TimeSpan.FromMinutes(5)));
+        Assert.Equal(255, code);
+        var last = output.Replace("\r", "", StringComparison.Ordinal).TrimEnd('\n').Split('\n')[^1];
+        Assert.EndsWith(RemoteScripts.ExitMarker("j1") + "255", last, StringComparison.Ordinal);
+        Assert.Equal(255, JobRunner.ReadExitMarker(last, "j1").Code);
+    }
+
     [Fact]
     public void TheLinuxJobRunsUnderTimeoutWhenALimitIsGiven()
     {
         var s = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], TimeSpan.FromSeconds(90.5));
-        Assert.Contains("if timeout -k 1 5 true >/dev/null 2>&1; then T=\"timeout -k 30 91\"; fi", s, StringComparison.Ordinal);
-        Assert.Contains("$S $T $N $I /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 91\"; fi", s, StringComparison.Ordinal);
+        Assert.Contains("$S $T $N $I env 'LANQ_JOB=j1' /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -122,15 +138,22 @@ public sealed class WorkerScriptTests : IDisposable
     [WindowsFact]
     public void RealPowerShellJobPastItsDeadlineIsStoppedWithItsTree()
     {
-        var marker = Path.Combine(_root, "survivor").Replace('/', (char)92);
-        var watch = Stopwatch.StartNew();
-        var (code, _) = Shells.Run(
+        // The job starts a grandchild PowerShell with its stdout and stderr detached to files (so nothing depends on pipe inheritance); the
+        // grandchild records its pid and start time, then would sleep five minutes. The worker's deadline must stop the
+        // whole tree. The deadline (30 s) leaves room for both PowerShells to start on a busy machine, so the grandchild always exists before
+        // it fires; the proof is that the recorded process is gone, not how long anything took.
+        var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
+        var inner = Recorded.PowerShellWrite(grandchild) + "; Start-Sleep -Seconds 300";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(inner));
+        var detached = "Start-Process -Wait -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile -EncodedCommand " + encoded + "'"
+            + " -RedirectStandardOutput '" + Path.Combine(_root, "gc.out").Replace('/', (char)92) + "'"
+            + " -RedirectStandardError '" + Path.Combine(_root, "gc.err").Replace('/', (char)92) + "'";
+        var (code, output) = Shells.Run(
             "windows",
-            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 20; New-Item -ItemType File " + marker], TimeSpan.FromSeconds(3)));
+            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["powershell", "-NoProfile", "-Command", detached], TimeSpan.FromSeconds(30)));
         Assert.Equal(124, code);
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "took " + watch.Elapsed);
-        Thread.Sleep(1000);
-        Assert.False(File.Exists(marker));
+        Assert.True(File.Exists(grandchild), "the grandchild never started: " + output);
+        Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the deadline");
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
     }
 
@@ -158,13 +181,16 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var m = Worker(MachineOs.Windows);
         var script = Path.Combine(Path.GetTempPath(), "lanq-orphan-" + Guid.NewGuid().ToString("N") + ".ps1");
-        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 120"], TimeSpan.FromMinutes(10)));
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 600"], TimeSpan.FromMinutes(30)));
         var pidFile = Path.Combine(_root, "locks", "job-j1.pid");
         using var wrapper = Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
         try
         {
             string[] lines = [];
-            for (var i = 0; i < 200 && lines.Length < 4; i++)
+            // Event-based waits with generous bounds: two PowerShells start here, which takes seconds on a busy machine. The child would sleep
+            // ten minutes, so it being gone within a minute of cleanup still proves cleanup stopped it.
+            var started = Stopwatch.StartNew();
+            while (lines.Length < 4 && started.Elapsed < TimeSpan.FromMinutes(2))
             {
                 Thread.Sleep(100);
                 try
@@ -179,12 +205,12 @@ public sealed class WorkerScriptTests : IDisposable
             Assert.True(lines.Length >= 4, "the wrapper did not record its child: " + string.Join("|", lines));
             using var child = Process.GetProcessById(int.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture));
             wrapper.Kill(entireProcessTree: false);
-            Assert.True(wrapper.WaitForExit(10000));
+            Assert.True(wrapper.WaitForExit(TimeSpan.FromSeconds(60)));
             Assert.False(child.HasExited);
 
             var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
             Assert.True(code == 0, output);
-            Assert.True(child.WaitForExit(10000), "the orphaned job child is still running");
+            Assert.True(child.WaitForExit(TimeSpan.FromSeconds(60)), "the orphaned job child is still running");
         }
         finally
         {

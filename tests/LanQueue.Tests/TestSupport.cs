@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using LanQueue.Config;
+using LanQueue.Jobs;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -69,6 +70,12 @@ internal static class Shells
         }
     }
 
+    /// <summary>
+    /// A test-level guard: no generated script may run longer than this. A script that hangs (a FIFO read, a link loop, a kill that did not
+    /// happen) is killed with its tree and the test fails with a TimeoutException instead of spinning for an hour.
+    /// </summary>
+    public static readonly TimeSpan Guard = TimeSpan.FromMinutes(5);
+
     public static (int Code, string Output) Exec(string file, IEnumerable<string> args, IReadOnlyDictionary<string, string>? env = null)
     {
         var psi = new ProcessStartInfo(file) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -84,9 +91,24 @@ internal static class Shells
 
         using var p = Process.Start(psi)!;
         var err = p.StandardError.ReadToEndAsync();
-        var output = p.StandardOutput.ReadToEnd();
+        var output = p.StandardOutput.ReadToEndAsync();
+        var started = Stopwatch.StartNew();
+        if (!p.WaitForExit(Guard) || !Task.WhenAll(output, err).Wait(Guard - started.Elapsed > TimeSpan.Zero ? Guard - started.Elapsed : TimeSpan.Zero))
+        {
+            try
+            {
+                p.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // it exited in the meantime
+            }
+
+            throw new TimeoutException($"{file} ran longer than the {Guard.TotalMinutes} minute test guard; killed.");
+        }
+
         p.WaitForExit();
-        return (p.ExitCode, output + err.Result);
+        return (p.ExitCode, output.Result + err.Result);
     }
 
     internal static bool OnPath(string exe)
@@ -102,6 +124,17 @@ internal static class Shells
 public sealed class ShFactAttribute : FactAttribute
 {
     public ShFactAttribute()
+    {
+        if (Shells.Sh is null)
+        {
+            Skip = Shells.NoSh;
+        }
+    }
+}
+
+public sealed class ShTheoryAttribute : TheoryAttribute
+{
+    public ShTheoryAttribute()
     {
         if (Shells.Sh is null)
         {
@@ -149,6 +182,23 @@ public sealed class WindowsFactAttribute : FactAttribute
 internal static class T
 {
     public const string RepoId = "0123456789abcdef";
+
+    /// <summary>A real job wrapper's output without its final exit marker (RemoteScripts.ExitMarker), for tests that compare the job's own output.</summary>
+    public static string JobOutput(string output, string jobId = "j1") => JobRunner.ReadExitMarker(output.TrimEnd((char)13, (char)10), jobId).Before;
+
+    /// <summary>The repository root (the folder holding LanQueue.slnx).</summary>
+    public static readonly string RepoRoot = FindRepoRoot();
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "LanQueue.slnx")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new InvalidOperationException("Repository root (LanQueue.slnx) not found.");
+    }
 
     public const string Yaml = """
         policy:
@@ -204,6 +254,48 @@ internal sealed class FakeSsh : ISshClient
         return Task.FromResult(new SshResult(0, ""));
     }
 
+    /// <summary>The timeout of every streaming stdin run, in order.</summary>
+    public List<TimeSpan> StreamingTimeouts { get; } = [];
+
+    /// <summary>
+    /// A split run (the fetch) goes through <see cref="Handler"/> and <see cref="Calls"/> like any command; with stdin (the Windows fetch) as
+    /// "STDIN:" plus the script it carries (decoded from the base64 UTF-16 input when it is that). Output lines starting with "STDERR:" go to
+    /// <paramref name="onStderr"/> (without the marker), all others to <paramref name="onStdout"/>. <see cref="RunAsync"/> instead delivers
+    /// every line, markers included, to one callback, as ssh merging both streams would.
+    /// </summary>
+    public Task<SshResult> RunSplitAsync(
+        Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct)
+    {
+        var command = remoteCommand;
+        if (input is { } bytes)
+        {
+            var text = Encoding.ASCII.GetString(bytes.Span).Trim();
+            try
+            {
+                text = Encoding.Unicode.GetString(Convert.FromBase64String(text));
+            }
+            catch (FormatException)
+            {
+                // not base64: keep the raw text
+            }
+
+            StreamingTimeouts.Add(timeout);
+            command = "STDIN:" + text;
+        }
+
+        return RunAsync(machine, command, l =>
+        {
+            if (l.StartsWith("STDERR:", StringComparison.Ordinal))
+            {
+                onStderr(l["STDERR:".Length..]);
+            }
+            else
+            {
+                onStdout(l);
+            }
+        }, timeout, ct);
+    }
+
     /// <summary>Every stdin run: the target, the remote command, the bytes sent, the output limit and the timeout.</summary>
     public List<(Machine Machine, string Command, byte[] Input, int MaxOutputChars, TimeSpan Timeout)> InputRuns { get; } = [];
 
@@ -235,19 +327,21 @@ internal sealed class GatedProbeSsh : ISshClient
     {
         if (IsProbe(machine, remoteCommand))
         {
+            // build-01 is probed first but can only finish after build-02 has finished: a sequential probe would block here until
+            // the timeout and fail, while concurrent probes finish build-02 then build-01 on any machine load (no timing window).
             if (machine.Name == "build-01")
             {
-                await _secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
-                await Task.Delay(50, ct);
-            }
-            else
-            {
-                _secondStarted.TrySetResult();
+                await _secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
             }
 
             lock (Finished)
             {
                 Finished.Add(machine.Name);
+            }
+
+            if (machine.Name != "build-01")
+            {
+                _secondStarted.TrySetResult();
             }
 
             var load = machine.Name == "build-01" ? "0.5" : "0.1";
@@ -266,6 +360,11 @@ internal sealed class GatedProbeSsh : ISshClient
         m.Os == MachineOs.Windows && cmd.Contains("-EncodedCommand ", StringComparison.Ordinal)
             ? System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(cmd[(cmd.LastIndexOf(' ') + 1)..]))
             : cmd;
+
+    /// <summary>A split run (the fetch) goes through RunAsync with stdout as the line callback, so this fake serves --fetch runs too.</summary>
+    public Task<SshResult> RunSplitAsync(
+        Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+        RunAsync(machine, remoteCommand, onStdout, timeout, ct);
 }
 
 /// <summary>A fixed instant; the local zone is UTC unless a (fixed-offset, DST-free) zone is given.</summary>
@@ -274,4 +373,81 @@ internal sealed class FakeClock(DateTimeOffset now, TimeZoneInfo? zone = null) :
     public override DateTimeOffset GetUtcNow() => now;
 
     public override TimeZoneInfo LocalTimeZone => zone ?? TimeZoneInfo.Utc;
+}
+
+/// <summary>Test folders that may hold symlinks, junctions and symlink loops.</summary>
+internal static class TestTree
+{
+    /// <summary>
+    /// Removes every link first (the link itself, never what it points at; Windows refuses a recursive delete through a junction made by
+    /// mklink /J), walking without ever descending into one, so a planted symlink loop cannot make the walk endless. Then deletes the rest.
+    /// </summary>
+    public static void Delete(string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        var pending = new Stack<DirectoryInfo>([new DirectoryInfo(root)]);
+        while (pending.Count > 0)
+        {
+            foreach (var e in pending.Pop().EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0, RecurseSubdirectories = false }))
+            {
+                if (e.LinkTarget is not null || e.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    if (e is DirectoryInfo)
+                    {
+                        Directory.Delete(e.FullName);
+                    }
+                    else
+                    {
+                        File.Delete(e.FullName);
+                    }
+                }
+                else if (e is DirectoryInfo d)
+                {
+                    pending.Push(d);
+                }
+            }
+        }
+
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>Processes a test job recorded about itself, so a kill can be proved by the process being gone rather than by timing.</summary>
+internal static class Recorded
+{
+    /// <summary>
+    /// A PowerShell line that writes "pid starttimeticks" of the running PowerShell to <paramref name="file"/> (no characters the Windows argv
+    /// policy refuses).
+    /// </summary>
+    public static string PowerShellWrite(string file) =>
+        "Set-Content -LiteralPath '" + file + "' -Value ([string]$PID + ' ' + (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)";
+
+    /// <summary>
+    /// Waits up to <paramref name="wait"/> for the process recorded in <paramref name="file"/> ("pid" or "pid starttimeticks") to be gone. A pid
+    /// that Windows has given to a new process (different start time) counts as gone.
+    /// </summary>
+    public static bool Gone(string file, TimeSpan wait)
+    {
+        var parts = File.ReadAllText(file).Trim().Split(' ');
+        var pid = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+        long? ticks = parts.Length > 1 ? long.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) : null;
+        return SpinWait.SpinUntil(() => !Running(pid, ticks), wait);
+    }
+
+    private static bool Running(int pid, long? ticks)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited && (ticks is null || p.StartTime.ToUniversalTime().Ticks == ticks);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
 }

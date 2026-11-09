@@ -158,8 +158,8 @@ public static class RemoteScripts
     /// replaced the old one in between), it is put back with its owner's token. Every lock holds its creator's unique token, and <c>drop</c>
     /// removes a lock only after renaming it away and finding its own token in it (otherwise it puts it back), so a reclaimer never removes
     /// another one's lock. sh has no atomic compare-and-delete, so a narrow window remains (see SECURITY.md). <c>stop_job</c> stops a stale slot's job if it is still
-    /// running: it reads locks/job-ID.pid and kills that process group only when /proc shows the process working inside that job's folder
-    /// (so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
+    /// running, through the shared <see cref="LinuxKillRecordedFunction"/> (the recorded group only while it is still the job's, matched by the
+    /// leader's start time, so a pid that was reused by an unrelated process is never killed); without pid information nothing is killed.
     /// </summary>
     internal const string LinuxSlotFunctions = """
         deadline_of() { d=$(printf '%s\n' "$1" | sed -n 2p); case "$d" in ''|*[!0-9]*) return 1 ;; esac; [ ${#d} -le 18 ] || return 1; d=$(printf '%s' "$d" | sed 's/^0*//'); echo "${d:-0}"; }
@@ -179,18 +179,9 @@ public static class RemoteScripts
         }
         stop_job() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
-          kp="$R/locks/job-$1.pid"; [ -f "$kp" ] || return 0
-          g=$(sed -n 1p "$kp" 2>/dev/null)
-          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
-          if [ -d "/proc/$g" ]; then
-            jd=$(cd -P "$R/jobs/$1" 2>/dev/null && pwd -P) || jd="$R/jobs/$1"
-            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in
-              "$jd"|"$jd"/*|"$jd (deleted)") kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
-            esac
-          fi
-          rm -f "$kp"
+          kill_recorded "$R/locks/job-$1.pid" "$R/jobs/$1" "$1"
         }
-        """;
+        """ + "\n" + LinuxKillRecordedFunction;
 
     /// <summary>
     /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file the same way as the sh ones (CreateNew with a
@@ -232,8 +223,11 @@ public static class RemoteScripts
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
     internal const int StaleSlotGraceSeconds = 1800;
 
-    /// <summary>Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback) and cleanup.</summary>
-    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(40);
+    /// <summary>
+    /// Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback), the --fetch step
+    /// (<see cref="JobRunner.FetchTimeout"/>) and cleanup.
+    /// </summary>
+    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(50);
 
     /// <summary>
     /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
@@ -353,8 +347,11 @@ public static class RemoteScripts
 
         var env = JobEnvironmentPosix(m);
         var lines = caps.Select(c => c.ToLowerInvariant()).Select(c =>
-            $"o=$($T {env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; "
-            + $"if [ -n \"$T\" ] && [ \"$rc\" = 124 ]; then echo \"cap.{c}=timeout|\"; else echo \"cap.{c}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"; fi");
+            // timeout exits 124 when TERM stopped the check, and 137 (128 + KILL) when the tool ignored TERM and -k had to kill it; 137 counts
+            // as a timeout only when the check really ran for its whole limit (an OOM-killed tool exits 137 too, but early).
+            $"s=$(date +%s); o=$($T {env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; "
+            + $"if [ -n \"$T\" ] && {{ [ \"$rc\" = 124 ] || {{ [ \"$rc\" = 137 ] && [ $(( $(date +%s) - s )) -ge {seconds} ]; }}; }}; then echo \"cap.{c}=timeout|\"; "
+            + $"else echo \"cap.{c}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"; fi");
         return $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
             if [ -d "$R" ]; then
@@ -362,7 +359,7 @@ public static class RemoteScripts
               if ( : > "$t" ) 2>/dev/null; then rm -f "$t"; echo root=ok; else echo root=readonly; fi
             else echo root=missing; fi
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux + "\n" + GitVersionLinux)}}
-            T=; if timeout -k 5 1 true >/dev/null 2>&1; then T="timeout -k 5 {{seconds}}"; fi
+            T=; if timeout -k 5 30 true >/dev/null 2>&1; then T="timeout -k 5 {{seconds}}"; fi
             {{string.Join('\n', lines)}}
             """;
     }
@@ -585,6 +582,7 @@ public static class RemoteScripts
                   $p = $p.Parent
                 }
                 {{JobEnvironmentPowerShell(m)}}
+                $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
                 Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
                 $job = {
@@ -609,6 +607,7 @@ public static class RemoteScripts
                 } finally {
                   Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
                 }
+                [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId))}} + $code)
                 exit $code
                 """;
         }
@@ -620,15 +619,16 @@ public static class RemoteScripts
             case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
             P={{ShellQuote.Posix(pidFile)}}
             S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
-            T={{(limit is { } l ? $"; if timeout -k 1 5 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
+            T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
-            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
-            echo "$j" > "$P"
+            printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
             rc=$?
             rm -f "$P"
+            printf '%s%s\n' {{ShellQuote.Posix(ExitMarker(jobId))}} "$rc"
             exit $rc
             """;
     }
@@ -652,9 +652,15 @@ public static class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    internal static string JobEnvironmentPosix(Machine m)
+    internal static string JobEnvironmentPosix(Machine m, string? jobId = null)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
+        if (jobId is not null)
+        {
+            // After the machine's own env: words, so the marker wins even if one named it (config refuses LANQ_* names anyway).
+            words.Add(ShellQuote.Posix(JobMarker + "=" + SafeJobId(jobId)));
+        }
+
         if (m.PathPrepend.Count > 0)
         {
             words.Add(ShellQuote.Posix("PATH=" + string.Join(':', m.PathPrepend)) + "\"${PATH:+:$PATH}\"");
@@ -662,6 +668,25 @@ public static class RemoteScripts
 
         return words.Count == 0 ? "" : "env " + string.Join(' ', words) + " ";
     }
+
+    /// <summary>
+    /// The environment variable that marks every process of a job with its id (LANQ_JOB=&lt;job id&gt;). The Linux kill uses it to recognise a
+    /// job's group after its leader has gone; jobs and tools may read it too.
+    /// </summary>
+    internal const string JobMarker = "LANQ_JOB";
+
+    /// <summary>
+    /// The start of the job wrapper's last stdout line, followed by the job's exit code: <c>LANQ_EXIT=&lt;job id&gt;:&lt;code&gt;</c>. ssh passes a
+    /// remote exit code through, so 255 alone cannot tell a job that exited 255 from a lost connection; this line, printed only after the job
+    /// is over, can, when it is the final output line (<see cref="JobRunner.ReadExitMarker"/>). It decides only that; any other code is ssh's.
+    /// </summary>
+    internal static string ExitMarker(string jobId) => "LANQ_EXIT=" + SafeJobId(jobId) + ":";
+
+    /// <summary>A job id is 1 to 64 of A-Z, a-z, 0-9, '_' and '-' (lanq makes them as yyyyMMdd-HHmmss-xxxxxx).</summary>
+    internal static string SafeJobId(string jobId) =>
+        jobId.Length is > 0 and <= 64 && jobId.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
+            ? jobId
+            : throw new ArgumentException("Invalid job id.", nameof(jobId));
 
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
     internal static string JobEnvironmentPowerShell(Machine m)
@@ -675,6 +700,76 @@ public static class RemoteScripts
 
         return string.Join('\n', lines);
     }
+
+    /// <summary>Marks the stop-before-fetch script (tests find it by this comment).</summary>
+    internal const string StopJobMarker = "# lanq: stop the job before fetching";
+
+    /// <summary>
+    /// <c>kill_recorded PIDFILE JOBDIR JOBID</c>: the Linux job wrapper records its process group (line 1), the group leader's start time
+    /// (line 2: field 22 of /proc/PID/stat, which stays the same across exec) and the boot id (line 3). With /proc, nothing is signalled unless
+    /// the boot id is this boot's (a pid file that survived a reboot names nothing); then the group (TERM, 2 s, KILL) only when the leader exists
+    /// with that start time, or the leader is gone, the group is alive and at least one live member of it carries LANQ_JOB=JOBID in its
+    /// environment (the job's own processes; a group number reused by an unrelated program has none). Only for a pid file without a start time,
+    /// or without /proc, the older checks decide: the leader's cwd inside JOBDIR (via /proc), else <c>ps -o pgid=</c> showing it still leads
+    /// that group.
+    /// The pid file is removed either way. Shared by cleanup, <see cref="StopJob"/> and stale-slot reclaim (stop_job).
+    /// </summary>
+    internal const string LinuxKillRecordedFunction = """
+        kill_recorded() {
+          kp="$1"; [ -f "$kp" ] || return 0
+          g=$(sed -n 1p "$kp" 2>/dev/null); st=$(sed -n 2p "$kp" 2>/dev/null); bt=$(sed -n 3p "$kp" 2>/dev/null)
+          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
+          case "$st" in *[!0-9]*) st= ;; esac
+          case "$bt" in *[!0-9a-f-]*) bt= ;; esac
+          case "$3" in ''|*[!A-Za-z0-9_-]*) rm -f "$kp"; return 0 ;; esac
+          mine=
+          if [ -n "$st" ] && [ -d /proc/self ]; then
+            if [ -z "$bt" ] || [ "$bt" != "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
+              :
+            elif [ -r "/proc/$g/stat" ]; then
+              [ "$(sed -n 's/.*) //p' "/proc/$g/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ] && mine=1
+            elif kill -s 0 -- "-$g" 2>/dev/null; then
+              for f in /proc/[0-9]*/stat; do
+                [ "$(sed -n 's/.*) //p' "$f" 2>/dev/null | cut -d' ' -f3)" = "$g" ] || continue
+                if { tr '\000' '\n' < "${f%/stat}/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
+              done
+            fi
+          elif [ -e /proc/self/cwd ]; then
+            jd=$(cd -P "$2" 2>/dev/null && pwd -P) || jd="$2"
+            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
+          elif [ "$(ps -o pgid= -p "$g" 2>/dev/null | tr -d ' ')" = "$g" ]; then
+            mine=1
+          fi
+          if [ -n "$mine" ]; then kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null; fi
+          rm -f "$kp"
+        }
+        """;
+
+    /// <summary>Cleanup's and <see cref="StopJob"/>'s use of <see cref="LinuxKillRecordedFunction"/>; needs $R and $ID.</summary>
+    internal const string LinuxKillRecordedJob = LinuxKillRecordedFunction + "\n" + "kill_recorded \"$R/locks/job-$ID.pid\" \"$R/jobs/$ID\" \"$ID\"";
+
+    /// <summary>
+    /// Stops a job lanq gave up on (timed out, or its machine's hours ended) before its files are fetched. The worker enforces the same limit
+    /// itself only <see cref="JobRunner.WorkerDeadlineMargin"/> later, so the job can still be running and writing. This uses the recorded
+    /// processes exactly as cleanup does: the process group on Linux, and on Windows only processes whose pid and start time match what the
+    /// job recorded (see <see cref="WindowsKillRecorded"/>). It then waits a moment for the processes to go and for files to be closed.
+    /// </summary>
+    public static string StopJob(Machine m, string jobId) => m.Os == MachineOs.Windows
+        ? $$"""
+            {{StopJobMarker}}
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $pf = "$root/locks/job-$id.pid"
+            {{WindowsKillRecorded}}
+            if (Test-Path -LiteralPath $pf) { KillRecorded $pf $false; Start-Sleep -Seconds 1 }
+            exit 0
+            """
+        : $$"""
+            {{StopJobMarker}}
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
+            {{LinuxKillRecordedJob}}
+            sleep 1
+            exit 0
+            """;
 
     /// <summary>
     /// Best-effort teardown: worktree, ref, bundle, slot. Never fails the job. In git mode without a repository id (nothing was fetched
@@ -702,15 +797,7 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
-            P="$R/locks/job-$ID.pid"
-            if [ -f "$P" ]; then
-              g=$(cat "$P" 2>/dev/null)
-              case "$g" in
-                ''|*[!0-9]*) ;;
-                *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
-              esac
-              rm -f "$P"
-            fi
+            {{LinuxKillRecordedJob}}
             rm -rf "$R/jobs/$ID"
             rm -f "$R/incoming/$ID.tar.gz" "$R/incoming/$ID.list" "$R/locks/slot-{{SafeSlot(slot)}}"
             exit 0
@@ -731,15 +818,7 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
-            P="$R/locks/job-$ID.pid"
-            if [ -f "$P" ]; then
-              g=$(cat "$P" 2>/dev/null)
-              case "$g" in
-                ''|*[!0-9]*) ;;
-                *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
-              esac
-              rm -f "$P"
-            fi
+            {{LinuxKillRecordedJob}}
             {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
             {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}

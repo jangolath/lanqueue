@@ -15,6 +15,9 @@ tar and your toolchain are enough.
 dotnet tool install --global LanQueue      # update later: dotnet tool update --global LanQueue
 ```
 
+No .NET SDK? Each release also has a single-file native `lanq` for Windows, Linux (glibc 2.27 and later) and macOS,
+and a Scoop manifest; see [Install](#install).
+
 A 3-command taste (after you list your machines once in `machines.yml`, see [Quick start](#quick-start)):
 
 ```bash
@@ -48,38 +51,110 @@ makes no speed-up claim.
 
 ## Install
 
-Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, and `git` and `ssh`/`scp` on the PATH.
-Remote machines need an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+) and either `git`
-(the default) or `tar` (with `transfer: archive`).
+On the machine you run `lanq` from you need `git` and `ssh`/`scp` on the PATH. Remote machines need an SSH server
+(Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+) and either `git` (the default) or `tar` (with
+`transfer: archive`). Then pick one of three ways to get `lanq` itself:
+
+| Way | Needs | Upgrade |
+| --- | --- | --- |
+| [Native binary](#native-binary-no-net-needed) from GitHub Releases | nothing else | download the new one |
+| [Scoop](#scoop-windows) (Windows) | Scoop | `scoop update lanq` |
+| [.NET tool](#net-tool) from nuget.org | the .NET 10 SDK | `dotnet tool update --global LanQueue` |
+
+### Native binary (no .NET needed)
+
+From 0.5.0 each release has a single-file, ahead-of-time compiled `lanq` for five targets. Each archive holds `lanq`
+(`lanq.exe` on Windows), `LICENSE` and `THIRD-PARTY-NOTICES.txt`; put `lanq` anywhere on your PATH.
+
+| Asset | Runs on |
+| --- | --- |
+| `lanq-win-x64.zip` | Windows x64 (the Windows versions .NET 10 supports) |
+| `lanq-win-arm64.zip` | Windows 11 on Arm64 |
+| `lanq-linux-x64.tar.gz` | Linux x64 with glibc 2.27 or later (Ubuntu 18.04, Debian 10, RHEL 8 and newer) |
+| `lanq-linux-arm64.tar.gz` | Linux Arm64 with glibc 2.27 or later (Raspberry Pi OS 64-bit, Ubuntu 18.04 and newer) |
+| `lanq-osx-arm64.tar.gz` | macOS on Apple silicon |
+
+The Linux binaries are linked against Microsoft's .NET 10 build sysroot (Ubuntu 18.04, glibc 2.27), not against the
+build machine's newer glibc, and every release runs them inside an Ubuntu 18.04 container before publishing. glibc
+2.27 is .NET 10's own floor; there is no musl (Alpine) or 32-bit build. On macOS, a file downloaded with a browser is
+quarantined; `xattr -d com.apple.quarantine lanq` clears that (the binary is ad-hoc signed, not notarized).
+
+```bash
+# Linux x64 example: download, verify (see below), install
+gh release download --repo jangolath/lanqueue --pattern 'lanq-linux-x64.tar.gz' --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify lanq-linux-x64.tar.gz --repo jangolath/lanqueue
+tar -xzf lanq-linux-x64.tar.gz lanq && install -m 755 lanq ~/.local/bin/lanq
+lanq --version
+```
+
+On Windows, check the hash in PowerShell with `(Get-FileHash lanq-win-x64.zip -Algorithm SHA256).Hash` and compare it
+with the line for that file in `SHA256SUMS`, or use `gh attestation verify` as above.
+
+A native binary carries its own copy of the .NET runtime, so a .NET security fix reaches it only through a new
+`lanq` release (see [SECURITY.md](SECURITY.md)). The .NET tool instead uses the runtime installed on your machine.
+
+### Scoop (Windows)
+
+Every release attaches a Scoop manifest, `lanq.json`, that pins that release's zip URLs and SHA-256 hashes. There is
+no bucket to add:
+
+```powershell
+scoop install https://github.com/jangolath/lanqueue/releases/latest/download/lanq.json
+scoop update lanq      # later
+```
+
+Scoop remembers the URL an app was installed from and reads the manifest from it again on `scoop update` and
+`scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
+`scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
+version, install from that release's URL instead, for example
+`https://github.com/jangolath/lanqueue/releases/download/v0.5.0/lanq.json`. Scoop checks each zip against the hash in
+the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
+(tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
+`latest` URL never installs one.
+
+### .NET tool
+
+Requires the .NET 10 SDK.
 
 ```bash
 dotnet tool install --global LanQueue
 dotnet tool update --global LanQueue       # later, to upgrade
 ```
 
-Package: [nuget.org/packages/LanQueue](https://www.nuget.org/packages/LanQueue). Prefer to build it yourself? From a
-clone:
+Package: [nuget.org/packages/LanQueue](https://www.nuget.org/packages/LanQueue). The tool package is
+framework-dependent (it runs on the .NET runtime you have) and behaves exactly like the native binary: both read the
+config through the same compile-time (source-generated) YAML and JSON code. Prefer to build it yourself? From a clone:
 
 ```bash
 dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
 
-### Verify a release
-
-From 0.4.0 on, the release workflow attests the build provenance of the `.nupkg` it builds (GitHub artifact
-attestations, signed with the workflow's OIDC identity). The `.nupkg` attached to the GitHub Release is that exact
-file, so you can check it was built from this repository by the release workflow, then install it:
+To build a native binary yourself (needs the platform's C toolchain, see
+[Native AOT prerequisites](https://aka.ms/nativeaot-prerequisites)):
 
 ```bash
-gh release download v0.4.0 --repo jangolath/lanqueue --pattern '*.nupkg'
-gh attestation verify LanQueue.0.4.0.nupkg --repo jangolath/lanqueue
-dotnet tool install --global --add-source . LanQueue --version 0.4.0
+dotnet publish src/LanQueue -c Release -r linux-x64 -p:LanqNative=true -o ./native
 ```
 
-(The copy on nuget.org carries nuget.org's own repository signature, so its bytes differ from the attested file;
-verify the GitHub Release asset.) Dependencies are pinned too: every project commits a `packages.lock.json`, CI
-restores in locked mode, and every GitHub Action is pinned to a full commit SHA.
+### Verify a release
+
+Every release asset is covered by one `SHA256SUMS` file and by a GitHub build-provenance attestation (signed with the
+release workflow's OIDC identity, logged in the public Sigstore transparency log). `sha256sum --check` proves a
+download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
+
+```bash
+gh release download v0.5.0 --repo jangolath/lanqueue
+sha256sum --check SHA256SUMS
+for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
+dotnet tool install --global --add-source . LanQueue --version 0.5.0    # the attested package, if you want the tool
+```
+
+From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
+repository signature, so its bytes differ from the attested file; verify the GitHub Release asset. Dependencies are
+pinned too: every project commits a `packages.lock.json` (the native build has its own, `packages.native.lock.json`),
+CI restores in locked mode, and every GitHub Action and build container is pinned to a full SHA or digest.
 
 ## Quick start
 
@@ -107,9 +182,11 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    ```
 
    The job's exit code becomes `lanq`'s exit code. `--wait 120` keeps retrying for up to 120 seconds when every
-   machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
-   only to a machine that reports at least 4 GB of available memory. `lanq stats` sums wall-clock time from your
-   local log.
+   machine is busy or on hold, and may wake a sleeping machine that has a `wake:` setting as a last resort
+   (`--no-wake` prevents that; see [Wake-on-LAN](#waking-a-sleeping-worker-wake-on-lan)). `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
+   only to a machine that reports at least 4 GB of available memory. `--fetch 'TestResults/**/*.trx'` brings test
+   results, coverage or build output back after the job (see [Fetching results](#fetching-results-fetch)). `lanq stats`
+   sums wall-clock time from your local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
 `75` no eligible machine; `124` the job ran past `--timeout`, or past the end of its machine's `allowed_hours` plus
@@ -121,12 +198,14 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 
 | Command | What it does |
 | --- | --- |
-| `lanq health [--json]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. |
-| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code. |
+| `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. `--wake` also wakes machines that look asleep. |
+| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
+| `lanq wake <machine> [--wait] [--json]` | Sends a Wake-on-LAN magic packet to a machine with a `wake:` setting, even outside its `allowed_hours`; `--wait` waits for ssh. |
+| `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready version. |
 
 Every command takes `--config FILE`. An option a command does not use is an error, not silently ignored.
 
@@ -199,6 +278,60 @@ or one written by a lanq before 0.4, which has no deadline). `lanq unlock build-
 file on that machine, including those old ones; a job still running there keeps running but loses its slot, so
 another job may start beside it. `--all` without `--yes` is refused.
 
+### Fetching results (--fetch)
+
+```bash
+lanq run --needs dotnet --dir tests --fetch 'TestResults/**/*.trx' --fetch '**/coverage.cobertura.xml' -- dotnet test --logger trx
+```
+
+After the job ends, whether it passed, failed, timed out or was stopped by its machine's hours, and before the job
+folder is deleted, `lanq` copies the files that match back to `.lanq/artifacts/<job id>/` in your repository (the
+`.lanq` folder is never sent to a worker and gets a `.gitignore`), keeping their relative paths. Nothing is fetched
+when the job never started.
+
+- A pattern is relative to the job's working folder (`--dir`), uses forward slashes, and only `*` (within one name),
+  `?` (one character) and `**` (a whole segment: any number of folders). Absolute paths, drive letters, `..`,
+  backslashes, `:` and a leading `-` are refused, as is any character outside letters, digits, space and
+  `. _ + @ = , ~ - /`. `--fetch` may be given up to 16 times. On a Windows worker patterns match ignoring case.
+- Only regular files are fetched. Symlinks, junctions and other reparse points (never followed, not even as folders),
+  hard-linked files (Linux), devices, FIFOs, names with control characters and anything that resolves outside the job
+  folder are skipped and listed with the reason.
+- Caps: 500 files and 200 MB in all by default; `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (for example
+  `500M` or `1G`, up to `2G`) change them. Files are taken in sorted order until a cap is hit; the rest are listed as
+  skipped.
+- `--fetch-dir DIR` writes to `DIR/<job id>/` instead.
+- The fetch has its own 10-minute limit, and on a machine with `allowed_hours` it never runs more than 2 minutes past
+  the end of the window plus grace.
+- A job that timed out or was stopped by its window can still be running on the worker (which enforces the limit
+  itself a minute later), so before fetching `lanq` stops it the way cleanup does: the recorded process group on
+  Linux, and on Windows only the recorded processes whose pid and start time still match. A job that completed or
+  failed is not touched.
+- A job whose ssh connection dropped while it ran (`InfraError`) may also still be running there: `lanq` stops it the
+  same way on a fresh connection and fetches what it left (cleanup would kill it next anyway). If the machine does not
+  answer that either, nothing is fetched and `fetchError` is "not fetched: the SSH connection failed during the job".
+  ssh reports a lost connection as exit 255, which a job can also exit with; the job wrapper therefore ends its output
+  with a `LANQ_EXIT=<job id>:<code>` line (taken off the output), and a 255 counts as the job's own exit only when that
+  line is the final one and says 255; otherwise it is a lost connection. The line decides nothing else: any other exit
+  code is ssh's, and a marker-shaped line that is not the last one is shown as ordinary output. A job that exits 255
+  itself is `Failed` with exit 255.
+- Each file is written as a short `.lanq-partial-N` file in the same folder and renamed to its name only once its size and hash are right.
+  Anything the worker prints on stderr during the fetch is shown as `[lanq] fetch stderr: ...` (the first 10 lines,
+  sanitised) and never mixed into the files.
+- **Fetch problems never change the exit code**: the job's result is what `lanq` reports, and a skipped or failed file
+  is listed in the summary (and in `--json`). A job that passed but whose results did not come back is still a passed
+  job; check `fetchError` and `fetchSkipped` when the files matter.
+
+The summary goes to the job output (stderr with `--json`):
+
+```text
+[lanq] fetch (the job failed (exit 1)): 2 file(s), 1.4 MB -> /home/me/src/app/.lanq/artifacts/20261109-221503-a1b2c3
+[lanq]   fetched TestResults/unit.trx (1.3 MB)
+[lanq]   fetched TestResults/coverage.cobertura.xml (96.2 KB)
+[lanq]   skipped TestResults/latest.trx: symbolic link, junction or reparse point (never followed)
+```
+
+The worker is treated as untrusted for this step; see [Security model](#security-model).
+
 ### JSON output
 
 Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
@@ -215,6 +348,12 @@ one object on stdout when it is over:
 ```json
 {"status":"Completed","exitCode":0,"machine":"build-02","jobId":"20261109-221503-a1b2c3","durationSeconds":84.2,"message":"exit 0"}
 ```
+
+With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","bytes":1363148,"sha256":"..."}]`) and
+`fetchSkipped` (`[{"path":"TestResults/latest.trx","reason":"..."}]`), both present and possibly empty on every path
+(also when the job never started, the command line was refused or the config could not be read), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
+problem (timed out, cut short, the machine's hours ended, the ssh connection was lost) and `fetchSkippedMore` when more than 200 files were skipped.
+Without `--fetch` none of these keys appear.
 
 `status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut`, `WindowClosed` or `Cancelled`;
 `exitCode` is `lanq`'s own exit code; `machine` is `null` when no machine took the job. Stdout always carries exactly
@@ -270,7 +409,9 @@ Where each safety check sits (numbers are the diagram steps):
    `scp`, fetched into a bare cache repo, and a detached `git worktree` is created for the job.
 5. The command runs in the worktree; output streams to your terminal and to `<state>/logs/<job>.log`, where
    `<state>` is `$LANQ_HOME` or a per-user folder (`%LOCALAPPDATA%\lanq`, or `~/.local/state/lanq`), never your repo.
-6. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
+6. With `--fetch`, the matching files are streamed back as checksummed text and written below
+   `.lanq/artifacts/<job id>/`.
+7. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
    `<state>/jobs.jsonl`. Any `.lanq/` folder in the repository is excluded from the snapshot.
 
 ## Transfer modes: git (default, recommended) or archive
@@ -345,6 +486,58 @@ settings keep `lanq` a polite guest there (a full example is the "family PC" ent
   exist and work) and at BelowNormal priority on Windows (inherited by every process the job starts), so the person
   at the keyboard keeps a responsive machine. Set `priority: normal` on a dedicated build box.
 - **Memory.** See the next section.
+- **Wake-on-LAN** for a PC that sleeps outside its hours. See below.
+
+### Waking a sleeping worker (Wake-on-LAN)
+
+A family PC that is asleep or off outside its `allowed_hours` can be woken by `lanq` when its window opens. Opt in per
+machine:
+
+```yaml
+    wake:
+      mac: "aa:bb:cc:dd:ee:ff"       # required; aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff
+      broadcast: 10.20.30.255        # optional IPv4 literal; default 255.255.255.255
+      port: 9                        # optional, 7 or 9 (default 9)
+      wait_seconds: 120              # optional, 1 to 600 (default 120): how long to wait for ssh after the packet
+```
+
+`broadcast` must be `255.255.255.255` or a private (10.x, 172.16-31.x, 192.168.x) or link-local (169.254.x) IPv4
+address; a public, multicast, loopback or `0.0.0.0` address is refused when the config loads (this is a LAN tool).
+**On a computer with several network cards, a VPN or WSL, the default `255.255.255.255` may leave through the wrong
+interface: set `broadcast` to the directed broadcast of the worker's own subnet** (for `10.20.30.0/24`, that is
+`10.20.30.255`).
+
+- **`lanq run` wakes a machine only as a last resort.** If no awake machine can take the job now, and you gave a real
+  `--wait` (above 0), `lanq` wakes **one** machine: the first by name among those that look asleep, have a `wake:`
+  setting, have the capabilities the job needs, could take its arguments (a Windows machine is skipped for arguments
+  Windows cannot take) and are inside their `allowed_hours` with at least `policy.min_window_minutes` plus the machine's
+  `wake.wait_seconds` of the window left (10 min + 120 s by default): a machine with less left would be held as "window
+  closing" once awake, so it is left asleep and the reason is shown. Nothing is woken while an awake machine can take the job,
+  with `--wait 0` (the default), or with `--no-wake`. The wake happens inside `--wait`: it never makes `lanq run`
+  wait longer than you asked, and the other machines keep being tried meanwhile. At most once per machine per `lanq`
+  invocation, and not another machine while one is still coming up.
+  When every awake machine that fits the job is merely busy, `lanq` may therefore wake a sleeper for extra capacity; use
+  `--no-wake` to avoid that. If a woken machine never answers, the next eligible sleeper (by name) may be tried once the
+  first one's `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run.
+- **`lanq health` stays read-only and quick.** It never wakes anything by itself. `lanq health --wake` sends a packet
+  to every machine that looks asleep and is inside its hours with that much of its window left, then waits for each (probing again after 5 s, 10 s, then
+  every 20 s, up to `wait_seconds`).
+- **What counts as asleep:** ssh itself said, on its own `ssh: connect to host ...` line, that the connection timed out
+  or the host or network is unreachable (the Windows OpenSSH wordings are recognised too). A refused connection (the PC
+  is up, sshd is not), an authentication failure or a host-key failure never wake a machine. A localized (non-English)
+  ssh message is not recognised, which fails safe: the automatic wake does not fire, and `lanq wake` still works.
+- **Hours and the PAUSE file.** A sleeping PC cannot report its own clock or a `PAUSE` file, so the hours check before
+  a wake uses **this computer's clock and time zone**; on a daylight-saving night it may be an hour off. A paused
+  machine that is awake is reported as paused and never woken, but a PC that is already asleep may well be paused: it
+  will be woken, then held as "paused on the machine" once it answers.
+- **Explicit**: `lanq wake build-02` sends the packet whatever the hour, because you asked for that machine by name,
+  and says so. `--wait` then waits for ssh and exits 0 when it answers, 1 when it does not within `wait_seconds`. With
+  `--json` it prints one object, `{"status":"Sent|Awake|NoAnswer","exitCode":0,"machine":...,"sent":true,"awake":null|bool,"durationSeconds":...,"message":...}`, or the usual
+  `{"status":"Rejected|InfraError|Cancelled","exitCode":...,"message":...}` when nothing was sent.
+- `lanq doctor` reports the wake setting. It cannot tell whether the machine will actually wake: Wake-on-LAN has to be
+  enabled in the BIOS/UEFI and the network card driver, and usually only works on wired Ethernet. See
+  [docs/WORKERS.md](docs/WORKERS.md#wake-on-lan-for-a-sleeping-worker). The packet is unauthenticated and only meant
+  for your LAN (see [SECURITY.md](SECURITY.md)).
 
 ## Old machines with little RAM
 
@@ -512,6 +705,11 @@ machines:
     env:                      # optional; variables for the job process only (see "Old machines with little RAM")
       NODE_OPTIONS: "--max-old-space-size=2048"
     path_prepend: [/home/build/.cargo/bin]   # optional; absolute directories put in front of PATH for the job
+    wake:                     # optional; Wake-on-LAN, see "Waking a sleeping worker"
+      mac: "aa:bb:cc:dd:ee:ff"   # required inside wake:
+      broadcast: 10.20.30.255   # optional IPv4 literal, 255.255.255.255 or private/link-local only; default 255.255.255.255
+      port: 9                    # optional; 7 or 9
+      wait_seconds: 120          # optional; 1 to 600
 ```
 
 Policy keys added in 0.4, with their defaults:
@@ -526,7 +724,9 @@ policy:
 
 A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing a machine with the people who use it").
 
-Unknown keys are an error (so a `password:` field is refused rather than ignored). Config lookup: `--config`,
+Unknown keys are an error (so a `password:` field is refused rather than ignored), and so is a duplicate key. A key
+left without a value (`max_jobs: ~`, a bare `wake:`) is an error too, except `allowed_hours`, `key_env` and a
+machine's `min_free_mem_gb`, where it means "not set"; to turn Wake-on-LAN off, leave `wake:` out. Config lookup: `--config`,
 then `$LANQ_CONFIG`, then the per-user config folder (`~/.config/lanq/machines.yml` or `%APPDATA%\lanq\machines.yml`).
 `LANQ_HOME` moves the state folder (job log, logs, scratch, `bases.json`); it defaults to a per-user folder outside any repository.
 
@@ -587,7 +787,24 @@ Each default below is enforced in code and covered by a unit test.
   `SHA256SUMS` and its build-provenance attestation). The script goes to the worker on ssh stdin and runs from memory.
   Its report is untrusted input: capped at 1 MB, parsed by a source-generated deserializer, checked against the
   `lanq-makeready/v1` schema, sanitised before display and never executed.
-- **No telemetry**, no network access except the SSH hosts you configure (`lanq doctor` without `--remote` uses none).
+- **Fetched files are data from an untrusted worker.** `lanq run --fetch` never runs, opens or extracts what it
+  fetches (there is no archive: each file comes as a header, base64 lines and a SHA-256). The worker script sends
+  only regular files whose real path is inside the job folder and never follows a link; `lanq` then checks everything
+  again itself: each path (no `..`, absolute or drive paths, backslash, `:`, control or invisible characters, Windows
+  device names such as `CON`, `NUL.txt` or `NUL .txt`, trailing dots or spaces, overlong names, and no two names that
+  differ only in case), that it matches a pattern you asked for (in linear time: a crafted name cannot make the matcher
+  hang), the file count and size caps on the bytes actually received, the exact size announced and the hash. Only
+  stdout carries files; stderr is a separate, sanitised diagnostic. A file that fails any check is deleted and listed.
+  Files are written under a short `.lanq-partial-N` name, created new, and renamed (never overwriting) only below
+  `<out>/<job id>/` once complete; nothing is written through a symlink or junction anywhere from the repository top
+  (or `--fetch-dir`) down, so a `.lanq` link committed in a repository is refused. Tests run the real
+  scripts against links to `/etc/passwd`, symlink loops, junctions, names with newlines and FIFOs, and feed the
+  receiver size lies, bad hashes, `..` paths, device names and case collisions.
+- **Wake-on-LAN is opt-in per machine.** A magic packet is unauthenticated, LAN-only UDP: anyone on the LAN who knows
+  the MAC address can send the same packet, so it is safe only because waking a PC is all it does. `broadcast` must be
+  an IPv4 literal that is 255.255.255.255 or private or link-local (config load refuses anything else).
+- **No telemetry**, no network access except the SSH hosts you configure (and, for a machine with `wake:`, one UDP
+  broadcast packet to its configured broadcast address; `lanq doctor` without `--remote` uses none).
 
 See [SECURITY.md](SECURITY.md) for what this does not protect against.
 
@@ -605,7 +822,10 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 - Cancellation and timeouts: cleanup kills the job's process group (Linux) or PowerShell process tree (Windows)
   recorded in `locks/job-<id>.pid` before removing the worktree. This is best effort: it needs the machine to be
   reachable when cleanup runs (on Windows the pid file also names the job's child process, and a process is killed only
-  when its start time matches the recorded one, so a reused pid is safe). If it is not, the worker stops the job itself one minute after its limit (Linux under
+  when its start time matches the recorded one, so a reused pid is safe; on Linux the pid file also records the group
+  leader's start time and the boot id, every job process carries `LANQ_JOB=<job id>` in its environment, and the
+  group is signalled only in the same boot and only when the leader still has that start time, or the leader is gone
+  and a live member of the group carries this job's `LANQ_JOB`). If it is not, the worker stops the job itself one minute after its limit (Linux under
   `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
   deliberately detaches into a new session or process group can escape both.
 - Windows remote commands are passed as an encoded command line limited to 8000 characters; very long argument
@@ -620,6 +840,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   is reclaimed by the next job that needs a slot (its job is killed first if it is somehow still running). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
+- Wake-on-LAN is best effort and was exercised only against fakes and a loopback UDP socket, not real hardware. `lanq`
+  cannot know whether a packet woke anything beyond the machine answering ssh later. The automatic wake judges
+  `allowed_hours` on your PC's clock (an asleep worker cannot report its own), so keep both in the same time zone.
 - Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
   embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through
   `cmd.exe`, so such an argument could run a second command. Such a job skips Windows workers (hold reason

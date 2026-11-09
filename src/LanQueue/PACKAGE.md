@@ -16,13 +16,19 @@ dotnet tool install --global LanQueue
 dotnet tool update --global LanQueue
 ```
 
-Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, plus `git` and `ssh` on the PATH.
+Requires the .NET 10 SDK on the machine you run `lanq` from, plus `git` and `ssh` on the PATH.
+
+No .NET SDK? Each GitHub release also has a single-file native `lanq` for Windows (x64, Arm64), Linux (x64, Arm64,
+glibc 2.27 and later) and macOS (Apple silicon), with `SHA256SUMS`, build-provenance attestations and a Scoop
+manifest: https://github.com/jangolath/lanqueue#install
 
 ## Quick start
 
 1. List your machines in a private `machines.yml` (start from the [example](https://github.com/jangolath/lanqueue/blob/main/machines.example.yml)) and make sure key-based SSH login works.
 2. Check your setup and the fleet: `lanq doctor --remote`, then `lanq health`
 3. Run a job from inside a git repository: `lanq run --needs dotnet,linux -- dotnet test -c Release`
+4. Bring results back: add `--fetch 'TestResults/**/*.trx'` (repeatable) and the matching files land in
+   `.lanq/artifacts/<job id>/`, whether the job passed or failed.
 
 Onboarding a PC: `lanq makeready --ssh user@old-pc.lan --os windows` runs the read-only
 [lanq-makeready](https://github.com/jangolath/lanq-makeready) check over SSH (built in, sent on stdin, nothing written to
@@ -46,6 +52,9 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 
 - `allowed_hours` per machine, by day: `["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]`, on the worker's own clock.
   A job still running when the window ends is stopped after a grace period (exit 124, `[lanq] WindowClosed`).
+- Optional Wake-on-LAN per machine (`wake: {mac: "aa:bb:cc:dd:ee:ff"}`): `lanq run` wakes one sleeping machine only when no awake
+  one can take the job (needs `--wait`, `--no-wake` turns it off), `lanq health --wake` wakes sleepers, both only inside `allowed_hours` with at least `min_window_minutes` + `wait_seconds` of the window left; `lanq wake <machine> [--wait] [--json]` wakes it on request. Needs
+  Wake-on-LAN enabled in the BIOS/UEFI and the NIC driver, usually wired Ethernet; see docs/WORKERS.md.
 - A `PAUSE` file (Linux: `PAUSE` or `pause`) in the worker's `work_root` holds the machine; anyone at that PC can create
   or delete it. A job already running is not affected.
 - Jobs run at low priority by default (`nice`/`ionice` on Linux, BelowNormal on Windows); `priority: normal` turns it off.
@@ -60,6 +69,9 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 - Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell (Windows
   workers never take arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
 - Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
+- `--fetch` treats the worker as untrusted: regular files only (links never followed), sent as checksummed text (no
+  archive is ever extracted), every path, size, count and hash checked again locally, files created new below
+  `.lanq/artifacts/<job id>/` and never through a link. Fetch problems are reported but never change the exit code.
 - Best-effort secret scan of the command and uncommitted changes, plus the names of committed files (`.env`,
   `id_rsa`, `*.pem` and similar) and the content of `.npmrc`, `.pypirc` and `.yarnrc.yml`, before anything leaves your
   machine.

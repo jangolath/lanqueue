@@ -44,6 +44,22 @@ public sealed class PolicyConfig
     public List<string> AllowedDirectories { get; set; } = [];
 }
 
+/// <summary>wake: (optional per machine) Wake-on-LAN for a sleeping worker. Validated by ConfigLoader.</summary>
+public sealed class WakeConfig
+{
+    /// <summary>aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff. Required.</summary>
+    public string Mac { get; set; } = "";
+
+    /// <summary>An IPv4 literal; the default is the limited broadcast.</summary>
+    public string Broadcast { get; set; } = "255.255.255.255";
+
+    /// <summary>UDP port, 7 or 9.</summary>
+    public int Port { get; set; } = 9;
+
+    /// <summary>How long to wait for the machine to answer ssh after the packet (1 to 600).</summary>
+    public int WaitSeconds { get; set; } = 120;
+}
+
 public sealed class Machine
 {
     public string Name { get; set; } = "";
@@ -67,9 +83,11 @@ public sealed class Machine
     public JobPriority Priority { get; set; } = JobPriority.Low;
 
     /// <summary>allowed_hours: one entry as a string (as before 0.4) or a list of entries; null = any time.</summary>
-    [YamlDotNet.Serialization.YamlConverter(typeof(StringOrListConverter))]
-    public List<string>? AllowedHours { get; set; }
+    public HoursList? AllowedHours { get; set; }
     public TransferMode Transfer { get; set; } = TransferMode.Git;
+
+    /// <summary>Wake-on-LAN settings; null (the default) means lanq never sends a magic packet to this machine automatically.</summary>
+    public WakeConfig? Wake { get; set; }
 }
 
 public sealed class FleetConfig
@@ -77,3 +95,10 @@ public sealed class FleetConfig
     public PolicyConfig Policy { get; set; } = new();
     public List<Machine> Machines { get; set; } = [];
 }
+
+/// <summary>
+/// The allowed_hours entries. Its own type so that <see cref="StringOrListConverter"/> can claim exactly this key by type: YamlDotNet's
+/// static generator (used for trimming and NativeAOT) does not carry a property's [YamlConverter] attribute into the generated code, so a
+/// per-property converter would silently be skipped.
+/// </summary>
+public sealed class HoursList : List<string>;

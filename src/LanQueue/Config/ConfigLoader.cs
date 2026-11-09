@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
+using YamlDotNet.RepresentationModel;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -35,12 +36,12 @@ internal sealed class WordEnumConverter<TEnum>(string key) : IYamlTypeConverter
 }
 
 /// <summary>
-/// A key that accepts either one string or a list of strings (allowed_hours); anything else is a friendly error. Used only where a property
-/// names it with [YamlConverter]: Accepts is false so other lists (capabilities, allowed_commands) stay lists only.
+/// A key that accepts either one string or a list of strings (allowed_hours); anything else is a friendly error. It claims only the
+/// <see cref="HoursList"/> type, so other lists (capabilities, allowed_commands) stay lists only.
 /// </summary>
 internal sealed class StringOrListConverter : IYamlTypeConverter
 {
-    public bool Accepts(Type type) => false;
+    public bool Accepts(Type type) => type == typeof(HoursList);
 
     public object? ReadYaml(IParser parser, Type type, ObjectDeserializer rootDeserializer)
     {
@@ -49,11 +50,11 @@ internal sealed class StringOrListConverter : IYamlTypeConverter
             // A bare "allowed_hours:" or "~" / null is YAML null: no hours set, any time (as in 0.3). A quoted "~" stays an entry.
             return single.Style == ScalarStyle.Plain && single.Value is "" or "~" or "null" or "Null" or "NULL"
                 ? null
-                : new List<string> { single.Value };
+                : new HoursList { single.Value };
         }
 
         var start = parser.Consume<SequenceStart>();
-        var list = new List<string>();
+        var list = new HoursList();
         while (!parser.TryConsume<SequenceEnd>(out _))
         {
             list.Add(parser.TryConsume<Scalar>(out var item)
@@ -105,16 +106,18 @@ public static partial class ConfigLoader
     public static FleetConfig Parse(string yaml)
     {
         // Strict: unknown keys (for example "password") are an error, not ignored.
-        var deserializer = new DeserializerBuilder()
+        var deserializer = new StaticDeserializerBuilder(new YamlContext())
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
             .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
+            .WithTypeConverter(new WordEnumConverter<MachineOs>("os"))
             .WithTypeConverter(new StringOrListConverter())
             .Build();
         FleetConfig config;
         try
         {
-            config = deserializer.Deserialize<FleetConfig>(yaml) ?? new FleetConfig();
+            CheckShape(yaml);
+            config = deserializer.Deserialize<FleetConfig>(StandardTagParser.For(yaml)) ?? new FleetConfig();
         }
         catch (YamlDotNet.Core.YamlException ex)
         {
@@ -125,14 +128,118 @@ public static partial class ConfigLoader
         return config;
     }
 
+    /// <summary>Keys that may be given with no value (YAML null), by their path: they mean "not set".</summary>
+    private static readonly HashSet<string> NullableKeys = new(StringComparer.Ordinal)
+    {
+        "machines[].allowed_hours", "machines[].key_env", "machines[].min_free_mem_gb",
+    };
+
+    private static bool IsNull(YamlNode node) =>
+        node is YamlScalarNode { Style: ScalarStyle.Plain, Value: "" or "~" or "null" or "Null" or "NULL" or null };
+
+    /// <summary>
+    /// Shape checks that the deserializer would otherwise turn into a cryptic message or a crash: the file must be a mapping, a key may not
+    /// be left without a value (except the few that mean "not set"), and a list may not have an empty entry. Values under env: are checked
+    /// by <see cref="Validate"/>, which names the variable.
+    /// </summary>
+    private static void CheckShape(string yaml)
+    {
+        var stream = new YamlStream();
+        stream.Load(StandardTagParser.For(yaml));
+        if (stream.Documents.Count == 0 || IsNull(stream.Documents[0].RootNode))
+        {
+            return; // an empty file has no machines, which Validate reports
+        }
+
+        var root = stream.Documents[0].RootNode;
+        if (root is not YamlMappingNode)
+        {
+            throw new ConfigException($"Invalid config: the file must be a mapping with policy: and machines: keys (line {root.Start.Line}).");
+        }
+
+        Walk(root, "", new HashSet<YamlNode>(ReferenceEqualityComparer.Instance));
+
+        static string Shown(string path) => path.Replace("[]", "", StringComparison.Ordinal);
+
+        // An anchor whose node holds its own alias (capabilities: &s [*s]) is a cycle that would recurse for ever: refused. The depth cap
+        // is a second guard; lanq's config is never more than a few levels deep.
+        static void Enter(YamlNode node, string path, HashSet<YamlNode> ancestors)
+        {
+            if (ancestors.Contains(node))
+            {
+                throw new ConfigException($"Invalid config: '{Shown(path)}' refers to itself through a YAML alias (line {node.Start.Line}).");
+            }
+
+            if (ancestors.Count >= 32)
+            {
+                throw new ConfigException($"Invalid config: '{Shown(path)}' is nested too deeply (line {node.Start.Line}).");
+            }
+        }
+
+        static void Walk(YamlNode node, string path, HashSet<YamlNode> ancestors)
+        {
+            if (node is not (YamlMappingNode or YamlSequenceNode))
+            {
+                return;
+            }
+
+            ancestors.Add(node);
+            switch (node)
+            {
+                case YamlMappingNode map:
+                    foreach (var (k, v) in map.Children)
+                    {
+                        var child = (path.Length == 0 ? "" : path + ".") + ((k as YamlScalarNode)?.Value ?? "");
+                        Enter(v, child, ancestors);
+                        if (path == "env" || path.EndsWith(".env", StringComparison.Ordinal))
+                        {
+                            continue; // an env: value is checked, and its variable named, by Validate
+                        }
+
+                        if (IsNull(v) && !NullableKeys.Contains(child))
+                        {
+                            throw new ConfigException($"Invalid config: '{Shown(child)}' has no value (line {v.Start.Line}). Give it a value or leave the key out.");
+                        }
+
+                        Walk(v, child, ancestors);
+                    }
+
+                    break;
+                case YamlSequenceNode list:
+                    foreach (var item in list.Children)
+                    {
+                        Enter(item, path, ancestors);
+                        if (IsNull(item))
+                        {
+                            throw new ConfigException($"Invalid config: '{Shown(path)}' has an empty entry (line {item.Start.Line}).");
+                        }
+
+                        Walk(item, path + "[]", ancestors);
+                    }
+
+                    break;
+            }
+
+            ancestors.Remove(node);
+        }
+    }
+
     public static FleetConfig Load(string path) => Parse(File.ReadAllText(path));
 
     public static void Validate(FleetConfig config)
     {
-        if (config.Machines.Count == 0)
+        if (config.Machines is null || config.Machines.Count == 0)
         {
             throw new ConfigException("No machines configured.");
         }
+
+        if (config.Policy is null || config.Machines.Any(m => m is null))
+        {
+            throw new ConfigException("policy: and every machines: entry must be a mapping of keys.");
+        }
+
+        RequireEntries("policy.allowed_commands", config.Policy.AllowedCommands);
+        RequireEntries("policy.allowed_directories", config.Policy.AllowedDirectories);
 
         if (config.Policy.AllowedCommands.Count == 0)
         {
@@ -195,6 +302,18 @@ public static partial class ConfigLoader
                     : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
             }
 
+            if (!Enum.IsDefined(m.Os))
+            {
+                throw new ConfigException($"Machine '{m.Name}': os must be 'windows' or 'linux'.");
+            }
+
+            RequireEntries($"Machine '{m.Name}': capabilities", m.Capabilities);
+            RequireEntries($"Machine '{m.Name}': path_prepend", m.PathPrepend);
+            if (m.Env is null)
+            {
+                throw new ConfigException($"Machine '{m.Name}': env must be a mapping of NAME: value.");
+            }
+
             if (!Enum.IsDefined(m.Transfer))
             {
                 throw new ConfigException($"Machine '{m.Name}': transfer must be 'git' or 'archive'.");
@@ -207,6 +326,7 @@ public static partial class ConfigLoader
 
             ValidateJobEnvironment(m);
             ValidateWindowsCommandLength(m);
+            ValidateWake(m);
 
             if (m.MaxJobs < 1)
             {
@@ -234,6 +354,48 @@ public static partial class ConfigLoader
                         + "Omit allowed_hours to allow all day, or give a real window like '22:00-07:00'.");
                 }
             }
+        }
+    }
+
+    /// <summary>A list key must be a list (not null), and every entry a non-blank string.</summary>
+    private static void RequireEntries(string what, List<string>? entries)
+    {
+        if (entries is null || entries.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ConfigException($"{what} must be a list without empty entries.");
+        }
+    }
+
+    private static void ValidateWake(Machine m)
+    {
+        if (m.Wake is not { } w)
+        {
+            return;
+        }
+
+        if (!Health.MagicPacket.TryParseMac(w.Mac, out _))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.mac is required and must look like aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff (not all zeros or all ff).");
+        }
+
+        if (!Health.MagicPacket.TryParseBroadcast(w.Broadcast, out var broadcast))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.broadcast must be an IPv4 address such as 10.20.30.255 (no host names, no IPv6). Omit it for 255.255.255.255.");
+        }
+
+        if (!Health.MagicPacket.IsAllowedBroadcast(broadcast))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.broadcast must be 255.255.255.255 or a private or link-local address (10.x, 172.16-31.x, 192.168.x, 169.254.x); a public, multicast, loopback or 0.0.0.0 address is refused (lanq is a LAN tool).");
+        }
+
+        if (w.Port is not (7 or 9))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.port must be 7 or 9.");
+        }
+
+        if (w.WaitSeconds is < 1 or > 600)
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.wait_seconds must be from 1 to 600.");
         }
     }
 
@@ -278,6 +440,11 @@ public static partial class ConfigLoader
             if (DeniedEnvPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) || DeniedEnvNames.Contains(name, StringComparer.OrdinalIgnoreCase))
             {
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused because it can hijack the program loader or a shell.");
+            }
+
+            if (name.StartsWith("LANQ_", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused: names starting with LANQ_ are reserved for lanq itself (it sets LANQ_JOB for every job).");
             }
 
             if (!names.Add(name))

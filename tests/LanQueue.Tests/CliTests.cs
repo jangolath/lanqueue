@@ -27,6 +27,71 @@ public class CliTests
         Assert.Contains("lanq health", o.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>The usage text lists every command and option of 0.5 (fetch, wake and --version merged from separate branches).</summary>
+    [Theory]
+    [InlineData("lanq run --needs")]
+    [InlineData("--fetch 'TestResults/**/*.trx'")]
+    [InlineData("[--fetch-dir DIR]")]
+    [InlineData("[--fetch-max 200M]")]
+    [InlineData("[--fetch-max-files 500]")]
+    [InlineData("[--no-wake]")]
+    [InlineData("lanq health [--json] [--wake]")]
+    [InlineData("lanq wake <machine> [--wait] [--json]")]
+    [InlineData("lanq --version")]
+    [InlineData("lanq makeready <machine>")]
+    [InlineData("lanq unlock <machine>")]
+    [InlineData("lanq doctor [--remote")]
+    public async Task UsageListsEveryCommandAndOption(string text)
+    {
+        var o = new StringWriter();
+        Assert.Equal(0, await Cli.RunAsync(["--help"], o, new StringWriter(), CancellationToken.None));
+        Assert.Contains(text, o.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunTakesFetchAndNoWakeTogether()
+    {
+        var p = ParsedArgs.Parse(["run", "--needs", "dotnet", "--wait", "120", "--no-wake", "--fetch", "**/*.trx", "--fetch-dir", "out", "--fetch-max", "10M", "--fetch-max-files", "20", "--json", "--", "dotnet", "test"]);
+        Assert.True(p.NoWake);
+        Assert.Equal(120, p.WaitSeconds);
+        Assert.Equal(["**/*.trx"], p.Fetch);
+        Assert.Equal(("out", 10L * 1024 * 1024, 20), (p.FetchDir, p.FetchMaxBytes, p.FetchMaxFiles));
+        Assert.True(p.Json);
+    }
+
+    [Theory]
+    [InlineData("run", "--wake")]
+    [InlineData("health", "--no-wake")]
+    [InlineData("health", "--fetch", "x")]
+    [InlineData("wake", "build-01", "--fetch", "x")]
+    [InlineData("wake", "build-01", "--no-wake")]
+    [InlineData("wake", "build-01", "--force")]
+    public void WakeAndFetchOptionsStayWithTheirCommands(params string[] args) =>
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(args));
+
+    [Theory]
+    [InlineData("--version")]
+    [InlineData("version")]
+    public async Task VersionPrintsLanqAndTheEmbeddedMakereadyVersionOnStdout(string arg)
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        var code = await Cli.RunAsync([arg], o, e, CancellationToken.None);
+        Assert.Equal(0, code);
+        Assert.Equal("", e.ToString());
+        var lines = o.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(2, lines.Length);
+        Assert.Matches(@"^lanq \d+\.\d+\.\d+", lines[0]);
+        Assert.Equal(
+            $"lanq-makeready {Cli.MakereadyVersion} (embedded: lanq-makeready.ps1 {Cli.MakereadyScript(Config.MachineOs.Windows).Length} bytes, "
+            + $"lanq-makeready.sh {Cli.MakereadyScript(Config.MachineOs.Linux).Length} bytes)",
+            lines[1]);
+    }
+
+    [Fact]
+    public void VersionTakesNoOptions() =>
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["--version", "--json"]));
+
     [Fact]
     public async Task AnUnknownCommandPrintsUsageOnStderrAndExits2()
     {

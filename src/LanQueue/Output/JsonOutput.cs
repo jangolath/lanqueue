@@ -16,7 +16,34 @@ internal sealed record HealthJson(
 /// </summary>
 /// <param name="Status">Completed, Failed, Rejected, NoCapacity, InfraError, TimedOut, WindowClosed or Cancelled.</param>
 /// <param name="ExitCode">lanq's own exit code (the job's code, or 2, 70, 75, 124, 130).</param>
-internal sealed record RunJson(string Status, int ExitCode, string? Machine, string? JobId, double DurationSeconds, string Message);
+internal sealed record RunJson(string Status, int ExitCode, string? Machine, string? JobId, double DurationSeconds, string Message)
+{
+    /// <summary>--fetch only: the files brought back (relative path below fetchDir, size, SHA-256 hex).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<FetchedJson>? Fetched { get; init; }
+
+    /// <summary>--fetch only: the files not brought back, each with a reason.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<FetchSkipJson>? FetchSkipped { get; init; }
+
+    /// <summary>--fetch only: skipped files beyond the ones listed in fetchSkipped.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FetchSkippedMore { get; init; }
+
+    /// <summary>--fetch only: the local folder the files were written to (out/jobid), when a fetch ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FetchDir { get; init; }
+
+    /// <summary>--fetch only: a problem with the fetch as a whole (timed out, cut short, the window ended), or null.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FetchError { get; init; }
+}
+
+/// <summary>One fetched file in <c>lanq run --json</c>.</summary>
+internal sealed record FetchedJson(string Path, long Bytes, string Sha256);
+
+/// <summary>One skipped file in <c>lanq run --json</c>.</summary>
+internal sealed record FetchSkipJson(string Path, string Reason);
 
 /// <summary>
 /// What <c>lanq health --json</c> and <c>lanq makeready --json</c> print instead of their normal output when there is none: Rejected (2),
@@ -24,9 +51,14 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
 /// </summary>
 internal sealed record ErrorJson(string Status, int ExitCode, string Message);
 
+/// <summary>The one object <c>lanq wake --json</c> prints when a packet was sent: Sent (0), Awake (0, with --wait) or NoAnswer (1, with --wait). Failures use <see cref="ErrorJson"/>.</summary>
+/// <param name="Awake">Null without --wait (not checked).</param>
+internal sealed record WakeJson(string Status, int ExitCode, string Machine, bool Sent, bool? Awake, double DurationSeconds, string Message);
+
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(List<HealthJson>))]
 [JsonSerializable(typeof(RunJson))]
 [JsonSerializable(typeof(ErrorJson))]
+[JsonSerializable(typeof(WakeJson))]
 internal sealed partial class LanqJson : JsonSerializerContext;

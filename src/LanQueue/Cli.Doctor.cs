@@ -216,6 +216,12 @@ public static partial class Cli
         }
 
         lines.Add(("OK", $"work_root {m.WorkRoot} ({(m.Os == MachineOs.Windows ? "windows" : "linux")}, transfer: {m.Transfer.ToString().ToLowerInvariant()})"));
+
+        if (m.Wake is { } wake)
+        {
+            const string Note = "Wake-on-LAN must also be enabled in the BIOS/UEFI and the network card driver, and usually only works on wired Ethernet (docs/WORKERS.md)";
+            lines.Add(("OK", $"wake: magic packet to {wake.Broadcast}:{wake.Port} for {wake.Mac}, waits up to {wake.WaitSeconds} s. {Note}"));
+        }
         return lines;
     }
 

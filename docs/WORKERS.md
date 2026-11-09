@@ -28,6 +28,7 @@ Either way, lanq never changes a worker: every fix it suggests is for the PC's o
 | Git | **Recommended; required for the default `transfer: git` mode.** Optional with `transfer: archive` | git mode unpacks the bundle into a throwaway worktree | `git --version` |
 | tar (+ gzip on Linux) | Only with `transfer: archive`. On Linux must be **GNU tar or bsdtar**; on Windows the **built-in bsdtar** (`%SystemRoot%\System32\tar.exe`, Windows 10 1803+ / Server 2019+). **busybox tar (Alpine, many minimal images) is refused**: `lanq health` holds the machine as unsupported | archive mode extracts the `tar.gz` into a fresh job folder; lanq trusts the pre-extraction listing only from these tars | `tar --version` must say `GNU tar` or `bsdtar` (Windows: `%SystemRoot%\System32\tar.exe --version` says `bsdtar`); `command -v gzip` on Linux |
 | Shell | **Required** | Windows: Windows PowerShell (built in). Linux: `sh` | — |
+| `base64`, `sha256sum`, `find`, `awk`, `sort`, `readlink` (Linux) | Only for `lanq run --fetch` | the fetch script lists the files and sends them back as checksummed text. Standard on every distribution (coreutils, findutils; busybox has them too); Windows needs nothing extra | `command -v base64 sha256sum find awk sort readlink` |
 | Writable work folder (`work_root`) with free disk | **Required** | each job gets its own worktree or folder there; `lanq health` holds a machine with low disk | `lanq health` from your PC |
 | Toolchain your jobs run (e.g. .NET SDK, Node) | Per job | tag the machine with matching `capabilities` (`dotnet`, `node`, ...) | `dotnet --version`, `node --version` |
 | Docker | Only for jobs that need it | e.g. integration tests with Testcontainers; tag the machine `docker` | `docker version` |
@@ -60,6 +61,47 @@ sudo systemctl enable --now ssh
 ```
 
 Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
+
+## Wake-on-LAN for a sleeping worker
+
+Optional. If a PC sleeps or is shut down outside its `allowed_hours`, `lanq` can wake it with a magic packet (see
+"Waking a sleeping worker" in the README for the `wake:` setting). Three things must be true for the packet to work, and
+`lanq` can check none of them: it only sees that ssh does or does not answer later.
+
+- **Wired Ethernet.** Wake-on-LAN usually works only over a cable. Wi-Fi rarely supports it.
+- **BIOS/UEFI.** Enable the setting (often named "Wake on LAN", "Power On By PCI-E/PCI", "Resume by LAN" or similar).
+  Turn off "ErP" or "deep sleep" power-saving options that cut power to the network card.
+- **The network card driver and the OS** (below). The machine must be on the same LAN and broadcast domain as the PC
+  running `lanq`, and its MAC address is the one of the wired adapter (`ipconfig /all` on Windows, `ip link` on Linux).
+
+### Windows
+
+1. Device Manager, Network adapters, your Ethernet adapter, Properties.
+2. Power Management tab: tick **Allow this device to wake the computer** and **Only allow a magic packet to wake the
+   computer** (the second one stops other network traffic from waking the PC at random).
+3. Advanced tab: if present, set **Wake on Magic Packet** to Enabled.
+4. **Fast Startup:** a PC shut down with Fast Startup enabled (the Windows default) is really hibernated and often does
+   not wake from a magic packet, or does so unreliably. If it does not wake from a full shutdown, turn Fast Startup off
+   (Control Panel, Power Options, Choose what the power buttons do, Change settings that are currently unavailable,
+   untick Turn on fast startup). Waking from sleep usually works with it on.
+5. Test before relying on it: shut the PC down, then run `lanq wake <machine> --wait` from your PC.
+
+### Linux
+
+1. Check support: `sudo ethtool eth0` should list `Supports Wake-on: ...g...`; `Wake-on: d` means it is off.
+2. Turn it on: `sudo ethtool -s eth0 wol g` (use your adapter's name from `ip link`). This does not survive a reboot.
+3. Make it persistent, one of:
+   - NetworkManager: `nmcli connection modify "<connection name>" 802-3-ethernet.wake-on-lan magic`
+   - systemd-networkd: in the interface's `.link` file under `[Match]`/`[Link]`, add `WakeOnLan=magic`
+   - a small systemd unit running `ethtool -s eth0 wol g` after `network.target`.
+4. Test as above with `lanq wake <machine> --wait`. `lanq doctor` shows the wake line and the same reminder.
+
+## What a job sees
+
+Every job runs with `LANQ_JOB=<job id>` in its environment (on Linux and Windows), besides the machine's own `env:`
+and `path_prepend:` (names starting with `LANQ_` are reserved, so `env:` cannot set them). A build script may read it,
+for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
+the environment of long-running helper processes you want stopped with the job.
 
 ## Then, on your PC
 
