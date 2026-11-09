@@ -18,9 +18,9 @@ them. Output from a worker is treated as untrusted: control and invisible format
 
 Per-machine `env:` values reach the job as data (one single-quoted word for `env` on Linux, a single-quoted
 PowerShell string on Windows) and never as shell code; names are restricted to `[A-Za-z_][A-Za-z0-9_]*`, values may
-not contain control characters, and names that hijack the program loader or a shell (`LD_PRELOAD`,
-`LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`)
-are refused. `path_prepend` entries must be absolute. Both are written by you in your own config: they are a
+not be empty or contain control characters, and names that hijack the program loader or a shell (`LD_*`, `DYLD_*`,
+`GLIBC_TUNABLES`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`,
+`PATHEXT`) are refused. That list is best effort, a guard against mistakes rather than a complete one. `path_prepend` entries must be absolute. Both are written by you in your own config: they are a
 convenience for your machines, not a boundary against someone who can edit that file.
 
 In git mode a worker receives the repository's history, not just the current files: the first job for a repository

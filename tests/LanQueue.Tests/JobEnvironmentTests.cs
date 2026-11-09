@@ -65,6 +65,13 @@ public sealed class JobEnvironmentTests : IDisposable
     [InlineData("COMSPEC")]
     [InlineData("ComSpec")]
     [InlineData("PATHEXT")]
+    [InlineData("LD_BIND_NOW")]
+    [InlineData("LD_DEBUG_OUTPUT")]
+    [InlineData("ld_anything")]
+    [InlineData("SHELLOPTS")]
+    [InlineData("BASHOPTS")]
+    [InlineData("PS4")]
+    [InlineData("GLIBC_TUNABLES")]
     public void LoaderAndShellHijackNamesAreRefused(string name)
     {
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Linux($"    env:\n      {name}: x")));
@@ -91,6 +98,21 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Linux($"    env:\n      FOO: {value}")));
         Assert.Contains("'FOO'", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Windows PowerShell 5.1 cannot set an empty variable ($env:X = '' deletes it) while Linux env would set it empty, so an empty value is
+    /// refused on both, with an error that says so.
+    /// </summary>
+    [Theory]
+    [InlineData("\"\"")]
+    [InlineData("''")]
+    public void EmptyEnvValuesAreRefusedOnEveryPlatform(string value)
+    {
+        var linux = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Linux($"    env:\n      FOO: {value}")));
+        Assert.Contains("'FOO'", linux.Message, StringComparison.Ordinal);
+        Assert.Contains("empty", linux.Message, StringComparison.Ordinal);
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows($"    env:\n      FOO: {value}")));
     }
 
     [Fact]

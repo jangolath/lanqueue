@@ -13,9 +13,10 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
   that cannot report it).
 - **Per-machine `env:`** sets variables for the job process only, for example heap caps on small machines
   (`DOTNET_GCHeapHardLimitPercent`, `NODE_OPTIONS=--max-old-space-size=2048`, `MSBUILDNODECOUNT`,
-  `CARGO_BUILD_JOBS`). Names must match `^[A-Za-z_][A-Za-z0-9_]*$`, values may not contain control characters, and
-  loader or shell hijack names (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `BASH_ENV`, `ENV`,
-  `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`) are refused. Values are passed as quoted data in both
+  `CARGO_BUILD_JOBS`). Names must match `^[A-Za-z_][A-Za-z0-9_]*$`, values may not be empty (Windows PowerShell 5.1
+  cannot set an empty variable, so both platforms refuse one) or contain control characters, and, as a best-effort
+  guard, loader or shell hijack names (`LD_*`, `DYLD_*`, `GLIBC_TUNABLES`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`,
+  `PS4`, `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`) are refused. Values are passed as quoted data in both
   shells.
 - **Per-machine `path_prepend:`** puts absolute directories in front of `PATH` for the job, so tools installed by nvm,
   pyenv, rustup or sdkman are found in a non-login SSH session. `PATH` itself cannot be set through `env:`.
@@ -24,7 +25,8 @@ Workers and windows: making old and shared PCs safe to lend to the queue.
   existing configs**; set `priority: normal` on a dedicated build box.
 - **PAUSE file.** If `<work_root>/PAUSE` exists on a worker, the machine is held ("paused on the machine"). Anyone at
   that PC can create or delete it. A job that is already running is not affected.
-- **Availability windows v2.** `allowed_hours` still accepts one string, and now also a list of entries
+- **Availability windows v2.** `allowed_hours` still accepts one string (a bare `allowed_hours:` or `~` still means any
+  time), and now also a list of entries
   `[Days ]HH:mm-HH:mm` with days `Mon`..`Sun`, ranges (`Mon-Fri`) and lists (`Sat,Sun`). A window that crosses
   midnight belongs to its start day. The start minute is inside a window and the end minute is not (0.3 also counted
   the end minute). Errors name the bad entry.

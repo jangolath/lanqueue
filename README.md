@@ -368,8 +368,10 @@ path_prepend:
   - /home/build/.cargo/bin
 ```
 
-`env:` names must be letters, digits and `_`; values may not contain control characters. Names that can hijack the
-program loader or a shell are refused (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `DYLD_*`, `BASH_ENV`, `ENV`,
+`env:` names must be letters, digits and `_`; values may not be empty (Windows PowerShell 5.1 cannot set an empty
+variable, so an empty value is refused everywhere: leave the variable out) or contain control characters. As a
+best-effort guard against mistakes (the config's author is trusted), names that can hijack the program loader or a
+shell are refused (`LD_*`, `DYLD_*`, `GLIBC_TUNABLES`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
 `PROMPT_COMMAND`, `PSModulePath`, `COMSPEC`, `PATHEXT`), and `PATH` is set only through `path_prepend` (absolute
 directories; a drive path such as `C:/Users/build/.cargo/bin` on Windows). Values reach the job as data: on Linux each
 `NAME=value` is one single-quoted word passed to `env`, on Windows a single-quoted PowerShell string, so quotes,

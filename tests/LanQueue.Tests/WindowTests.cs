@@ -115,6 +115,18 @@ public sealed class WindowTests : IDisposable
         Assert.Contains("start and end", ex.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>As in 0.3: a bare "allowed_hours:" or "~" (YAML null) means no hours set, so any time.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("~")]
+    [InlineData("null")]
+    public void NullAllowedHoursMeansAnyTime(string yaml) =>
+        Assert.Null(ConfigLoader.Parse(WithHours(yaml)).Machines[1].AllowedHours);
+
+    [Fact]
+    public void AQuotedTildeIsStillAnEntryAndIsRefused() =>
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WithHours("\"~\"")));
+
     [Theory]
     [InlineData("[]")]
     [InlineData("[[\"09:00-10:00\"]]")]

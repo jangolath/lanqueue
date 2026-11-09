@@ -45,7 +45,10 @@ internal sealed class StringOrListConverter : IYamlTypeConverter
     {
         if (parser.TryConsume<Scalar>(out var single))
         {
-            return new List<string> { single.Value };
+            // A bare "allowed_hours:" or "~" / null is YAML null: no hours set, any time (as in 0.3). A quoted "~" stays an entry.
+            return single.Style == ScalarStyle.Plain && single.Value is "" or "~" or "null" or "Null" or "NULL"
+                ? null
+                : new List<string> { single.Value };
         }
 
         var start = parser.Consume<SequenceStart>();
@@ -88,8 +91,14 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:[/\\]", RegexOptions.None, 1000)]
     private static partial Regex WindowsAbsolutePathRegex();
 
-    /// <summary>Names that would let a value hijack the dynamic loader or a shell's startup; refused in env: (compared ignoring case).</summary>
-    private static readonly string[] DeniedEnvNames = ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "PROMPT_COMMAND", "PSModulePath", "COMSPEC", "PATHEXT"];
+    /// <summary>
+    /// Names that would let a value hijack the dynamic loader or a shell's startup or tracing; refused in env: (compared ignoring case), as
+    /// is every name starting with LD_ or DYLD_. Best effort: the config's author is trusted, this only catches the obvious mistakes.
+    /// </summary>
+    private static readonly string[] DeniedEnvNames =
+        ["BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELLOPTS", "BASHOPTS", "PS4", "GLIBC_TUNABLES", "PSModulePath", "COMSPEC", "PATHEXT"];
+
+    private static readonly string[] DeniedEnvPrefixes = ["LD_", "DYLD_"];
 
     public static FleetConfig Parse(string yaml)
     {
@@ -240,7 +249,7 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is not allowed; list extra directories under path_prepend instead.");
             }
 
-            if (name.StartsWith("DYLD_", StringComparison.OrdinalIgnoreCase) || DeniedEnvNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+            if (DeniedEnvPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) || DeniedEnvNames.Contains(name, StringComparer.OrdinalIgnoreCase))
             {
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused because it can hijack the program loader or a shell.");
             }
@@ -253,7 +262,14 @@ public static partial class ConfigLoader
             // The value is never echoed: it may be something the owner would rather not see in a terminal.
             if (value is null || value.Any(char.IsControl))
             {
-                throw new ConfigException($"Machine '{m.Name}': env '{name}' needs a value without control characters (no newlines, tabs or escapes); use \"\" for empty.");
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' needs a value without control characters (no newlines, tabs or escapes).");
+            }
+
+            // Windows PowerShell 5.1 has no way to set an empty variable ($env:X = '' removes it) while Linux would set it empty; one rule
+            // for both: an empty value is refused instead of meaning different things per OS.
+            if (value.Length == 0)
+            {
+                throw new ConfigException($"Machine '{m.Name}': env '{name}' is empty. Empty values are not supported (Windows cannot set one); leave the variable out instead.");
             }
         }
 
