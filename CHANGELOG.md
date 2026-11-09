@@ -1,5 +1,104 @@
 # Changelog
 
+## 0.5.1 (2026-11-09)
+
+### Getting a team's pool going
+
+- **`lanq makeready` now runs lanq-makeready 0.2.0** (verified against its release SHA256SUMS and build-provenance
+  attestation), which adds Wake-on-LAN and Fast Startup readiness, Windows 10 end-of-support, OpenSSH Server, firewall
+  and default-shell checks, Linux end-of-life, sshd password and auto-suspend checks. lanq shows what 0.2.0 adds to the
+  report: the script's `VERDICT:` line (READY / READY WITH WARNINGS / NOT READY) and its numbered next steps, blockers
+  first, each with the command or settings path and whether it needs admin (or root), worded as the script prints them
+  and sanitised; a `Suited for:` line; and, in the suggested `machines.yml` entry, `min_free_mem_gb` and (only when the
+  script's Wake-on-LAN check passed) a commented `wake:` block whose redacted MAC you fill in. `--json` (and each report
+  in `--all --json`) now carries every field as the script sent it, 0.2.0's `summary`, `suitedFor`, `min_free_mem_gb`
+  and `wake` included, and no longer adds a `WorkerReady` field. A malformed `summary` or `suitedFor` makes the report
+  unusable (exit 70). Reports from lanq-makeready 0.1 still work as before.
+- **`lanq makeready --all`** runs the read-only lanq-makeready check on every machine in `machines.yml`, four at a
+  time, with the same rules as `lanq makeready <machine>` (a `PAUSE` file or `allowed_hours` holds a machine unless
+  `--force`; the script goes on ssh stdin), and prints one table: machine, OS, verdict (`OK`, `WARN n`, `FAIL n`,
+  `unreachable`, `held`, or `error` for an unusable report) and the top problem, then points at
+  `lanq makeready <machine>` for details. `FAIL` means NOT READY (no transfer mode works, so the single-machine
+  check exits `1`); a `FAIL` check that does not block the worker (Docker, .NET) counts as a warning, as in the
+  script's own verdict. The counts and top problem come from the report's summary (0.2.0), else from its checks. Exit
+  `70` any machine unreachable or unusable, else `1` any NOT READY, else `75` any held, else `0` (warnings alone exit
+  `0`, as for one machine); `2` bad arguments or config, `130` Ctrl+C. `--json` prints one object
+  (`status`, `exitCode`, `machines`), each machine carrying the validated report exactly as the single-machine
+  `--json` prints it.
+- **`lanq init`** writes a commented, minimal starter `machines.yml` (current folder, or `--config FILE`) that loads
+  as written: memory holds suited to low-RAM PCs, one example machine to replace, and commented Windows and Linux
+  examples covering `key_env`, a .NET heap cap, `allowed_hours` and `wake:`. It never overwrites a file or writes
+  through a link (an existing file, folder or link, even a dangling one, is refused with exit 2), prints the next
+  steps (OpenSSH on the workers, connect once, `lanq makeready --ssh`, paste, `lanq doctor --remote`), and with
+  `--json` prints one object (`status`, `exitCode`, `path`, `message`).
+
+### Sharding across a mixed pool
+
+- **`lanq run --shards N|auto -- CMD`** runs N jobs of one command at once (1 to 64), each its own lanq job with its
+  own id, slot, log and cleanup. `{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only (no
+  other expansion), and each job also gets `LANQ_SHARD` and `LANQ_SHARDS` next to `LANQ_JOB` (Linux env prefix and
+  Windows wrapper). Every shard's substituted command line passes the allowlist, permission-flag ban, secret scan and
+  Windows argument rule before anything is built or sent.
+- **`--shards auto`** sets N to the free slots on the machines that can take the job now (capabilities, hours, `--mem`,
+  holds), at least 1, at most 64, and prints the choice and why.
+- **Placement:** shards are dealt round-robin over free slots, so a machine with `max_jobs: 4` runs up to four at once.
+  Shards beyond the free slots wait for a sibling to finish; `--wait` counts only while no shard of the run holds a
+  slot (an attempt whose slot claim fails never extends it). `--mem` is per shard: a machine takes at most
+  floor(free memory / `--mem`) shards at once, also when `--shards auto` counts.
+- **One payload:** the snapshot is taken and scanned once, and each bundle (full or incremental) or archive is built at
+  most once for the whole run, one build at a time (a failed build is tried once more). The bundle carries the
+  snapshot under a shared ref that each shard's prepare fetches into its own; lanq prepares (and cleans up) one job at a time per machine within a run, so shards on one worker do not race
+  on its repository cache.
+- **Results:** lines prefixed `[i/N machine]`, a summary table (shard, machine, status, exit, duration), exit 0 only if
+  every shard passed (otherwise the failing shard's own code, then 2, 124, 70, 75; Ctrl+C 130). `--json` prints one
+  object with `status`, `exitCode`, `shardCount`, `durationSeconds`, `message` and a `shards` array of run objects with
+  `shard` and `attempts`. `--fetch` puts each shard's files in its own job-id folder.
+- **`--fail-fast`** cancels the other shards after the first one that does not complete; **`--shard-retries R`** (0 to
+  3) re-runs only a shard whose machine stopped answering ssh (never a test failure or a job that exited 255 itself),
+  and never where it could run twice: if the connection dropped mid-run and the cleanup did not finish, the re-run goes
+  to another machine, or does not happen when none can take it. An unexpected error ends only its own shard.
+  Ctrl+C cancels every shard and still cleans each one up; Ctrl+C after every shard has finished keeps the real result.
+- **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (by lanq-makeready's rule and in its
+  words, so a PC gets the same tier from both: the reported memory rounded up to whole GB, then light under 6 GB, medium
+  6 to under 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; a 16 GB PC that
+  reports 15.8 GB is heavy; the Linux core count tries getconf, nproc, then /proc/cpuinfo and is left out (unknown)
+  when none works); the probe now reports `mem_total_gb` and `cores` on
+  Linux and Windows (unknown values are shown as `?`, never a hold). `health --json` adds `cores`, `memTotalGb`,
+  `freeSlots`, `size` and `suitedFor`; earlier fields are unchanged. The text line now says `slots free F/M` instead
+  of `slots U/M`.
+- The Windows env cap checked at config load now includes the largest shard variables.
+
+### Clearer first-run errors
+
+- An ssh failure now says what to do, and still quotes ssh's own line: a host key not yet in `known_hosts` (connect
+  once with `ssh user@host`, because lanq uses `StrictHostKeyChecking=yes`), a changed host key, `Permission denied
+  (publickey)` (load the key, or put it in `authorized_keys`, or `administrators_authorized_keys` for a Windows
+  administrator), a private key with loose permissions, an unknown host name, a refused connection, and a missing
+  ssh client. Only when ssh itself failed (exit 255) and only on lines in ssh's own formats, so a remote command's output
+  cannot produce one. Shown by `lanq health`, `lanq run`'s "no eligible machine", `lanq makeready` and `lanq doctor --remote`.
+- `key_env` errors tell an unset variable apart from a path that does not exist, and say how to set it or use
+  ssh-agent instead.
+- A missing config points at `lanq init --config <path>`.
+- "No eligible machine" says why each machine was passed over: the capability it lacks, its slots in use, or no free
+  slot when the job tried to start, instead of "no match / full"; `lanq run --shards` says the same per machine.
+
+### Docs
+
+- **[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md):** one orchestrator plus Windows 10/11 and Linux workers, from
+  install to the first job: Windows OpenSSH Server, the `administrators_authorized_keys` trap, a non-admin build user,
+  the firewall, sizing micro PCs, overnight family PCs, and the ten errors you are most likely to see.
+- **[docs/SHARDING.md](docs/SHARDING.md):** per-ecosystem recipes (.NET helper scripts for sh and PowerShell, Jest,
+  Vitest, Playwright, pytest-split, Go, cargo-nextest), what to keep local, sizing `max_jobs` and `min_free_mem_gb`,
+  routing in a mixed pool, a worked 2 dev boxes + 4 micro PCs plan, and guidance for coding agents. The agent snippet and
+  skill gained a "Shard long work across the pool" section.
+- The MSBuild node-count environment variable is gone from `machines.example.yml`, the README, SHARDING.md and the
+  starter config: it is not a documented MSBuild setting. Small PCs run `dotnet build -m:1` / `dotnet test -m:1` (one MSBuild process) instead.
+
+### Dependencies
+
+- Dependencies: GitHub Actions moved off the deprecated Node 20 runtime; test SDK 18.
+- YamlDotNet 18.1.0 (config parsing unchanged; verified against 0.5.0 on 182 config shapes). A nested value where a plain one belongs (for example `env: {A: {b: c}}`) is now reported as a config error naming the line, not as a hint to edit C#.
+
 ## 0.5.0 (2026-11-09)
 
 ### Native binaries: `lanq` without the .NET SDK

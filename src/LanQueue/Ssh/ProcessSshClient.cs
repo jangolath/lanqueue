@@ -178,10 +178,19 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
         }
 
         var path = getEnv(machine.KeyEnv);
-        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        if (string.IsNullOrEmpty(path))
         {
             throw new InvalidOperationException(
-                $"Machine '{machine.Name}': environment variable {machine.KeyEnv} must point to an existing private key file.");
+                $"Machine '{machine.Name}': key_env names the environment variable {machine.KeyEnv}, but {machine.KeyEnv} is not set. Set it to "
+                + $"your private key file's path (PowerShell: $env:{machine.KeyEnv} = \"$HOME/.ssh/id_ed25519\"; sh: export {machine.KeyEnv}=~/.ssh/id_ed25519), "
+                + "or remove key_env from machines.yml to use the keys in ssh-agent.");
+        }
+
+        if (!File.Exists(path))
+        {
+            throw new InvalidOperationException(Jobs.JobRunner.SafeLine(
+                $"Machine '{machine.Name}': key_env {machine.KeyEnv} points to {path}, which does not exist. Fix the path in {machine.KeyEnv}, "
+                + "or remove key_env from machines.yml to use the keys in ssh-agent."));
         }
 
         return path;

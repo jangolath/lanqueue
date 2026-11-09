@@ -286,8 +286,21 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "gpu"), CancellationToken.None);
         Assert.Equal(JobStatus.NoCapacity, r.Status);
         Assert.Equal(75, r.CliExitCode);
+        // Says which capability each machine lacks, instead of a bare "no match".
+        Assert.Contains("lacks gpu", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("no match", r.Message, StringComparison.Ordinal);
         Assert.Empty(ssh.Uploads);
         Assert.Empty(log.ReadAll());
+    }
+
+    [Fact]
+    public async Task NoCapacityShowsWhatToFixOnAMachineThatRefusesTheKey()
+    {
+        var (runner, _, _, _) = Make((m, _) => new SshResult(255, m.Ssh + ": Permission denied (publickey)."));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains("unreachable: ", r.Message, StringComparison.Ordinal);
+        Assert.Contains("authorized_keys", r.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -300,6 +313,7 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
         Assert.Equal(JobStatus.NoCapacity, r.Status);
         Assert.Empty(ssh.Uploads);
+        Assert.Contains("no free slot", r.Message, StringComparison.Ordinal);
     }
 
     [Fact]

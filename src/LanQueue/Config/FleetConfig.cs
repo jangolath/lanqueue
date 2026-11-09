@@ -1,3 +1,5 @@
+using System.Collections;
+
 namespace LanQueue.Config;
 
 public enum MachineOs
@@ -101,4 +103,17 @@ public sealed class FleetConfig
 /// static generator (used for trimming and NativeAOT) does not carry a property's [YamlConverter] attribute into the generated code, so a
 /// per-property converter would silently be skipped.
 /// </summary>
-public sealed class HoursList : List<string>;
+public sealed class HoursList : IEnumerable<string>
+{
+    // Deliberately not a List<string> subclass: YamlDotNet's static generator (18.x) emits member accessors for a registered type's
+    // indexer ("this[]"), which does not compile. Without an indexer it has nothing to emit, and the converter does all the reading.
+    private readonly List<string> _items = [];
+
+    public int Count => _items.Count;
+
+    public void Add(string entry) => _items.Add(entry);
+
+    public IEnumerator<string> GetEnumerator() => _items.GetEnumerator();
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}

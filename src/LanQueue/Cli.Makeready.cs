@@ -5,6 +5,7 @@ using LanQueue.Config;
 using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Makeready;
+using LanQueue.Output;
 using LanQueue.Ssh;
 
 namespace LanQueue;
@@ -12,7 +13,7 @@ namespace LanQueue;
 public static partial class Cli
 {
     /// <summary>The lanq-makeready release embedded in this build (see scripts/sync-makeready.sh).</summary>
-    internal const string MakereadyVersion = "0.1.0";
+    internal const string MakereadyVersion = "0.2.0";
 
     internal static readonly TimeSpan MakereadyTimeout = TimeSpan.FromSeconds(120);
 
@@ -49,40 +50,51 @@ public static partial class Cli
         : "sh -s -- --json - --redact";
 
     /// <summary>
-    /// lanq makeready &lt;machine&gt; | --ssh user@host --os windows|linux: runs the read-only lanq-makeready check on a worker and reads its
-    /// report. Exit 0 worker-ready, 1 not ready, 2 bad arguments, 70 ssh or an unusable report, 75 machine paused or outside its allowed
-    /// hours (unless --force).
+    /// lanq makeready &lt;machine&gt; | --ssh user@host --os windows|linux | --all: runs the read-only lanq-makeready check on a worker (or on
+    /// every configured machine) and reads its report. One machine: exit 0 worker-ready, 1 not ready, 2 bad arguments, 70 ssh or an unusable
+    /// report, 75 machine paused or outside its allowed hours (unless --force). --all: see <see cref="MakereadyAll"/>.
     /// </summary>
     internal static async Task<int> Makeready(
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
         if (!p.Json)
         {
-            return await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false);
+            return p.All
+                ? await MakereadyAll(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false)
+                : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false);
         }
 
-        // --json: stdout is exactly one object on every path, the validated report (exit 0 or 1) or status/exitCode/message. The
-        // people-readable messages still go to stderr.
+        // --json: stdout is exactly one object on every path: the validated report (exit 0 or 1), the --all summary, or
+        // status/exitCode/message. The people-readable messages still go to stderr.
         var errors = new StringWriter();
+        var body = new StringWriter();
         int code;
         try
         {
-            code = await MakereadyCore(p, loadConfig, ssh, probe, stdout, errors, ct).ConfigureAwait(false);
+            code = p.All
+                ? await MakereadyAll(p, loadConfig, ssh, probe, body, errors, ct).ConfigureAwait(false)
+                : await MakereadyCore(p, loadConfig, ssh, probe, body, errors, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             errors.WriteLine("cancelled (Ctrl+C)");
+            body.GetStringBuilder().Clear();
             code = 130;
         }
         catch (Exception ex)
         {
             errors.WriteLine(JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
+            body.GetStringBuilder().Clear();
             code = 70;
         }
 
         var text = errors.ToString();
         await stderr.WriteAsync(text).ConfigureAwait(false);
-        if (code is not (0 or 1))
+        if (body.GetStringBuilder().Length > 0)
+        {
+            await stdout.WriteAsync(body.ToString()).ConfigureAwait(false);
+        }
+        else
         {
             var message = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
             var status = code switch { 2 => "Rejected", 75 => "Held", 130 => "Cancelled", _ => "InfraError" };
@@ -92,14 +104,84 @@ public static partial class Cli
         return code;
     }
 
+    /// <summary>
+    /// The outcome of scanning one machine: <paramref name="Code"/> is what lanq makeready &lt;machine&gt; exits with (0 ready, 1 not ready,
+    /// 70 unreachable or unusable report, 75 held), <paramref name="Message"/> the line it prints on stderr when there is no report, and
+    /// <paramref name="Reason"/> the same without the machine's name (for the --all table).
+    /// </summary>
+    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false);
+
+    /// <summary>
+    /// Scans one machine. With <paramref name="policy"/> (a configured machine) and without <paramref name="force"/>, a health probe first:
+    /// an unreachable machine is not scanned, and a paused machine or one outside its allowed hours is held. The script goes on ssh stdin.
+    /// </summary>
+    private static async Task<MakereadyScan> ScanAsync(
+        Machine machine, string name, PolicyConfig? policy, bool force, ISshClient ssh, HealthProbe probe, CancellationToken ct)
+    {
+        if (policy is not null && !force)
+        {
+            // A scan is light, but a family PC's PAUSE file and hours are respected by default.
+            var h = await probe.ProbeAsync(machine, policy, ct).ConfigureAwait(false);
+            if (!h.Reachable)
+            {
+                return new(70, null, $"{name}: unreachable: {h.Error}", h.Error ?? "unreachable");
+            }
+
+            var held = h.HoldKind switch
+            {
+                HoldKind.Paused => "paused (a PAUSE file is in its work_root)",
+                HoldKind.OutsideHours => "outside allowed hours",
+                _ => null,
+            };
+            if (held is not null)
+            {
+                return new(75, null, $"{name} is {held}; not scanning it now. Add --force to scan anyway.", $"{held}; --force scans anyway");
+            }
+        }
+
+        SshResult r;
+        try
+        {
+            r = await ssh.RunWithInputAsync(machine, MakereadyCommand(machine.Os), MakereadyScript(machine.Os), MakereadyReport.MaxChars, MakereadyTimeout, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return new(70, null, ex.Message, ex.Message);
+        }
+
+        if (r.TimedOut || r.ExitCode == 255)
+        {
+            var why = JobRunner.SafeLine(r.TimedOut
+                ? "timed out after " + ProcessSshClient.Describe(MakereadyTimeout)
+                : "ssh failed: " + SshErrors.Explain(r.ErrorOutput, machine.Ssh));
+            return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why);
+        }
+
+        try
+        {
+            var report = r.OutputTruncated ? throw new FormatException("report larger than 1 MB") : MakereadyReport.Parse(r.Output);
+            return new(report.WorkerReady ? 0 : 1, report, null, null);
+        }
+        catch (FormatException ex)
+        {
+            var detail = FirstLine(r.ErrorOutput);
+            var why = JobRunner.SafeLine(
+                $"unusable lanq-makeready report ({ex.Message}; script exit {r.ExitCode.ToString(CultureInfo.InvariantCulture)})"
+                + (detail.Length > 0 ? ": " + detail : ""));
+            return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why, Unusable: true);
+        }
+    }
+
     private static async Task<int> MakereadyCore(
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
         Machine machine;
         Machine? configured = null;
+        PolicyConfig? policy = null;
         if ((p.Target is null) == (p.SshTarget is null) || (p.SshTarget is null) != (p.Os is null))
         {
-            await stderr.WriteLineAsync("Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--json] [--force]").ConfigureAwait(false);
+            await stderr.WriteLineAsync(MakereadyUsage).ConfigureAwait(false);
             return 2;
         }
 
@@ -132,62 +214,15 @@ public static partial class Cli
             }
 
             machine = configured = m;
-            if (!p.Force)
-            {
-                // A scan is light, but a family PC's PAUSE file and hours are respected by default.
-                var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
-                if (!h.Reachable)
-                {
-                    await stderr.WriteLineAsync($"{m.Name}: unreachable: {h.Error}").ConfigureAwait(false);
-                    return 70;
-                }
-
-                var held = h.HoldKind switch
-                {
-                    HoldKind.Paused => "paused (a PAUSE file is in its work_root)",
-                    HoldKind.OutsideHours => "outside allowed hours",
-                    _ => null,
-                };
-                if (held is not null)
-                {
-                    await stderr.WriteLineAsync($"{m.Name} is {held}; not scanning it now. Add --force to scan anyway.").ConfigureAwait(false);
-                    return 75;
-                }
-            }
-        }
-
-        SshResult r;
-        try
-        {
-            r = await ssh.RunWithInputAsync(machine, MakereadyCommand(machine.Os), MakereadyScript(machine.Os), MakereadyReport.MaxChars, MakereadyTimeout, ct)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
-        {
-            await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
-            return 70;
+            policy = config.Policy;
         }
 
         var name = configured?.Name ?? machine.Ssh;
-        if (r.TimedOut || r.ExitCode == 255)
+        var scan = await ScanAsync(machine, name, policy, p.Force, ssh, probe, ct).ConfigureAwait(false);
+        if (scan.Report is not { } report)
         {
-            var why = r.TimedOut ? "timed out after " + ProcessSshClient.Describe(MakereadyTimeout) : "ssh failed: " + FirstLine(r.ErrorOutput);
-            await stderr.WriteLineAsync(JobRunner.SafeLine($"{name}: {why}")).ConfigureAwait(false);
-            return 70;
-        }
-
-        MakereadyReport report;
-        try
-        {
-            report = r.OutputTruncated ? throw new FormatException("report larger than 1 MB") : MakereadyReport.Parse(r.Output);
-        }
-        catch (FormatException ex)
-        {
-            var detail = FirstLine(r.ErrorOutput);
-            await stderr.WriteLineAsync(JobRunner.SafeLine(
-                $"{name}: unusable lanq-makeready report ({ex.Message}; script exit {r.ExitCode.ToString(CultureInfo.InvariantCulture)})"
-                + (detail.Length > 0 ? ": " + detail : ""))).ConfigureAwait(false);
-            return 70;
+            await stderr.WriteLineAsync(scan.Message).ConfigureAwait(false);
+            return scan.Code;
         }
 
         if (p.Json)
@@ -202,7 +237,165 @@ public static partial class Cli
             }
         }
 
-        return report.WorkerReady ? 0 : 1;
+        return scan.Code;
+    }
+
+    private const string MakereadyUsage =
+        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux | lanq makeready --all [--json] [--force]";
+
+    /// <summary>How many machines lanq makeready --all scans at once.</summary>
+    internal const int MakereadyParallelism = 4;
+
+    /// <summary>The longest top problem the --all table shows; --json carries it whole.</summary>
+    private const int MakereadyProblemWidth = 84;
+
+    /// <summary>
+    /// lanq makeready --all: every machine in the config, <see cref="MakereadyParallelism"/> at a time, with the same rules as one machine
+    /// (PAUSE and allowed_hours respected unless --force, the script on ssh stdin), then one summary table (or, with --json, one object).
+    /// Exit codes: see <see cref="MakereadyAllExitCode"/>; 2 bad arguments or config; 130 Ctrl+C.
+    /// </summary>
+    private static async Task<int> MakereadyAll(
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    {
+        if (p.Target is not null || p.SshTarget is not null || p.Os is not null)
+        {
+            await stderr.WriteLineAsync("lanq makeready --all checks every machine in the config; it takes no machine name and no --ssh or --os.")
+                .ConfigureAwait(false);
+            return 2;
+        }
+
+        FleetConfig config;
+        try
+        {
+            config = loadConfig();
+        }
+        catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
+        {
+            await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            return 2;
+        }
+
+        using var gate = new SemaphoreSlim(MakereadyParallelism);
+        async Task<MakereadyScan> Scanned(Machine m)
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                return await ScanAsync(m, m.Name, config.Policy, p.Force, ssh, probe, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        var scans = await Task.WhenAll(config.Machines.Select(Scanned)).ConfigureAwait(false);
+        var rows = config.Machines.Zip(scans).Select(x => MakereadyRow(x.First, x.Second)).ToList();
+        var code = MakereadyAllExitCode(rows);
+        if (p.Json)
+        {
+            var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(new MakereadyAllJson(status, code, rows), MakereadyAllJsonContext.Default.MakereadyAllJson))
+                .ConfigureAwait(false);
+            return code;
+        }
+
+        var nameWidth = Math.Max("MACHINE".Length, config.Machines.Max(m => m.Name.Length)) + 2;
+        await stdout.WriteLineAsync(
+            $"lanq makeready --all: {rows.Count} machine(s), read-only (lanq-makeready {MakereadyVersion}{(p.Force ? ", --force" : "")})").ConfigureAwait(false);
+        await stdout.WriteLineAsync().ConfigureAwait(false);
+        await stdout.WriteLineAsync($"{"MACHINE".PadRight(nameWidth)}{"OS",-9}{"VERDICT",-13}TOP PROBLEM").ConfigureAwait(false);
+        foreach (var r in rows)
+        {
+            var verdict = r.Verdict switch
+            {
+                "WARN" => $"WARN {r.Warnings}",
+                "FAIL" => r.Failures > 0 ? $"FAIL {r.Failures}" : "FAIL",
+                _ => r.Verdict,
+            };
+            var problem = Truncate(r.Problem ?? "", MakereadyProblemWidth);
+            await stdout.WriteLineAsync(JobRunner.SafeLine($"{r.Machine.PadRight(nameWidth)}{r.Os,-9}{verdict,-13}{problem}").TrimEnd()).ConfigureAwait(false);
+        }
+
+        await stdout.WriteLineAsync().ConfigureAwait(false);
+        await stdout.WriteLineAsync("Details, advice and a suggested machines.yml entry for one machine: lanq makeready <machine>").ConfigureAwait(false);
+        await stdout.WriteLineAsync(WorkerUntouched).ConfigureAwait(false);
+        return code;
+    }
+
+    /// <summary>
+    /// The --all exit code: 70 when any machine was unreachable or sent an unusable report (the check is incomplete); else 1 when any is NOT
+    /// READY (FAIL: lanq makeready &lt;machine&gt; exits 1 for it); else 75 when any was held; else 0. Warnings alone, including FAIL checks
+    /// that do not stop the PC being a worker (docker, dotnet), exit 0 as lanq makeready &lt;machine&gt; does; they stay in the table and JSON.
+    /// </summary>
+    private static int MakereadyAllExitCode(IReadOnlyCollection<MakereadyRowJson> rows) =>
+        rows.Any(r => r.Verdict is "unreachable" or "error") ? 70
+        : rows.Any(r => r.Verdict == "FAIL") ? 1
+        : rows.Any(r => r.Verdict == "held") ? 75
+        : 0;
+
+    /// <summary>Cuts <paramref name="text"/> to at most <paramref name="width"/> UTF-16 units with "...", never inside a surrogate pair.</summary>
+    internal static string Truncate(string text, int width)
+    {
+        if (text.Length <= width)
+        {
+            return text;
+        }
+
+        var kept = new System.Text.StringBuilder();
+        foreach (var rune in text.EnumerateRunes())
+        {
+            if (kept.Length + rune.Utf16SequenceLength > width - 3)
+            {
+                break;
+            }
+
+            kept.Append(rune.ToString());
+        }
+
+        return kept.Append("...").ToString();
+    }
+
+    /// <summary>
+    /// One --all row. FAIL only when the machine is not worker-ready (no transfer mode works: the same rule as the single-machine exit code
+    /// and the script's NOT READY); otherwise WARN when anything is left to look at, else OK. With the script's summary (0.2.0+), the counts
+    /// and the top problem (its first next step, blockers first) come from it; a summary that contradicts the transfer verdicts is ignored.
+    /// Without one (0.1), every FAIL check of a not-ready machine counts as a failure, and on a worker-ready machine every WARN or FAIL check
+    /// counts as a warning. <see cref="MakereadyRowJson.Failures"/> is the blocker count, <see cref="MakereadyRowJson.Warnings"/> the rest.
+    /// </summary>
+    private static MakereadyRowJson MakereadyRow(Machine m, MakereadyScan scan)
+    {
+        var os = m.Os == MachineOs.Windows ? "windows" : "linux";
+        if (scan.Report is not { } report)
+        {
+            var verdict = scan.Code == 75 ? "held" : scan.Unusable ? "error" : "unreachable";
+            return new MakereadyRowJson(m.Name, os, verdict, 0, 0, scan.Code, scan.Reason is { } reason ? JobRunner.SafeLine(reason) : null, null);
+        }
+
+        var ready = report.WorkerReady;
+        int failures, warnings;
+        string? title, detail;
+        if (report.Summary is { } s && (s.Verdict == "NOT_READY") != ready)
+        {
+            failures = ready ? 0 : s.Blockers;
+            warnings = s.Warnings;
+            var step = s.NextSteps!.FirstOrDefault();
+            (title, detail) = (step?.Title ?? step?.Id, step?.Detail);
+        }
+        else
+        {
+            var problems = report.Checks!.Where(c => c.Status is "WARN" or "FAIL").ToList();
+            failures = ready ? 0 : problems.Count(c => c.Status == "FAIL");
+            warnings = problems.Count - failures;
+            var top = problems.FirstOrDefault(c => c.Status == "FAIL") ?? problems.FirstOrDefault();
+            (title, detail) = (top?.Title ?? top?.Id, top?.Detail);
+        }
+
+        var problem = title is not null || !string.IsNullOrWhiteSpace(detail)
+            ? JobRunner.SafeLine(string.IsNullOrWhiteSpace(detail) ? title ?? "?" : $"{title}: {detail}")
+            : ready ? null : "no transfer mode works (worker_git and worker_archive are FAIL)";
+        var verdictText = !ready ? "FAIL" : warnings > 0 ? "WARN" : "OK";
+        return new MakereadyRowJson(m.Name, os, verdictText, warnings, failures, scan.Code, problem, report);
     }
 
     /// <summary>The human report. Every string from the worker is sanitised by the caller, line by line; nothing from it is executed.</summary>
@@ -217,8 +410,42 @@ public static partial class Cli
             yield return $"  {key,-15} {value}";
         }
 
+        if (report.Summary is { } summary)
+        {
+            // The script's own verdict line and numbered next steps, worded as the script prints them (0.2.0+).
+            yield return "";
+            yield return $"VERDICT: {summary.Text}";
+            if (summary.NextSteps!.Count > 0)
+            {
+                yield return "Next steps (blockers first; nothing here is run for you):";
+                var linux = report.SuggestedMachine!.Os == "linux";
+                foreach (var st in summary.NextSteps)
+                {
+                    var who = (st.AdminToFix, linux) switch
+                    {
+                        (true, true) => "needs root",
+                        (false, true) => "no root needed",
+                        (true, false) => "needs admin: elevated PowerShell",
+                        (false, false) => "no admin needed",
+                    };
+                    yield return $"{st.Step.ToString(CultureInfo.InvariantCulture),2}. [{(st.Blocker ? "MUST FIX" : "should fix")}] {st.Title}: {st.Detail}";
+                    yield return $"    do ({who}): {(string.IsNullOrEmpty(st.Action) ? "see the detail above" : st.Action)}";
+                }
+            }
+        }
+
+        if (report.SuitedFor is { } suited)
+        {
+            if (report.Summary is null)
+            {
+                yield return "";
+            }
+
+            yield return $"Suited for: {suited.Text}";
+        }
+
         var problems = report.Checks!.Where(c => c.Status is "WARN" or "FAIL").ToList();
-        if (problems.Count > 0)
+        if (report.Summary is null && problems.Count > 0)
         {
             yield return "";
             yield return "Checks to look at";
@@ -251,7 +478,9 @@ public static partial class Cli
         }
 
         yield return "";
-        yield return report.WorkerReady ? "Ready: at least one transfer mode works." : "Not ready yet: fix the FAIL items above on that PC, then run lanq makeready again.";
+        yield return report.WorkerReady ? "Ready: at least one transfer mode works."
+            : report.Summary is not null ? "Not ready yet: fix the MUST FIX steps above on that PC, then run lanq makeready again."
+            : "Not ready yet: fix the FAIL items above on that PC, then run lanq makeready again.";
         yield return WorkerUntouched;
     }
 
@@ -276,10 +505,25 @@ public static partial class Cli
         yield return $"    work_root: {Yaml(configured?.WorkRoot ?? s.WorkRoot ?? "")}";
         yield return $"    capabilities: [{string.Join(", ", caps)}]";
         yield return $"    max_jobs: {Math.Clamp(s.MaxJobs, 1, 64).ToString(CultureInfo.InvariantCulture)}";
+        if (s.MinFreeMemGb is { } minFree && double.IsFinite(minFree) && minFree is >= 0 and <= 1024)
+        {
+            yield return $"    min_free_mem_gb: {minFree.ToString("0.##", CultureInfo.InvariantCulture)}   # LanQueue starts no new job while less memory than this is free";
+        }
+
         yield return s.Transfer is "git" or "archive" ? $"    transfer: {s.Transfer}" : "    # transfer: no transfer mode works yet (needs git, or tar for archive)";
         if (s.AllowedHours is { } hours && HoursRegex().IsMatch(hours))
         {
             yield return $"    allowed_hours: {Yaml(hours)}";
+        }
+
+        // Only when the script's Wake-on-LAN check passed; commented, so waking stays the owner's choice. A redacted MAC stays "<mac>",
+        // which ConfigLoader refuses until the real one is filled in.
+        if (s.Wake is { } wake)
+        {
+            yield return $"    # wake:   # Wake-on-LAN looks ready; uncomment to let lanq wake this PC (test: lanq wake {name} --wait)";
+            yield return MagicPacket.TryParseMac(wake.Mac, out _)
+                ? $"    #   mac: {Yaml(wake.Mac!)}"
+                : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address";
         }
     }
 

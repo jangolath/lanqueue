@@ -85,6 +85,5 @@ machines:
     env:                       # for the job process only
       DOTNET_GCHeapHardLimitPercent: "0x32"      # .NET GC heap at most 50% of RAM (hexadecimal)
       NODE_OPTIONS: "--max-old-space-size=2048"  # Node heap at most 2 GB
-      MSBUILDNODECOUNT: "1"                      # one MSBuild worker node
     path_prepend:              # tools installed per user that a non-login SSH session does not find
       - C:/Users/build/AppData/Roaming/nvm/v22.11.0

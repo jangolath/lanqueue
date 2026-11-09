@@ -24,7 +24,7 @@ manifest: https://github.com/jangolath/lanqueue#install
 
 ## Quick start
 
-1. List your machines in a private `machines.yml` (start from the [example](https://github.com/jangolath/lanqueue/blob/main/machines.example.yml)) and make sure key-based SSH login works.
+1. Write a starter `machines.yml` with `lanq init` (or start from the [example](https://github.com/jangolath/lanqueue/blob/main/machines.example.yml)), list your machines, and make sure key-based SSH login works.
 2. Check your setup and the fleet: `lanq doctor --remote`, then `lanq health`
 3. Run a job from inside a git repository: `lanq run --needs dotnet,linux -- dotnet test -c Release`
 4. Bring results back: add `--fetch 'TestResults/**/*.trx'` (repeatable) and the matching files land in
@@ -32,7 +32,8 @@ manifest: https://github.com/jangolath/lanqueue#install
 
 Onboarding a PC: `lanq makeready --ssh user@old-pc.lan --os windows` runs the read-only
 [lanq-makeready](https://github.com/jangolath/lanq-makeready) check over SSH (built in, sent on stdin, nothing written to
-the PC) and suggests a `machines.yml` entry. `lanq unlock <machine>` clears slots left by a crashed run. `lanq health
+the PC) and suggests a `machines.yml` entry; `lanq makeready --all` checks every configured machine and prints one
+summary table (`--json` for one object). `lanq unlock <machine>` clears slots left by a crashed run. `lanq health
 --json` and `lanq run --json` print machine-readable results for scripts and coding agents.
 
 `lanq` picks the least loaded machine that has what the job needs, ships your current git state (including
@@ -41,6 +42,9 @@ uncommitted changes) to a throw-away worktree, runs the one allowlisted command,
 `lanq`'s exit code is the job's own exit code; `2` means rejected by policy or bad arguments, `70` an infrastructure
 error, `75` no eligible machine and `124` that the job ran past `--timeout <minutes>` (default 240) and was stopped.
 A job that itself exits with 124 looks the same; the `[lanq] TimedOut: ...` status line on stderr tells them apart.
+
+Setting up a pool for a team (one orchestrator, Windows 10/11 and Linux workers, low-RAM micro PCs, overnight family
+PCs)? Follow the [team quick start](https://github.com/jangolath/lanqueue/blob/main/docs/TEAM-QUICKSTART.md).
 
 ## What a worker needs
 
@@ -62,6 +66,15 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
   for a machine with at least 4 GB available.
 - Per-machine `env:` (for example `NODE_OPTIONS: "--max-old-space-size=2048"`) and `path_prepend:` (for nvm, pyenv,
   rustup or sdkman tools a non-login SSH session cannot find).
+
+## Split long work across the pool
+
+`lanq run --shards 4 -- npx jest --shard={shard}/{shards}` runs four pieces at once on free slots (`--shards auto`
+uses every free slot that can take the job); each gets `{shard}`/`{shards}` in its arguments and `LANQ_SHARD`/
+`LANQ_SHARDS` in its environment, and the snapshot is built once. Exit 0 only if every shard passed; `--json` prints
+one object with a `shards` array. `lanq health` shows cores, total RAM, free slots and what each machine suits.
+Recipes for .NET, Node, Python, Go and Rust:
+[docs/SHARDING.md](https://github.com/jangolath/lanqueue/blob/main/docs/SHARDING.md).
 
 ## Safe by default
 

@@ -121,7 +121,13 @@ public static partial class ConfigLoader
         }
         catch (YamlDotNet.Core.YamlException ex)
         {
-            throw new ConfigException($"Invalid config: {ex.Message} {ex.InnerException?.Message}".Trim());
+            // The static generator's own wording for a mapping or list where a plain value belongs ("Type X is not registered in the
+            // YamlDotNet static context. Add [YamlSerializable]...") is advice to a C# author, not to a config author: replace it.
+            var text = $"{ex.Message} {ex.InnerException?.Message}";
+            throw new ConfigException(
+                text.Contains("not registered", StringComparison.Ordinal) || text.Contains("No node deserializer", StringComparison.Ordinal)
+                    ? $"Invalid config: a value has the wrong shape, for example a mapping or a list where a single value (or a list of plain values) is expected (line {ex.Start.Line})."
+                    : $"Invalid config: {text}".Trim());
         }
 
         Validate(config);
@@ -193,7 +199,12 @@ public static partial class ConfigLoader
                         Enter(v, child, ancestors);
                         if (path == "env" || path.EndsWith(".env", StringComparison.Ordinal))
                         {
-                            continue; // an env: value is checked, and its variable named, by Validate
+                            if (v is not YamlScalarNode && !IsNull(v))
+                            {
+                                throw new ConfigException($"Invalid config: env values must be plain strings ('{Shown(child)}' is a {(v is YamlMappingNode ? "mapping" : "list")}, line {v.Start.Line}).");
+                            }
+
+                            continue; // an env: scalar value is checked, and its variable named, by Validate
                         }
 
                         if (IsNull(v) && !NullableKeys.Contains(child))
@@ -402,7 +413,7 @@ public static partial class ConfigLoader
     /// <summary>
     /// A Windows worker gets each script as one encoded command line of at most 8000 characters. The machine's env: and path_prepend: go
     /// into the job script, so if they alone, with no job arguments at all, already pass the cap, every job there would fail: refuse the
-    /// config now and say by how much. Only the job script gates loading; lanq doctor checks (and reports) its own script's size.
+    /// config now and say by how much (measured with the largest LANQ_SHARD / LANQ_SHARDS, so a sharded run fits too). Only the job script gates loading; lanq doctor checks (and reports) its own script's size.
     /// </summary>
     private static void ValidateWindowsCommandLength(Machine m)
     {
@@ -411,7 +422,7 @@ public static partial class ConfigLoader
             return;
         }
 
-        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], Jobs.JobRequest.DefaultTimeout)).Length;
+        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], Jobs.JobRequest.DefaultTimeout, new Jobs.ShardInfo(Jobs.ShardInfo.MaxShards, Jobs.ShardInfo.MaxShards))).Length;
         var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
         if (size > limit)
         {

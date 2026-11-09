@@ -66,15 +66,19 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
     public bool NoWake { get; init; }
 
+    /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
+    public ShardOptions? Shards { get; init; }
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json", "--wake"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all"],
+        ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
         ["version"] = [],
@@ -111,6 +115,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         long? fetchMax = null;
         int? fetchMaxFiles = null;
         var seen = new List<string>();
+        var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
         for (var i = 1; i < own.Length; i++)
         {
@@ -176,6 +181,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     }
 
                     fetchMaxFiles = files;
+                    break;
+                case "--shards" or "--shard-retries" when i + 1 < own.Length:
+                    shards.Set(own[i], own[++i]);
+                    break;
+                case "--fail-fast":
+                    shards.FailFast = true;
                     break;
                 case "--all":
                     all = true;
@@ -251,6 +262,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
+            Shards = shards.Build(),
         };
     }
 
@@ -285,11 +297,14 @@ public static partial class Cli
           lanq health [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
+          lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--json]
+          lanq makeready --all [--json] [--force] [--config FILE]
+          lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
           lanq --version
 
@@ -304,15 +319,27 @@ public static partial class Cli
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
-        makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
-        problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
-        outside its allowed hours (--force scans anyway). lanq never changes a worker.
+        health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
+        probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C.
+        makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints the verdicts,
+        the script's VERDICT line and numbered next steps (0.1 reports: the WARN/FAIL checks with advice), what the PC is suited for, the
+        capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 2 bad arguments, 70 ssh failed or the report was
+        unusable, 75 the machine is paused or outside its allowed hours (--force scans anyway), 130 Ctrl+C. lanq never changes a worker.
+        makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
+        FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
+        report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
+        init writes a commented starter machines.yml (default ./machines.yml, or --config FILE) and never overwrites a file or writes through
+        a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
         inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
-        makeready prints the validated report; wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
-        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
+        makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
+        exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
+        --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
+        in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
+        started shard is cleaned up).
+        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
     /// <summary>
@@ -343,10 +370,12 @@ public static partial class Cli
             var message = JobRunner.SafeLine(ex.Message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
-                await WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch")).ConfigureAwait(false);
+                await (own[0] == "run" && own.Contains("--shards")
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
+                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"))).ConfigureAwait(false);
             }
 
             return 2;
@@ -356,6 +385,11 @@ public static partial class Cli
         {
             await stdout.WriteLineAsync(VersionText()).ConfigureAwait(false);
             return 0;
+        }
+
+        if (p.Command == "init")
+        {
+            return await Init(p, Directory.GetCurrentDirectory(), Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), stdout, stderr).ConfigureAwait(false);
         }
 
         var home = ResolveHome(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
@@ -397,7 +431,9 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             if (p.Json)
             {
-                await WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0).ConfigureAwait(false);
+                await (p.Shards is not null
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
+                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0)).ConfigureAwait(false);
             }
 
             return 2;
@@ -439,6 +475,11 @@ public static partial class Cli
         }
 
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
+        if (p.Shards is { } shards)
+        {
+            return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
         var started = System.Diagnostics.Stopwatch.StartNew();
         JobResult result;
         try
@@ -480,9 +521,12 @@ public static partial class Cli
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
     private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false) =>
-        stdout.WriteLineAsync(command == "run"
-            ? JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson)
-            : JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson));
+        stdout.WriteLineAsync(command switch
+        {
+            "run" => JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson),
+            "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message), LanqJson.Default.InitJson),
+            _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson),
+        });
 
     /// <summary>
     /// With --fetch the run object always carries fetched and fetchSkipped (empty when nothing was fetched or the job never ran), plus fetchDir
@@ -582,9 +626,20 @@ public static partial class Cli
         var path = explicitPath ?? env("LANQ_CONFIG");
         if (!string.IsNullOrEmpty(path))
         {
-            return exists(path) ? path : throw new ConfigException($"Config file not found: {path}");
+            return exists(path) ? path : throw new ConfigException($"Config file not found: {path}. Check the path, or write a starter file with: lanq init --config {path}");
         }
 
+        var userFile = UserConfigPath(env, windows);
+        return exists(userFile)
+            ? userFile
+            : throw new ConfigException(
+                $"No config found. Pass --config FILE, set LANQ_CONFIG, or create {userFile} (a starter file: lanq init --config {userFile}). "
+                + "A machines file in the current directory is never picked up implicitly.");
+    }
+
+    /// <summary>The per-user config file lanq reads when neither --config nor $LANQ_CONFIG is given.</summary>
+    internal static string UserConfigPath(Func<string, string?> env, bool windows)
+    {
         string userDir;
         if (windows)
         {
@@ -597,10 +652,7 @@ public static partial class Cli
             userDir = Path.Combine(!string.IsNullOrEmpty(xdg) ? xdg : Path.Combine(HomeDir(env), ".config"), "lanq");
         }
 
-        var userFile = Path.Combine(userDir, "machines.yml");
-        return exists(userFile)
-            ? userFile
-            : throw new ConfigException($"No config found. Pass --config FILE, set LANQ_CONFIG, or create {userFile}. (A machines file in the current directory is never picked up implicitly.)");
+        return Path.Combine(userDir, "machines.yml");
     }
 
     private static string HomeDir(Func<string, string?> env) =>
@@ -640,8 +692,9 @@ public static partial class Cli
         {
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
-                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots {h.SlotsUsed}/{m.MaxJobs}")
+                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
                     + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
+                    + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
                 : h.Error ?? "";
             await stdout.WriteLineAsync($"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd()).ConfigureAwait(false);
         }
@@ -654,8 +707,22 @@ public static partial class Cli
         var state = !h.Reachable ? "down" : h.Hold is not null ? "hold" : "ok";
         var reason = !h.Reachable ? h.Error ?? h.Hold : h.Hold;
         return new HealthJson(
-            m.Name, state, reason is null ? [] : [JobRunner.SafeLine(reason)], h.LoadRatio, h.DiskFreeGb, h.MemFreeGb, h.SlotsUsed, m.MaxJobs, h.LocalTime);
+            m.Name, state, reason is null ? [] : [JobRunner.SafeLine(reason)], h.LoadRatio, h.DiskFreeGb, h.MemFreeGb, h.SlotsUsed, m.MaxJobs, h.LocalTime)
+        {
+            Cores = h.Cores,
+            MemTotalGb = h.MemTotalGb,
+            FreeSlots = h.Reachable ? FreeSlots(m, h) : 0,
+            Size = MachineSize.Classify(h.MemTotalGb, h.Cores).ToString().ToLowerInvariant(),
+            SuitedFor = MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores),
+        };
     }
+
+    /// <summary>Slots a job could take now: max_jobs minus the slots in use (never below 0).</summary>
+    private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsUsed);
+
+    private static string Size(MachineHealth h) =>
+        (h.Cores is { } c ? string.Create(CultureInfo.InvariantCulture, $"cores {c}") : "cores ?")
+        + (h.MemTotalGb is { } t ? string.Create(CultureInfo.InvariantCulture, $"  ram {t:0.#} GB") : "  ram ?");
 
     private static string Memory(MachineHealth h) =>
         (h.MemFreeGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"mem free {mem:0.0} GB") : "mem free ?")

@@ -18,6 +18,10 @@ dotnet tool install --global LanQueue      # update later: dotnet tool update --
 No .NET SDK? Each release also has a single-file native `lanq` for Windows, Linux (glibc 2.27 and later) and macOS,
 and a Scoop manifest; see [Install](#install).
 
+**Setting up a pool for a team?** [docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md) walks through one orchestrator
+and a mix of Windows 10/11 and Linux workers, low-RAM micro PCs and overnight family PCs included, from `lanq init` to
+the first job, with the ten most common errors and their fixes.
+
 A 3-command taste (after you list your machines once in `machines.yml`, see [Quick start](#quick-start)):
 
 ```bash
@@ -84,7 +88,7 @@ quarantined; `xattr -d com.apple.quarantine lanq` clears that (the binary is ad-
 gh release download --repo jangolath/lanqueue --pattern 'lanq-linux-x64.tar.gz' --pattern SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 gh attestation verify lanq-linux-x64.tar.gz --repo jangolath/lanqueue
-tar -xzf lanq-linux-x64.tar.gz lanq && install -m 755 lanq ~/.local/bin/lanq
+tar -xzf lanq-linux-x64.tar.gz lanq && install -D -m 755 lanq ~/.local/bin/lanq   # ~/.local/bin must be on PATH (most distros add it at next login)
 lanq --version
 ```
 
@@ -162,8 +166,9 @@ Before your first job, each worker needs an SSH server, git (or only `tar` in ar
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
 [docs/WORKERS.md](docs/WORKERS.md).
 
-1. Copy `machines.example.yml` to a private location (for example `~/.config/lanq/machines.yml`, or
-   `%APPDATA%\lanq\machines.yml` on Windows) and edit it. A config in the current directory is never picked up
+1. Write a starter config with `lanq init --config ~/.config/lanq/machines.yml` (bash; in PowerShell
+   `lanq init --config "$env:APPDATA\lanq\machines.yml"`; plain `lanq init` writes `./machines.yml`), or copy
+   `machines.example.yml` to one of those places, and edit it. A config in the current directory is never picked up
    implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
    (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
@@ -171,9 +176,14 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 
    ```
    $ lanq health
-   build-01       OK    load 0.12  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots 0/2
-   build-02       HOLD  load 0.05  disk free 90.1 GB  mem free 5.1 GB  slots 0/1 (outside allowed hours)
+   build-01       OK    load 0.12  cores 8  ram 15.6 GB  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots free 2/2  suited: heavy: full suites and large builds
+   build-02       HOLD  load 0.05  cores 4  ram 7.8 GB  disk free 90.1 GB  mem free 5.1 GB  slots free 1/1  suited: medium: test shards and builds (outside allowed hours)
+   build-03       DOWN  build-03.lan refused the connection: its SSH server is not running, or a firewall rejects the ssh port (Windows: Start-Service sshd and Set-Service sshd -StartupType Automatic; Linux: sudo systemctl enable --now ssh) (ssh: ssh: connect to host build-03.lan port 22: Connection refused)
    ```
+
+   Each line shows the machine's size (cores, total RAM, free/total slots, what it is suited for; see
+   [Sharding](#sharding-long-work-across-the-pool)), and a machine that does not answer says what to fix, quoting
+   ssh's own line.
 
 4. Run something from inside a git repository:
 
@@ -198,11 +208,14 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 
 | Command | What it does |
 | --- | --- |
-| `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. `--wake` also wakes machines that look asleep. |
+| `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, cores, RAM, disk, memory, free slots, what it is suited for, holds, and what to fix when ssh fails. `--wake` also wakes machines that look asleep. |
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
+| `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
+| `lanq makeready --all [--json] [--force]` | The same check on every configured machine, four at a time, as one summary table. |
+| `lanq init [--json]` | Writes a commented starter `machines.yml` (in the current folder, or at `--config FILE`); never overwrites a file. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
 | `lanq wake <machine> [--wait] [--json]` | Sends a Wake-on-LAN magic packet to a machine with a `wake:` setting, even outside its `allowed_hours`; `--wait` waits for ssh. |
 | `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready version. |
@@ -252,7 +265,7 @@ SKIP  build-01 (remote): gpu: not checked (no known tool command)
 
 Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
 .NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
-(v0.1.0, byte-identical to that release, whose SHA-256 a test pins), sent on ssh **stdin** and run from memory with
+(v0.2.0, byte-identical to that release, whose SHA-256 a test pins), sent on ssh **stdin** and run from memory with
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
 - `lanq makeready build-01` for a configured machine. It respects the machine's `PAUSE` file and `allowed_hours`
@@ -261,14 +274,67 @@ Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: 
   SSH works and its host key is in your `known_hosts` (same key-only, strict-host-key ssh options as every other call;
   your agent or default key is used).
 
-It prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), each `WARN`/`FAIL` check
-with its advice, for a configured machine the capabilities detected but not configured and configured but not
-detected, and a suggested `machines.yml` entry. It ends with: *lanq never changes a worker. Fixes are for the PC's
-owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead; when there is no report it prints exactly
+It prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), then the script's own
+`VERDICT:` line (`READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`) and its numbered next steps, blockers
+first, each with the command or settings path to use and whether it needs admin (or root), worded as the script prints
+them, and a `Suited for:` line (light, medium or heavy, "+ container builds" when Docker answers). A report from
+lanq-makeready 0.1 has none of these: lanq then lists each `WARN`/`FAIL` check with its advice. Then, for a configured
+machine, the capabilities detected but not configured and configured but not detected, and a suggested `machines.yml`
+entry: `max_jobs` and `min_free_mem_gb` sized from the PC's RAM and CPUs, and, only when the script's Wake-on-LAN check
+passed, a commented `wake:` block to uncomment (the MAC is redacted in the report, so fill in `mac:`). It ends with: *lanq never changes a worker. Fixes are for the PC's
+owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead, every field as the script sent it (0.2.0's
+`summary`, `suitedFor`, `min_free_mem_gb` and `wake` included); when there is no report it prints exactly
 one `{"status":...,"exitCode":...,"message":...}` object (`Rejected` 2, `InfraError` 70, `Held` 75, `Cancelled` 130). The report is
 treated as untrusted input: at most 1 MB, parsed without reflection, checked against the schema, every string
 sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-ready (git or archive transfer works),
-`1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours.
+`1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours,
+`130` Ctrl+C.
+
+`lanq makeready --all` runs the same check on every machine in the config, four at a time, with the same rules (a
+paused machine or one outside its `allowed_hours` is not scanned unless `--force`; the script goes on ssh stdin), and
+prints one table:
+
+```text
+$ lanq makeready --all
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.2.0)
+
+MACHINE    OS       VERDICT      TOP PROBLEM
+micro-01   linux    WARN 1       Pending reboot: a restart is pending
+micro-02   windows  FAIL 1       OpenSSH Server: not installed
+family-pc  windows  held         paused (a PAUSE file is in its work_root); --force scans anyway
+micro-03   linux    unreachable  ssh: connect to host 10.20.30.33 port 22: Connection timed out
+
+Details, advice and a suggested machines.yml entry for one machine: lanq makeready <machine>
+lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
+```
+
+The verdict is `FAIL n` only when the machine is NOT READY (no transfer mode works, so `lanq makeready <machine>` exits
+`1`), with n blockers; else `WARN n` with n things to look at, else `OK`. A `FAIL` check that does not stop the PC being
+a worker (Docker, .NET) is one of the warnings, as in the script's own verdict. The counts and the top problem come from
+the report's summary (lanq-makeready 0.2.0: its first next step, blockers first); for a 0.1 report, from its checks (the
+first failing check, else the first warning). `unreachable` (the probe or ssh failed), `held` or `error` (the report was
+unusable) when there is no report, with why as the top problem. Exit codes, first match wins: `70` any machine was
+unreachable or its report unusable (the check is incomplete); `1` any machine is NOT READY; `75` any was held; `0`
+otherwise. Warnings alone exit `0`, as `lanq makeready <machine>` does; they stay in the table and the JSON. `2` means bad arguments or config, `130` Ctrl+C. With `--json` it prints exactly
+one object, `{"status":"Ok|Failing|InfraError|Held","exitCode":...,"machines":[...]}`, where each machine has `machine`,
+`os`, `verdict` (`OK`, `WARN`, `FAIL`, `unreachable`, `held` or `error`), `warnings`, `failures` (blockers), `exitCode` (what
+`lanq makeready <machine>` would exit with), `problem` (absent when there is none) and `report`: the validated
+`lanq-makeready/v1` report exactly as `lanq makeready <machine> --json` prints it (absent without one). A bad argument
+or config prints the usual `{"status":"Rejected","exitCode":2,"message":...}` object instead.
+
+### lanq init
+
+`lanq init` writes a commented, minimal `machines.yml` to the current folder (or to `--config FILE`, creating its
+folder). It never overwrites a file and never writes through a link: an existing file, folder or link (even one
+pointing nowhere) at that path is refused (exit `2`). The file loads as written: a policy memory floor suited to
+small PCs (`min_free_mem_gb: 1.5`), one live example machine to replace (`max_jobs: 1`, set per machine), and commented examples of a
+Windows micro PC (`key_env`, a memory floor, heap caps) and a Linux family PC (`allowed_hours`, `wake:`). It then
+prints the next steps: set up OpenSSH on each worker ([docs/WORKERS.md](docs/WORKERS.md)), connect once with `ssh`,
+run `lanq makeready --ssh user@host --os windows|linux` on each, paste the suggested entries, then
+`lanq doctor --remote`. Remember that lanq never reads `./machines.yml` by itself: the steps include `--config` with
+the file's path unless you wrote it to the per-user path. `--json` prints one object
+(`{"status":"Created","exitCode":0,"path":...,"message":...}`; `Rejected` 2 when the file exists, `InfraError` 70 when
+it could not be written) and sends the next steps to stderr.
 
 ### lanq unlock
 
@@ -337,12 +403,14 @@ The worker is treated as untrusted for this step; see [Security model](#security
 Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03"},
- {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null}]
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
+ {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"freeSlots":1,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
 ```
 
 `state` is `ok`, `hold` or `down`; `reasons` is empty when `ok`; `memFreeGb` and `localTime` (the worker's own clock)
-are `null` when the worker does not report them. `lanq run --json` streams the job's output to **stderr** and prints
+are `null` when the worker does not report them; so are `cores` and `memTotalGb` (then `size` is `unknown`).
+`freeSlots` is `maxJobs` minus `slotsUsed` (0 for a machine that is down), and `size` is `light`, `medium`, `heavy`
+or `unknown`. `lanq run --json` streams the job's output to **stderr** and prints
 one object on stdout when it is over:
 
 ```json
@@ -553,6 +621,12 @@ A machine that does not report memory (an older kernel, an unusual host) is not 
 of memory can ask: `lanq run --mem 6 ...` goes only to a machine that reports at least 6 GB available, and never to
 one that cannot report it.
 
+How many jobs a machine should take at once follows its RAM and CPUs: `max_jobs` 1 under 6 GB, 2 under 12 GB, 3
+under 24 GB (4 with 8+ CPUs), else 6 (8 with 16+ CPUs), never above the CPU count, and `min_free_mem_gb` 1.5 under
+6 GB, else 2. `lanq makeready` suggests exactly that; the table and the reasons are in
+[docs/SHARDING.md, Sizing machines](docs/SHARDING.md#sizing-machines), and the other small-PC settings in
+[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md#8-sizing-micro-pcs).
+
 Build tools size themselves to the machine, which on a 4 GB box usually means swapping. Cap them per machine with
 `env:` (set for the job only):
 
@@ -560,9 +634,13 @@ Build tools size themselves to the machine, which on a 4 GB box usually means sw
 env:
   DOTNET_GCHeapHardLimitPercent: "0x32"        # .NET: GC heap at most 50% of RAM (the value is hexadecimal)
   NODE_OPTIONS: "--max-old-space-size=2048"    # Node: 2 GB heap
-  MSBUILDNODECOUNT: "1"                        # MSBuild: one worker node
   CARGO_BUILD_JOBS: "2"                        # Rust: two parallel compile jobs
 ```
+
+For .NET builds the parallelism is a command-line switch, not an environment variable: `dotnet build` and
+`dotnet test` build several projects at once by default (MSBuild's `-maxcpucount`, `-m`); on a small machine run
+them as `dotnet build -m:1` and `dotnet test -m:1` (one build process). The allowlist entries `dotnet build` and `dotnet test`
+already allow the extra argument.
 
 Tools installed per user (nvm, pyenv, rustup, sdkman) are often missing in a non-login SSH session, because they put
 themselves on `PATH` from `.bashrc` or `.profile`. List their folders under `path_prepend:` and the job finds them:
@@ -581,6 +659,37 @@ shell are refused (`LD_*`, `DYLD_*`, `GLIBC_TUNABLES`, `BASH_ENV`, `ENV`, `SHELL
 directories; a drive path such as `C:/Users/build/.cargo/bin` on Windows). Values reach the job as data: on Linux each
 `NAME=value` is one single-quoted word passed to `env`, on Windows a single-quoted PowerShell string, so quotes,
 `$( )` or backticks in a value are never run.
+
+## Sharding long work across the pool
+
+A long test suite can run as N pieces at once, one per free slot, while your dev PC keeps working:
+
+```bash
+lanq run --needs node --shards 4 -- npx jest --shard={shard}/{shards}
+lanq run --needs node --shards auto -- npx playwright test --shard={shard}/{shards}
+lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}
+```
+
+- `--shards N` (1 to 64) starts N jobs of one command, each with its own job id; `--shards auto` uses the number of
+  free slots on the machines that can take the job now (and says why). A machine with `max_jobs: 4` takes up to four
+  shards at once, a `max_jobs: 1` micro PC one.
+- `{shard}` (1-based) and `{shards}` are replaced by numbers in the arguments only, and each job also gets `LANQ_SHARD`
+  and `LANQ_SHARDS`. Every shard's command line passes the allowlist, the permission-flag ban and the secret scan before
+  anything is sent.
+- The repository is snapshotted once and each bundle or archive built once for all shards. Shards beyond the free
+  slots wait for a sibling to finish; `--wait` counts only while no shard of the run holds a slot. `--mem` is per
+  shard: a machine takes at most as many shards as its free memory covers.
+- Output lines are prefixed `[i/N machine]`, and a summary table ends the run. Exit 0 only if every shard passed;
+  otherwise the failing shard's own code, else 2, 124, 70 or 75. `--json` prints one object with a `shards` array.
+- `--fail-fast` cancels the rest after the first shard that fails; `--shard-retries R` (0 to 3) re-runs only a shard
+  whose machine stopped answering, never a test failure. Ctrl+C cancels every shard and cleans each one up.
+
+`lanq health` also shows each machine's cores, total RAM, free/total slots and what it is suited for (light under
+6 GB, medium 6 to under 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a `docker` capability);
+`health --json` adds `cores`, `memTotalGb`, `freeSlots`, `size` and `suitedFor`.
+[docs/SHARDING.md](docs/SHARDING.md) has per-ecosystem recipes (.NET, Node, Python, Go, Rust), a sizing table for
+`max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs; setting up the pool itself is in
+[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md).
 
 ## Keeping your keys safe
 

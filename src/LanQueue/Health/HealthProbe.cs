@@ -37,6 +37,12 @@ public sealed record MachineHealth(
     /// <summary>Available memory in GB, or null when the worker did not report it (older or unusual hosts).</summary>
     public double? MemFreeGb { get; init; }
 
+    /// <summary>Total memory in GB, or null when the worker did not report it (an older probe, or an unreadable value).</summary>
+    public double? MemTotalGb { get; init; }
+
+    /// <summary>Logical processors the worker reports (nproc / getconf on Linux, Environment.ProcessorCount on Windows), or null.</summary>
+    public int? Cores { get; init; }
+
     /// <summary>Free swap in GB (Linux), or null when not reported.</summary>
     public double? SwapFreeGb { get; init; }
 
@@ -161,7 +167,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
 
         if (!result.Ok)
         {
-            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", FirstLine(result.Output)) { HoldKind = HoldKind.Unreachable, LooksAsleep = WakeService.LooksAsleep(result) };
+            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", JobRunner.SafeLine(result.IsSshFailure ? SshErrors.Explain(result.Output, machine.Ssh) : SshErrors.FirstLine(result.Output))) { HoldKind = HoldKind.Unreachable, LooksAsleep = WakeService.LooksAsleep(result) };
         }
 
         var values = Parse(result.Output);
@@ -193,6 +199,8 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
         var health = new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, null, null)
         {
             MemFreeGb = OptionalNum(values, "mem_free_gb"),
+            MemTotalGb = OptionalNum(values, "mem_total_gb") is { } total and > 0 and < 1_048_576 ? total : null,
+            Cores = OptionalNum(values, "cores") is { } cores and >= 1 and <= 65_536 && cores == Math.Floor(cores) ? (int)cores : null,
             SwapFreeGb = OptionalNum(values, "swap_free_gb"),
             MemPressure = OptionalNum(values, "mem_pressure"),
             Paused = values.TryGetValue("paused", out var paused) && paused == "1",
@@ -283,7 +291,4 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
     /// <summary>A non-negative finite number, or null when the key is missing or garbled (treated as unknown).</summary>
     private static double? OptionalNum(Dictionary<string, string> v, string key) =>
         TryNum(v, key, out var value) && value >= 0 ? value : null;
-
-    private static string FirstLine(string text) => JobRunner.SafeLine(
-        text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "no output");
 }

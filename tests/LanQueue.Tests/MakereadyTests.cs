@@ -11,23 +11,23 @@ namespace LanQueue.Tests;
 /// <summary>lanq makeready: the embedded scripts, how they are sent, and how their (untrusted) report is read.</summary>
 public class MakereadyTests
 {
-    /// <summary>From SHA256SUMS of the lanq-makeready v0.1.0 GitHub release (build-provenance attested). Change only via scripts/sync-makeready.sh.</summary>
-    private const string Ps1Sha256 = "aaa26113197878ecd84092b66409c23d0a16bb297b8e079fba9af96912f4b151";
+    /// <summary>From SHA256SUMS of the lanq-makeready v0.2.0 GitHub release (build-provenance attested). Change only via scripts/sync-makeready.sh.</summary>
+    private const string Ps1Sha256 = "d49bf9503e17b3a3ee7a01af0c88cc40544de34e873da6e428fc05e72b0d59e0";
 
-    private const string ShSha256 = "6393c3a301b255313515875007509ae29ffffdaf385ad3b036e7c4188d03b1e0";
+    private const string ShSha256 = "fc4aae07bb57c60c629b643d1f645554bac9aba3e8f4201a7d71db0044733c23";
 
     private const char Esc = (char)27;
 
-    private static string Report(
+    internal static string Report(
         string git = "OK", string archive = "OK", string schema = "lanq-makeready/v1", string caps = "\"dotnet\", \"java\"", string detail = "a restart is pending",
-        string advice = "Restart the PC when convenient.") => $$"""
+        string advice = "Restart the PC when convenient.", string extra = "", string docker = "SKIP", string extraChecks = "") => $$"""
         {
           "schema": "{{schema}}",
           "tool": { "name": "lanq-makeready", "version": "0.1.0" },
           "generatedAt": "2026-11-09T06:39:14Z",
           "host": { "hostname": "<redacted>", "user": "<redacted>", "os": "Ubuntu 24.04", "arch": "x64" },
-          "verdicts": { "worker_git": "{{git}}", "worker_archive": "{{archive}}", "dotnet10": "OK", "docker": "SKIP", "overnight": "WARN" },
-          "checks": [
+          "verdicts": { "worker_git": "{{git}}", "worker_archive": "{{archive}}", "dotnet10": "OK", "docker": "{{docker}}", "overnight": "WARN" },{{extra}}
+          "checks": [{{extraChecks}}
             { "id": "os.version", "title": "OS", "status": "OK", "detail": "Ubuntu 24.04", "advice": "", "needsAdmin": false },
             { "id": "reboot.pending", "title": "Pending reboot", "status": "WARN", "detail": "{{detail}}", "advice": "{{advice}}", "needsAdmin": false },
             { "id": "ssh.server", "title": "OpenSSH Server", "status": "{{(git == "FAIL" ? "FAIL" : "OK")}}", "detail": "sshd", "advice": "Install openssh-server yourself.", "needsAdmin": true }

@@ -123,8 +123,8 @@ public sealed partial class HoursWindow
     }
 
     /// <summary>Parses allowed_hours entries that config validation has accepted; null when there are none (any time is fine).</summary>
-    public static List<HoursWindow>? ParseAll(IReadOnlyList<string>? entries) =>
-        entries is null or { Count: 0 }
+    public static List<HoursWindow>? ParseAll(IEnumerable<string>? entries) =>
+        entries is null || !entries.Any()
             ? null
             : [.. entries.Select(e => TryParse(e, out var w) ? w : throw new FormatException($"Invalid allowed_hours entry '{e}'."))];
 }

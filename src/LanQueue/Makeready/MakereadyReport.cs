@@ -14,6 +14,8 @@ internal sealed record MakereadyReport(
     [property: JsonPropertyName("generatedAt")] string? GeneratedAt,
     [property: JsonPropertyName("host")] MakereadyHost? Host,
     [property: JsonPropertyName("verdicts")] MakereadyVerdicts? Verdicts,
+    [property: JsonPropertyName("summary")] MakereadySummary? Summary,
+    [property: JsonPropertyName("suitedFor")] MakereadySuitedFor? SuitedFor,
     [property: JsonPropertyName("checks")] List<MakereadyCheck>? Checks,
     [property: JsonPropertyName("capabilities")] List<string>? Capabilities,
     [property: JsonPropertyName("suggestedMachine")] MakereadySuggestion? SuggestedMachine)
@@ -25,7 +27,12 @@ internal sealed record MakereadyReport(
 
     private static readonly string[] Statuses = ["OK", "WARN", "FAIL", "SKIP"];
 
+    private static readonly string[] SummaryVerdicts = ["READY", "READY_WITH_WARNINGS", "NOT_READY"];
+
+    private static readonly string[] Tiers = ["light", "medium", "heavy"];
+
     /// <summary>Ready when at least one transfer mode is not FAIL: the same rule the script uses for its own exit code.</summary>
+    [JsonIgnore]
     public bool WorkerReady => Verdicts!.WorkerGit != "FAIL" || Verdicts.WorkerArchive != "FAIL";
 
     /// <summary>Parses and validates; throws <see cref="FormatException"/> with a short reason (never echoing the input).</summary>
@@ -67,6 +74,19 @@ internal sealed record MakereadyReport(
             throw new FormatException("capabilities or suggestedMachine missing");
         }
 
+        // Optional since lanq-makeready 0.2.0; when present they must have the documented shape.
+        if (report.Summary is { } s
+            && (!SummaryVerdicts.Contains(s.Verdict, StringComparer.Ordinal) || s.Text is null || s.Blockers < 0 || s.Warnings < 0 || s.NextSteps is null
+                || s.NextSteps.Any(st => st is null || st.Step < 1 || st.Status is not ("WARN" or "FAIL"))))
+        {
+            throw new FormatException("summary is not verdict/text/blockers/warnings/nextSteps as documented");
+        }
+
+        if (report.SuitedFor is { } f && (!Tiers.Contains(f.Tier, StringComparer.Ordinal) || f.Text is null))
+        {
+            throw new FormatException("suitedFor is not tier/containers/text as documented");
+        }
+
         return report;
     }
 }
@@ -86,6 +106,33 @@ internal sealed record MakereadyVerdicts(
     [property: JsonPropertyName("docker")] string? Docker,
     [property: JsonPropertyName("overnight")] string? Overnight);
 
+/// <summary>The script's one-line verdict and its numbered next steps (every WARN/FAIL check, blockers first). Optional, 0.2.0+.</summary>
+internal sealed record MakereadySummary(
+    [property: JsonPropertyName("verdict")] string? Verdict,
+    [property: JsonPropertyName("text")] string? Text,
+    [property: JsonPropertyName("blockers")] int Blockers,
+    [property: JsonPropertyName("warnings")] int Warnings,
+    [property: JsonPropertyName("nextSteps")] List<MakereadyStep>? NextSteps);
+
+internal sealed record MakereadyStep(
+    [property: JsonPropertyName("step")] int Step,
+    [property: JsonPropertyName("id")] string? Id,
+    [property: JsonPropertyName("title")] string? Title,
+    [property: JsonPropertyName("status")] string? Status,
+    [property: JsonPropertyName("blocker")] bool Blocker,
+    [property: JsonPropertyName("detail")] string? Detail,
+    [property: JsonPropertyName("action")] string? Action,
+    [property: JsonPropertyName("adminToFix")] bool AdminToFix);
+
+/// <summary>Job sizing hint (light, medium, heavy) and its text. Optional, 0.2.0+.</summary>
+internal sealed record MakereadySuitedFor(
+    [property: JsonPropertyName("tier")] string? Tier,
+    [property: JsonPropertyName("containers")] bool Containers,
+    [property: JsonPropertyName("text")] string? Text);
+
+/// <summary>A suggested Wake-on-LAN block (only when the script's wol check is OK; mac is &lt;mac&gt; when redacted). Optional, 0.2.0+.</summary>
+internal sealed record MakereadyWake([property: JsonPropertyName("mac")] string? Mac);
+
 internal sealed record MakereadyCheck(
     [property: JsonPropertyName("id")] string? Id,
     [property: JsonPropertyName("title")] string? Title,
@@ -101,8 +148,10 @@ internal sealed record MakereadySuggestion(
     [property: JsonPropertyName("work_root")] string? WorkRoot,
     [property: JsonPropertyName("capabilities")] List<string>? Capabilities,
     [property: JsonPropertyName("max_jobs")] int MaxJobs,
+    [property: JsonPropertyName("min_free_mem_gb")] double? MinFreeMemGb,
     [property: JsonPropertyName("transfer")] string? Transfer,
-    [property: JsonPropertyName("allowed_hours")] string? AllowedHours);
+    [property: JsonPropertyName("allowed_hours")] string? AllowedHours,
+    [property: JsonPropertyName("wake")] MakereadyWake? Wake);
 
 /// <summary>Source-generated (de)serialization for the report: no reflection. Depth is capped well below the default.</summary>
 [JsonSourceGenerationOptions(MaxDepth = 16, WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
