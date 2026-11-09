@@ -53,7 +53,7 @@ public static class FetchScripts
                 $jp = $j.FullName.TrimEnd('\')
                 if (-not ($jp + '\').StartsWith($w + '\', [StringComparison]::OrdinalIgnoreCase)) { O 'LQF1 ERROR outside'; O 'LQF1 DONE'; exit 0 }
                 for ($p = $j; $p -and $p.FullName.TrimEnd('\').Length -ge $w.Length; $p = $p.Parent) { if ($p.Attributes -band 1024) { O 'LQF1 ERROR outside'; O 'LQF1 DONE'; exit 0 } }
-                $re = New-Object Text.RegularExpressions.Regex ({{ShellQuote.PowerShell(FetchPatterns.ToDotNet(patterns))}}, 'IgnoreCase, CultureInvariant')
+                $re = New-Object Text.RegularExpressions.Regex ({{ShellQuote.PowerShell(FetchPatterns.ToDotNet(patterns))}}, 'IgnoreCase, CultureInvariant', [TimeSpan]::FromSeconds(1))
                 $F = New-Object Collections.Generic.List[string]; $X = New-Object Collections.Generic.List[string]
                 foreach ($r in @({{winRoots}})) {
                   $d = $j; $ok = $true
@@ -65,7 +65,7 @@ public static class FetchScripts
                     foreach ($e in $es) {
                       $q = $e.FullName.Substring($jp.Length + 1).Replace('\', '/'); $a = [int]$e.Attributes
                       if (($a -band 16) -and -not ($a -band 1024)) { $st.Push($e); continue }
-                      if (-not $re.IsMatch($q)) { continue }
+                      try { if (-not $re.IsMatch($q)) { continue } } catch { continue }
                       if ($a -band 1024) { $X.Add('link ' + $q) } elseif (-not ($a -band 16)) { $F.Add($q) }
                     }
                   }

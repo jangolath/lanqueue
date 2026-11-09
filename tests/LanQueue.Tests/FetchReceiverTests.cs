@@ -114,6 +114,11 @@ public sealed class FetchReceiverTests : IDisposable
     [InlineData("LPT9")]
     [InlineData("conin$")]
     [InlineData("COM\u00b9.txt")]
+    [InlineData("NUL .txt")]
+    [InlineData("logs/COM1 .log")]
+    [InlineData("CON  .txt")]
+    [InlineData("conout$ .log")]
+    [InlineData("LPT² .txt")]
     [InlineData("trailing.")]
     [InlineData("dir./x.txt")]
     [InlineData("space ")]
@@ -338,6 +343,31 @@ public sealed class FetchReceiverTests : IDisposable
 
         Assert.Empty(r.Fetched);
         Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+    }
+
+    /// <summary>A pattern that would make a backtracking engine explode against a long name is matched in linear time, never timing out.</summary>
+    [Fact]
+    public void AManyStarPatternAgainstALongNameCannotHangTheMatcher()
+    {
+        var pattern = string.Concat(Enumerable.Repeat("*a", 40)) + "*b";
+        var name = new string('a', 255);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var r = Receive(Frame(name, Bytes(3)).Concat(Frame("ok" + new string('a', 40) + "b", Bytes(3))), [pattern]);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), "took " + watch.Elapsed);
+        Assert.Equal("not matched by any --fetch pattern", Reason(r, name));
+        Assert.Single(r.Fetched);
+    }
+
+    /// <summary>The Windows script sends 3072-byte chunks: exactly 4096 base64 characters per line, the most a data line may hold.</summary>
+    [Fact]
+    public void AnExactly4096CharacterDataLineIsAccepted()
+    {
+        var data = Bytes(3072 * 3 + 5);
+        var frame = Frame("w.bin", data, chunk: 3072).ToList();
+        Assert.Equal(4096, frame[1].Length);
+        var r = Receive(frame);
+        Assert.Equal(data, File.ReadAllBytes(Path.Combine(JobDir, "w.bin")));
+        Assert.Single(r.Fetched);
     }
 
     /// <summary>The file is written as data lines arrive, not held until END: more than the write buffer is on disk before the frame ends.</summary>

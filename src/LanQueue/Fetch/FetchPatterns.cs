@@ -147,9 +147,15 @@ public static partial class FetchPatterns
     /// <summary>All patterns as one .NET alternation, anchored with \z (a trailing newline never matches).</summary>
     internal static string ToDotNet(IReadOnlyList<string> patterns) => "^(" + string.Join('|', patterns.Select(p => "(" + ToRegexBody(p) + ")")) + @")\z";
 
-    /// <summary>The local matcher: a path the worker sends must match one of the requested patterns (case-insensitively for a Windows worker).</summary>
+    /// <summary>
+    /// The local matcher: a path the worker sends must match one of the requested patterns (case-insensitively for a Windows worker). The
+    /// non-backtracking engine matches in time linear in the name, so a many-star pattern cannot be made to explode by a crafted name.
+    /// </summary>
     internal static Regex Matcher(IReadOnlyList<string> patterns, bool ignoreCase) =>
-        new(ToDotNet(patterns), RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None), TimeSpan.FromSeconds(1));
+        new(
+            ToDotNet(patterns),
+            RegexOptions.NonBacktracking | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture | (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None),
+            TimeSpan.FromSeconds(1));
 
     /// <summary>
     /// The folders the worker walks: each pattern's leading literal folders (stopping at the first wildcard segment, never the last segment),

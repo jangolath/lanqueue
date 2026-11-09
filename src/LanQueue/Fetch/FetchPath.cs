@@ -13,8 +13,11 @@ internal static partial class FetchPath
 
     internal const int MaxSegmentChars = 255;
 
-    /// <summary>Names Windows reserves for devices, with or without an extension (CON, NUL.txt, COM1, LPT9.log, COM¹, CONIN$...).</summary>
-    [GeneratedRegex(@"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³])(\..*)?\z", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, 1000)]
+    /// <summary>
+    /// Names Windows reserves for devices, with or without an extension, and with any spaces before it (CON, NUL.txt, "NUL .txt", COM1,
+    /// LPT9.log, COM¹, CONIN$...): Windows strips those spaces and opens the device.
+    /// </summary>
+    [GeneratedRegex(@"^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9¹²³]|LPT[0-9¹²³]) *(\..*)?\z", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, 1000)]
     private static partial Regex Reserved();
 
     /// <summary>Characters Windows cannot store in a name (':' would also open an alternate data stream), plus the backslash.</summary>

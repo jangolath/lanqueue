@@ -107,6 +107,18 @@ public sealed class FetchReceiver : IDisposable
         {
             Handle(line);
         }
+        catch (RegexMatchTimeoutException)
+        {
+            // Cannot happen with the non-backtracking matcher; should it ever, that one file fails, never the whole fetch.
+            if (_cur is not null)
+            {
+                Fail("the path took too long to match");
+            }
+            else
+            {
+                _cur = new Current("?", 0, null, "") { DropReason = "the path took too long to match" };
+            }
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or System.Security.SecurityException)
         {
             if (_cur is not null)
@@ -260,7 +272,7 @@ public sealed class FetchReceiver : IDisposable
         {
             linkProblem = PrepareFolders(rel);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
         {
             linkProblem = "could not create its folder: " + ex.Message;
         }
@@ -276,7 +288,7 @@ public sealed class FetchReceiver : IDisposable
         {
             stream = new FileStream(full, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024);
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
         {
             _cur = new Current(rel, size, null, "") { DropReason = "could not create the file (it may already exist): " + ex.Message };
             return;
