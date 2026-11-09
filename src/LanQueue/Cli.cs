@@ -73,6 +73,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --log-tail N (1 to 200, --json only): the last N lines of the job's log in the JSON object; null without it.</summary>
     public int? LogTail { get; init; }
 
+    /// <summary>lanq run --dry-run: say what the run would do now (see Cli.DryRun.cs), and send, claim, log and wake nothing.</summary>
+    public bool DryRun { get; init; }
+
     /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
     public ShardOptions? Shards { get; init; }
 
@@ -80,7 +83,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json", "--wake", "--needs", "--mem"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail", "--dry-run"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
@@ -113,6 +116,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var waitForSsh = false;
         var wakeSleepers = false;
         var noWake = false;
+        var dryRun = false;
         var force = false;
         string? sshTarget = null;
         MachineOs? os = null;
@@ -216,6 +220,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--no-wake":
                     noWake = true;
                     break;
+                case "--dry-run":
+                    dryRun = true;
+                    break;
                 case "--remote":
                     remote = true;
                     break;
@@ -281,6 +288,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitForSsh = waitForSsh,
             WakeSleepers = wakeSleepers,
             NoWake = noWake,
+            DryRun = dryRun,
             Force = force,
             SshTarget = sshTarget,
             Os = os,
@@ -327,6 +335,7 @@ public static partial class Cli
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
           lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
+          lanq run ... --dry-run [--json] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
@@ -367,6 +376,11 @@ public static partial class Cli
         Every job's output is also kept in a log in the state folder: run prints "[lanq] log: PATH" just before its status line (--shards: for
         each shard that did not complete); run --json always carries logPath (null when no job started), and --log-tail N (1 to 200, --json
         only) adds logTail, the log's last N lines (each shard its own with --shards).
+        run --dry-run says what lanq run would do now and does none of it: the same command-line checks, snapshot and secret scan, one probe
+        of every machine and the same choice (machine, --shards N or auto and placement, every excluded machine and why, the sleeper it would
+        wake); it claims no slot, sends, logs, fetches and wakes nothing (the snapshot's git objects are written as for a run). Every run option
+        is accepted. Exit 0 would start now, 75 no machine could take it now, 2 refused, 70 the snapshot failed, 130 Ctrl+C; --json prints one
+        object with status WouldRun (or the status run would end with), machine, ranked, machines, placement, wouldWake and retryable.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
@@ -407,7 +421,9 @@ public static partial class Cli
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
-                await (own[0] == "run" && own.Contains("--shards")
+                await (own[0] == "run" && own.Contains("--dry-run")
+                    ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"))
+                    : own[0] == "run" && own.Contains("--shards")
                     ? WriteShardsJsonError("Rejected", 2, message, stdout)
                     : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"), logTail: own.Contains("--log-tail"))).ConfigureAwait(false);
             }
@@ -465,7 +481,9 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             if (p.Json)
             {
-                await (p.Shards is not null
+                await (p.DryRun
+                    ? WritePlanJsonError("Rejected", 2, message, stdout, p.LogTail is not null)
+                    : p.Shards is not null
                     ? WriteShardsJsonError("Rejected", 2, message, stdout)
                     : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0, logTail: p.LogTail is not null)).ConfigureAwait(false);
             }
@@ -501,6 +519,12 @@ public static partial class Cli
         ParsedArgs p, FleetConfig config, ISshClient ssh, IPayloadBuilder payloads, HealthProbe probe, JobLog log, string home, string repoDir,
         TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
+        if (p.DryRun)
+        {
+            // Before anything below: FetchRoot creates the .lanq folder, and the runner here would use bases.json.
+            return await DryRun(p, config, ssh, payloads, log, home, repoDir, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
         var jobOutput = p.Json ? stderr : stdout;
         FetchRequest? fetch = null;
         if (p.Fetch.Count > 0)

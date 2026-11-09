@@ -25,6 +25,22 @@
   just before the status line (`--shards`: one per shard that did not complete, ending `(shard i/N)`); the
   `[lanq] <Status>: ...` line stays last.
 
+- **`lanq run --dry-run`**: says what `lanq run` would do now, by the same code, and does none of it. It runs the same
+  command-line checks (allowlist, banned flags, secrets in the command line, the Windows-arguments rule, no machine
+  with the capabilities), takes the same snapshot and secret scan of the uncommitted changes (no bundle or archive is
+  built; git still writes the snapshot's objects to the repository's object store, as a run does), probes every machine
+  once and makes the same choice: the machine (or, with `--shards N|auto`, N and where each shard would start), every
+  excluded machine with its reason and whether waiting can change it, and the sleeping machine it would wake (with
+  `--wait` above 0 and no `--no-wake`). It claims no slot, uploads nothing, appends nothing to `jobs.jsonl`, creates no
+  log, never reads or writes `bases.json`, fetches nothing and never sends a Wake-on-LAN packet. Every `lanq run` option
+  is accepted and checked; `--log-tail` gives an empty `logTail`. Exit `0` would start now, `75` no machine could take
+  it now (`retryable` as for a run), `2` refused, `70` the snapshot failed, `130` Ctrl+C. Text goes to stdout (with
+  `--json` to stderr) and the `[lanq] WouldRun: ...` (or `Rejected`, `NoCapacity`, ...) line stays last on stderr;
+  `--json` prints one object: `status`, `exitCode`, `dryRun: true`, `message`, `machine`, `ranked`, `shardCount`,
+  `shardCountAuto`, `placement` (`[{machine, shards}]`), `machines` (`{machine, eligible, reason, why, permanent,
+  freeSlots, jobSlots}` per machine), `wouldWake` and `retryable`, also for bad arguments or config. It cannot foresee
+  an archive that fails to build or a slot taken between the probe and a real start.
+
 ### Behaviour changes
 
 - **`lanq run` ends at once when no machine can ever take the job** (exit `75`, `retryable: false`), instead of

@@ -130,6 +130,57 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
 
+/// <summary>
+/// The one object <c>lanq run --dry-run --json</c> prints on stdout: what lanq run would do now. Every field is always present (null where it
+/// does not apply), except logTail (only with --log-tail, and then always empty: a dry run starts no job). Fields are only ever added (a
+/// later version adds nextSteps here).
+/// </summary>
+/// <param name="Status">WouldRun (0), Rejected (2), NoCapacity (75), InfraError (70) or Cancelled (130).</param>
+/// <param name="ExitCode">The exit code of this dry run.</param>
+internal sealed record PlanJson(string Status, int ExitCode)
+{
+    /// <summary>Always true: nothing was sent, no slot claimed, nothing woken.</summary>
+    public bool DryRun { get; init; } = true;
+
+    public string Message { get; init; } = "";
+
+    /// <summary>The machine the job (or shard 1) would go to, or null.</summary>
+    public string? Machine { get; init; }
+
+    /// <summary>The machines that could take the job now, in the order lanq run would try them (empty when none could, or nothing was probed).</summary>
+    public IReadOnlyList<string> Ranked { get; init; } = [];
+
+    /// <summary>--shards only: N (the choice for auto); else null.</summary>
+    public int? ShardCount { get; init; }
+
+    /// <summary>--shards only: true for --shards auto; else null.</summary>
+    public bool? ShardCountAuto { get; init; }
+
+    /// <summary>--shards only: where the shards would start now (empty when none could); else null.</summary>
+    public IReadOnlyList<PlacementJson>? Placement { get; init; }
+
+    /// <summary>Every machine judged for the job, in config order (empty when the run was refused before any machine was looked at).</summary>
+    public IReadOnlyList<PlanMachineJson> Machines { get; init; } = [];
+
+    /// <summary>The sleeping machine lanq run would wake (with --wait above 0 and without --no-wake, when no awake machine can take the job), or null.</summary>
+    public string? WouldWake { get; init; }
+
+    /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>; else null.</summary>
+    public bool? Retryable { get; init; }
+
+    /// <summary>--log-tail only: always empty (a dry run starts no job, so there is no log).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? LogTail { get; init; }
+}
+
+/// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
+/// <param name="FreeSlots">max_jobs minus the slots in use.</param>
+/// <param name="JobSlots">How many copies of the job (shards) it could take now; 0 when not eligible.</param>
+internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots);
+
+/// <summary>--shards --dry-run: the shards one machine would take at the start.</summary>
+internal sealed record PlacementJson(string Machine, IReadOnlyList<int> Shards);
+
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>
 internal sealed record FetchedJson(string Path, long Bytes, string Sha256);
 
@@ -156,6 +207,7 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]
+[JsonSerializable(typeof(PlanJson))]
 internal sealed partial class LanqJson : JsonSerializerContext;
 
 /// <summary>One machine in <c>lanq makeready --all --json</c>.</summary>
