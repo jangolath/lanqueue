@@ -22,8 +22,13 @@ jobs:
           grep -o -E '[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}' .github/workflows/release.yml | sort -u | while read -r ref; do
             name=${ref%@*}
             created=$(skopeo inspect --no-tags "docker://$ref" 2>/dev/null | sed -n 's/^ *"Created": "\([^"]*\)".*/\1/p' | head -n 1)
-            current=$(skopeo inspect --no-tags "docker://$name" 2>/dev/null | sed -n 's/^ *"Digest": "\([^"]*\)".*/\1/p' | head -n 1)
-            if [ -n "$current" ] && [ "$current" != "${ref#*@}" ]; then
+            # The digest of what the tag points at now: the hash of its raw manifest (for a multi-arch image, the index itself, the same
+            # thing the pin names), not the per-platform manifest a plain inspect would resolve to.
+            current=$(skopeo inspect --raw "docker://$name" 2>/dev/null | sha256sum | cut -d ' ' -f 1)
+            current=${current:+sha256:$current}
+            if [ -z "$current" ] || [ "$current" = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+              echo "$name: could not read the current digest"
+            elif [ "$current" != "${ref#*@}" ]; then
               echo "::notice::$name has a newer digest than the pin (pinned image created ${created:-unknown}); refresh it with the next runtime bump"
             else
               echo "$name: pin is the current digest (created ${created:-unknown})"
