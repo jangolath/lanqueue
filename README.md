@@ -18,6 +18,10 @@ dotnet tool install --global LanQueue      # update later: dotnet tool update --
 No .NET SDK? Each release also has a single-file native `lanq` for Windows, Linux (glibc 2.27 and later) and macOS,
 and a Scoop manifest; see [Install](#install).
 
+**Setting up a pool for a team?** [docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md) walks through one orchestrator
+and a mix of Windows 10/11 and Linux workers, low-RAM micro PCs and overnight family PCs included, from `lanq init` to
+the first job, with the ten most common errors and their fixes.
+
 A 3-command taste (after you list your machines once in `machines.yml`, see [Quick start](#quick-start)):
 
 ```bash
@@ -162,8 +166,9 @@ Before your first job, each worker needs an SSH server, git (or only `tar` in ar
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
 [docs/WORKERS.md](docs/WORKERS.md).
 
-1. Copy `machines.example.yml` to a private location (for example `~/.config/lanq/machines.yml`, or
-   `%APPDATA%\lanq\machines.yml` on Windows) and edit it. A config in the current directory is never picked up
+1. Write a starter config with `lanq init --config ~/.config/lanq/machines.yml` (on Windows
+   `lanq init --config %APPDATA%\lanq\machines.yml`; plain `lanq init` writes `./machines.yml`), or copy
+   `machines.example.yml` to one of those places, and edit it. A config in the current directory is never picked up
    implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
    (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
@@ -203,6 +208,8 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
+| `lanq makeready --all [--json] [--force]` | The same check on every configured machine, four at a time, as one summary table. |
+| `lanq init [--json]` | Writes a commented starter `machines.yml` (in the current folder, or at `--config FILE`); never overwrites a file. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
 | `lanq wake <machine> [--wait] [--json]` | Sends a Wake-on-LAN magic packet to a machine with a `wake:` setting, even outside its `allowed_hours`; `--wait` waits for ssh. |
 | `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready version. |
@@ -269,6 +276,48 @@ one `{"status":...,"exitCode":...,"message":...}` object (`Rejected` 2, `InfraEr
 treated as untrusted input: at most 1 MB, parsed without reflection, checked against the schema, every string
 sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-ready (git or archive transfer works),
 `1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours.
+
+`lanq makeready --all` runs the same check on every machine in the config, four at a time, with the same rules (a
+paused machine or one outside its `allowed_hours` is not scanned unless `--force`; the script goes on ssh stdin), and
+prints one table:
+
+```text
+$ lanq makeready --all
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.1.0)
+
+MACHINE    OS       VERDICT      TOP PROBLEM
+micro-01   linux    WARN 1       Pending reboot: a restart is pending
+micro-02   windows  FAIL 1       OpenSSH Server: sshd
+family-pc  windows  held         paused (a PAUSE file is in its work_root); --force scans anyway
+micro-03   linux    unreachable  ssh: connect to host 10.20.30.33 port 22: Connection timed out
+
+Details, advice and a suggested machines.yml entry for one machine: lanq makeready <machine>
+lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
+```
+
+The verdict counts the report's checks: `FAIL n` when any check fails (also `FAIL` when no transfer mode works),
+else `WARN n`, else `OK`; `unreachable` (the probe or ssh failed), `held` or `error` (the report was unusable) when
+there is no report. The top problem is the first failing check, else the first warning, else why there is no report.
+Exit codes: `0` every machine is OK; `1` any machine has a WARN or FAIL; otherwise `70` any machine was unreachable or
+its report unusable, `75` any was held; `2` bad arguments or config; `130` Ctrl+C. With `--json` it prints exactly one
+object, `{"status":"Ok|Problems|InfraError|Held","exitCode":...,"machines":[...]}`, where each machine has `machine`,
+`os`, `verdict` (`OK`, `WARN`, `FAIL`, `unreachable`, `held` or `error`), `warnings`, `failures`, `exitCode` (what
+`lanq makeready <machine>` would exit with), `problem` (absent when there is none) and `report`: the validated
+`lanq-makeready/v1` report exactly as `lanq makeready <machine> --json` prints it (absent without one). A bad argument
+or config prints the usual `{"status":"Rejected","exitCode":2,"message":...}` object instead.
+
+### lanq init
+
+`lanq init` writes a commented, minimal `machines.yml` to the current folder (or to `--config FILE`, creating its
+folder) and refuses to overwrite an existing file (exit `2`). The file loads as written: policy defaults suited to
+small PCs (`min_free_mem_gb: 1.5`, `max_jobs: 1`), one live example machine to replace, and commented examples of a
+Windows micro PC (`key_env`, a memory floor, heap caps) and a Linux family PC (`allowed_hours`, `wake:`). It then
+prints the next steps: set up OpenSSH on each worker ([docs/WORKERS.md](docs/WORKERS.md)), connect once with `ssh`,
+run `lanq makeready --ssh user@host --os windows|linux` on each, paste the suggested entries, then
+`lanq doctor --remote`. Remember that lanq never reads `./machines.yml` by itself: the steps include `--config` with
+the file's path unless you wrote it to the per-user path. `--json` prints one object
+(`{"status":"Created","exitCode":0,"path":...,"message":...}`; `Rejected` 2 when the file exists, `InfraError` 70 when
+it could not be written) and sends the next steps to stderr.
 
 ### lanq unlock
 

@@ -24,7 +24,8 @@
   wake a sleeping PC as a last resort; leave out `--no-wake` only if the developer has said waking is fine.
 - Never edit the lanq machines file, the allowlists or any ssh/key configuration. The developer owns them. If a
   command is refused, say so and stop; do not look for a way around it.
-- Do not run `lanq unlock`, `lanq makeready`, `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
+- Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
+- Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
   commands run through lanq. lanq rejects them anyway.
 - Never put secrets, tokens or key material in files or command lines that lanq will ship; it refuses them.

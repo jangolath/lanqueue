@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased (0.5.1)
+
+### Getting a team's pool going
+
+- **`lanq makeready --all`** runs the read-only lanq-makeready check on every machine in `machines.yml`, four at a
+  time, with the same rules as `lanq makeready <machine>` (a `PAUSE` file or `allowed_hours` holds a machine unless
+  `--force`; the script goes on ssh stdin), and prints one table: machine, OS, verdict (`OK`, `WARN n`, `FAIL n`,
+  `unreachable`, `held`, or `error` for an unusable report) and the top problem, then points at
+  `lanq makeready <machine>` for details. The counts come from the report's checks. Exit `0` every machine OK, `1`
+  any WARN or FAIL, otherwise `70` any unreachable or unusable, `75` any held. `--json` prints one object
+  (`status`, `exitCode`, `machines`), each machine carrying the validated report exactly as the single-machine
+  `--json` prints it.
+- **`lanq init`** writes a commented, minimal starter `machines.yml` (current folder, or `--config FILE`) that loads
+  as written: memory holds suited to low-RAM PCs, one example machine to replace, and commented Windows and Linux
+  examples covering `key_env`, heap caps, `allowed_hours` and `wake:`. It never overwrites a file, prints the next
+  steps (OpenSSH on the workers, connect once, `lanq makeready --ssh`, paste, `lanq doctor --remote`), and with
+  `--json` prints one object (`status`, `exitCode`, `path`, `message`).
+- **[docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md):** one orchestrator plus Windows 10/11 and Linux workers, from
+  install to the first job: Windows OpenSSH Server, the `administrators_authorized_keys` trap, a non-admin build user,
+  the firewall, sizing micro PCs, overnight family PCs, and the ten errors you are most likely to see.
+
+### Clearer first-run errors
+
+- An ssh failure now says what to do, and still quotes ssh's own line: a host key not yet in `known_hosts` (connect
+  once with `ssh user@host`, because lanq uses `StrictHostKeyChecking=yes`), a changed host key, `Permission denied
+  (publickey)` (load the key, or put it in `authorized_keys`, or `administrators_authorized_keys` for a Windows
+  administrator), a private key with loose permissions, an unknown host name, a refused connection, and a missing
+  ssh client. Shown by `lanq health`, `lanq run`'s "no eligible machine", `lanq makeready` and `lanq doctor --remote`.
+- `key_env` errors tell an unset variable apart from a path that does not exist, and say how to set it or use
+  ssh-agent instead.
+- A missing config points at `lanq init --config <path>`.
+- "No eligible machine" says why each machine was passed over: the capability it lacks, its slots in use, or no free
+  slot when the job tried to start, instead of "no match / full".
+
 ## 0.5.0 (2026-11-09)
 
 ### Native binaries: `lanq` without the .NET SDK

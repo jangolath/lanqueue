@@ -18,7 +18,11 @@ checklist, what would break an overnight job (sleep, pending reboot, update rest
   `PAUSE` file and `allowed_hours` unless you add `--force`.
 - **On the PC itself**, before SSH is set up: download the script from its release page and run it there.
 
-Either way, lanq never changes a worker: every fix it suggests is for the PC's owner to run on that PC.
+Either way, lanq never changes a worker: every fix it suggests is for the PC's owner to run on that PC. Once the
+machines are in `machines.yml`, `lanq makeready --all` checks them all (four at a time) and prints one summary table.
+
+Setting up several workers for a team at once? [TEAM-QUICKSTART.md](TEAM-QUICKSTART.md) walks through it step by step,
+including Windows 10 build users, low-RAM micro PCs and overnight family PCs.
 
 ## Checklist
 
@@ -105,7 +109,7 @@ the environment of long-running helper processes you want stopped with the job.
 
 ## Then, on your PC
 
-1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
+1. Add the worker to your `machines.yml` (`lanq init` writes a starter file; see also `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
    `capabilities`, `max_jobs`, optional `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for
    a worker without git). For a PC someone else also uses, see the "family PC" example: hours by day, low priority
    (the default), a memory floor, heap caps in `env:`, and a `PAUSE` file the people at that PC can create to hold it.
