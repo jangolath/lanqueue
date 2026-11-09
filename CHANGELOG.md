@@ -56,7 +56,7 @@ Transfer and supply chain:
 - **Secret scan of committed file names.** Besides the uncommitted overlay, the names of every committed file in the
   HEAD tree are checked against `.env`, `.env.*`, `id_rsa`, `id_ed25519`, `*.pem`, `*.pfx`, `*.p12`, `*.key`,
   `credentials.json` and `*.kdbx`, because a bundle or archive would carry them. A match refuses the job before
-  anything is sent. Committed `.npmrc` and `.pypirc` files are not refused by name (registry-only ones are common):
+  anything is sent. `.npmrc` and `.pypirc` files, committed or uncommitted, are not refused by name (registry-only ones are common):
   their content (up to 64 KB) is checked, and only a literal credential refuses the job (`.npmrc`: a non-empty
   `_authToken`, `_auth`, `_password` or `password`, including `//host/:_authToken=`, unless it is just an environment
   reference such as `${NPM_TOKEN}`; `.pypirc`: a non-empty `password`). The refusal names the file and key, never

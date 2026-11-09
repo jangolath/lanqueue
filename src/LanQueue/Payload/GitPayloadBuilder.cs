@@ -45,12 +45,16 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             var repoId = kinds.HasFlag(PayloadKinds.Bundle) ? await RepoIdAsync(top, ct).ConfigureAwait(false) : null;
             var committed = (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", "HEAD").ConfigureAwait(false))
                 .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            // Package-manager configs are read from the snapshot itself, so committed and uncommitted ones get the same content check.
+            var snapshotFiles = sha == head
+                ? committed
+                : (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", sha).ConfigureAwait(false)).Split('\0', StringSplitOptions.RemoveEmptyEntries);
             var configs = new Dictionary<string, string?>(StringComparer.Ordinal);
-            foreach (var path in committed.Where(Policy.SecretScanner.IsPackageConfig))
+            foreach (var path in snapshotFiles.Where(Policy.SecretScanner.IsPackageConfig))
             {
                 // Read only small blobs (a bigger one is refused unread by the scan); the content never leaves this process.
-                var size = long.Parse((await Git(top, null, ct, "cat-file", "-s", "HEAD:" + path).ConfigureAwait(false)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
-                configs[path] = size > Policy.SecretScanner.MaxConfigBytes ? null : await Git(top, null, ct, "cat-file", "-p", "HEAD:" + path).ConfigureAwait(false);
+                var size = long.Parse((await Git(top, null, ct, "cat-file", "-s", sha + ":" + path).ConfigureAwait(false)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                configs[path] = size > Policy.SecretScanner.MaxConfigBytes ? null : await Git(top, null, ct, "cat-file", "-p", sha + ":" + path).ConfigureAwait(false);
             }
 
             ArchiveBuild? built = null;

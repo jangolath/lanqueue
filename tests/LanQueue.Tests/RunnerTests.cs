@@ -236,6 +236,28 @@ public sealed class RunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task UncommittedRegistryOnlyNpmrcRunsLikeACommittedOne()
+    {
+        var (runner, _, payloads, _) = Make(files: ["web/.npmrc", ".pypirc"]);
+        payloads.Configs["web/.npmrc"] = "registry=https://r.example/\n";
+        payloads.Configs[".pypirc"] = "[pypi]\nusername = __token__\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+    }
+
+    [Fact]
+    public async Task UncommittedNpmrcWithALiteralTokenIsRefusedByContent()
+    {
+        var (runner, ssh, payloads, _) = Make(files: [".npmrc"]);
+        payloads.Configs[".npmrc"] = "//r.example/:_authToken=npm_SuperSecretValue123\n";
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Contains("_authToken", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("SuperSecretValue123", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
     public async Task ManyCommittedSecretFilesAreListedBriefly()
     {
         var (runner, _, payloads, _) = Make();

@@ -24,7 +24,7 @@ public static class SecretScanner
 
     private static readonly string[] SecretFileNames =
     [
-        ".env", "id_rsa", "id_ed25519", "id_ecdsa", "secrets.json", "credentials.json", ".npmrc", ".pypirc",
+        ".env", "id_rsa", "id_ed25519", "id_ecdsa", "secrets.json", "credentials.json",
         ".git-credentials", "terraform.tfstate", "terraform.tfstate.backup",
     ];
 

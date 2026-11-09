@@ -9,7 +9,7 @@ namespace LanQueue.Payload;
 /// <param name="RepoId">Names the worker's per-repository cache (<c>repos/&lt;RepoId&gt;.git</c>): the first 16 hex digits of the root commit; set when <see cref="PayloadKinds.Bundle"/> was asked for.</param>
 /// <param name="Head">The HEAD commit the snapshot was taken on; recorded as the next incremental base once a worker has fetched it.</param>
 /// <param name="CommittedFiles">Every path in the HEAD tree (committed files), for the secret file-name scan.</param>
-/// <param name="CommittedConfigs">Content of committed package-manager configs (<c>.npmrc</c>, <c>.pypirc</c>) by path, for the credential scan; null content means too large to check.</param>
+/// <param name="CommittedConfigs">Content of the package-manager configs (<c>.npmrc</c>, <c>.pypirc</c>) in the snapshot, committed or uncommitted, by path, for the credential scan; null content means too large to check.</param>
 public sealed record JobPayload(
     string Sha,
     IReadOnlyList<string> ChangedFiles,

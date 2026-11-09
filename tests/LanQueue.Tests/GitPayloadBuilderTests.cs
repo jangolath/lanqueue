@@ -221,4 +221,15 @@ public sealed class GitPayloadBuilderTests : IDisposable
         Assert.Null(p.CommittedConfigs[".pypirc"]); // over 64 KB: not read, and refused by the scan
         Assert.Equal(2, p.CommittedConfigs.Count);
     }
+
+    [Fact]
+    public async Task UncommittedPackageConfigsAreReadFromTheSnapshot()
+    {
+        File.WriteAllText(Path.Combine(_repo, ".npmrc"), "//r.example/:_authToken=${NPM_TOKEN}\n"); // untracked, rides along in the overlay
+
+        var p = await new GitPayloadBuilder().BuildAsync("j9", _repo, Path.Combine(_repo, ".out"), PayloadKinds.None, CancellationToken.None);
+
+        Assert.Equal("//r.example/:_authToken=${NPM_TOKEN}", p.CommittedConfigs![".npmrc"]!.Trim());
+        Assert.Contains(".npmrc", p.ChangedFiles);
+    }
 }

@@ -74,6 +74,8 @@ public class SecretScannerTests
     [Theory]
     [InlineData(".env.example")]
     [InlineData("src/Program.cs")]
+    [InlineData(".npmrc")]
+    [InlineData("tools/.pypirc")]
     public void NormalFileNamesPass(string path) =>
         Assert.Empty(SecretScanner.ScanFileNames([path]));
 
