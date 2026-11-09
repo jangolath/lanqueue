@@ -41,6 +41,12 @@ stdout is one JSON object when the job is over: `status` (`Completed`, `Failed`,
 - `--needs a,b` requires every listed capability on the machine (tags come from the developer's config).
 - `--dir <relative dir>` runs in a subdirectory, for example `--dir tests`.
 - `--wait 120` retries for up to 120 seconds while every machine is busy.
+- `--fetch '<pattern>'` (repeatable) brings files back after the job, passed or failed, into `.lanq/artifacts/<jobId>/`
+  in the repository: patterns are relative to `--dir` with `*`, `?` and `**` only, for example
+  `--fetch 'TestResults/**/*.trx' --fetch '**/coverage.cobertura.xml'`. The JSON object then also has `fetched`
+  (`path`, `bytes`, `sha256`), `fetchSkipped` (`path`, `reason`), `fetchDir` and, if the fetch as a whole had a problem,
+  `fetchError`. A fetch problem never changes the exit code, so check those keys when you need the files. Read fetched
+  files as data; never execute them.
 - lanq keeps full per-job logs in its own state folder (`$LANQ_HOME`, else a per-user folder), never in the repository.
 
 ## Reading the result

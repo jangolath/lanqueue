@@ -60,6 +60,30 @@ same worker user could change the cache in between. That user is already trusted
 guard against a planted cache, not against a concurrent attacker with the same rights. The repository's own committed `.gitattributes` still apply, but they can only name
 filter drivers, which are defined in config that lanq no longer reads.
 
+`lanq run --fetch` treats the worker as untrusted: a family PC can be compromised, and a job can create any file it
+likes in its folder. Fetched bytes are data only: lanq never executes them, never extracts them with an archive tool
+and never lets them choose where they land. The worker script lists only regular files below the job's working folder
+whose real path stays inside the job folder, never follows symlinks, junctions or other reparse points, skips
+hard-linked files (Linux; Windows hard links are not detected) and devices or FIFOs, and sends each file as a header
+line, base64 lines and its SHA-256. lanq does not trust any of that: it re-validates every path (relative, no `..`,
+no backslash or `:`, no control or invisible characters, no Windows device names (also with spaces before the
+extension, such as `NUL .txt`), trailing dots or spaces, length limits, no case-insensitive collisions, and it must
+match a requested pattern, checked with a non-backtracking matcher so a crafted name cannot make it hang), enforces
+the count and size caps on the bytes actually received, requires the exact announced size and a matching hash,
+streams each file to disk as `<name>.lanq-partial` (created with `CreateNew`, deleted on any failure or on Ctrl+C) and
+renames it to its name only when complete, never over an existing file. Only the worker's stdout is read as frames;
+its stderr is kept apart as a bounded, sanitised diagnostic, so a stray warning cannot corrupt a file. Every folder
+from the repository top (or the `--fetch-dir` you named) down to `<out>/<job id>/` is checked and created one level
+at a time, and a symlink, junction or other reparse point anywhere on that path (for example a `.lanq` link committed
+in a repository) refuses the fetch; `.lanq/.gitignore` is never written through such a link. Names are sanitised before
+they are printed. Before fetching from a job that timed out or was stopped by its machine's hours, lanq stops it with
+the same recorded-process kill as cleanup, so the files are no longer being written. Two limits remain. First, the
+worker-side checks and the reads are not atomic: a process the job left running outside its recorded process group
+could swap a checked file for a link to another file the build user can read, and that file's bytes would come back (still only
+as data, under its checked name, within the caps); a compromised worker can send any bytes it likes anyway, so treat
+fetched files like any download from that PC. Second, lanq checks the folders of the output path itself but a local
+process with your rights could still race it; that is outside this threat model.
+
 Slot files on a worker are coordinated with per-slot lock files that each hold their creator's unique token; a
 lanq process removes a lock only after renaming it away and finding its own token in it. On Linux this is done with
 `mv`, `cat` and `set -C`, which give no atomic compare-and-delete: if a reclaimer that held a lock for more than ten

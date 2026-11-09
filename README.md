@@ -183,8 +183,9 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 
    The job's exit code becomes `lanq`'s exit code. `--wait 120` keeps retrying for up to 120 seconds when every
    machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
-   only to a machine that reports at least 4 GB of available memory. `lanq stats` sums wall-clock time from your
-   local log.
+   only to a machine that reports at least 4 GB of available memory. `--fetch 'TestResults/**/*.trx'` brings test
+   results, coverage or build output back after the job (see [Fetching results](#fetching-results-fetch)). `lanq stats`
+   sums wall-clock time from your local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
 `75` no eligible machine; `124` the job ran past `--timeout`, or past the end of its machine's `allowed_hours` plus
@@ -197,7 +198,7 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 | Command | What it does |
 | --- | --- |
 | `lanq health [--json]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. |
-| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code. |
+| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back. |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
@@ -274,6 +275,52 @@ or one written by a lanq before 0.4, which has no deadline). `lanq unlock build-
 file on that machine, including those old ones; a job still running there keeps running but loses its slot, so
 another job may start beside it. `--all` without `--yes` is refused.
 
+### Fetching results (--fetch)
+
+```bash
+lanq run --needs dotnet --dir tests --fetch 'TestResults/**/*.trx' --fetch '**/coverage.cobertura.xml' -- dotnet test --logger trx
+```
+
+After the job ends, whether it passed, failed, timed out or was stopped by its machine's hours, and before the job
+folder is deleted, `lanq` copies the files that match back to `.lanq/artifacts/<job id>/` in your repository (the
+`.lanq` folder is never sent to a worker and gets a `.gitignore`), keeping their relative paths. Nothing is fetched
+when the job never started.
+
+- A pattern is relative to the job's working folder (`--dir`), uses forward slashes, and only `*` (within one name),
+  `?` (one character) and `**` (a whole segment: any number of folders). Absolute paths, drive letters, `..`,
+  backslashes, `:` and a leading `-` are refused, as is any character outside letters, digits, space and
+  `. _ + @ = , ~ - /`. `--fetch` may be given up to 16 times. On a Windows worker patterns match ignoring case.
+- Only regular files are fetched. Symlinks, junctions and other reparse points (never followed, not even as folders),
+  hard-linked files (Linux), devices, FIFOs, names with control characters and anything that resolves outside the job
+  folder are skipped and listed with the reason.
+- Caps: 500 files and 200 MB in all by default; `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (for example
+  `500M` or `1G`, up to `2G`) change them. Files are taken in sorted order until a cap is hit; the rest are listed as
+  skipped.
+- `--fetch-dir DIR` writes to `DIR/<job id>/` instead.
+- The fetch has its own 10-minute limit, and on a machine with `allowed_hours` it never runs more than 2 minutes past
+  the end of the window plus grace.
+- A job that timed out or was stopped by its window can still be running on the worker (which enforces the limit
+  itself a minute later), so before fetching `lanq` stops it the way cleanup does: the recorded process group on
+  Linux, and on Windows only the recorded processes whose pid and start time still match. A job that completed or
+  failed is not touched.
+- Each file is written as `<name>.lanq-partial` and renamed to its name only once its size and hash are right.
+  Anything the worker prints on stderr during the fetch is shown as `[lanq] fetch stderr: ...` (the first 10 lines,
+  sanitised) and never mixed into the files.
+- **Fetch problems never change the exit code**: the job's result is what `lanq` reports, and a skipped or failed file
+  is listed in the summary (and in `--json`). A job that passed but whose results did not come back is still a passed
+  job; check `fetchError` and `fetchSkipped` when the files matter.
+
+The summary goes to the job output (stderr with `--json`):
+
+```text
+[lanq] fetch (the job failed (exit 1)): 2 file(s), 1.4 MB -> /home/me/src/app/.lanq/artifacts/20261109-221503-a1b2c3
+[lanq]   fetched TestResults/unit.trx (1.3 MB)
+[lanq]   fetched TestResults/coverage.cobertura.xml (96.2 KB)
+[lanq]   skipped TestResults/latest.trx: symbolic link, junction or reparse point (never followed)
+```
+
+The worker is treated as untrusted for this step; see [Security model](#security-model).
+
 ### JSON output
 
 Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
@@ -290,6 +337,12 @@ one object on stdout when it is over:
 ```json
 {"status":"Completed","exitCode":0,"machine":"build-02","jobId":"20261109-221503-a1b2c3","durationSeconds":84.2,"message":"exit 0"}
 ```
+
+With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","bytes":1363148,"sha256":"..."}]`) and
+`fetchSkipped` (`[{"path":"TestResults/latest.trx","reason":"..."}]`), both present and possibly empty on every path
+(also when the job never started), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
+problem (timed out, cut short, the machine's hours ended) and `fetchSkippedMore` when more than 200 files were skipped.
+Without `--fetch` none of these keys appear.
 
 `status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut`, `WindowClosed` or `Cancelled`;
 `exitCode` is `lanq`'s own exit code; `machine` is `null` when no machine took the job. Stdout always carries exactly
@@ -345,7 +398,9 @@ Where each safety check sits (numbers are the diagram steps):
    `scp`, fetched into a bare cache repo, and a detached `git worktree` is created for the job.
 5. The command runs in the worktree; output streams to your terminal and to `<state>/logs/<job>.log`, where
    `<state>` is `$LANQ_HOME` or a per-user folder (`%LOCALAPPDATA%\lanq`, or `~/.local/state/lanq`), never your repo.
-6. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
+6. With `--fetch`, the matching files are streamed back as checksummed text and written below
+   `.lanq/artifacts/<job id>/`.
+7. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
    `<state>/jobs.jsonl`. Any `.lanq/` folder in the repository is excluded from the snapshot.
 
 ## Transfer modes: git (default, recommended) or archive
@@ -662,6 +717,19 @@ Each default below is enforced in code and covered by a unit test.
   `SHA256SUMS` and its build-provenance attestation). The script goes to the worker on ssh stdin and runs from memory.
   Its report is untrusted input: capped at 1 MB, parsed by a source-generated deserializer, checked against the
   `lanq-makeready/v1` schema, sanitised before display and never executed.
+- **Fetched files are data from an untrusted worker.** `lanq run --fetch` never runs, opens or extracts what it
+  fetches (there is no archive: each file comes as a header, base64 lines and a SHA-256). The worker script sends
+  only regular files whose real path is inside the job folder and never follows a link; `lanq` then checks everything
+  again itself: each path (no `..`, absolute or drive paths, backslash, `:`, control or invisible characters, Windows
+  device names such as `CON`, `NUL.txt` or `NUL .txt`, trailing dots or spaces, overlong names, and no two names that
+  differ only in case), that it matches a pattern you asked for (in linear time: a crafted name cannot make the matcher
+  hang), the file count and size caps on the bytes actually received, the exact size announced and the hash. Only
+  stdout carries files; stderr is a separate, sanitised diagnostic. A file that fails any check is deleted and listed.
+  Files are written under a `.lanq-partial` name, created new, and renamed (never overwriting) only below
+  `<out>/<job id>/` once complete; nothing is written through a symlink or junction anywhere from the repository top
+  (or `--fetch-dir`) down, so a `.lanq` link committed in a repository is refused. Tests run the real
+  scripts against links to `/etc/passwd`, symlink loops, junctions, names with newlines and FIFOs, and feed the
+  receiver size lies, bad hashes, `..` paths, device names and case collisions.
 - **No telemetry**, no network access except the SSH hosts you configure (`lanq doctor` without `--remote` uses none).
 
 See [SECURITY.md](SECURITY.md) for what this does not protect against.

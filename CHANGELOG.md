@@ -48,6 +48,32 @@ Native binaries: `lanq` without the .NET SDK.
   and the CI AOT job when the SDK carries a newer 10.0 runtime than the pin, and a weekly `runtime-pin` workflow fails
   when Microsoft has shipped one, so a .NET security patch cannot be left out of the binaries unnoticed.
 
+- **`lanq run --fetch <pattern>`** (repeatable) brings files the job produced back from the worker's job folder after
+  the job ends (completed, failed, timed out or stopped by its window) and before cleanup, into
+  `.lanq/artifacts/<job id>/` in the repository (`--fetch-dir DIR` for another place; the default `.lanq` folder gets a
+  `.gitignore`). Patterns are relative to `--dir`, with `*`, `?` and `**` only; absolute paths, drive letters, `..`,
+  backslashes, `:`, control characters and a leading `-` are refused. Nothing is fetched when the job never started.
+- The worker is treated as untrusted: only regular files whose real path is inside the job folder are sent; symlinks,
+  junctions and reparse points (never followed), hard links (Linux), devices, FIFOs and names with control characters
+  are skipped and listed. Files come back as a framed text stream (header, base64 lines, SHA-256), never as an archive;
+  lanq re-checks every path (including Windows device names, also as `NUL .txt`, trailing dots and spaces, length and
+  case-insensitive collisions; matched in linear time), the caps, the exact size and the hash. Each file streams to
+  `<name>.lanq-partial` (CreateNew) and is renamed only when complete, never over an existing file; a failed or
+  interrupted file is deleted. Nothing is written through a symlink or junction from the repository top (or
+  `--fetch-dir`) down, so a committed `.lanq` link is refused. Only stdout carries files; the worker's stderr is a
+  separate, sanitised diagnostic.
+- A job that timed out or was stopped by its window is stopped on the worker (recorded process group on Linux, pid
+  and start time on Windows) before its files are fetched.
+- Caps: 500 files and 200 MB by default, `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (up to 2G); what
+  fits is fetched in sorted order and the rest is listed.
+- The fetch has its own 10-minute limit and never runs more than 2 minutes past a machine's allowed hours plus grace.
+  The slot lease allowance grows from 40 to 50 minutes to cover it.
+- Fetch problems never change the exit code. `lanq run --json` gains `fetched` (`path`, `bytes`, `sha256`) and
+  `fetchSkipped` (`path`, `reason`), present on every path when `--fetch` is given, plus `fetchDir`, `fetchError` and
+  `fetchSkippedMore`; without `--fetch` the object is unchanged.
+- Windows workers receive the fetch script on ssh stdin (as base64 of its UTF-16 text), so patterns do not count
+  toward the 8000-character command line.
+
 ## 0.4.0 (2026-11-09)
 
 Workers and windows: making old and shared PCs safe to lend to the queue.

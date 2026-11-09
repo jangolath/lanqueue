@@ -31,4 +31,13 @@ public interface ISshClient
     /// </summary>
     Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct) =>
         throw new NotSupportedException("This ssh client cannot send input.");
+
+    /// <summary>
+    /// Like <see cref="RunAsync"/>, but stdout and stderr are kept apart: stdout lines go to <paramref name="onStdout"/> and stderr lines to
+    /// <paramref name="onStderr"/>, each through the bounded line reader, so a stderr line can never land between two stdout lines of a framed
+    /// stream. With <paramref name="input"/> it is written to the command's stdin, which is then closed (a script too long for a command line).
+    /// </summary>
+    Task<SshResult> RunSplitAsync(
+        Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct) =>
+        throw new NotSupportedException("This ssh client cannot keep stdout and stderr apart.");
 }

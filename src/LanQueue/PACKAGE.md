@@ -27,6 +27,8 @@ manifest: https://github.com/jangolath/lanqueue#install
 1. List your machines in a private `machines.yml` (start from the [example](https://github.com/jangolath/lanqueue/blob/main/machines.example.yml)) and make sure key-based SSH login works.
 2. Check your setup and the fleet: `lanq doctor --remote`, then `lanq health`
 3. Run a job from inside a git repository: `lanq run --needs dotnet,linux -- dotnet test -c Release`
+4. Bring results back: add `--fetch 'TestResults/**/*.trx'` (repeatable) and the matching files land in
+   `.lanq/artifacts/<job id>/`, whether the job passed or failed.
 
 Onboarding a PC: `lanq makeready --ssh user@old-pc.lan --os windows` runs the read-only
 [lanq-makeready](https://github.com/jangolath/lanq-makeready) check over SSH (built in, sent on stdin, nothing written to
@@ -64,6 +66,9 @@ access. Setup steps for Linux and Windows: [docs/WORKERS.md](https://github.com/
 - Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell (Windows
   workers never take arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
 - Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
+- `--fetch` treats the worker as untrusted: regular files only (links never followed), sent as checksummed text (no
+  archive is ever extracted), every path, size, count and hash checked again locally, files created new below
+  `.lanq/artifacts/<job id>/` and never through a link. Fetch problems are reported but never change the exit code.
 - Best-effort secret scan of the command and uncommitted changes, plus the names of committed files (`.env`,
   `id_rsa`, `*.pem` and similar) and the content of `.npmrc`, `.pypirc` and `.yarnrc.yml`, before anything leaves your
   machine.

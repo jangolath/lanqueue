@@ -232,8 +232,11 @@ public static class RemoteScripts
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
     internal const int StaleSlotGraceSeconds = 1800;
 
-    /// <summary>Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback) and cleanup.</summary>
-    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(40);
+    /// <summary>
+    /// Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback), the --fetch step
+    /// (<see cref="JobRunner.FetchTimeout"/>) and cleanup.
+    /// </summary>
+    internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(50);
 
     /// <summary>
     /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
@@ -676,6 +679,48 @@ public static class RemoteScripts
         return string.Join('\n', lines);
     }
 
+    /// <summary>Marks the stop-before-fetch script (tests find it by this comment).</summary>
+    internal const string StopJobMarker = "# lanq: stop the job before fetching";
+
+    /// <summary>
+    /// The Linux job wrapper records its process group in locks/job-ID.pid: TERM the group (and the pid), wait 2 s, KILL it, remove the file.
+    /// Shared by cleanup and <see cref="StopJob"/>; needs $R and $ID.
+    /// </summary>
+    internal const string LinuxKillRecordedJob = """
+        P="$R/locks/job-$ID.pid"
+        if [ -f "$P" ]; then
+          g=$(cat "$P" 2>/dev/null)
+          case "$g" in
+            ''|*[!0-9]*) ;;
+            *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
+          esac
+          rm -f "$P"
+        fi
+        """;
+
+    /// <summary>
+    /// Stops a job lanq gave up on (timed out, or its machine's hours ended) before its files are fetched. The worker enforces the same limit
+    /// itself only <see cref="JobRunner.WorkerDeadlineMargin"/> later, so the job can still be running and writing. This uses the recorded
+    /// processes exactly as cleanup does: the process group on Linux, and on Windows only processes whose pid and start time match what the
+    /// job recorded (see <see cref="WindowsKillRecorded"/>). It then waits a moment for the processes to go and for files to be closed.
+    /// </summary>
+    public static string StopJob(Machine m, string jobId) => m.Os == MachineOs.Windows
+        ? $$"""
+            {{StopJobMarker}}
+            $root = {{ShellQuote.PowerShell(m.WorkRoot)}}; $id = {{ShellQuote.PowerShell(jobId)}}
+            $pf = "$root/locks/job-$id.pid"
+            {{WindowsKillRecorded}}
+            if (Test-Path -LiteralPath $pf) { KillRecorded $pf $false; Start-Sleep -Seconds 1 }
+            exit 0
+            """
+        : $$"""
+            {{StopJobMarker}}
+            R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
+            {{LinuxKillRecordedJob}}
+            sleep 1
+            exit 0
+            """;
+
     /// <summary>
     /// Best-effort teardown: worktree, ref, bundle, slot. Never fails the job. In git mode without a repository id (nothing was fetched
     /// into a cache) only the cache steps are left out: the job's process, folder, bundle and slot are still removed.
@@ -702,15 +747,7 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
-            P="$R/locks/job-$ID.pid"
-            if [ -f "$P" ]; then
-              g=$(cat "$P" 2>/dev/null)
-              case "$g" in
-                ''|*[!0-9]*) ;;
-                *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
-              esac
-              rm -f "$P"
-            fi
+            {{LinuxKillRecordedJob}}
             rm -rf "$R/jobs/$ID"
             rm -f "$R/incoming/$ID.tar.gz" "$R/incoming/$ID.list" "$R/locks/slot-{{SafeSlot(slot)}}"
             exit 0
@@ -731,15 +768,7 @@ public static class RemoteScripts
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
-            P="$R/locks/job-$ID.pid"
-            if [ -f "$P" ]; then
-              g=$(cat "$P" 2>/dev/null)
-              case "$g" in
-                ''|*[!0-9]*) ;;
-                *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
-              esac
-              rm -f "$P"
-            fi
+            {{LinuxKillRecordedJob}}
             {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
             {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}
