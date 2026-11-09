@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Docs: [docs/JSON.md](docs/JSON.md), the `--json` contract (every field, status and exit code, with jq and
+  PowerShell examples); a tool-agnostic [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt) at the repository root;
+  [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md) and an `AGENTS.md` snippet for using lanq from AI coding agents. The
+  Claude Code skill and `CLAUDE.md` snippet now list the `Cancelled` status and the current `health --json` fields,
+  write each run's log to its own file, and show PowerShell too.
+
 ## 0.5.1 (2026-11-09)
 
 ### Getting a team's pool going
