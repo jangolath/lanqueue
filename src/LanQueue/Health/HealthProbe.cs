@@ -114,7 +114,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
         {
             await waker.SendAsync(machine, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             return h with { Error = $"asleep, but the magic packet could not be sent: {JobRunner.SafeLine(ex.Message)}" };
         }

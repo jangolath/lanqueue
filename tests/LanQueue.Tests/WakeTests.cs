@@ -749,6 +749,44 @@ public sealed class WakeTests
         AssertOneErrorObject(o.ToString(), json, "InfraError", 70);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WakeSendCancelledByTheSocketNotByCtrlCIsExit70WithOneObject(bool json)
+    {
+        var config = T.Config();
+        config.Machines[1].Wake = new WakeConfig { Mac = Mac };
+        var o = new StringWriter();
+        var args = json ? new[] { "wake", "build-02", "--json" } : ["wake", "build-02"];
+
+        var code = await Cli.Wake(
+            ParsedArgs.Parse(args), config, new WakeService(new FakeSender { Failure = new TaskCanceledException("socket") }, TimeProvider.System),
+            new HealthProbe(new FakeSsh(), TimeProvider.System), o, new StringWriter(), CancellationToken.None);
+
+        Assert.Equal(70, code);
+        AssertOneErrorObject(o.ToString(), json, "InfraError", 70);
+    }
+
+    [Fact]
+    public async Task ProbeAndHealthWakeReportASocketCancellationOnTheMachineInsteadOfThrowing()
+    {
+        var (probe, sender, waker, _) = Rig(Night, (_, _) => new SshResult(255, TimedOut));
+        sender.Failure = new TaskCanceledException("socket");
+
+        var h = await probe.ProbeAsync(Sleepy(), T.Config().Policy, CancellationToken.None, WakeMode.SendAndWait);
+        Assert.Contains("could not be sent", h.Error, StringComparison.Ordinal);
+        Assert.False(waker.AnyPending);
+
+        var config = T.Config();
+        config.Machines.RemoveAt(0);
+        config.Machines[0].AllowedHours = null;
+        config.Machines[0].Wake = new WakeConfig { Mac = Mac };
+        var o = new StringWriter();
+        var code = await Cli.Health(config, probe, o, new StringWriter(), CancellationToken.None, wake: true);
+        Assert.Equal(0, code);
+        Assert.Contains("DOWN", o.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task WakeJsonStillPrintsOneObjectForBadArgumentsAndBadConfig()
     {

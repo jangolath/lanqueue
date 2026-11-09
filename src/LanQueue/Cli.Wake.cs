@@ -57,7 +57,7 @@ public static partial class Cli
         {
             return await Fail("Cancelled", 130, "cancelled (Ctrl+C) before the packet was sent").ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             return await Fail("InfraError", 70, $"{machine.Name}: could not send the magic packet: {ex.Message}").ConfigureAwait(false);
         }
@@ -83,6 +83,10 @@ public static partial class Cli
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             return await Fail("Cancelled", 130, $"cancelled (Ctrl+C) while waiting for {machine.Name}").ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            return await Fail("InfraError", 70, $"{machine.Name}: waiting for ssh failed: {ex.Message}").ConfigureAwait(false);
         }
 
         var message = up
