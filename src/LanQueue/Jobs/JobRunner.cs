@@ -30,6 +30,9 @@ public sealed record JobRequest(
     IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null, double? MinMemGb = null,
     FetchRequest? Fetch = null)
 {
+    /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
+    public bool NoWake { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -190,6 +193,13 @@ public sealed class JobRunner(
                 }
             }
 
+            // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
+            // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
+            if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
+            {
+                await WakeBestSleeperAsync(req, probes, health, windowsUnsafe, archive, ct).ConfigureAwait(false);
+            }
+
             if (deadline.Elapsed >= req.Wait)
             {
                 var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
@@ -199,6 +209,38 @@ public sealed class JobRunner(
 
             output("[lanq] no eligible machine; waiting 15s");
             await delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Wakes at most one machine: the first by name among those that look asleep, have a wake: setting, are inside their hours and could take
+    /// the job by everything knowable without a probe (capabilities, Windows-safe arguments, archive build). A sleeper's memory and load are
+    /// unknown, so they are not judged. The decision uses the raw probe results (not the job-adjusted holds in <paramref name="health"/>).
+    /// </summary>
+    private async Task WakeBestSleeperAsync(
+        JobRequest req, MachineHealth[] probes, List<(Machine, MachineHealth)> health, bool windowsUnsafe, LazyArchive archive, CancellationToken ct)
+    {
+        foreach (var i in Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal))
+        {
+            var m = config.Machines[i];
+            if (m.Wake is null || !probes[i].LooksAsleep || !HasCapabilities(m, req.Needs)
+                || (windowsUnsafe && m.Os == MachineOs.Windows) || (m.Transfer == TransferMode.Archive && archive.Failure is not null))
+            {
+                continue;
+            }
+
+            var after = await probe.WakeAsync(m, config.Policy, probes[i], wait: false, ct).ConfigureAwait(false);
+            if (ReferenceEquals(after, probes[i]))
+            {
+                continue; // not allowed now (outside its hours, already woken)
+            }
+
+            health[i] = (m, after);
+            if (probe.Waker!.AnyPending)
+            {
+                output($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
+                return;
+            }
         }
     }
 

@@ -2,7 +2,7 @@
 
 ## Unreleased (0.5.0)
 
-Native binaries: `lanq` without the .NET SDK.
+### Native binaries: `lanq` without the .NET SDK
 
 - **Single-file native binaries** on every GitHub release, compiled ahead of time (NativeAOT, trimmed, symbols
   stripped, size-optimised): `lanq-win-x64.zip`, `lanq-win-arm64.zip`, `lanq-linux-x64.tar.gz`,
@@ -48,6 +48,8 @@ Native binaries: `lanq` without the .NET SDK.
   and the CI AOT job when the SDK carries a newer 10.0 runtime than the pin, and a weekly `runtime-pin` workflow fails
   when Microsoft has shipped one, so a .NET security patch cannot be left out of the binaries unnoticed.
 
+### Fetch: bring job outputs back
+
 - **`lanq run --fetch <pattern>`** (repeatable) brings files the job produced back from the worker's job folder after
   the job ends (completed, failed, timed out or stopped by its window) and before cleanup, into
   `.lanq/artifacts/<job id>/` in the repository (`--fetch-dir DIR` for another place; the default `.lanq` folder gets a
@@ -73,6 +75,24 @@ Native binaries: `lanq` without the .NET SDK.
   `fetchSkippedMore`; without `--fetch` the object is unchanged.
 - Windows workers receive the fetch script on ssh stdin (as base64 of its UTF-16 text), so patterns do not count
   toward the 8000-character command line.
+
+### Wake-on-LAN for sleeping workers
+
+- **Wake-on-LAN for sleeping workers.** An optional per-machine `wake:` setting (`mac` required as `aa:bb:cc:dd:ee:ff`
+  or `aa-bb-cc-dd-ee-ff`; `broadcast` an IPv4 literal, `255.255.255.255` (default) or a private or link-local address, anything else is refused; `port` 7 or 9, default 9;
+  `wait_seconds` 1 to 600, default 120). `lanq run` sends one magic packet only as a last resort: when no awake machine can take the
+  job, `--wait` is above 0 and `--no-wake` is not given, to the first-by-name machine that looks asleep (ssh's own
+  connect timeout or unreachable-host error; never refused, auth or host-key failures), has the capabilities the job
+  needs and is inside its `allowed_hours` on this computer's clock. The wake happens inside `--wait`, at most once per
+  machine per invocation. `lanq health` stays read-only; `lanq health --wake` wakes sleepers and waits for them, probing
+  with backoff until they answer or `wait_seconds` run out. A localized ssh message disables the automatic wake (fails
+  safe).
+- **`lanq wake <machine> [--wait] [--json]`** sends the packet even outside `allowed_hours` (you asked by name) and says
+  so; `--wait` waits for ssh. `--json` prints exactly one object on every path.
+- `lanq doctor` reports the wake setting and
+  reminds that Wake-on-LAN must be enabled in the BIOS/UEFI and the network card driver and usually needs wired Ethernet.
+- Docs: Windows and Linux Wake-on-LAN setup in `docs/WORKERS.md`; the magic packet is unauthenticated and LAN-only,
+  which is why it is opt-in per machine (SECURITY.md).
 
 ## 0.4.0 (2026-11-09)
 

@@ -301,6 +301,7 @@ public static partial class ConfigLoader
 
             ValidateJobEnvironment(m);
             ValidateWindowsCommandLength(m);
+            ValidateWake(m);
 
             if (m.MaxJobs < 1)
             {
@@ -337,6 +338,39 @@ public static partial class ConfigLoader
         if (entries is null || entries.Any(string.IsNullOrWhiteSpace))
         {
             throw new ConfigException($"{what} must be a list without empty entries.");
+        }
+    }
+
+    private static void ValidateWake(Machine m)
+    {
+        if (m.Wake is not { } w)
+        {
+            return;
+        }
+
+        if (!Health.MagicPacket.TryParseMac(w.Mac, out _))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.mac is required and must look like aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff (not all zeros or all ff).");
+        }
+
+        if (!Health.MagicPacket.TryParseBroadcast(w.Broadcast, out var broadcast))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.broadcast must be an IPv4 address such as 10.20.30.255 (no host names, no IPv6). Omit it for 255.255.255.255.");
+        }
+
+        if (!Health.MagicPacket.IsAllowedBroadcast(broadcast))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.broadcast must be 255.255.255.255 or a private or link-local address (10.x, 172.16-31.x, 192.168.x, 169.254.x); a public, multicast, loopback or 0.0.0.0 address is refused (lanq is a LAN tool).");
+        }
+
+        if (w.Port is not (7 or 9))
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.port must be 7 or 9.");
+        }
+
+        if (w.WaitSeconds is < 1 or > 600)
+        {
+            throw new ConfigException($"Machine '{m.Name}': wake.wait_seconds must be from 1 to 600.");
         }
     }
 

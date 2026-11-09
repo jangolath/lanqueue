@@ -197,12 +197,14 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 
 | Command | What it does |
 | --- | --- |
-| `lanq health [--json]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. |
-| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back. |
+| `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. `--wake` also wakes machines that look asleep. |
+| `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
+| `lanq wake <machine> [--wait] [--json]` | Sends a Wake-on-LAN magic packet to a machine with a `wake:` setting, even outside its `allowed_hours`; `--wait` waits for ssh. |
+| `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready version. |
 
 Every command takes `--config FILE`. An option a command does not use is an error, not silently ignored.
 
@@ -475,6 +477,56 @@ settings keep `lanq` a polite guest there (a full example is the "family PC" ent
   exist and work) and at BelowNormal priority on Windows (inherited by every process the job starts), so the person
   at the keyboard keeps a responsive machine. Set `priority: normal` on a dedicated build box.
 - **Memory.** See the next section.
+- **Wake-on-LAN** for a PC that sleeps outside its hours. See below.
+
+### Waking a sleeping worker (Wake-on-LAN)
+
+A family PC that is asleep or off outside its `allowed_hours` can be woken by `lanq` when its window opens. Opt in per
+machine:
+
+```yaml
+    wake:
+      mac: "aa:bb:cc:dd:ee:ff"       # required; aa:bb:cc:dd:ee:ff or aa-bb-cc-dd-ee-ff
+      broadcast: 10.20.30.255        # optional IPv4 literal; default 255.255.255.255
+      port: 9                        # optional, 7 or 9 (default 9)
+      wait_seconds: 120              # optional, 1 to 600 (default 120): how long to wait for ssh after the packet
+```
+
+`broadcast` must be `255.255.255.255` or a private (10.x, 172.16-31.x, 192.168.x) or link-local (169.254.x) IPv4
+address; a public, multicast, loopback or `0.0.0.0` address is refused when the config loads (this is a LAN tool).
+**On a computer with several network cards, a VPN or WSL, the default `255.255.255.255` may leave through the wrong
+interface: set `broadcast` to the directed broadcast of the worker's own subnet** (for `10.20.30.0/24`, that is
+`10.20.30.255`).
+
+- **`lanq run` wakes a machine only as a last resort.** If no awake machine can take the job now, and you gave a real
+  `--wait` (above 0), `lanq` wakes **one** machine: the first by name among those that look asleep, have a `wake:`
+  setting, have the capabilities the job needs, could take its arguments (a Windows machine is skipped for arguments
+  Windows cannot take) and are inside their `allowed_hours`. Nothing is woken while an awake machine can take the job,
+  with `--wait 0` (the default), or with `--no-wake`. The wake happens inside `--wait`: it never makes `lanq run`
+  wait longer than you asked, and the other machines keep being tried meanwhile. At most once per machine per `lanq`
+  invocation, and not another machine while one is still coming up.
+  When every awake machine that fits the job is merely busy, `lanq` may therefore wake a sleeper for extra capacity; use
+  `--no-wake` to avoid that. If a woken machine never answers, the next eligible sleeper (by name) may be tried once the
+  first one'"'"'s `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run.
+- **`lanq health` stays read-only and quick.** It never wakes anything by itself. `lanq health --wake` sends a packet
+  to every machine that looks asleep and is inside its hours, then waits for each (probing again after 5 s, 10 s, then
+  every 20 s, up to `wait_seconds`).
+- **What counts as asleep:** ssh itself said, on its own `ssh: connect to host ...` line, that the connection timed out
+  or the host or network is unreachable (the Windows OpenSSH wordings are recognised too). A refused connection (the PC
+  is up, sshd is not), an authentication failure or a host-key failure never wake a machine. A localized (non-English)
+  ssh message is not recognised, which fails safe: the automatic wake does not fire, and `lanq wake` still works.
+- **Hours and the PAUSE file.** A sleeping PC cannot report its own clock or a `PAUSE` file, so the hours check before
+  a wake uses **this computer's clock and time zone**; on a daylight-saving night it may be an hour off. A paused
+  machine that is awake is reported as paused and never woken, but a PC that is already asleep may well be paused: it
+  will be woken, then held as "paused on the machine" once it answers.
+- **Explicit**: `lanq wake build-02` sends the packet whatever the hour, because you asked for that machine by name,
+  and says so. `--wait` then waits for ssh and exits 0 when it answers, 1 when it does not within `wait_seconds`. With
+  `--json` it prints one object, `{"status":"Sent|Awake|NoAnswer","exitCode":0,"machine":...,"sent":true,"awake":null|bool,"durationSeconds":...,"message":...}`, or the usual
+  `{"status":"Rejected|InfraError|Cancelled","exitCode":...,"message":...}` when nothing was sent.
+- `lanq doctor` reports the wake setting. It cannot tell whether the machine will actually wake: Wake-on-LAN has to be
+  enabled in the BIOS/UEFI and the network card driver, and usually only works on wired Ethernet. See
+  [docs/WORKERS.md](docs/WORKERS.md#wake-on-lan-for-a-sleeping-worker). The packet is unauthenticated and only meant
+  for your LAN (see [SECURITY.md](SECURITY.md)).
 
 ## Old machines with little RAM
 
@@ -642,6 +694,11 @@ machines:
     env:                      # optional; variables for the job process only (see "Old machines with little RAM")
       NODE_OPTIONS: "--max-old-space-size=2048"
     path_prepend: [/home/build/.cargo/bin]   # optional; absolute directories put in front of PATH for the job
+    wake:                     # optional; Wake-on-LAN, see "Waking a sleeping worker"
+      mac: "aa:bb:cc:dd:ee:ff"   # required inside wake:
+      broadcast: 10.20.30.255   # optional IPv4 literal, 255.255.255.255 or private/link-local only; default 255.255.255.255
+      port: 9                    # optional; 7 or 9
+      wait_seconds: 120          # optional; 1 to 600
 ```
 
 Policy keys added in 0.4, with their defaults:
@@ -730,7 +787,11 @@ Each default below is enforced in code and covered by a unit test.
   (or `--fetch-dir`) down, so a `.lanq` link committed in a repository is refused. Tests run the real
   scripts against links to `/etc/passwd`, symlink loops, junctions, names with newlines and FIFOs, and feed the
   receiver size lies, bad hashes, `..` paths, device names and case collisions.
-- **No telemetry**, no network access except the SSH hosts you configure (`lanq doctor` without `--remote` uses none).
+- **Wake-on-LAN is opt-in per machine.** A magic packet is unauthenticated, LAN-only UDP: anyone on the LAN who knows
+  the MAC address can send the same packet, so it is safe only because waking a PC is all it does. `broadcast` must be
+  an IPv4 literal that is 255.255.255.255 or private or link-local (config load refuses anything else).
+- **No telemetry**, no network access except the SSH hosts you configure (and, for a machine with `wake:`, one UDP
+  broadcast packet to its configured broadcast address; `lanq doctor` without `--remote` uses none).
 
 See [SECURITY.md](SECURITY.md) for what this does not protect against.
 
@@ -763,6 +824,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   is reclaimed by the next job that needs a slot (its job is killed first if it is somehow still running). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
+- Wake-on-LAN is best effort and was exercised only against fakes and a loopback UDP socket, not real hardware. `lanq`
+  cannot know whether a packet woke anything beyond the machine answering ssh later. The automatic wake judges
+  `allowed_hours` on your PC's clock (an asleep worker cannot report its own), so keep both in the same time zone.
 - Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
   embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through
   `cmd.exe`, so such an argument could run a second command. Such a job skips Windows workers (hold reason
