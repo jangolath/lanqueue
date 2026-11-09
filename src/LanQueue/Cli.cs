@@ -319,12 +319,15 @@ public static partial class Cli
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
-        makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
-        problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
-        outside its allowed hours (--force scans anyway). lanq never changes a worker. makeready --all checks every machine in the config (four at a
-        time, same rules) and prints one table (machine, OS, verdict OK / WARN n / FAIL n / unreachable / held / error, top problem); exit 70 any
-        machine unreachable or its report unusable, else 1 any FAIL, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or
-        config; 130 Ctrl+C.
+        health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
+        probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C.
+        makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints the verdicts,
+        the script's VERDICT line and numbered next steps (0.1 reports: the WARN/FAIL checks with advice), what the PC is suited for, the
+        capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 2 bad arguments, 70 ssh failed or the report was
+        unusable, 75 the machine is paused or outside its allowed hours (--force scans anyway), 130 Ctrl+C. lanq never changes a worker.
+        makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
+        FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
+        report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
         init writes a commented starter machines.yml (default ./machines.yml, or --config FILE) and never overwrites a file or writes through
         a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
@@ -334,8 +337,9 @@ public static partial class Cli
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
         --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
-        in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed.
-        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
+        in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
+        started shard is cleaned up).
+        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
     /// <summary>

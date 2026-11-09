@@ -282,11 +282,12 @@ evenly. On a machine under 6 GB, run one shard at a time and cap tool memory wit
 small-PC settings (heap caps, transfer mode, disk).
 
 `lanq health` shows each machine's cores, total RAM, free memory, free/total slots and what it suits, from the
-reported total memory, cores and capabilities, with the same thresholds as `lanq-makeready`: **light** under 6 GB
-(lint, type-check, unit-test shards), **medium** 6 to under 16 GB (test shards, builds), **heavy** 16 GB or more with at
-least 4 cores (full test suites, large builds; a big machine with fewer cores is medium), and "+ container builds" when
-the machine has a `docker` capability. The OS keeps some memory back, so a PC with 16 GB installed may report a little
-less and show as medium. `lanq health --json` has the same as `cores`, `memTotalGb`, `freeSlots`, `size` and
+reported total memory, cores and capabilities, by the same rule and in the same words as `lanq-makeready`, so a PC gets
+the same tier from both. The OS keeps some memory back, so the reported memory is first rounded **up** to whole GB (a
+16 GB PC that reports 15.8 GB counts as 16, one that reports 5.8 GB as 6); then **light** under 6 GB (lint and unit-test
+shards), **medium** 6 to under 16 GB (test shards and builds), **heavy** 16 GB or more with at least 4 cores (full
+suites and large builds; a big machine with fewer cores is medium), and "+ container builds" when the machine has a
+`docker` capability. `lanq health --json` has the same as `cores`, `memTotalGb`, `freeSlots`, `size` and
 `suitedFor`.
 
 ## Routing work in a mixed pool

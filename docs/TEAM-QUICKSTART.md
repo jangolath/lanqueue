@@ -100,7 +100,8 @@ lanq init --config ~/.config/lanq/machines.yml
 `lanq init` with no `--config` writes `./machines.yml` instead. A config in the current folder is **never** read by
 itself: then pass `--config FILE` on every command or set `LANQ_CONFIG`. `lanq init` never overwrites a file. The
 starter has one live example machine (`example-01`, which you will replace), a commented Windows micro PC and a
-commented Linux family PC, and policy defaults for small PCs (`min_free_mem_gb: 1.5`, `max_jobs: 1`). `lanq init
+commented Linux family PC, a policy memory floor for small PCs (`min_free_mem_gb: 1.5`) and `max_jobs: 1` on each
+example machine (`max_jobs` is set per machine; `lanq makeready` suggests one from the PC's RAM and CPUs). `lanq init
 --json` prints one object (`status`, `exitCode`, `path`, `message`).
 
 ## 3. Set up each worker
@@ -301,14 +302,15 @@ machine or one outside its `allowed_hours` is `held` unless you add `--force`) a
 ```text
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending
-micro-02   windows  FAIL 1       OpenSSH Server: sshd
+micro-02   windows  FAIL 1       OpenSSH Server: not installed
 family-pc  windows  held         paused (a PAUSE file is in its work_root); --force scans anyway
 micro-03   linux    unreachable  ssh: connect to host 10.20.30.33 port 22: Connection timed out
 ```
 
-Exit `70` when any machine was unreachable (or sent an unusable report, verdict `error`), else `1` when any has a FAIL,
-else `75` when any was held, else `0`. Warnings alone exit `0`, as for one machine; they stay in the table.
-`lanq makeready <machine>` shows the details and advice.
+`FAIL` means the machine is NOT READY (no transfer mode works); a failing check that does not block the worker, such as
+Docker, is counted under `WARN`. Exit `70` when any machine was unreachable (or sent an unusable report, verdict
+`error`), else `1` when any is NOT READY, else `75` when any was held, else `0`. Warnings alone exit `0`, as for one
+machine; they stay in the table. `lanq makeready <machine>` shows the script's verdict and its numbered next steps.
 
 ## 7. Run a first job
 

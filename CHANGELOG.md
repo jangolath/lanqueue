@@ -1,21 +1,28 @@
 # Changelog
 
-## Unreleased (0.5.1)
+## 0.5.1 (2026-11-09)
 
 ### Getting a team's pool going
 
 - **`lanq makeready` now runs lanq-makeready 0.2.0** (verified against its release SHA256SUMS and build-provenance
-  attestation): a READY / READY WITH WARNINGS / NOT READY verdict with numbered next steps (exact command, shell, and
-  whether it needs admin), Wake-on-LAN and Fast Startup readiness, Windows 10 end-of-support, OpenSSH Server, firewall
-  and default-shell checks, Linux end-of-life, sshd password and auto-suspend checks, and a `machines.yml` snippet sized
-  from RAM and CPUs (`max_jobs`, `min_free_mem_gb`, "suited for", `wake:`).
+  attestation), which adds Wake-on-LAN and Fast Startup readiness, Windows 10 end-of-support, OpenSSH Server, firewall
+  and default-shell checks, Linux end-of-life, sshd password and auto-suspend checks. lanq shows what 0.2.0 adds to the
+  report: the script's `VERDICT:` line (READY / READY WITH WARNINGS / NOT READY) and its numbered next steps, blockers
+  first, each with the command or settings path and whether it needs admin (or root), worded as the script prints them
+  and sanitised; a `Suited for:` line; and, in the suggested `machines.yml` entry, `min_free_mem_gb` and (only when the
+  script's Wake-on-LAN check passed) a commented `wake:` block whose redacted MAC you fill in. `--json` (and each report
+  in `--all --json`) now carries every field as the script sent it, 0.2.0's `summary`, `suitedFor`, `min_free_mem_gb`
+  and `wake` included, and no longer adds a `WorkerReady` field. A malformed `summary` or `suitedFor` makes the report
+  unusable (exit 70). Reports from lanq-makeready 0.1 still work as before.
 - **`lanq makeready --all`** runs the read-only lanq-makeready check on every machine in `machines.yml`, four at a
   time, with the same rules as `lanq makeready <machine>` (a `PAUSE` file or `allowed_hours` holds a machine unless
   `--force`; the script goes on ssh stdin), and prints one table: machine, OS, verdict (`OK`, `WARN n`, `FAIL n`,
   `unreachable`, `held`, or `error` for an unusable report) and the top problem, then points at
-  `lanq makeready <machine>` for details. The counts come from the report's checks. Exit `70` any machine
-  unreachable or unusable, else `1` any FAIL, else `75` any held, else `0` (warnings alone exit `0`, as for one
-  machine); `2` bad arguments or config, `130` Ctrl+C. `--json` prints one object
+  `lanq makeready <machine>` for details. `FAIL` means NOT READY (no transfer mode works, so the single-machine
+  check exits `1`); a `FAIL` check that does not block the worker (Docker, .NET) counts as a warning, as in the
+  script's own verdict. The counts and top problem come from the report's summary (0.2.0), else from its checks. Exit
+  `70` any machine unreachable or unusable, else `1` any NOT READY, else `75` any held, else `0` (warnings alone exit
+  `0`, as for one machine); `2` bad arguments or config, `130` Ctrl+C. `--json` prints one object
   (`status`, `exitCode`, `machines`), each machine carrying the validated report exactly as the single-machine
   `--json` prints it.
 - **`lanq init`** writes a commented, minimal starter `machines.yml` (current folder, or `--config FILE`) that loads
@@ -51,10 +58,11 @@
   and never where it could run twice: if the connection dropped mid-run and the cleanup did not finish, the re-run goes
   to another machine, or does not happen when none can take it. An unexpected error ends only its own shard.
   Ctrl+C cancels every shard and still cleans each one up; Ctrl+C after every shard has finished keeps the real result.
-- **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (light under 6 GB, medium 6 to under 16 GB,
-  heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; the Linux core count tries
-  getconf, nproc, then /proc/cpuinfo and is left out (unknown) when none works; the same thresholds as
-  lanq-makeready); the probe now reports `mem_total_gb` and `cores` on
+- **`lanq health`** shows cores, total RAM, free/total slots and "suited for" (by lanq-makeready's rule and in its
+  words, so a PC gets the same tier from both: the reported memory rounded up to whole GB, then light under 6 GB, medium
+  6 to under 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a docker capability; a 16 GB PC that
+  reports 15.8 GB is heavy; the Linux core count tries getconf, nproc, then /proc/cpuinfo and is left out (unknown)
+  when none works); the probe now reports `mem_total_gb` and `cores` on
   Linux and Windows (unknown values are shown as `?`, never a hold). `health --json` adds `cores`, `memTotalGb`,
   `freeSlots`, `size` and `suitedFor`; earlier fields are unchanged. The text line now says `slots free F/M` instead
   of `slots U/M`.

@@ -176,8 +176,8 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 
    ```
    $ lanq health
-   build-01       OK    load 0.12  cores 8  ram 15.6 GB  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots free 2/2  suited: medium: test shards, builds
-   build-02       HOLD  load 0.05  cores 4  ram 7.8 GB  disk free 90.1 GB  mem free 5.1 GB  slots free 1/1  suited: medium: test shards, builds (outside allowed hours)
+   build-01       OK    load 0.12  cores 8  ram 15.6 GB  disk free 180.4 GB  mem free 9.8 GB (swap 2.0 GB)  slots free 2/2  suited: heavy: full suites and large builds
+   build-02       HOLD  load 0.05  cores 4  ram 7.8 GB  disk free 90.1 GB  mem free 5.1 GB  slots free 1/1  suited: medium: test shards and builds (outside allowed hours)
    build-03       DOWN  build-03.lan refused the connection: its SSH server is not running, or a firewall rejects the ssh port (Windows: Start-Service sshd and Set-Service sshd -StartupType Automatic; Linux: sudo systemctl enable --now ssh) (ssh: ssh: connect to host build-03.lan port 22: Connection refused)
    ```
 
@@ -265,7 +265,7 @@ SKIP  build-01 (remote): gpu: not checked (no known tool command)
 
 Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
 .NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
-(v0.1.0, byte-identical to that release, whose SHA-256 a test pins), sent on ssh **stdin** and run from memory with
+(v0.2.0, byte-identical to that release, whose SHA-256 a test pins), sent on ssh **stdin** and run from memory with
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
 - `lanq makeready build-01` for a configured machine. It respects the machine's `PAUSE` file and `allowed_hours`
@@ -274,14 +274,21 @@ Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: 
   SSH works and its host key is in your `known_hosts` (same key-only, strict-host-key ssh options as every other call;
   your agent or default key is used).
 
-It prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), each `WARN`/`FAIL` check
-with its advice, for a configured machine the capabilities detected but not configured and configured but not
-detected, and a suggested `machines.yml` entry. It ends with: *lanq never changes a worker. Fixes are for the PC's
-owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead; when there is no report it prints exactly
+It prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), then the script's own
+`VERDICT:` line (`READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`) and its numbered next steps, blockers
+first, each with the command or settings path to use and whether it needs admin (or root), worded as the script prints
+them, and a `Suited for:` line (light, medium or heavy, "+ container builds" when Docker answers). A report from
+lanq-makeready 0.1 has none of these: lanq then lists each `WARN`/`FAIL` check with its advice. Then, for a configured
+machine, the capabilities detected but not configured and configured but not detected, and a suggested `machines.yml`
+entry: `max_jobs` and `min_free_mem_gb` sized from the PC's RAM and CPUs, and, only when the script's Wake-on-LAN check
+passed, a commented `wake:` block to uncomment (the MAC is redacted in the report, so fill in `mac:`). It ends with: *lanq never changes a worker. Fixes are for the PC's
+owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead, every field as the script sent it (0.2.0's
+`summary`, `suitedFor`, `min_free_mem_gb` and `wake` included); when there is no report it prints exactly
 one `{"status":...,"exitCode":...,"message":...}` object (`Rejected` 2, `InfraError` 70, `Held` 75, `Cancelled` 130). The report is
 treated as untrusted input: at most 1 MB, parsed without reflection, checked against the schema, every string
 sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-ready (git or archive transfer works),
-`1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours.
+`1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours,
+`130` Ctrl+C.
 
 `lanq makeready --all` runs the same check on every machine in the config, four at a time, with the same rules (a
 paused machine or one outside its `allowed_hours` is not scanned unless `--force`; the script goes on ssh stdin), and
@@ -293,7 +300,7 @@ lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.2.0)
 
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending
-micro-02   windows  FAIL 1       OpenSSH Server: sshd
+micro-02   windows  FAIL 1       OpenSSH Server: not installed
 family-pc  windows  held         paused (a PAUSE file is in its work_root); --force scans anyway
 micro-03   linux    unreachable  ssh: connect to host 10.20.30.33 port 22: Connection timed out
 
@@ -301,14 +308,16 @@ Details, advice and a suggested machines.yml entry for one machine: lanq makerea
 lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
 ```
 
-The verdict counts the report's checks: `FAIL n` when any check fails (also `FAIL` when no transfer mode works),
-else `WARN n`, else `OK`; `unreachable` (the probe or ssh failed), `held` or `error` (the report was unusable) when
-there is no report. The top problem is the first failing check, else the first warning, else why there is no report.
-Exit codes, first match wins: `70` any machine was unreachable or its report unusable (the check is incomplete); `1`
-any machine has a FAIL; `75` any was held; `0` otherwise. Warnings alone exit `0`, as `lanq makeready <machine>` does;
-they stay in the table and the JSON. `2` means bad arguments or config, `130` Ctrl+C. With `--json` it prints exactly
+The verdict is `FAIL n` only when the machine is NOT READY (no transfer mode works, so `lanq makeready <machine>` exits
+`1`), with n blockers; else `WARN n` with n things to look at, else `OK`. A `FAIL` check that does not stop the PC being
+a worker (Docker, .NET) is one of the warnings, as in the script's own verdict. The counts and the top problem come from
+the report's summary (lanq-makeready 0.2.0: its first next step, blockers first); for a 0.1 report, from its checks (the
+first failing check, else the first warning). `unreachable` (the probe or ssh failed), `held` or `error` (the report was
+unusable) when there is no report, with why as the top problem. Exit codes, first match wins: `70` any machine was
+unreachable or its report unusable (the check is incomplete); `1` any machine is NOT READY; `75` any was held; `0`
+otherwise. Warnings alone exit `0`, as `lanq makeready <machine>` does; they stay in the table and the JSON. `2` means bad arguments or config, `130` Ctrl+C. With `--json` it prints exactly
 one object, `{"status":"Ok|Failing|InfraError|Held","exitCode":...,"machines":[...]}`, where each machine has `machine`,
-`os`, `verdict` (`OK`, `WARN`, `FAIL`, `unreachable`, `held` or `error`), `warnings`, `failures`, `exitCode` (what
+`os`, `verdict` (`OK`, `WARN`, `FAIL`, `unreachable`, `held` or `error`), `warnings`, `failures` (blockers), `exitCode` (what
 `lanq makeready <machine>` would exit with), `problem` (absent when there is none) and `report`: the validated
 `lanq-makeready/v1` report exactly as `lanq makeready <machine> --json` prints it (absent without one). A bad argument
 or config prints the usual `{"status":"Rejected","exitCode":2,"message":...}` object instead.
@@ -317,8 +326,8 @@ or config prints the usual `{"status":"Rejected","exitCode":2,"message":...}` ob
 
 `lanq init` writes a commented, minimal `machines.yml` to the current folder (or to `--config FILE`, creating its
 folder). It never overwrites a file and never writes through a link: an existing file, folder or link (even one
-pointing nowhere) at that path is refused (exit `2`). The file loads as written: policy defaults suited to
-small PCs (`min_free_mem_gb: 1.5`, `max_jobs: 1`), one live example machine to replace, and commented examples of a
+pointing nowhere) at that path is refused (exit `2`). The file loads as written: a policy memory floor suited to
+small PCs (`min_free_mem_gb: 1.5`), one live example machine to replace (`max_jobs: 1`, set per machine), and commented examples of a
 Windows micro PC (`key_env`, a memory floor, heap caps) and a Linux family PC (`allowed_hours`, `wake:`). It then
 prints the next steps: set up OpenSSH on each worker ([docs/WORKERS.md](docs/WORKERS.md)), connect once with `ssh`,
 run `lanq makeready --ssh user@host --os windows|linux` on each, paste the suggested entries, then
@@ -394,7 +403,7 @@ The worker is treated as untrusted for this step; see [Security model](#security
 Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"medium","suitedFor":"medium: test shards, builds"},
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
  {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"freeSlots":1,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
 ```
 
