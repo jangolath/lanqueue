@@ -15,6 +15,9 @@ tar and your toolchain are enough.
 dotnet tool install --global LanQueue      # update later: dotnet tool update --global LanQueue
 ```
 
+No .NET SDK? Each release also has a single-file native `lanq` for Windows, Linux (glibc 2.27 and later) and macOS,
+and a Scoop manifest; see [Install](#install).
+
 A 3-command taste (after you list your machines once in `machines.yml`, see [Quick start](#quick-start)):
 
 ```bash
@@ -48,38 +51,108 @@ makes no speed-up claim.
 
 ## Install
 
-Requires the .NET 10 SDK or runtime on the machine you run `lanq` from, and `git` and `ssh`/`scp` on the PATH.
-Remote machines need an SSH server (Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+) and either `git`
-(the default) or `tar` (with `transfer: archive`).
+On the machine you run `lanq` from you need `git` and `ssh`/`scp` on the PATH. Remote machines need an SSH server
+(Linux: `sh`; Windows: OpenSSH Server with PowerShell 5.1+) and either `git` (the default) or `tar` (with
+`transfer: archive`). Then pick one of three ways to get `lanq` itself:
+
+| Way | Needs | Upgrade |
+| --- | --- | --- |
+| [Native binary](#native-binary-no-net-needed) from GitHub Releases | nothing else | download the new one |
+| [Scoop](#scoop-windows) (Windows) | Scoop | `scoop update lanq` |
+| [.NET tool](#net-tool) from nuget.org | the .NET 10 SDK | `dotnet tool update --global LanQueue` |
+
+### Native binary (no .NET needed)
+
+From 0.5.0 each release has a single-file, ahead-of-time compiled `lanq` for five targets. Each archive holds `lanq`
+(`lanq.exe` on Windows), `LICENSE` and `THIRD-PARTY-NOTICES.txt`; put `lanq` anywhere on your PATH.
+
+| Asset | Runs on |
+| --- | --- |
+| `lanq-win-x64.zip` | Windows x64 (the Windows versions .NET 10 supports) |
+| `lanq-win-arm64.zip` | Windows 11 on Arm64 |
+| `lanq-linux-x64.tar.gz` | Linux x64 with glibc 2.27 or later (Ubuntu 18.04, Debian 10, RHEL 8 and newer) |
+| `lanq-linux-arm64.tar.gz` | Linux Arm64 with glibc 2.27 or later (Raspberry Pi OS 64-bit, Ubuntu 18.04 and newer) |
+| `lanq-osx-arm64.tar.gz` | macOS on Apple silicon |
+
+The Linux binaries are linked against Microsoft's .NET 10 build sysroot (Ubuntu 18.04, glibc 2.27), not against the
+build machine's newer glibc, and every release runs them inside an Ubuntu 18.04 container before publishing. glibc
+2.27 is .NET 10's own floor; there is no musl (Alpine) or 32-bit build. On macOS, a file downloaded with a browser is
+quarantined; `xattr -d com.apple.quarantine lanq` clears that (the binary is ad-hoc signed, not notarized).
+
+```bash
+# Linux x64 example: download, verify (see below), install
+gh release download --repo jangolath/lanqueue --pattern 'lanq-linux-x64.tar.gz' --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify lanq-linux-x64.tar.gz --repo jangolath/lanqueue
+tar -xzf lanq-linux-x64.tar.gz lanq && install -m 755 lanq ~/.local/bin/lanq
+lanq --version
+```
+
+On Windows, check the hash in PowerShell with `(Get-FileHash lanq-win-x64.zip -Algorithm SHA256).Hash` and compare it
+with the line for that file in `SHA256SUMS`, or use `gh attestation verify` as above.
+
+A native binary carries its own copy of the .NET runtime, so a .NET security fix reaches it only through a new
+`lanq` release (see [SECURITY.md](SECURITY.md)). The .NET tool instead uses the runtime installed on your machine.
+
+### Scoop (Windows)
+
+Every release attaches a Scoop manifest, `lanq.json`, that pins that release's zip URLs and SHA-256 hashes. There is
+no bucket to add:
+
+```powershell
+scoop install https://github.com/jangolath/lanqueue/releases/latest/download/lanq.json
+scoop update lanq      # later
+```
+
+Scoop remembers the URL an app was installed from and reads the manifest from it again on `scoop update` and
+`scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
+`scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
+version, install from that release's URL instead, for example
+`https://github.com/jangolath/lanqueue/releases/download/v0.5.0/lanq.json`. Scoop checks each zip against the hash in
+the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation.
+
+### .NET tool
+
+Requires the .NET 10 SDK.
 
 ```bash
 dotnet tool install --global LanQueue
 dotnet tool update --global LanQueue       # later, to upgrade
 ```
 
-Package: [nuget.org/packages/LanQueue](https://www.nuget.org/packages/LanQueue). Prefer to build it yourself? From a
-clone:
+Package: [nuget.org/packages/LanQueue](https://www.nuget.org/packages/LanQueue). The tool package is
+framework-dependent (it runs on the .NET runtime you have) and behaves exactly like the native binary: both read the
+config through the same compile-time (source-generated) YAML and JSON code. Prefer to build it yourself? From a clone:
 
 ```bash
 dotnet pack src/LanQueue -c Release -o ./nupkg
 dotnet tool install --global --add-source ./nupkg LanQueue
 ```
 
-### Verify a release
-
-From 0.4.0 on, the release workflow attests the build provenance of the `.nupkg` it builds (GitHub artifact
-attestations, signed with the workflow's OIDC identity). The `.nupkg` attached to the GitHub Release is that exact
-file, so you can check it was built from this repository by the release workflow, then install it:
+To build a native binary yourself (needs the platform's C toolchain, see
+[Native AOT prerequisites](https://aka.ms/nativeaot-prerequisites)):
 
 ```bash
-gh release download v0.4.0 --repo jangolath/lanqueue --pattern '*.nupkg'
-gh attestation verify LanQueue.0.4.0.nupkg --repo jangolath/lanqueue
-dotnet tool install --global --add-source . LanQueue --version 0.4.0
+dotnet publish src/LanQueue -c Release -r linux-x64 -p:LanqNative=true -o ./native
 ```
 
-(The copy on nuget.org carries nuget.org's own repository signature, so its bytes differ from the attested file;
-verify the GitHub Release asset.) Dependencies are pinned too: every project commits a `packages.lock.json`, CI
-restores in locked mode, and every GitHub Action is pinned to a full commit SHA.
+### Verify a release
+
+Every release asset is covered by one `SHA256SUMS` file and by a GitHub build-provenance attestation (signed with the
+release workflow's OIDC identity, logged in the public Sigstore transparency log). `sha256sum --check` proves a
+download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
+
+```bash
+gh release download v0.5.0 --repo jangolath/lanqueue
+sha256sum --check SHA256SUMS
+for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
+dotnet tool install --global --add-source . LanQueue --version 0.5.0    # the attested package, if you want the tool
+```
+
+From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
+repository signature, so its bytes differ from the attested file; verify the GitHub Release asset. Dependencies are
+pinned too: every project commits a `packages.lock.json` (the native build has its own, `packages.native.lock.json`),
+CI restores in locked mode, and every GitHub Action and build container is pinned to a full SHA or digest.
 
 ## Quick start
 
