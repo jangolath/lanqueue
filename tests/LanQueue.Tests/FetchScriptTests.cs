@@ -300,7 +300,7 @@ public sealed class FetchScriptTests : IDisposable
     {
         Directory.CreateDirectory(_root + "/locks");
         var pf = _root + "/locks/job-j1.pid";
-        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false };
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = Job }; // a job runs in its folder
         foreach (var a in new[] { "sh", "-c", "echo $$ > \"$1\"; sleep 60 & wait", "sh", pf })
         {
             psi.ArgumentList.Add(a);
@@ -320,6 +320,41 @@ public sealed class FetchScriptTests : IDisposable
         finally
         {
             Shells.Exec("sh", ["-c", "kill -s KILL -- -" + job.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
+        }
+    }
+
+    /// <summary>
+    /// The recorded pid may have been reused by an unrelated process group (the job ended and the worker has run for days). Neither stop nor
+    /// cleanup may signal it: its cwd is not inside the job's folder.
+    /// </summary>
+    [LinuxFact]
+    public void TheLinuxKillLeavesAReusedPidWhoseCwdIsElsewhereAlone()
+    {
+        Directory.CreateDirectory(_root + "/locks");
+        Directory.CreateDirectory(_root + "/elsewhere");
+        var pf = _root + "/locks/job-j1.pid";
+        var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = _root + "/elsewhere" };
+        foreach (var a in new[] { "sh", "-c", "sleep 60 & wait" })
+        {
+            psi.ArgumentList.Add(a);
+        }
+
+        using var other = System.Diagnostics.Process.Start(psi)!;
+        try
+        {
+            foreach (var script in new[] { RemoteScripts.StopJob(Worker(MachineOs.Linux), "j1"), RemoteScripts.Cleanup(Worker(MachineOs.Linux), "j1", "1", T.RepoId) })
+            {
+                Directory.CreateDirectory(Job);
+                File.WriteAllText(pf, other.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\n");
+                var (code, output) = Shells.Run("linux", script);
+                Assert.True(code == 0, output);
+                Assert.False(other.WaitForExit(TimeSpan.FromSeconds(3)), "an unrelated process group was killed");
+                Assert.False(File.Exists(pf));
+            }
+        }
+        finally
+        {
+            Shells.Exec("sh", ["-c", "kill -s KILL -- -" + other.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) + " 2>/dev/null; true"]);
         }
     }
 

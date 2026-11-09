@@ -18,6 +18,9 @@
   separate, sanitised diagnostic.
 - A job that timed out or was stopped by its window is stopped on the worker (recorded process group on Linux, pid
   and start time on Windows) before its files are fetched.
+- Linux cleanup and that stop now check the recorded pid is still the job's before signalling its group: its cwd must
+  be inside the job's folder (as stale-slot reclaim already checked), or, where /proc has no cwd links (macOS, BSD),
+  `ps -o pgid=` must show it still leads the recorded group. A reused pid is left alone.
 - Caps: 500 files and 200 MB by default, `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (up to 2G); what
   fits is fetched in sorted order and the rest is listed.
 - The fetch has its own 10-minute limit and never runs more than 2 minutes past a machine's allowed hours plus grace.

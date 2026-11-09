@@ -684,15 +684,26 @@ public static class RemoteScripts
 
     /// <summary>
     /// The Linux job wrapper records its process group in locks/job-ID.pid: TERM the group (and the pid), wait 2 s, KILL it, remove the file.
-    /// Shared by cleanup and <see cref="StopJob"/>; needs $R and $ID.
+    /// Shared by cleanup and <see cref="StopJob"/>; needs $R and $ID. The pid may have been reused by an unrelated process since, so it is
+    /// signalled only when it is still this job's: where /proc has cwd links, its cwd must be the job's folder or below it (as stale-slot
+    /// reclaim checks); without them (macOS, BSD) <c>ps -o pgid=</c> must show it still leads the recorded process group.
     /// </summary>
     internal const string LinuxKillRecordedJob = """
         P="$R/locks/job-$ID.pid"
         if [ -f "$P" ]; then
-          g=$(cat "$P" 2>/dev/null)
+          g=$(sed -n 1p "$P" 2>/dev/null)
           case "$g" in
             ''|*[!0-9]*) ;;
-            *) kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null ;;
+            *)
+              mine=
+              if [ -e /proc/self/cwd ]; then
+                jd=$(cd -P "$R/jobs/$ID" 2>/dev/null && pwd -P) || jd="$R/jobs/$ID"
+                case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
+              elif [ "$(ps -o pgid= -p "$g" 2>/dev/null | tr -d ' ')" = "$g" ]; then
+                mine=1
+              fi
+              if [ -n "$mine" ]; then kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null; fi
+              ;;
           esac
           rm -f "$P"
         fi
