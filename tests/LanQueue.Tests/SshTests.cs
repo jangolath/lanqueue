@@ -71,4 +71,19 @@ public class SshTests
         Assert.Null(client.ResolveKey(T.Windows()));
         Assert.Throws<InvalidOperationException>(() => client.ResolveKey(T.Linux()));
     }
+
+    [Theory]
+    [InlineData("ForwardAgent=no")]
+    [InlineData("ClearAllForwardings=yes")]
+    [InlineData("PermitLocalCommand=no")]
+    public void SshAndScpDisableAgentForwardingPortForwardsAndLocalCommands(string option)
+    {
+        foreach (var args in new[] { SshArgs.Ssh(T.Linux(), "/keys/id", "true"), SshArgs.Scp(T.Linux(), "/keys/id", "a", "b") })
+        {
+            var at = args.IndexOf(option);
+            Assert.True(at > 0, option + " missing");
+            Assert.Equal("-o", args[at - 1]);
+            Assert.True(at < args.IndexOf("--"), "options must come before the target");
+        }
+    }
 }
