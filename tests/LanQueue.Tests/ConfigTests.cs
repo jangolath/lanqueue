@@ -122,4 +122,13 @@ public class ConfigTests
         Assert.Contains(c.Machines, m => m.Transfer == TransferMode.Git);
         Assert.Contains(c.Machines, m => m.Transfer == TransferMode.Archive);
     }
+
+    [Theory]
+    [InlineData("22:00-22:00")]
+    [InlineData("07:30 - 07:30")]
+    public void AllowedHoursWithTheSameStartAndEndIsRejected(string window)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace("22:00-07:00", window, StringComparison.Ordinal)));
+        Assert.Contains("start and end", ex.Message, StringComparison.Ordinal);
+    }
 }
