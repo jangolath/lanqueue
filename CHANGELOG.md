@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (0.5.1)
+
+- Dependencies: GitHub Actions moved off the deprecated Node 20 runtime; test SDK 18.
+
 ## 0.5.0 (2026-11-09)
 
 ### Native binaries: `lanq` without the .NET SDK
