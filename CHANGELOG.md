@@ -94,7 +94,8 @@ Transfer and supply chain:
   and only a literal credential refuses the job (`.npmrc`: a non-empty `_authToken`, `_auth`, `_password` or
   `password`, including `//host/:_authToken=`, unless it is just an environment reference such as `${NPM_TOKEN}`;
   `.yarnrc.yml`: a non-empty `npmAuthToken` or `npmAuthIdent`, also under `npmScopes`, with the same environment
-  reference rule; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
+  reference rule, and any other line naming one of those keys, such as YAML flow style `{acme: {npmAuthToken: x}}`;
+  an environment reference is exactly `${NAME}`, so `${NPM_TOKEN:-literal}` counts as a literal; `.pypirc`: a non-empty `password`). The refusal names the file and key, never
   the value. Obvious samples pass: names ending in `.example` or `.sample`, names containing
   `.example.`, and anything under a `fixtures/` or `testdata/` folder. **Behaviour change:** a repository that commits
   such a file (for example a test certificate outside those folders, or an `.npmrc` with a literal token) is now refused until the file is

@@ -5,8 +5,12 @@ namespace LanQueue.Policy;
 public sealed record SecretFinding(string Rule, string Where);
 
 /// <summary>Refuses obvious secrets. Findings never echo the matched value.</summary>
-public static class SecretScanner
+public static partial class SecretScanner
 {
+    /// <summary>An environment reference and nothing else: <c>${NAME}</c>. <c>${NAME:-default}</c> carries a literal and does not count.</summary>
+    [GeneratedRegex(@"^\$\{[A-Za-z_][A-Za-z0-9_]*\}\z", RegexOptions.None, 1000)]
+    private static partial Regex EnvReferenceRegex();
+
     private static readonly (string Name, Regex Pattern)[] Rules =
     [
         ("private-key-block", Make(@"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY")),
@@ -135,20 +139,37 @@ public static class SecretScanner
         foreach (var raw in content.Split(['\r', '\n']))
         {
             var line = raw.Trim();
-            var sep = npm ? line.IndexOf('=', StringComparison.Ordinal) : yarn ? line.IndexOf(':', StringComparison.Ordinal) : line.IndexOfAny(['=', ':']);
-            if (line.Length == 0 || line[0] is '#' or ';' or '[' || sep <= 0)
+            if (line.Length == 0 || line[0] is '#' or ';')
             {
+                continue;
+            }
+
+            // .yarnrc.yml is YAML: a key can also sit in flow style ({acme: {npmAuthToken: x}}). Any non-comment line that names a
+            // credential key and is not exactly "key: <empty or plain ${VAR}>" is refused.
+            var yarnKey = yarn ? keys.FirstOrDefault(k => line.Contains(k, StringComparison.OrdinalIgnoreCase)) : null;
+            var sep = npm ? line.IndexOf('=', StringComparison.Ordinal) : yarn ? line.IndexOf(':', StringComparison.Ordinal) : line.IndexOfAny(['=', ':']);
+            if (line[0] == '[' || sep <= 0)
+            {
+                if (yarnKey is not null)
+                {
+                    found.Add(new SecretFinding($"{CommittedConfigRule} (key {yarnKey})", path));
+                }
+
                 continue;
             }
 
             var key = line[..sep].Trim().Trim('"', '\'');
             key = npm ? key[(key.LastIndexOf(':') + 1)..] : key; // "//registry.example/:_authToken" -> "_authToken"
             var value = line[(sep + 1)..].Trim().Trim('"', '\'').Trim();
-            var envReference = (npm || yarn) && value.StartsWith("${", StringComparison.Ordinal) && value.EndsWith('}') && value.IndexOf('}') == value.Length - 1;
+            var envReference = (npm || yarn) && EnvReferenceRegex().IsMatch(value);
             var canonical = keys.FirstOrDefault(k => k.Equals(key, StringComparison.OrdinalIgnoreCase));
             if (canonical is not null && value.Length > 0 && !envReference)
             {
                 found.Add(new SecretFinding($"{CommittedConfigRule} (key {canonical})", path));
+            }
+            else if (canonical is null && yarnKey is not null)
+            {
+                found.Add(new SecretFinding($"{CommittedConfigRule} (key {yarnKey})", path));
             }
         }
 

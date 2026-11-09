@@ -183,6 +183,7 @@ public class SecretScannerTests
     [InlineData("web/.npmrc", "registry=https://r.example/\n_auth = dXNlcjpTdXBlclNlY3JldFZhbHVlMTIz\n", "_auth")]
     [InlineData(".npmrc", "//npm.acme.dev/:_password=\"SuperSecretValue123\"", "_password")]
     [InlineData(".npmrc", "password=SuperSecretValue123", "password")]
+    [InlineData(".npmrc", "//r.example/:_authToken=${NPM_TOKEN:-SuperSecretValue123}", "_authToken")]
     [InlineData(".pypirc", "[pypi]\nusername = __token__\npassword = pypi-SuperSecretValue123\n", "password")]
     [InlineData(".pypirc", "[testpypi]\r\nPassword: SuperSecretValue123\r\n", "password")]
     public void PackageConfigsWithALiteralCredentialAreRefusedWithoutEchoingIt(string path, string content, string key)
@@ -238,6 +239,11 @@ public class SecretScannerTests
     [Theory]
     [InlineData(".yarnrc.yml", "npmAuthToken: npm_SuperSecretValue123|")]
     [InlineData("web/.yarnrc.yml", "npmRegistryServer: 'https://r.example'|npmScopes:|  acme:|    npmAuthToken: 'SuperSecretValue123'|")]
+    [InlineData(".yarnrc.yml", "npmAuthToken: ${NPM_TOKEN:-SuperSecretValue123}|")] // a default value is a literal
+    [InlineData(".yarnrc.yml", "npmAuthToken: '${NPM_TOKEN}SuperSecretValue123'|")]
+    [InlineData(".yarnrc.yml", "npmScopes: {acme: {npmAuthToken: SuperSecretValue123}}|")] // flow style
+    [InlineData(".yarnrc.yml", "npmScopes: {acme: {npmAlwaysAuth: true, npmAuthToken: '${NPM_TOKEN}'}}|")] // flow style, even with a reference
+    [InlineData(".yarnrc.yml", "\"npmAuthToken\": \"SuperSecretValue123\"|")]
     public void YarnrcWithALiteralNpmAuthTokenIsRefused(string path, string content)
     {
         Assert.True(SecretScanner.IsPackageConfig(path));

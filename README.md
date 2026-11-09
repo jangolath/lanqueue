@@ -549,7 +549,8 @@ Each default below is enforced in code and covered by a unit test.
   and uncommitted `.npmrc`, `.pypirc` and `.yarnrc.yml` files are read instead (up to 64 KB; larger ones are refused unchecked) and refused only when
   they hold a literal credential: in `.npmrc` a non-empty `_authToken`, `_auth`, `_password` or `password` (also the
   registry-scoped `//host/:_authToken=` form) that is not just an environment reference like `${NPM_TOKEN}`, in
-  `.pypirc` a non-empty `password`, in `.yarnrc.yml` a non-empty `npmAuthToken` or `npmAuthIdent` (lines may end in CR,
+  `.pypirc` a non-empty `password`, in `.yarnrc.yml` a non-empty `npmAuthToken` or `npmAuthIdent` (or any other line naming them, such as flow style; an
+  environment reference must be exactly `${NAME}`, a `${NAME:-default}` counts as literal) (lines may end in CR,
   LF or CRLF); the refusal names the file and key, never the value. Obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
   anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
   never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
