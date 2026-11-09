@@ -216,7 +216,10 @@ public sealed partial class SupplyChainTests
         Assert.Contains("assemble", Needs(Map(jobs, "publish")));
         Assert.Contains("attest", Needs(Map(jobs, "publish")));
 
-        // A manual (dry) run builds everything above and publishes nothing.
+        // A manual (dry) run builds everything above and publishes nothing. It takes no inputs: only the tag push gates publishing, so an
+        // input such as dry-run would be a switch nothing reads.
+        Assert.True(Map(Workflow("release.yml"), "on").Children.TryGetValue(new YamlScalarNode("workflow_dispatch"), out var dispatch));
+        Assert.False(dispatch is YamlMappingNode d && d.Children.ContainsKey(new YamlScalarNode("inputs")), "release.yml workflow_dispatch has inputs");
         foreach (var name in new[] { "pack", "native", "smoke", "assemble" })
         {
             Assert.Null(Scalar(Map(jobs, name), "if"));

@@ -2,12 +2,8 @@ name: release
 on:
   push:
     tags: ['v*.*.*']
+  # A manual run (no inputs) builds, tests and smoke-tests everything and never attests or publishes: those jobs need a tag push.
   workflow_dispatch:
-    inputs:
-      dry-run:
-        description: Build, test, pack and build every native binary only; skip publishing (a manual run never publishes)
-        type: boolean
-        default: true
 permissions:
   contents: read
 # Order: pack (tests + NuGet tool) -> native (one NativeAOT binary per target, smoke-tested where the runner can run it) -> smoke (the

@@ -51,8 +51,9 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    Runs for the same tag are queued (workflow `concurrency`), never cancelled. Check an asset with
    `gh attestation verify <file> --repo jangolath/lanqueue` (see "Verify a release" in the README).
 
-To rehearse, run the `release` workflow manually (workflow_dispatch): it runs every job up to `assemble`, so every
-binary is built and smoke-tested, and never attests or publishes.
+To rehearse, run the `release` workflow manually (workflow_dispatch, which takes no inputs): it runs every job up to
+`assemble`, so every binary is built and smoke-tested, and never attests or publishes. Publishing is gated on a tag
+push alone (the `attest` and `publish` jobs' `if:`), so there is no dry-run switch to set or forget.
 
 ## Native binaries and the pinned runtime
 
