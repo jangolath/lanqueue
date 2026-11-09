@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (0.5.1)
+
+- Dependencies: GitHub Actions moved off the deprecated Node 20 runtime; test SDK 18.
+- YamlDotNet 18.1.0 (config parsing unchanged; verified against 0.5.0 on 182 config shapes). A nested value where a plain one belongs (for example `env: {A: {b: c}}`) is now reported as a config error naming the line, not as a hint to edit C#.
+
 ## 0.5.0 (2026-11-09)
 
 ### Native binaries: `lanq` without the .NET SDK

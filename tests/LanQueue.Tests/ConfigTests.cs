@@ -27,6 +27,19 @@ public class ConfigTests
         Assert.NotEmpty(ConfigLoader.Load(Path.Combine(dir, "machines.example.yml")).Machines);
     }
 
+    [Theory]
+    [InlineData("os: linux", "os: linux\n    env: {A: {b: c}}", "env values must be plain strings")]
+    [InlineData("os: linux", "os: linux\n    env: {A: [b, c]}", "env values must be plain strings")]
+    [InlineData("max_jobs: 2", "max_jobs: {a: b}", "wrong shape")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: [[dotnet], node]", "wrong shape")]
+    public void ANestedValueWhereAScalarIsExpectedIsAFriendlyErrorNotACodeHint(string from, string to, string expected)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace(from, to, StringComparison.Ordinal)));
+        Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("static context", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("YamlSerializable", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void PasswordFieldIsRefusedAsUnknownKey()
     {
