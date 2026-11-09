@@ -206,6 +206,7 @@ public static partial class ConfigLoader
             }
 
             ValidateJobEnvironment(m);
+            ValidateWindowsCommandLength(m);
 
             if (m.MaxJobs < 1)
             {
@@ -233,6 +234,31 @@ public static partial class ConfigLoader
                         + "Omit allowed_hours to allow all day, or give a real window like '22:00-07:00'.");
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// A Windows worker gets each script as one encoded command line of at most 8000 characters. The machine's env: and path_prepend: go
+    /// into the job script (and, with its capabilities' tool checks, into lanq doctor's), so if they alone, with no job arguments at all,
+    /// already pass the cap, every job there would fail: refuse the config now and say by how much.
+    /// </summary>
+    private static void ValidateWindowsCommandLength(Machine m)
+    {
+        if (m.Os != MachineOs.Windows)
+        {
+            return;
+        }
+
+        var job = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], Jobs.JobRequest.DefaultTimeout)).Length;
+        var doctor = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Doctor(m)).Length;
+        var (which, size) = job >= doctor ? ("job", job) : ("lanq doctor", doctor);
+        var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
+        if (size > limit)
+        {
+            throw new ConfigException(
+                $"Machine '{m.Name}': its env: ({m.Env.Count} entries) and path_prepend: ({m.PathPrepend.Count} entries) make the Windows {which} script "
+                + $"{size} characters once encoded, {size - limit} over the {limit}-character Windows command-line limit before any job arguments. "
+                + "Shorten or remove some env: values or path_prepend: entries.");
         }
     }
 

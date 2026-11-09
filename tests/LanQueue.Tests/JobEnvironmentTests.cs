@@ -26,6 +26,44 @@ public sealed class JobEnvironmentTests : IDisposable
 
     private static string Windows(string lines) => T.Yaml.Replace("    allowed_hours:", lines + NL + "    allowed_hours:", StringComparison.Ordinal);
 
+    private static string ManyEnv(int count, int valueLength) =>
+        "    env:" + string.Concat(Enumerable.Range(0, count).Select(i => NL + "      VAR_" + i.ToString(System.Globalization.CultureInfo.InvariantCulture) + ": " + new string('x', valueLength)));
+
+    /// <summary>
+    /// A Windows machine whose env: and path_prepend: alone push the job (or doctor) script past the encoded command-line cap would fail
+    /// every job with a misleading "shorten the arguments"; the config is refused at load instead, naming the machine, the settings and
+    /// how much is over.
+    /// </summary>
+    [Fact]
+    public void AWindowsMachineWhoseEnvAlonePassesTheCommandLineCapIsRefusedAtLoad()
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(ManyEnv(30, 120))));
+        Assert.Contains("build-02", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("env", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("path_prepend", ex.Message, StringComparison.Ordinal);
+        Assert.Matches("[0-9]+ over the 8000", ex.Message);
+
+        var paths = "    path_prepend: [" + string.Join(", ", Enumerable.Range(0, 40).Select(i => "C:/tools/" + new string('p', 60) + i.ToString(System.Globalization.CultureInfo.InvariantCulture))) + "]";
+        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(paths)));
+    }
+
+    [Fact]
+    public void AModestWindowsEnvLoadsAndTheSameEnvOnLinuxIsNotLimited()
+    {
+        Assert.Equal(5, ConfigLoader.Parse(Windows(ManyEnv(5, 40))).Machines[1].Env.Count);
+        Assert.Equal(30, ConfigLoader.Parse(Linux(ManyEnv(30, 120))).Machines[0].Env.Count);
+    }
+
+    /// <summary>The run-time error for long arguments says the limit and the actual size.</summary>
+    [Fact]
+    public void TheArgumentLengthErrorSaysTheLimitAndTheSize()
+    {
+        var script = RemoteScripts.Execute(T.Windows(), "j", ".", ["dotnet", "test", new string('a', 4000)]);
+        var ex = Assert.Throws<InvalidOperationException>(() => RemoteScripts.Wrap(T.Windows(), script));
+        Assert.Matches("is [0-9]+ characters once encoded; the limit is 8000", ex.Message);
+        Assert.Contains("arguments", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void EnvAndPathPrependAreReadFromConfig()
     {

@@ -18,15 +18,22 @@ public static class RemoteScripts
             return "sh -c " + ShellQuote.Posix(script);
         }
 
+        var command = WindowsCommand(script);
+        return command.Length > MaxWindowsCommandLength
+            ? throw new InvalidOperationException(
+                $"The command for Windows machine '{m.Name}' is {command.Length} characters once encoded; the limit is {MaxWindowsCommandLength}. "
+                + "Shorten the arguments (the machine's env: and path_prepend: count too).")
+            : command;
+    }
+
+    /// <summary>The powershell command line for a script, whatever its length (<see cref="Wrap"/> refuses one over the cap).</summary>
+    internal static string WindowsCommand(string script)
+    {
         // Indentation and blank lines cost characters under the encoded-command cap and mean nothing to PowerShell here: none of these
         // scripts has a here-string, and no value spliced into them can contain a line break.
         var compact = string.Join('\n', script.Split('\n').Select(l => l.TrimStart(' ', '\t').TrimEnd('\r')).Where(l => l.Trim().Length > 0));
-        var command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+        return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
             + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + compact));
-        return command.Length > MaxWindowsCommandLength
-            ? throw new InvalidOperationException(
-                $"The command is too long for Windows machine '{m.Name}' ({command.Length} > {MaxWindowsCommandLength} characters once encoded). Shorten the arguments.")
-            : command;
     }
 
     public static string Probe(Machine m) => m.Os == MachineOs.Windows

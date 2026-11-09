@@ -608,8 +608,10 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   when its start time matches the recorded one, so a reused pid is safe). If it is not, the worker stops the job itself one minute after its limit (Linux under
   `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
   deliberately detaches into a new session or process group can escape both.
-- Windows remote commands are passed as an encoded command line limited to roughly 8000 characters; very long
-  argument lists are refused with a clear message.
+- Windows remote commands are passed as an encoded command line limited to 8000 characters; very long argument
+  lists are refused with a message giving the limit and the actual size. A Windows machine whose `env:` and
+  `path_prepend:` alone would already pass that limit (in the job script or in `lanq doctor`'s) is refused when the
+  config loads, with the machine, the settings and how much is over.
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
   have yet (see "Incremental bundles"). Archive mode sends the whole working snapshot each time, with no history and
   no cache.
