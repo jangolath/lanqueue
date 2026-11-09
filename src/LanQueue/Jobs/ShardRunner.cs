@@ -47,10 +47,23 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
 {
     /// <summary>What --fetch brought back for the shard's last attempt; null when no fetch was asked for or it never ran.</summary>
     public FetchReport? Fetch { get; init; }
+
+    /// <summary>NoCapacity only: see <see cref="JobResult.Retryable"/>.</summary>
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: see <see cref="JobResult.Excluded"/>.</summary>
+    public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 }
 
 /// <summary>A whole lanq run --shards: the overall status and exit code (see <see cref="JobRunner.Aggregate"/>) and every shard, in index order.</summary>
-public sealed record ShardRunResult(string Status, int ExitCode, int Count, IReadOnlyList<ShardResult> Shards, string Message);
+public sealed record ShardRunResult(string Status, int ExitCode, int Count, IReadOnlyList<ShardResult> Shards, string Message)
+{
+    /// <summary>NoCapacity only: whether waiting may help (from the shard that decided the status; true when it did not say). Null otherwise.</summary>
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: every machine that took none of the waiting shards and why. Null otherwise.</summary>
+    public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+}
 
 public sealed partial class JobRunner
 {
@@ -139,9 +152,17 @@ public sealed partial class JobRunner
         }
 
         var worst = shards.Where(s => s.Status != nameof(JobStatus.Completed)).OrderBy(s => Rank(s.Status)).ThenBy(s => s.Index).FirstOrDefault();
-        return worst is null
-            ? new ShardRunResult(nameof(JobStatus.Completed), 0, count, shards, summary)
-            : new ShardRunResult(worst.Status, worst.ExitCode, count, shards, string.Create(CultureInfo.InvariantCulture, $"{summary}; shard {worst.Index}/{count}: {worst.Status}: {worst.Message}"));
+        if (worst is null)
+        {
+            return new ShardRunResult(nameof(JobStatus.Completed), 0, count, shards, summary);
+        }
+
+        var noCapacity = worst.Status == nameof(JobStatus.NoCapacity);
+        return new ShardRunResult(worst.Status, worst.ExitCode, count, shards, string.Create(CultureInfo.InvariantCulture, $"{summary}; shard {worst.Index}/{count}: {worst.Status}: {worst.Message}"))
+        {
+            Retryable = noCapacity ? worst.Retryable ?? true : null,
+            Excluded = noCapacity ? worst.Excluded ?? [] : null,
+        };
 
         static int Rank(string status) => status switch
         {
@@ -156,10 +177,10 @@ public sealed partial class JobRunner
     }
 
     /// <summary>
-    /// The sharded run's NoCapacity text per machine: <see cref="WhyNot(Assessment)"/> of the last probe, plus the one reason only shards have:
+    /// The last probe judged again for a sharded run's NoCapacity result (<see cref="WhyNot(Assessment)"/> per machine), with the one reason only shards have:
     /// a machine every waiting shard must avoid because an earlier attempt of it lost the connection there and its cleanup did not finish.
     /// </summary>
-    private static string ShardWhyNot(IEnumerable<(Machine, MachineHealth)> raw, JobNeeds needs, IReadOnlyCollection<ShardState> waiting)
+    private static List<Assessment> AssessForWaiting(IEnumerable<(Machine, MachineHealth)> raw, JobNeeds needs, IReadOnlyCollection<ShardState> waiting)
     {
         HashSet<string>? avoid = null;
         foreach (var p in waiting)
@@ -168,7 +189,7 @@ public sealed partial class JobRunner
             avoid.IntersectWith(p.Avoid);
         }
 
-        return string.Join("; ", Scheduler.Assess(raw, needs, avoid).Select(a => $"{a.Machine.Name}: {WhyNot(a)}"));
+        return Scheduler.Assess(raw, needs, avoid);
     }
 
     private sealed class ShardState(ShardInfo shard)
@@ -310,10 +331,14 @@ public sealed partial class JobRunner
                 else if (pending.Count > 0 && running.Count == 0 && idle.Elapsed >= template.Wait)
                 {
                     var archiveNote = prepared.Archive.Failure is null ? "" : " Archive build failed: " + prepared.Archive.Failure;
-                    var held = ShardWhyNot(config.Machines.Zip(lastProbes), needs, pending);
+                    var none = NoCapacity("shard", AssessForWaiting(config.Machines.Zip(lastProbes), needs, pending), archiveNote);
                     foreach (var st in pending)
                     {
-                        st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, "No eligible machine. " + held + archiveNote);
+                        st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, none.Message)
+                        {
+                            Retryable = none.Retryable,
+                            Excluded = none.Excluded,
+                        };
                     }
 
                     pending.Clear();
@@ -451,7 +476,12 @@ public sealed partial class JobRunner
         }
 
         var message = SafeLine(r.Message + note) + (st.Attempts > 1 ? string.Create(CultureInfo.InvariantCulture, $" (attempt {st.Attempts})") : "");
-        st.Final = new ShardResult(st.Shard.Index, r.Status.ToString(), r.CliExitCode, r.Machine, r.JobId, a.Duration, st.Attempts, message) { Fetch = r.Fetch };
+        st.Final = new ShardResult(st.Shard.Index, r.Status.ToString(), r.CliExitCode, r.Machine, r.JobId, a.Duration, st.Attempts, message)
+        {
+            Fetch = r.Fetch,
+            Retryable = r.Retryable,
+            Excluded = r.Excluded,
+        };
         return r.Status != JobStatus.Completed;
     }
 }

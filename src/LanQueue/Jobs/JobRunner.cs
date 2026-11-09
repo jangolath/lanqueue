@@ -64,6 +64,15 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>True when the cleanup after the job finished on the worker (its process stopped, folder and slot removed).</summary>
     public bool CleanedUp { get; init; }
 
+    /// <summary>
+    /// NoCapacity only: false when every machine has a reason waiting cannot cure (see <see cref="Eligibility.IsPermanent"/>), true when
+    /// waiting or retrying may help (a busy, held or merely unreachable machine). Null for every other status.
+    /// </summary>
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: every machine that did not take the job and why, in config order. Null for every other status.</summary>
+    public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -74,6 +83,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
         _ => 70,
     };
 }
+
+/// <summary>One machine that did not take a job: its name, the reason code (missing_capability, busy, ...), the reason for people, and whether waiting can never help.</summary>
+public sealed record ExcludedMachine(string Machine, string Reason, string Why, bool Permanent);
 
 public sealed partial class JobRunner(
     FleetConfig config,
@@ -241,6 +253,23 @@ public sealed partial class JobRunner(
     /// <summary>Why a machine did not take the job, for the NoCapacity message: its hold or ssh error, a missing capability, or no free slot.</summary>
     internal static string WhyNot(Assessment a) => a.Why ?? "no free slot when the job tried to start (busy, or ssh failed)";
 
+    /// <summary>
+    /// The NoCapacity result after the last look at the machines: retryable unless every machine has a permanent reason, and every machine
+    /// listed (one that was eligible but whose slot was taken first counts as busy).
+    /// </summary>
+    private static JobResult NoCapacity(string jobId, IReadOnlyList<Assessment> assessed, string note)
+    {
+        var held = string.Join("; ", assessed.Select(a => $"{a.Machine.Name}: {WhyNot(a)}"));
+        return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + note)
+        {
+            Retryable = !assessed.All(a => a.Permanent),
+            Excluded = Excluded(assessed),
+        };
+    }
+
+    internal static List<ExcludedMachine> Excluded(IEnumerable<Assessment> assessed) =>
+        [.. assessed.Select(a => new ExcludedMachine(a.Machine.Name, a.Code ?? Eligibility.Code(Exclusion.Busy)!, WhyNot(a), a.Permanent))];
+
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
@@ -269,9 +298,7 @@ public sealed partial class JobRunner(
 
             if (deadline.Elapsed >= req.Wait)
             {
-                var held = string.Join("; ", assessed.Select(a => $"{a.Machine.Name}: {WhyNot(a)}"));
-                var archiveNote = archive.Failure is null ? "" : " Archive build failed: " + archive.Failure;
-                return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + archiveNote);
+                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
             }
 
             output("[lanq] no eligible machine; waiting 15s");
@@ -492,9 +519,14 @@ public sealed partial class JobRunner(
         if (windowLimit is { } left && (left <= TimeSpan.Zero || left < TimeSpan.FromMinutes(config.Policy.MinWindowMinutes)))
         {
             // Upload and prepare used up the window: hold like a closing window (cleanup runs in the caller), never a job stopped after a second.
-            return new JobResult(jobId, JobStatus.NoCapacity, 75, machine.Name, string.Create(
+            var why = string.Create(
                 CultureInfo.InvariantCulture,
-                $"{machine.Name}: window closing ({Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left of its allowed hours plus grace after upload and prepare); the job was not started"));
+                $"window closing ({Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left of its allowed hours plus grace after upload and prepare); the job was not started");
+            return new JobResult(jobId, JobStatus.NoCapacity, 75, machine.Name, $"{machine.Name}: {why}")
+            {
+                Retryable = true,
+                Excluded = [new ExcludedMachine(machine.Name, Eligibility.Code(Exclusion.WindowClosing)!, why, false)],
+            };
         }
 
         if (byWindow)

@@ -256,6 +256,96 @@ public sealed class JsonOutputTests : IDisposable
             RunAsync(machine, remoteCommand, onStdout, timeout, ct);
     }
 
+    private async Task<(int Code, JsonElement Json, string Stderr)> RunJson(Config.FleetConfig config, Func<Config.Machine, string, SshResult> handler, params string[] args)
+    {
+        var ssh = new FakeSsh { Handler = handler };
+        var o = new StringWriter();
+        var e = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", .. args]), config, ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System),
+            new JobLog(Path.Combine(_dir, "state")), _dir, _dir, o, e, CancellationToken.None);
+        using var doc = JsonDocument.Parse(o.ToString());
+        return (code, doc.RootElement.Clone(), e.ToString());
+    }
+
+    private static SshResult Probe(Config.Machine m, string cmd, string probe) =>
+        IsProbe(m, cmd) ? new SshResult(0, probe) : Decoded(m, cmd).Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=FULL") : new SshResult(0, "");
+
+    [Fact]
+    public async Task NoCapacityJsonCarriesRetryableAndExcluded()
+    {
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var (code, r, _) = await RunJson(
+            config,
+            (m, cmd) => Probe(m, cmd, m.Name == "build-01" ? "load=0.1\ndisk_free_gb=50\nslots_used=2\ntool=ok" : "load=0.95\ndisk_free_gb=50\nslots_used=0\ntool=ok"),
+            "--needs", "dotnet", "--", "dotnet", "test");
+
+        Assert.Equal(75, code);
+        Assert.Equal("NoCapacity", r.GetProperty("status").GetString());
+        Assert.True(r.GetProperty("retryable").GetBoolean());
+        var excluded = r.GetProperty("excluded");
+        Assert.Equal(2, excluded.GetArrayLength());
+        Assert.Equal("build-01", excluded[0].GetProperty("machine").GetString());
+        Assert.Equal("busy", excluded[0].GetProperty("reason").GetString());
+        Assert.Equal("busy (slots 2/2)", excluded[0].GetProperty("why").GetString());
+        Assert.False(excluded[0].GetProperty("permanent").GetBoolean());
+        Assert.Equal("load", excluded[1].GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task RetryableAndExcludedAppearOnlyOnNoCapacity()
+    {
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var (code, done, _) = await RunJson(
+            config,
+            (m, cmd) => IsProbe(m, cmd) ? new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok")
+                : Decoded(m, cmd).Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "ran"),
+            "--needs", "dotnet", "--", "dotnet", "test");
+        Assert.Equal(0, code);
+        Assert.False(done.TryGetProperty("retryable", out _));
+        Assert.False(done.TryGetProperty("excluded", out _));
+
+        var (refusedCode, refused, _) = await RunJson(T.Config(), (_, _) => new SshResult(0, ""), "--", "rm", "-rf", "/");
+        Assert.Equal(2, refusedCode);
+        Assert.False(refused.TryGetProperty("retryable", out _));
+        Assert.False(refused.TryGetProperty("excluded", out _));
+    }
+
+    [Fact]
+    public async Task BothKindsExit75()
+    {
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var busy = await RunJson(config, (m, cmd) => Probe(m, cmd, "load=0.1\ndisk_free_gb=50\nslots_used=2\ntool=ok"), "--needs", "dotnet", "--", "dotnet", "test");
+        var never = await RunJson(config, (m, cmd) => Probe(m, cmd, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok"), "--needs", "gpu", "--", "dotnet", "test");
+
+        Assert.Equal((75, true), (busy.Code, busy.Json.GetProperty("retryable").GetBoolean()));
+        Assert.Equal((75, false), (never.Code, never.Json.GetProperty("retryable").GetBoolean()));
+        Assert.Equal("NoCapacity", never.Json.GetProperty("status").GetString());
+        Assert.All(never.Json.GetProperty("excluded").EnumerateArray(), x =>
+        {
+            Assert.Equal("missing_capability", x.GetProperty("reason").GetString());
+            Assert.True(x.GetProperty("permanent").GetBoolean());
+        });
+        Assert.StartsWith("No eligible machine", never.Json.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith("[lanq] NoCapacity: ", never.Stderr.TrimEnd().Split('\n')[^1], StringComparison.Ordinal); // the status line stays last
+    }
+
+    [Fact]
+    public async Task ShardNoCapacityJsonCarriesRetryableAndExcludedAtTheTopOnly()
+    {
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var (code, r, _) = await RunJson(config, (m, cmd) => Probe(m, cmd, "load=0.1\ndisk_free_gb=50\nslots_used=2\ntool=ok"), "--needs", "dotnet", "--shards", "2", "--", "dotnet", "test");
+
+        Assert.Equal(75, code);
+        Assert.True(r.GetProperty("retryable").GetBoolean());
+        Assert.Equal(2, r.GetProperty("excluded").GetArrayLength());
+        Assert.All(r.GetProperty("shards").EnumerateArray(), s => Assert.False(s.TryGetProperty("retryable", out _) || s.TryGetProperty("excluded", out _)));
+    }
+
     [Fact]
     public async Task HealthJsonPrintsOneObjectWhenCancelled()
     {

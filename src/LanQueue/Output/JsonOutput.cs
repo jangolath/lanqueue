@@ -61,6 +61,14 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>--fetch only: a problem with the fetch as a whole (timed out, cut short, the window ended), or null.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FetchError { get; init; }
+
+    /// <summary>NoCapacity only (top level): false when no machine can ever take the job as configured (waiting will not help), else true.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only (top level): every machine that did not take the job, with its reason.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
 }
 
 /// <summary>
@@ -68,7 +76,24 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
 /// shard (with shard and attempts) in index order. shards is empty when nothing ran (refused before anything was sent, or bad arguments).
 /// </summary>
 /// <param name="Status">Completed, Failed, Rejected, NoCapacity, InfraError, TimedOut, WindowClosed or Cancelled.</param>
-internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount, double DurationSeconds, string Message, IReadOnlyList<RunJson> Shards);
+internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount, double DurationSeconds, string Message, IReadOnlyList<RunJson> Shards)
+{
+    /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: as in <see cref="RunJson.Excluded"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+}
+
+/// <summary>One machine in excluded (NoCapacity only).</summary>
+/// <param name="Reason">
+/// missing_capability, windows_unsafe_args, mem_exceeds_total, mem_unknown, tool_missing (permanent); unreachable, asleep, unreadable, paused,
+/// outside_hours, window_closing, low_disk, low_memory, memory_pressure, load, mem_below_request, busy, avoided, held (waiting may help).
+/// </param>
+/// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
+internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
 
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>
 internal sealed record FetchedJson(string Path, long Bytes, string Sha256);
@@ -91,6 +116,7 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
 [JsonSerializable(typeof(List<HealthJson>))]
 [JsonSerializable(typeof(RunJson))]
 [JsonSerializable(typeof(ShardRunJson))]
+[JsonSerializable(typeof(ExcludedJson))]
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]

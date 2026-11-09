@@ -111,7 +111,11 @@ public static partial class Cli
         [.. result.Shards.Select(s => WithFetch(
             new RunJson(s.Status, s.ExitCode, s.Machine, s.JobId, Math.Round(s.Duration.TotalSeconds, 1), JobRunner.SafeLine(s.Message)) { Shard = s.Index, Attempts = s.Attempts },
             fetch,
-            s.Fetch))]);
+            s.Fetch))])
+    {
+        Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
+        Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+    };
 
     /// <summary>The summary table: one line per shard, in index order.</summary>
     internal static string ShardTable(ShardRunResult result)

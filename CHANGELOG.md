@@ -2,6 +2,16 @@
 
 ## 0.6.0 (unreleased)
 
+### Agents and scripts
+
+- **`retryable` and `excluded` on `NoCapacity`.** `lanq run --json` (and the top level of `--shards --json`) adds two
+  fields, only when the status is `NoCapacity`: `retryable` (false only when every machine has a reason waiting can
+  never cure; a merely busy, held or unreachable machine keeps it true) and `excluded`, one
+  `{machine, reason, why, permanent}` per machine. `reason` is a snake_case code: `missing_capability`,
+  `windows_unsafe_args`, `mem_exceeds_total`, `mem_unknown` and `tool_missing` are permanent; `unreachable`, `asleep`,
+  `unreadable`, `paused`, `outside_hours`, `window_closing`, `low_disk`, `low_memory`, `memory_pressure`, `load`,
+  `mem_below_request`, `busy` and `avoided` are not. The exit code stays `75` for both kinds.
+
 ### Behaviour changes
 
 - `lanq run` judges every machine for a job in one place (the same rules for single jobs, `--shards` placement,

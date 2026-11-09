@@ -507,7 +507,11 @@ public static partial class Cli
         if (p.Json)
         {
             var json = WithFetch(
-                new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message)),
+                new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message))
+                {
+                    Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
+                    Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
+                },
                 fetch is not null,
                 result.Fetch);
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.RunJson)).ConfigureAwait(false);
@@ -527,6 +531,10 @@ public static partial class Cli
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message), LanqJson.Default.InitJson),
             _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson),
         });
+
+    /// <summary>The excluded list of a NoCapacity object (empty when the result named no machine), sanitised.</summary>
+    internal static List<ExcludedJson> ExcludedJsons(IReadOnlyList<ExcludedMachine>? excluded) =>
+        [.. (excluded ?? []).Select(x => new ExcludedJson(JobRunner.SafeLine(x.Machine), x.Reason, JobRunner.SafeLine(x.Why), x.Permanent))];
 
     /// <summary>
     /// With --fetch the run object always carries fetched and fetchSkipped (empty when nothing was fetched or the job never ran), plus fetchDir
