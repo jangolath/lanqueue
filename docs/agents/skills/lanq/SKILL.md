@@ -26,17 +26,28 @@ lanq health --json
 ```
 
 One array, in config order: `name`, `state` (`ok`, `hold` or `down`), `reasons` (why held or down), `load`,
-`diskFreeGb`, `memFreeGb` (null if unknown), `slotsUsed`, `maxJobs`, `localTime` (the worker's clock, or null).
+`diskFreeGb`, `memFreeGb` (null if unknown), `slotsUsed`, `maxJobs`, `localTime` (the worker's clock, or null),
+`cores` and `memTotalGb` (null if unknown), `freeSlots`, `size` (`light`, `medium`, `heavy` or `unknown`) and
+`suitedFor`. Use machines with `state` `ok` and `freeSlots` above 0.
 
-Run a job (run from inside the git repository) and keep only a short result:
+Run a job (run from inside the git repository) and keep only a short result. Give each run its own log file, so
+parallel runs do not overwrite each other:
 
 ```bash
-lanq run --json --needs dotnet -- dotnet test -c Release 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
+log="${TMPDIR:-/tmp}/lanq-$(date +%s)-$$.log"
+lanq run --json --no-wake --needs dotnet -- dotnet test -c Release 2> "$log"; echo "exit=$?"; tail -n 40 "$log"
 ```
 
-stdout is one JSON object when the job is over: `status` (`Completed`, `Failed`, `Rejected`, `NoCapacity`,
-`InfraError`, `TimedOut`, `WindowClosed`), `exitCode` (lanq's exit code), `machine` (null if none took it), `jobId`,
-`durationSeconds`, `message`. The job's output and the `[lanq]` status line go to stderr (the log file above).
+```powershell
+$log = Join-Path $env:TEMP ("lanq-{0}-{1}.log" -f (Get-Date -Format yyyyMMdd-HHmmss), $PID)
+lanq run --json --no-wake --needs dotnet -- dotnet test -c Release 2> $log; "exit=$LASTEXITCODE"; Get-Content $log -Tail 40
+```
+
+stdout is exactly one JSON object, also when the command was refused, the config could not be read, Ctrl+C was
+pressed or something unexpected broke: `status` (`Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`,
+`TimedOut`, `WindowClosed` or `Cancelled`), `exitCode` (lanq's exit code), `machine` (null if none took it), `jobId`
+(null if lanq stopped before it made one), `durationSeconds`, `message`. The job's output and the `[lanq]` status line
+go to stderr (the log file above). Every field is in LanQueue's docs/JSON.md.
 
 - `--needs a,b` requires every listed capability on the machine (tags come from the developer's config).
 - `--dir <relative dir>` runs in a subdirectory, for example `--dir tests`.
@@ -66,7 +77,8 @@ interactive as a single run.
 3. Run, keeping the log out of the conversation:
 
 ```bash
-lanq run --json --no-wake --needs node --shards auto -- npx jest --shard={shard}/{shards} 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 60 "${TMPDIR:-/tmp}/lanq-last.log"
+log="${TMPDIR:-/tmp}/lanq-$(date +%s)-$$.log"
+lanq run --json --no-wake --needs node --shards auto -- npx jest --shard={shard}/{shards} 2> "$log"; echo "exit=$?"; tail -n 60 "$log"
 lanq run --json --no-wake --needs node --shards 4 -- npx playwright test --shard={shard}/{shards}
 lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}
 ```
@@ -78,8 +90,9 @@ summary table (shard, machine, status, exit, duration) ends the log.
 Reading the result: stdout is one object with `status`, `exitCode`, `shardCount`, `durationSeconds`, `message` and
 `shards` (one entry per shard: `shard`, `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`,
 `attempts`, plus the fetch fields with `--fetch`, each shard in its own `fetchDir`). `exitCode` is 0 only if every shard
-passed; otherwise the failing shard's own code, else 2 (refused), 124 (timed out), 70 (infrastructure), 75 (no
-machine) or 130 (cancelled). Report failing shards by index and machine with their failing tests from the log.
+passed; otherwise the failing shard's own code, else 2 (refused), 124 (timed out or hours ended), 70
+(infrastructure), 75 (no machine) or 130 (cancelled). A shard entry can be `Cancelled` too (Ctrl+C, or `--fail-fast`
+stopping the rest). Report failing shards by index and machine with their failing tests from the log.
 
 Rules:
 
@@ -91,14 +104,21 @@ Rules:
 
 ## Reading the result
 
+Read `status` as well as the exit code: a job's own exit code can be any number, and `124` and `75` each cover more
+than one case.
+
 - Exit `0`: the job passed. Say so in one line.
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from the tail; open
   the log file further only if the tail does not show them.
 - `2`: refused by policy (command, directory, secret scan, bad flag). Report the message and stop.
 - `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. `lanq doctor` (local, no network) or
   `lanq doctor --remote` (also each worker's tools in the job environment) shows what is wrong; report its FAIL lines.
-- `75`: no eligible machine. Retry once with `--wait 120 --no-wake` (plain `--wait 120` only if the developer allowed
-  waking machines), then tell the developer.
+- `75` (`NoCapacity`): no eligible machine. Retry once with `--wait 120 --no-wake` (plain `--wait 120` only if the
+  developer allowed waking machines), then tell the developer.
+- `124`: `TimedOut` (ran past `--timeout`) or `WindowClosed` (the machine's allowed hours ended). Report it; ask before
+  raising `--timeout` or running it again.
+- `130` (`Cancelled`): someone pressed Ctrl+C. Stop.
+- No JSON on stdout at all: lanq was killed or is missing. Report it; do not guess the result.
 
 ## What not to do
 

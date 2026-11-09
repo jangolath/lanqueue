@@ -1,0 +1,22 @@
+# LanQueue
+
+> LanQueue (`lanq`) is a small .NET CLI that runs builds, tests and other allowlisted dev jobs on spare machines on your own LAN over SSH. It ships the current git state, picks the least-loaded capable machine, runs one command in a throw-away folder, streams the log, cleans up and returns the job's exit code. `--json` gives scripts and coding agents one result object on stdout.
+
+The developer sets up the pool (`machines.yml`, allowlists, SSH keys); a coding agent only runs `lanq health --json` and `lanq run --json`.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/jangolath/lanqueue/main/README.md): what lanq does, install, commands, configuration and security model
+- [AGENTS.md](https://raw.githubusercontent.com/jangolath/lanqueue/main/AGENTS.md): short rules and decision tree for a coding agent that runs jobs through lanq
+- [JSON output](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/JSON.md): every `--json` field, status and exit code, with jq and PowerShell examples
+- [Agents guide](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/AGENTS-GUIDE.md): setting up lanq for an AI coding agent, instruction-file snippets and a failure playbook
+
+## Setup and use
+
+- [Team quick start](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/TEAM-QUICKSTART.md): one orchestrator and a mixed pool of Windows and Linux workers, step by step
+- [Workers](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/WORKERS.md): what each worker needs (OpenSSH, a build user, tools, Wake-on-LAN)
+- [Sharding](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/SHARDING.md): splitting long test suites across the pool with `--shards`, per ecosystem
+
+## Optional
+
+- [Changelog](https://raw.githubusercontent.com/jangolath/lanqueue/main/CHANGELOG.md): what changed in each release

@@ -112,7 +112,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.5.0/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.5.1/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -149,10 +149,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.5.0 --repo jangolath/lanqueue
+gh release download v0.5.1 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.5.0    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.5.1    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -195,7 +195,7 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    machine is busy or on hold, and may wake a sleeping machine that has a `wake:` setting as a last resort
    (`--no-wake` prevents that; see [Wake-on-LAN](#waking-a-sleeping-worker-wake-on-lan)). `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
    only to a machine that reports at least 4 GB of available memory. `--fetch 'TestResults/**/*.trx'` brings test
-   results, coverage or build output back after the job (see [Fetching results](#fetching-results-fetch)). `lanq stats`
+   results, coverage or build output back after the job (see [Fetching results](#fetching-results---fetch)). `lanq stats`
    sums wall-clock time from your local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
@@ -400,7 +400,8 @@ The worker is treated as untrusted for this step; see [Security model](#security
 
 ### JSON output
 
-Scripts and coding agents should prefer `--json`. `lanq health --json` prints one array, in config order:
+Scripts and coding agents should prefer `--json`; [docs/JSON.md](docs/JSON.md) is the full contract.
+`lanq health --json` prints one array, in config order:
 
 ```json
 [{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
@@ -780,9 +781,14 @@ The agent keeps the exit code and a short tail, and opens more of the log file o
 enough. The log lives in the temp folder, not in your repository; lanq also keeps full per-job logs in its own state
 folder (`$LANQ_HOME`, else a per-user folder). (A `.lanq/` folder in the repository is excluded from the snapshot.)
 
+**Using lanq with AI agents.** [AGENTS.md](AGENTS.md) is the short, tool-agnostic rule set an agent reads;
+[docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md) covers setup, instruction-file snippets and a failure playbook; and
+[docs/JSON.md](docs/JSON.md) is the `--json` contract (every field, status and exit code).
+
 Ready-to-copy assets live in [docs/agents/](docs/agents/):
 
 - [`CLAUDE.md-snippet.md`](docs/agents/CLAUDE.md-snippet.md): rules to paste into your project's `CLAUDE.md`.
+- [`AGENTS.md-snippet.md`](docs/agents/AGENTS.md-snippet.md): the same for a project's `AGENTS.md` (Codex and others).
 - [`skills/lanq/SKILL.md`](docs/agents/skills/lanq/SKILL.md): a minimal Claude Code skill. Copy the `lanq` folder to
   `.claude/skills/` in your project (or `~/.claude/skills/` for all projects).
 
