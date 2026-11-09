@@ -103,7 +103,7 @@ public static class RemoteScripts
     /// info/attributes and objects), makes prepare recreate the cache. The worktrees/*/commondir files git writes per job are below this level.
     /// </summary>
     internal const string CacheTopLevel =
-        @"HEAD|config|description|hooks|info|objects|refs|branches|packed-refs|logs|worktrees|FETCH_HEAD|shallow|gc\.pid|gc\.log|(HEAD|config|packed-refs|shallow)\.lock";
+        @"HEAD|config|description|hooks|info|objects|refs|reftable|branches|packed-refs|logs|worktrees|FETCH_HEAD|ORIG_HEAD|shallow|gc\.pid|gc\.log|(HEAD|config|packed-refs|shallow)\.lock";
 
     /// <summary>Printed by prepare when it recreated a worker cache whose config held anything but <see cref="CacheConfigKeys"/>.</summary>
     internal const string CacheRecreated = "the worker cache had unexpected config keys or files; deleted and recreated it (this job sends a full bundle)";

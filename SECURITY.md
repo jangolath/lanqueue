@@ -52,8 +52,8 @@ global config is still read, and `lanq doctor --remote` warns. Before each fetch
 is checked: anything but the keys `git init --bare` writes (`core.repositoryformatversion`, `core.filemode`,
 `core.bare`, `core.symlinks`, `core.ignorecase`, `core.precomposeunicode`, `core.logallrefupdates`,
 `extensions.objectformat`, `extensions.refstorage`), or any top-level entry besides the ones git itself creates there
-(`HEAD`, `config`, `description`, `hooks`, `info`, `objects`, `refs`, `branches`, `packed-refs`, `logs`, `worktrees`,
-`FETCH_HEAD`, `shallow`, gc and lock files), in particular a `commondir` or `gitdir` file that would make git read
+(`HEAD`, `config`, `description`, `hooks`, `info`, `objects`, `refs`, `reftable`, `branches`, `packed-refs`, `logs`,
+`worktrees`, `FETCH_HEAD`, `ORIG_HEAD`, `shallow`, gc and lock files), in particular a `commondir` or `gitdir` file that would make git read
 another directory's config and attributes, makes lanq delete and recreate that cache, and the cache's
 `info/attributes` is deleted. This check and the git calls that follow are not atomic: another process running as the
 same worker user could change the cache in between. That user is already trusted (it runs the jobs), so this is a

@@ -115,6 +115,27 @@ public sealed partial class GitHardeningTests
     }
 
     /// <summary>The cache's own worktrees/*/commondir files (written by git for every job worktree) are legitimate and keep the cache.</summary>
+    /// <summary>
+    /// A cache with the reftable ref backend (git 2.45+, the planned git 3.0 default) has a top-level reftable/ directory and
+    /// extensions.refstorage: it is a legitimate cache and must survive prepare, or incremental bundles stop working.
+    /// </summary>
+    [ReftableGitFact]
+    public async Task AReftableCacheIsKept()
+    {
+        using var repo = new TempRepo();
+        using var worker = new LocalWorker();
+        var (code, output, cache) = await PrepareWithPlantedCache(repo, worker, c =>
+        {
+            Directory.Delete(c, recursive: true);
+            repo.Git("init", "-q", "--bare", "--ref-format=reftable", c);
+            File.WriteAllText(c + "/ORIG_HEAD", new string('0', 40) + "\n"); // also written by git itself in some flows
+        });
+
+        Assert.True(code == 0, output);
+        Assert.DoesNotContain("unexpected", output, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(cache + "/reftable"));
+    }
+
     [Fact]
     public async Task ACacheWithAJobWorktreeIsKept()
     {

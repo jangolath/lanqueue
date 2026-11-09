@@ -6,6 +6,36 @@ using Xunit;
 
 namespace LanQueue.Tests;
 
+/// <summary>Runs only where the local git can create a reftable repository (git 2.45 or later); otherwise reported as skipped.</summary>
+public sealed class ReftableGitFactAttribute : FactAttribute
+{
+    private static readonly bool Supported = Probe();
+
+    public ReftableGitFactAttribute()
+    {
+        if (!Supported)
+        {
+            Skip = "This git cannot create a reftable repository (needs git 2.45 or later).";
+        }
+    }
+
+    private static bool Probe()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "lanq-reftable-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            return Shells.Exec("git", ["init", "-q", "--bare", "--ref-format=reftable", dir]).Code == 0;
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
+}
+
 /// <summary>The shells a test can run generated worker scripts with, found once; a test that needs a missing one is reported as skipped.</summary>
 internal static class Shells
 {
