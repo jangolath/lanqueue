@@ -77,4 +77,25 @@ public class CliTests
     [Fact]
     public void MissingExplicitConfigIsAnError() =>
         Assert.Throws<LanQueue.Config.ConfigException>(() => Cli.ResolveConfig("nope.yml", Env(), windows: false, exists: _ => false));
+
+    [Fact]
+    public void TimeoutDefaultsTo240MinutesAndCanBeSet()
+    {
+        Assert.Equal(240, ParsedArgs.Parse(["run", "--", "dotnet", "test"]).TimeoutMinutes);
+        Assert.Equal(30, ParsedArgs.Parse(["run", "--timeout", "30", "--", "dotnet", "test"]).TimeoutMinutes);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-5")]
+    [InlineData("100000")]
+    public void OutOfRangeTimeoutIsAnError(string minutes) =>
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--timeout", minutes, "--", "dotnet", "test"]));
+
+    [Fact]
+    public async Task BadTimeoutExitsWith2()
+    {
+        var err = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--timeout", "abc", "--", "dotnet", "test"], new StringWriter(), err, CancellationToken.None));
+    }
 }

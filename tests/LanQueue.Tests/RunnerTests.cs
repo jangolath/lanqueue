@@ -444,4 +444,52 @@ public sealed class RunnerTests : IDisposable
         Assert.Contains(safe, File.ReadAllText(log.LogPathFor(r.JobId)), StringComparison.Ordinal);
         Assert.DoesNotContain(_output, l => l.Contains(Esc, StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task JobPastItsTimeLimitIsReportedAsTimedOutWithExit124()
+    {
+        var (runner, _, _, log) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+            : DecodedContains(m, cmd, "LASTEXITCODE") || cmd.Contains("setsid -w", StringComparison.Ordinal) ? new SshResult(124, "[lanq] timed out", TimedOut: true)
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { Timeout = TimeSpan.FromMinutes(5) }, CancellationToken.None);
+
+        Assert.Equal(JobStatus.TimedOut, r.Status);
+        Assert.Equal(124, r.CliExitCode);
+        Assert.Equal("timed out after 5 min", r.Message);
+        Assert.DoesNotContain("SSH", r.Message, StringComparison.Ordinal);
+        Assert.Equal("TimedOut", Assert.Single(log.ReadAll()).Status);
+    }
+
+    [Fact]
+    public async Task TheRequestedTimeoutIsPassedToTheJobAndDefaultsToFourHours()
+    {
+        var timeouts = new List<TimeSpan>();
+        var ssh = new RecordingSsh(timeouts);
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var runner = new JobRunner(config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _ => { });
+
+        await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet") with { Timeout = TimeSpan.FromMinutes(7) }, CancellationToken.None);
+        Assert.Contains(TimeSpan.FromMinutes(7), timeouts);
+        timeouts.Clear();
+        await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
+        Assert.Contains(TimeSpan.FromHours(4), timeouts);
+    }
+
+    private sealed class RecordingSsh(List<TimeSpan> timeouts) : ISshClient
+    {
+        public Task<SshResult> RunAsync(Config.Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
+        {
+            timeouts.Add(timeout);
+            return Task.FromResult(
+                DecodedContains(machine, remoteCommand, "SLOT=") ? new SshResult(0, "SLOT=1")
+                : DecodedContains(machine, remoteCommand, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
+                : new SshResult(0, ""));
+        }
+
+        public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
+            Task.FromResult(new SshResult(0, ""));
+    }
 }

@@ -91,10 +91,11 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    ```
 
    The job's exit code becomes `lanq`'s exit code. `--wait 120` keeps retrying for up to 120 seconds when every
-   machine is busy or on hold. `lanq stats` sums wall-clock time from your local log.
+   machine is busy or on hold. `--timeout 60` stops the job after 60 minutes (default 240). `lanq stats` sums
+   wall-clock time from your local log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
-`75` no eligible machine.
+`75` no eligible machine; `124` the job ran past `--timeout` and was stopped.
 
 ## How it works
 
@@ -221,6 +222,7 @@ Sources: [Microsoft, key-based authentication in OpenSSH for Windows](https://le
 lanq health                                                    # who is awake and idle?
 lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is the job's exit code
 lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
+lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
 lanq stats                                                     # wall-clock time per machine
 ```
 

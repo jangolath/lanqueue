@@ -16,16 +16,22 @@ public enum JobStatus
     Rejected,
     NoCapacity,
     InfraError,
+    TimedOut,
 }
 
-public sealed record JobRequest(IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait);
+/// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
+public sealed record JobRequest(IReadOnlyList<string> Needs, IReadOnlyList<string> Argv, string Directory, string RepoDir, TimeSpan Wait, TimeSpan? Timeout = null)
+{
+    public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
+}
 
 public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, string? Machine, string Message)
 {
-    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 70 for infra.</summary>
+    /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
         JobStatus.Completed or JobStatus.Failed => ExitCode,
+        JobStatus.TimedOut => ProcessSshClient.TimedOutExitCode,
         JobStatus.NoCapacity => 75,
         JobStatus.Rejected => 2,
         _ => 70,
@@ -233,15 +239,22 @@ public sealed class JobRunner(
 
         if (!step.Ok)
         {
-            return new JobResult(jobId, JobStatus.InfraError, step.ExitCode, machine.Name, "Could not prepare the job on the machine.");
+            return new JobResult(jobId, JobStatus.InfraError, step.ExitCode, machine.Name,
+                "Could not prepare the job on the machine." + (step.TimedOut ? " (timed out)" : ""));
         }
 
+        var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
         var run = await ssh.RunAsync(
             machine,
             executeCommand,
             onLine,
-            TimeSpan.FromHours(4),
+            timeout,
             ct).ConfigureAwait(false);
+        if (run.TimedOut)
+        {
+            return new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
+        }
+
         if (run.IsSshFailure)
         {
             return new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.");
