@@ -215,9 +215,13 @@ one object on stdout when it is over:
 {"status":"Completed","exitCode":0,"machine":"build-02","jobId":"20261109-221503-a1b2c3","durationSeconds":84.2,"message":"exit 0"}
 ```
 
-`status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut` or `WindowClosed`; `exitCode`
-is `lanq`'s own exit code; `machine` is `null` when no machine took the job. The `[lanq] ...` status line still goes
-to stderr.
+`status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut`, `WindowClosed` or `Cancelled`;
+`exitCode` is `lanq`'s own exit code; `machine` is `null` when no machine took the job. Stdout always carries exactly
+one such object, also when the job never started: bad arguments or a config error (`Rejected`, `2`, `jobId` `null`),
+Ctrl+C (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`). `lanq health --json` with a bad argument or
+config prints `{"status":"Rejected","exitCode":2,"message":...}` instead of its array. The `[lanq] ...` status line
+and error messages still go to stderr, and so does the usage text after an unknown command (`lanq --help` prints it
+on stdout).
 
 ## How it works
 

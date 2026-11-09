@@ -23,13 +23,14 @@ public static partial class Cli
 
     private static readonly string[] OsTags = ["windows", "linux"];
 
-    [GeneratedRegex("^[a-z0-9][a-z0-9_.+-]{0,39}$", RegexOptions.CultureInvariant, 1000)]
+    // \z, not $: a report value with a trailing newline must not pass as a clean one.
+    [GeneratedRegex(@"^[a-z0-9][a-z0-9_.+-]{0,39}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex CapabilityNameRegex();
 
-    [GeneratedRegex("^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$", RegexOptions.CultureInvariant, 1000)]
+    [GeneratedRegex(@"^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex HoursRegex();
 
-    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$", RegexOptions.CultureInvariant, 1000)]
+    [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex MachineNameRegex();
 
     /// <summary>The embedded script, byte for byte as released (pinned by a test).</summary>

@@ -126,4 +126,78 @@ public sealed class JsonOutputTests : IDisposable
         Assert.Equal(2, doc.RootElement.GetProperty("exitCode").GetInt32());
         Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("machine").ValueKind);
     }
+
+    /// <summary>stdout must be exactly one JSON object with this status and exit code, whatever went wrong.</summary>
+    private static JsonElement OneObject(string stdout, string status, int exitCode)
+    {
+        using var doc = JsonDocument.Parse(stdout); // throws unless stdout is exactly one JSON value
+        var r = doc.RootElement.Clone();
+        Assert.Equal(JsonValueKind.Object, r.ValueKind);
+        Assert.Equal(status, r.GetProperty("status").GetString());
+        Assert.Equal(exitCode, r.GetProperty("exitCode").GetInt32());
+        Assert.False(string.IsNullOrEmpty(r.GetProperty("message").GetString()));
+        return r;
+    }
+
+    [Theory]
+    [InlineData("run", "--json", "--config", "does-not-exist.yml", "--", "dotnet", "test")]
+    [InlineData("run", "--json", "--timeout", "0", "--", "dotnet", "test")]
+    [InlineData("run", "--json", "--bogus", "--", "dotnet", "test")]
+    public async Task RunJsonPrintsOneObjectForConfigAndArgumentErrors(params string[] args)
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(args, o, e, CancellationToken.None));
+        var r = OneObject(o.ToString(), "Rejected", 2);
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("jobId").ValueKind);
+        Assert.NotEqual("", e.ToString()); // the people-readable message still goes to stderr
+    }
+
+    [Fact]
+    public async Task HealthJsonPrintsOneObjectForAConfigError()
+    {
+        var o = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["health", "--json", "--config", "does-not-exist.yml"], o, new StringWriter(), CancellationToken.None));
+        Assert.Contains("not found", OneObject(o.ToString(), "Rejected", 2).GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunJsonPrintsOneObjectWhenCancelled()
+    {
+        var config = T.Config();
+        var ssh = new FakeSsh { Handler = (m, cmd) => IsProbe(m, cmd) ? new SshResult(0, "load=0.99\ndisk_free_gb=50\nslots_used=0\ntool=ok") : new SshResult(0, "") };
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--wait", "600", "--needs", "dotnet", "--", "dotnet", "test"]), config, ssh, new RunnerTests.FakePayloads(""),
+            new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, "state")), _dir, _dir, o, new StringWriter(), cts.Token);
+
+        Assert.Equal(130, code);
+        OneObject(o.ToString(), "Cancelled", 130);
+    }
+
+    private sealed class ThrowingPayloads : Payload.IPayloadBuilder
+    {
+        public Task<Payload.JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, Payload.PayloadKinds kinds, CancellationToken ct) =>
+            throw new IOException("disk on fire");
+
+        public Task<Payload.ArchiveBuild> BuildArchiveAsync(string jobId, string repoDir, string outputDir, string sha, CancellationToken ct) => throw new IOException("no");
+
+        public Task<Payload.BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct) =>
+            throw new IOException("no");
+    }
+
+    [Fact]
+    public async Task RunJsonPrintsOneObjectForAnUnexpectedError()
+    {
+        var ssh = new FakeSsh();
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--needs", "dotnet", "--", "dotnet", "test"]), T.Config(), ssh, new ThrowingPayloads(),
+            new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, "state")), _dir, _dir, o, new StringWriter(), CancellationToken.None);
+
+        Assert.Equal(70, code);
+        Assert.Contains("disk on fire", OneObject(o.ToString(), "InfraError", 70).GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
 }

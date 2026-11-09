@@ -40,6 +40,10 @@ public class ConfigTests
     [InlineData("work_root: /srv/lanq", "work_root: relative/path")]
     [InlineData("max_jobs: 2", "max_jobs: 0")]
     [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: \"nonsense\"")]
+    [InlineData("ssh: user@build-01.lan", "ssh: \"user@build-01.lan\\n\"")] // "$" would match before a trailing newline; "\z" does not
+    [InlineData("name: build-01", "name: \"build-01\\n\"")]
+    [InlineData("work_root: /srv/lanq", "work_root: \"/srv/lanq\\n\"")]
+    [InlineData("work_root: D:/lanq", "work_root: \"D:/lanq\\n\"")]
     public void UnsafeValuesAreRejected(string from, string to) =>
         Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace(from, to, StringComparison.Ordinal)));
 

@@ -200,6 +200,39 @@ public class MakereadyTests
         Report().Replace("\"suggestedMachine\"", "\"other\"", StringComparison.Ordinal),
     ];
 
+    /// <summary>
+    /// An otherwise valid report with 30 levels of nesting under a property the schema does not know: only the 16-level MaxDepth of the
+    /// source-generated context rejects it (the default, 64, would skip the unknown property and accept the report).
+    /// </summary>
+    [Fact]
+    public async Task DeepNestingUnderAnUnknownPropertyIsRefusedByMaxDepth()
+    {
+        var nested = Report().Replace("\"generatedAt\"", "\"extra\": " + new string('[', 30) + new string(']', 30) + ", \"generatedAt\"", StringComparison.Ordinal);
+        Assert.Throws<FormatException>(() => MakereadyReport.Parse(nested));
+        var (code, _, e, _) = await Run(nested, ["build-01"]);
+        Assert.Equal(70, code);
+        Assert.Contains("not valid JSON", e, StringComparison.Ordinal);
+
+        var shallow = Report().Replace("\"generatedAt\"", "\"extra\": [[[1]]], \"generatedAt\"", StringComparison.Ordinal);
+        Assert.True(MakereadyReport.Parse(shallow).WorkerReady); // unknown properties themselves are fine
+    }
+
+    /// <summary>Report values used in the suggested entry must match their pattern to the very end: a trailing newline is not "the end".</summary>
+    [Fact]
+    public async Task SuggestedValuesWithATrailingNewlineAreNotUsed()
+    {
+        var report = Report()
+            .Replace("\"name\": \"old-pc\"", "\"name\": \"evil-pc\\n\"", StringComparison.Ordinal)
+            .Replace("\"allowed_hours\": \"00:00-07:00\"", "\"allowed_hours\": \"00:00-07:00\\n\"", StringComparison.Ordinal)
+            .Replace("\"capabilities\": [\"dotnet\", \"java\", \"linux\"]", "\"capabilities\": [\"dotnet\\n\", \"java\", \"linux\"]", StringComparison.Ordinal);
+        var (code, o, _, _) = await Run(report, ["--ssh", "me@new-pc.lan", "--os", "linux"]);
+        Assert.Equal(0, code);
+        Assert.Contains("name: \"old-pc\"", o, StringComparison.Ordinal);
+        Assert.DoesNotContain("evil-pc", o, StringComparison.Ordinal);
+        Assert.DoesNotContain("allowed_hours", o, StringComparison.Ordinal);
+        Assert.Contains("capabilities: [java, linux]", o, StringComparison.Ordinal);
+    }
+
     [Theory]
     [MemberData(nameof(Unusable))]
     public async Task AnUnusableReportIsRefusedAsInfrastructure(string report)

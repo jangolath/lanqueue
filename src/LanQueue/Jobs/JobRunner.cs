@@ -443,7 +443,10 @@ public sealed class JobRunner(
         static bool Unsafe(char c) =>
             (c < 0x20 && c != (char)0x09) || (c >= 0x7f && c <= 0x9f) // C0 (except tab), DEL, C1
             || (c >= 0x200b && c <= 0x200f) || c == 0xfeff // zero-width characters and marks
-            || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069); // bidi embeddings, overrides and isolates
+            || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) // bidi embeddings, overrides and isolates
+            || c == 0x061c // Arabic letter mark (a bidi mark)
+            || c == 0x2028 || c == 0x2029 // line and paragraph separators (a line break to some terminals and editors)
+            || (c >= 0x2060 && c <= 0x2064); // word joiner and invisible operators
         if (!line.Any(Unsafe))
         {
             return line;

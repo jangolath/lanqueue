@@ -7,7 +7,8 @@
   `lanq run --needs <capability> -- <command>`. The command must be one the developer has allowlisted.
 - Prefer `--json`, and capture the log instead of reading it whole:
   `lanq run --json --needs dotnet -- dotnet test 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"`
-  stdout is one JSON object (`status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`); the job's own
+  stdout is always exactly one JSON object (`status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`),
+  also for a refusal, a config error, Ctrl+C (`Cancelled`) or an unexpected error; the job's own
   output is in the log file. Report the status and the failing tests from the tail. Open more of the log only if the
   tail is not enough. Never paste a whole log into the conversation.
 - To see which machines are free: `lanq health --json` (an array of `name`, `state` ok|hold|down, `reasons`, `load`,

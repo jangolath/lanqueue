@@ -28,6 +28,53 @@ public class CliTests
     }
 
     [Fact]
+    public async Task AnUnknownCommandPrintsUsageOnStderrAndExits2()
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        var code = await Cli.RunAsync(["frobnicate"], o, e, CancellationToken.None);
+        Assert.Equal(2, code);
+        Assert.Equal("", o.ToString());
+        Assert.Contains("lanq health", e.ToString(), StringComparison.Ordinal);
+
+        o = new StringWriter();
+        Assert.Equal(0, await Cli.RunAsync(["--help"], o, new StringWriter(), CancellationToken.None));
+        Assert.Contains("lanq health", o.ToString(), StringComparison.Ordinal); // asked-for help stays on stdout
+    }
+
+    [Theory]
+    [InlineData("health")]
+    [InlineData("stats")]
+    [InlineData("unlock", "build-01")]
+    [InlineData("doctor")]
+    [InlineData("makeready", "build-01")]
+    public async Task OnlyRunTakesACommandAfterDoubleDash(params string[] args)
+    {
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse([.. args, "--", "rm", "-rf", "/"]));
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync([.. args, "--", "x"], new StringWriter(), e, CancellationToken.None));
+        Assert.Contains("--", e.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UserInputInArgumentErrorsIsSanitised()
+    {
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--bogus\u001b]0;pwned\u0007\u001b[2J"], new StringWriter(), e, CancellationToken.None));
+        Assert.DoesNotContain('\u001b', e.ToString());
+        Assert.DoesNotContain('\u0007', e.ToString());
+    }
+
+    [Fact]
+    public void UserInputInConfigErrorsIsSanitised()
+    {
+        var ex = Assert.Throws<LanQueue.Config.ConfigException>(() => LanQueue.Config.ConfigLoader.Parse(T.Yaml.Replace("name: build-01", "name: \"bad\\e[2J\\u202Ename\"", StringComparison.Ordinal)));
+        Assert.DoesNotContain('\u001b', ex.Message);
+        Assert.DoesNotContain('‮', ex.Message);
+        Assert.Contains("bad?[2J?name", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task MissingConfigFailsCleanlyWithExit2()
     {
         var err = new StringWriter();

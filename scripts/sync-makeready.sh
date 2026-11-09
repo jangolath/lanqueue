@@ -15,17 +15,25 @@ repo=jangolath/lanq-makeready
 root=$(cd "$(dirname "$0")/.." && pwd)
 dest="$root/src/LanQueue/Makeready"
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT INT TERM
+# Cleanup on every exit; an interrupt also ends the script with a failure status (130 for INT, 143 for TERM).
+trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; exit 130' INT
+trap 'rm -rf "$work"; exit 143' TERM
 
 cd "$work"
 gh release download "$tag" -R "$repo" -p SHA256SUMS -p lanq-makeready.ps1 -p lanq-makeready.sh
 
-# Check exactly the two scripts; a SHA256SUMS that does not list both is refused.
-grep -E '^[0-9a-f]{64} [ *]lanq-makeready\.(ps1|sh)$' SHA256SUMS > sums || true
-if [ "$(wc -l < sums | tr -d ' ')" != 2 ]; then
-  echo "SHA256SUMS of $tag does not list lanq-makeready.ps1 and lanq-makeready.sh exactly once each" >&2
-  exit 1
-fi
+# Check exactly the two scripts; a SHA256SUMS that does not list each of them exactly once is refused.
+: > sums
+for f in lanq-makeready.ps1 lanq-makeready.sh; do
+  line="^[0-9a-f]{64} [ *]$(printf '%s' "$f" | sed 's/[.]/[.]/g')\$"
+  n=$(grep -c -E "$line" SHA256SUMS || true)
+  if [ "$n" != 1 ]; then
+    echo "SHA256SUMS of $tag does not list lanq-makeready.ps1 and lanq-makeready.sh exactly once each ($f: $n)" >&2
+    exit 1
+  fi
+  grep -E "$line" SHA256SUMS >> sums
+done
 sha256sum -c sums
 for f in lanq-makeready.ps1 lanq-makeready.sh; do
   gh attestation verify "$f" -R "$repo"

@@ -712,6 +712,14 @@ public sealed class RunnerTests : IDisposable
     [InlineData(0x200B)]
     [InlineData(0x200F)]
     [InlineData(0xFEFF)]
+    [InlineData(0x061C)] // Arabic letter mark
+    [InlineData(0x2028)] // line separator
+    [InlineData(0x2029)] // paragraph separator
+    [InlineData(0x2060)] // word joiner
+    [InlineData(0x2061)]
+    [InlineData(0x2062)]
+    [InlineData(0x2063)]
+    [InlineData(0x2064)]
     public void BidiAndZeroWidthCharactersAreReplaced(int codePoint) =>
         Assert.Equal("a?b", JobRunner.SafeLine("a" + (char)codePoint + "b"));
 

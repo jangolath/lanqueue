@@ -33,7 +33,7 @@ public static class RemoteScripts
             $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
             if ($null -eq $cpu) { $cpu = 0 }
             $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
-            $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+$' }).Count
+            $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }).Count
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
             'slots_used=' + $slots
@@ -209,7 +209,7 @@ public static class RemoteScripts
                   $f = "$root/locks/slot-$i"
                   try {
                     $c = [IO.File]::ReadAllText($f); $l = $c -split "`n"
-                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}$' -and $now -gt ([long]$l[1].Trim() + {{grace}}) -and (Take $f)) {
+                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim() + {{grace}}) -and (Take $f)) {
                       try { if ([IO.File]::ReadAllText($f) -ceq $c) { StopJob $l[0].Trim(); $t = "$f.stale.$PID"; [IO.File]::Move($f, $t); [IO.File]::Delete($t) } } catch { } finally { Drop $f }
                     }
                   } catch { }
@@ -630,7 +630,7 @@ public static class RemoteScripts
             $pf = "$root/locks/job-$id.pid"
             if (Test-Path -LiteralPath $pf) {
               $jp = (Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
-              if ("$jp" -match '^[0-9]+$') {
+              if ("$jp" -match '^[0-9]+\z') {
                 $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
                 if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
               }
@@ -669,7 +669,7 @@ public static class RemoteScripts
             $pf = "$root/locks/job-$id.pid"
             if (Test-Path -LiteralPath $pf) {
               $jp = (Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | Select-Object -First 1)
-              if ("$jp" -match '^[0-9]+$') {
+              if ("$jp" -match '^[0-9]+\z') {
                 $proc = Get-Process -Id ([int]$jp) -ErrorAction SilentlyContinue
                 if ($proc -and ($proc.ProcessName -like 'powershell*' -or $proc.ProcessName -like 'pwsh*')) { & taskkill /PID $jp /T /F 2>$null | Out-Null }
               }

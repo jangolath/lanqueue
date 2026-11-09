@@ -6,7 +6,8 @@ using YamlDotNet.Serialization.NamingConventions;
 
 namespace LanQueue.Config;
 
-public sealed class ConfigException(string message) : Exception(message);
+/// <summary>A config problem. The message often quotes what the user wrote, so it is sanitised like worker output (no escapes, bidi, newlines).</summary>
+public sealed class ConfigException(string message) : Exception(Jobs.JobRunner.SafeLine(message));
 
 /// <summary>
 /// Accepts only the enum's own names as words, in any case (for transfer: 'git' or 'archive'; for priority: 'low' or 'normal'); a number,
@@ -69,19 +70,20 @@ internal sealed class StringOrListConverter : IYamlTypeConverter
 
 public static partial class ConfigLoader
 {
-    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$", RegexOptions.None, 1000)]
+    // Every pattern that guards user input ends in \z, never $: "$" would also match just before a trailing newline.
+    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9_.@-]*\z", RegexOptions.None, 1000)]
     private static partial Regex SshTargetRegex();
 
     /// <summary>The same rule a machine's ssh: must follow (user@host, no leading '-', no spaces).</summary>
     internal static bool IsValidSshTarget(string target) => SshTargetRegex().IsMatch(target);
 
-    [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]*$", RegexOptions.None, 1000)]
+    [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]*\z", RegexOptions.None, 1000)]
     private static partial Regex NameRegex();
 
-    [GeneratedRegex(@"^/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
+    [GeneratedRegex(@"^/[A-Za-z0-9_./-]*\z", RegexOptions.None, 1000)]
     private static partial Regex PosixWorkRootRegex();
 
-    [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*$", RegexOptions.None, 1000)]
+    [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*\z", RegexOptions.None, 1000)]
     private static partial Regex WindowsWorkRootRegex();
 
     // \z, not $: "$" would also match just before a trailing newline.

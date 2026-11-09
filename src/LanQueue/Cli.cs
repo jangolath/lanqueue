@@ -158,6 +158,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
+        if (split >= 0 && command != "run")
+        {
+            throw new ArgumentException($"lanq {command} does not take a command after --; only lanq run does.");
+        }
+
         return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote, Force = force, SshTarget = sshTarget, Os = os };
     }
 }
@@ -200,7 +205,15 @@ public static partial class Cli
         }
         catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
         {
-            await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            // The message can quote what was typed: sanitised. With --json (run or health) stdout still gets its one object.
+            var message = JobRunner.SafeLine(ex.Message);
+            await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
+            if (own.Length > 0 && own[0] is "run" or "health" && own.Contains("--json"))
+            {
+                await WriteJsonError(own[0], "Rejected", 2, message, stdout).ConfigureAwait(false);
+            }
+
             return 2;
         }
 
@@ -213,8 +226,10 @@ public static partial class Cli
 
         if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready"))
         {
-            await stdout.WriteLineAsync(Usage).ConfigureAwait(false);
-            return p.Command is "help" or "--help" or "-h" ? 0 : 2;
+            // Help that was asked for goes to stdout; usage after a mistake goes to stderr, so stdout stays clean for scripts.
+            var asked = p.Command is "help" or "--help" or "-h";
+            await (asked ? stdout : stderr).WriteLineAsync(Usage).ConfigureAwait(false);
+            return asked ? 0 : 2;
         }
 
         FleetConfig LoadConfig() => ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
@@ -237,7 +252,13 @@ public static partial class Cli
         }
         catch (Exception ex) when (ex is ConfigException or IOException)
         {
-            await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            var message = JobRunner.SafeLine(ex.Message);
+            await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            if (p.Json)
+            {
+                await WriteJsonError(p.Command, "Rejected", 2, message, stdout).ConfigureAwait(false);
+            }
+
             return 2;
         }
 
@@ -264,9 +285,28 @@ public static partial class Cli
         var jobOutput = p.Json ? stderr : stdout;
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
         var started = System.Diagnostics.Stopwatch.StartNew();
-        var result = await runner.RunAsync(
-            new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
-            ct).ConfigureAwait(false);
+        JobResult result;
+        try
+        {
+            result = await runner.RunAsync(
+                new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb),
+                ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
+        {
+            // Ctrl+C: an agent reading --json still gets its one object.
+            await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
+            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed).ConfigureAwait(false);
+            return 130;
+        }
+        catch (Exception ex) when (p.Json && ex is not OperationCanceledException)
+        {
+            var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
+            await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
+            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed).ConfigureAwait(false);
+            return 70;
+        }
+
         await stderr.WriteLineAsync(StatusLine(result)).ConfigureAwait(false);
         if (p.Json)
         {
@@ -277,6 +317,15 @@ public static partial class Cli
 
         return result.CliExitCode;
     }
+
+    /// <summary>
+    /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
+    /// for health an object with status, exitCode and message instead of the array.
+    /// </summary>
+    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null) =>
+        stdout.WriteLineAsync(command == "run"
+            ? JsonSerializer.Serialize(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), LanqJson.Default.RunJson)
+            : JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson));
 
     /// <summary>The final line on stderr; TimedOut and WindowClosed (both exit 124) are told apart here.</summary>
     internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}: {result.Message}";

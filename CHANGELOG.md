@@ -134,12 +134,23 @@ Command line:
   call runs out of time what did arrive is still reported. Exit `0` when no line is WARN or FAIL.
 - **`--json`** for `lanq health` (one array: `name`, `state`, `reasons`, `load`, `diskFreeGb`, `memFreeGb`,
   `slotsUsed`, `maxJobs`, `localTime`) and `lanq run` (the job's output goes to stderr, then one object on stdout:
-  `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it.
+  `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it. `run --json` prints
+  exactly one object even when no job ran: a bad argument or config (`Rejected`, exit `2`, `jobId` null), Ctrl+C
+  (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`); `health --json` prints
+  `{"status":"Rejected","exitCode":2,"message":...}` for a bad argument or config. Usage text after an unknown command
+  goes to stderr (exit `2`); `lanq --help` still prints it on stdout.
 - **`lanq unlock <machine>`** removes slot files past their recorded deadline at once (the same locked reclaim, which
   also stops such a slot's job if it is somehow still running) and says what it removed and kept; `--all --yes` removes every slot file (also pre-0.4 ones without a deadline), after a warning that a running
   job there would lose its slot. `--all` without `--yes` is refused.
 - Options are checked per command: an option the command does not use (for example `lanq health --needs x`) is now an
-  error (exit `2`) instead of being ignored.
+  error (exit `2`) instead of being ignored, and only `lanq run` takes a command after `--` (anything else with `--` is
+  exit `2`).
+- Input checks: every pattern that validates user input or a worker's report (machine name, `ssh`, `work_root`, the
+  values of a makeready suggestion) must match to the very end (`\z`), so a value with a trailing newline is refused.
+  Error messages that quote what you typed (config errors, unknown options) are sanitised like worker output, and
+  that sanitising now also replaces U+061C, U+2028, U+2029 and U+2060 to U+2064.
+- `scripts/sync-makeready.sh` requires exactly one `SHA256SUMS` line for each of the two scripts (two lines for one
+  script no longer pass), and exits non-zero after cleaning up when interrupted (INT 130, TERM 143).
 - Fixes: an uncommitted `.npmrc` / `.pypirc` gets the same content check as a committed one (it was refused by
   name); the health probe no longer counts the transient `slot-N.stale.<pid>` file of a slot reclaim as a used slot.
 
