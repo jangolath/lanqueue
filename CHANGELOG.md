@@ -14,6 +14,14 @@
 
 ### Behaviour changes
 
+- **`lanq run` ends at once when no machine can ever take the job** (exit `75`, `retryable: false`), instead of
+  waiting out `--wait`: when no machine in `machines.yml` has every `--needs` capability (before any snapshot, ssh,
+  wait or wake; the Windows-arguments refusal, exit `2`, still comes first), and after a probe when every machine is
+  ruled out for good (a missing capability, Windows for arguments cmd.exe would re-parse, `--mem` above its total
+  memory, no memory report under `--mem`, or git/tar missing). Such a run never wakes a sleeping machine. The message
+  starts `No eligible machine, and no machine can ever take this job as configured (waiting will not help).` and the
+  stderr status line is still `[lanq] NoCapacity: ...`. The same holds for `--shards` (each shard ends `NoCapacity`).
+
 - `lanq run` judges every machine for a job in one place (the same rules for single jobs, `--shards` placement,
   `--shards auto` and Wake-on-LAN). The `NoCapacity` message now gives the reason waiting cannot cure first: a
   machine that is unreachable AND lacks a capability says `lacks gpu (capabilities: ...)` instead of its ssh error, and

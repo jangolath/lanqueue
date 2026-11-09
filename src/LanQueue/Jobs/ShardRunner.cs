@@ -81,6 +81,17 @@ public sealed partial class JobRunner
     {
         // The command line is refused before any network work when even one shard's arguments would be.
         var firstCheck = Precheck("shard", template with { Argv = new ShardInfo(1, 1).Substitute(template.Argv) });
+        if (firstCheck is { Status: JobStatus.NoCapacity } never)
+        {
+            // No machine in the config can ever take it: every shard ends NoCapacity at once, as after a --wait 0 look, without any probe.
+            var n = options.Count ?? 1;
+            return Aggregate(n, [.. Enumerable.Range(1, n).Select(i => new ShardResult(i, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, 0, never.Message)
+            {
+                Retryable = never.Retryable,
+                Excluded = never.Excluded,
+            })], false);
+        }
+
         if (firstCheck is not null)
         {
             return Refused(options.Count ?? 1, "shard 1: " + firstCheck.Message, firstCheck);
@@ -278,6 +289,23 @@ public sealed partial class JobRunner
             }, CancellationToken.None);
         }
 
+        string ArchiveNote() => prepared.Archive.Failure is null ? "" : " Archive build failed: " + prepared.Archive.Failure;
+
+        // Every shard still waiting ends with this NoCapacity result.
+        void EndWaiting(JobResult none)
+        {
+            foreach (var st in pending)
+            {
+                st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, none.Message)
+                {
+                    Retryable = none.Retryable,
+                    Excluded = none.Excluded,
+                };
+            }
+
+            pending.Clear();
+        }
+
         try
         {
             while (pending.Count > 0 || running.Count > 0)
@@ -317,7 +345,12 @@ public sealed partial class JobRunner
                     }
 
                     (lastProbes, lastAssessed) = (probes, assessed); // a wake below updates both in place
-                    if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
+                    if (pending.Count > 0 && assessed.All(a => a.Permanent))
+                    {
+                        // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish).
+                        EndWaiting(NoCapacity("shard", AssessForWaiting(config.Machines.Zip(probes), needs, pending), ArchiveNote()));
+                    }
+                    else if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
                     {
                         await WakeBestSleeperAsync(needs, probes, assessed, prepared.Archive, stop.Token).ConfigureAwait(false);
                     }
@@ -330,18 +363,7 @@ public sealed partial class JobRunner
                 }
                 else if (pending.Count > 0 && running.Count == 0 && idle.Elapsed >= template.Wait)
                 {
-                    var archiveNote = prepared.Archive.Failure is null ? "" : " Archive build failed: " + prepared.Archive.Failure;
-                    var none = NoCapacity("shard", AssessForWaiting(config.Machines.Zip(lastProbes), needs, pending), archiveNote);
-                    foreach (var st in pending)
-                    {
-                        st.Final = new ShardResult(st.Shard.Index, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, st.Attempts, none.Message)
-                        {
-                            Retryable = none.Retryable,
-                            Excluded = none.Excluded,
-                        };
-                    }
-
-                    pending.Clear();
+                    EndWaiting(NoCapacity("shard", AssessForWaiting(config.Machines.Zip(lastProbes), needs, pending), ArchiveNote()));
                     break;
                 }
 

@@ -339,7 +339,7 @@ public static partial class Cli
         --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
         in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
         started shard is cleaned up).
-        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
+        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
     /// <summary>

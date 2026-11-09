@@ -404,6 +404,48 @@ public sealed class ShardReviewTests : IDisposable
         Assert.All(r.Shards, s => Assert.DoesNotContain("no match / full", s.Message, StringComparison.Ordinal));
     }
 
+    /// <summary>No machine has the capability: every shard ends NoCapacity at once (no probe, no wait), and the run is not retryable.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ShardNoCapacityIsNotRetryableWhenNoMachineHasTheCapability()
+    {
+        var ssh = new PoolSsh();
+        var r = await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest("gpu", wait: TimeSpan.FromHours(1)), new ShardOptions(3), CancellationToken.None);
+
+        Assert.Equal(("NoCapacity", 75, 3), (r.Status, r.ExitCode, r.Count));
+        Assert.False(r.Retryable);
+        Assert.Equal(["tiny-01", "big-01"], r.Excluded!.Select(x => x.Machine));
+        Assert.All(r.Excluded!, x => Assert.Equal(("missing_capability", true), (x.Reason, x.Permanent)));
+        Assert.All(r.Shards, s => Assert.Equal(("NoCapacity", 75), (s.Status, s.ExitCode)));
+        Assert.All(r.Shards, s => Assert.Contains("no machine can ever take this job as configured", s.Message, StringComparison.Ordinal));
+        Assert.Empty(ssh.Calls);
+    }
+
+    /// <summary>--shards auto with a capability no machine has ends the same way, before the auto probe.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ShardsAutoWithNoCapableMachineEndsBeforeProbing()
+    {
+        var ssh = new PoolSsh();
+        var r = await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest("gpu", wait: TimeSpan.FromHours(1)), new ShardOptions(null), CancellationToken.None);
+
+        Assert.Equal(("NoCapacity", 75, 1), (r.Status, r.ExitCode, r.Count));
+        Assert.False(r.Retryable);
+        Assert.Empty(ssh.Calls);
+    }
+
+    /// <summary>--mem above every machine's total memory: the waiting shards end after one probe (the delay here never ends), not after --wait.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ShardsEndAfterOneProbeWhenNoMachineHasEnoughMemoryForGood()
+    {
+        var ssh = new PoolSsh { ProbeExtra = _ => "mem_free_gb=3\nmem_total_gb=7.6" };
+        var r = await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest(wait: TimeSpan.FromHours(1)) with { MinMemGb = 16 }, new ShardOptions(2), CancellationToken.None);
+
+        Assert.Equal(("NoCapacity", 75), (r.Status, r.ExitCode));
+        Assert.False(r.Retryable);
+        Assert.All(r.Excluded!, x => Assert.Equal("mem_exceeds_total", x.Reason));
+        Assert.Empty(ssh.Executes);
+        Assert.Equal(2, ssh.Calls.Count); // one probe of each machine
+    }
+
     /// <summary>An exception nobody expected (here an OperationCanceledException that no cancel caused) ends that shard only.</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task AStrayExceptionEndsOnlyItsOwnShard()

@@ -639,8 +639,10 @@ public sealed class ShardTests : IDisposable
     [Fact(Timeout = TestTimeout)]
     public async Task AutoWithNothingFreeRunsOneShard()
     {
-        var (runner, _, _) = Pool();
-        var r = await runner.RunShardsAsync(new JobRequest(["gpu"], ["npx", "jest"], ".", _dir, TimeSpan.Zero), new ShardOptions(null), CancellationToken.None);
+        // Every machine has the capability but too little free memory now (a capability no machine has ends before the auto probe).
+        var (runner, ssh, _) = Pool();
+        ssh.ProbeExtra = _ => "mem_free_gb=1";
+        var r = await runner.RunShardsAsync(new JobRequest(["node"], ["npx", "jest"], ".", _dir, TimeSpan.Zero, MinMemGb: 4), new ShardOptions(null), CancellationToken.None);
         Assert.Equal(1, r.Count);
         Assert.Contains(_output, l => l.StartsWith("[lanq] --shards auto: 1 shard(s) (no machine can take the job right now", StringComparison.Ordinal));
     }

@@ -143,10 +143,24 @@ public sealed partial class JobRunner(
         // Arguments that cmd.exe shims would re-parse can still run on a Linux worker; refuse only when no non-Windows machine has
         // the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
-        return !windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs))
-            ? new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!)
-            : null;
+        if (!windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        {
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!);
+        }
+
+        // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
+        if (!config.Machines.Any(m => HasCapabilities(m, req.Needs)))
+        {
+            var needs = new JobNeeds(req.Needs, null, false);
+            return NoCapacity(jobId, [.. config.Machines.Select(m => new Assessment(m, Unprobed(m), Exclusion.MissingCapability,
+                Eligibility.Lacks(m, Eligibility.Missing(m, needs.Capabilities)), true, 0, 0))], "");
+        }
+
+        return null;
     }
+
+    /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
+    private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
 
     /// <summary>
     /// Snapshots the repository once (under <paramref name="payloadId"/>) and scans it for secrets. Every job given the result shares its
@@ -253,16 +267,20 @@ public sealed partial class JobRunner(
     /// <summary>Why a machine did not take the job, for the NoCapacity message: its hold or ssh error, a missing capability, or no free slot.</summary>
     internal static string WhyNot(Assessment a) => a.Why ?? "no free slot when the job tried to start (busy, or ssh failed)";
 
+    /// <summary>The start of the NoCapacity message when no machine can ever take the job (every machine has a permanent reason).</summary>
+    internal const string NeverMessage = "No eligible machine, and no machine can ever take this job as configured (waiting will not help).";
+
     /// <summary>
-    /// The NoCapacity result after the last look at the machines: retryable unless every machine has a permanent reason, and every machine
-    /// listed (one that was eligible but whose slot was taken first counts as busy).
+    /// The NoCapacity result after the last look at the machines: retryable unless every machine has a permanent reason (then the message
+    /// starts with <see cref="NeverMessage"/>), and every machine listed (one that was eligible but whose slot was taken first counts as busy).
     /// </summary>
     private static JobResult NoCapacity(string jobId, IReadOnlyList<Assessment> assessed, string note)
     {
+        var never = assessed.All(a => a.Permanent);
         var held = string.Join("; ", assessed.Select(a => $"{a.Machine.Name}: {WhyNot(a)}"));
-        return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + note)
+        return new JobResult(jobId, JobStatus.NoCapacity, 75, null, (never ? NeverMessage : "No eligible machine.") + " " + held + note)
         {
-            Retryable = !assessed.All(a => a.Permanent),
+            Retryable = !never,
             Excluded = Excluded(assessed),
         };
     }
@@ -287,6 +305,12 @@ public sealed partial class JobRunner(
                 {
                     return result;
                 }
+            }
+
+            // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now.
+            if (assessed.All(a => a.Permanent))
+            {
+                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
             }
 
             // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
