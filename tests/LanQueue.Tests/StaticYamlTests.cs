@@ -303,7 +303,6 @@ public sealed class StaticYamlTests
     /// <summary>The wake: block goes through the same tag stripping: standard tags load as the untagged value.</summary>
     [Theory]
     [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: !!str \"aa:bb:cc:dd:ee:01\"")]
-    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: ! aa:bb:cc:dd:ee:01")]
     [InlineData("      broadcast: 10.20.30.255", "      broadcast: !!str 10.20.30.255")]
     [InlineData("      port: 7", "      port: !!int \"7\"")]
     [InlineData("      port: 7", "      port: !!float 7.0")]
@@ -410,6 +409,7 @@ public sealed class StaticYamlTests
     [InlineData("max_jobs: 3", "max_jobs: !!int 3.5", "'tag:yaml.org,2002:int'")]
     [InlineData("min_free_mem_gb: 2", "min_free_mem_gb: !!float two", "'tag:yaml.org,2002:float'")]
     [InlineData("    ssh: build@lin.lan", "    ssh: !!bool build@lin.lan", "'tag:yaml.org,2002:bool'")]
+    [InlineData("      mac: \"aa:bb:cc:dd:ee:01\"", "      mac: ! aa:bb:cc:dd:ee:01", "'!'")] // inside wake: as everywhere else
     public void TagsThatContradictTheirNodeAreRefused(string from, string to, string tag)
     {
         var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
