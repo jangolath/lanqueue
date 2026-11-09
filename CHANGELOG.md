@@ -12,6 +12,12 @@
   `unreadable`, `paused`, `outside_hours`, `window_closing`, `low_disk`, `low_memory`, `memory_pressure`, `load`,
   `mem_below_request`, `busy` and `avoided` are not. The exit code stays `75` for both kinds.
 
+- **`lanq health --needs a,b [--mem N]`**: judges every machine for such a job by the rules `lanq run` uses. Each text
+  line ends `-> eligible (2 slots)` or `-> not eligible: lacks gpu (capabilities: dotnet, linux)`; `--json` rows add
+  `eligible`, `why`, `reason` (the codes above), `permanent` and `jobSlots` (how many copies, or shards, it could take
+  now, `--mem` counted per copy). Exit `0` when at least one machine is eligible, `75` when none is. Plain
+  `lanq health` (text and `--json`) is unchanged and still exits `0`.
+
 ### Behaviour changes
 
 - **`lanq run` ends at once when no machine can ever take the job** (exit `75`, `retryable: false`), instead of

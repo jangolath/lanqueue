@@ -7,6 +7,7 @@ using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Output;
 using LanQueue.Payload;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 
 namespace LanQueue;
@@ -72,7 +73,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
-        ["health"] = ["--json", "--wake"],
+        ["health"] = ["--json", "--wake", "--needs", "--mem"],
         ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
@@ -233,6 +234,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
+        if (command == "health" && seen.Contains("--needs") && needs.Count == 0)
+        {
+            throw new ArgumentException("--needs must name at least one capability (for example --needs dotnet,linux).");
+        }
+
         if (fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
         {
             throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
@@ -295,6 +301,7 @@ public static partial class Cli
         lanq - headless job runner for your own LAN machines
 
           lanq health [--json] [--wake] [--config FILE]
+          lanq health --needs dotnet,linux [--mem 4] [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
           lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
@@ -320,7 +327,9 @@ public static partial class Cli
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
-        probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C.
+        probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
+        such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
+        and jobSlots); exit 0 when at least one machine could take it now, 75 when none could.
         makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints the verdicts,
         the script's VERDICT line and numbered next steps (0.1 reports: the WARN/FAIL checks with advice), what the PC is suited for, the
         capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 2 bad arguments, 70 ssh failed or the report was
@@ -454,7 +463,9 @@ public static partial class Cli
         var probe = new HealthProbe(ssh, TimeProvider.System, waker);
         if (p.Command == "health")
         {
-            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers).ConfigureAwait(false);
+            // --needs / --mem: judge each machine for such a job exactly as lanq run does (Windows-safe arguments assumed).
+            var needs = p.Needs.Count > 0 || p.MemGb is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) : null;
+            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs).ConfigureAwait(false);
         }
 
         return await Run(p, config, ssh, new GitPayloadBuilder(), probe, log, home, Directory.GetCurrentDirectory(), stdout, stderr, ct).ConfigureAwait(false);
@@ -666,7 +677,13 @@ public static partial class Cli
     private static string HomeDir(Func<string, string?> env) =>
         env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    internal static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false)
+    /// <summary>
+    /// lanq health. With <paramref name="needs"/> (--needs / --mem) each machine is also judged for such a job by <see cref="Scheduler.Assess"/>,
+    /// the same rules lanq run uses: JSON rows gain eligible, why, reason, permanent and jobSlots, text lines gain "  -> ...", and the exit code is
+    /// 0 when at least one machine could take the job now, 75 when none could. Without it the output and exit code are exactly as before.
+    /// </summary>
+    internal static async Task<int> Health(
+        FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false, JobNeeds? needs = null)
     {
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
@@ -689,14 +706,19 @@ public static partial class Cli
             await WriteJsonError("health", "InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), stdout).ConfigureAwait(false);
             return 70;
         }
+
+        var assessed = needs is null ? null : Scheduler.Assess(config.Machines.Zip(results), needs);
+        var exitCode = assessed is null || assessed.Any(a => a.Eligible) ? 0 : 75;
         if (json)
         {
             var rows = config.Machines.Zip(results).Select(x => HealthRow(x.First, x.Second)).ToList();
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)).ConfigureAwait(false);
-            return 0;
+            await stdout.WriteLineAsync(assessed is null
+                ? JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)
+                : JsonSerializer.Serialize([.. rows.Zip(assessed, HealthNeedsRow)], LanqJson.Default.ListHealthNeedsJson)).ConfigureAwait(false);
+            return exitCode;
         }
 
-        foreach (var (m, h) in config.Machines.Zip(results))
+        foreach (var (i, (m, h)) in config.Machines.Zip(results).Index())
         {
             var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
             var detail = h.Reachable
@@ -704,11 +726,26 @@ public static partial class Cli
                     + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                     + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
                 : h.Error ?? "";
-            await stdout.WriteLineAsync($"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd()).ConfigureAwait(false);
+            var line = $"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd();
+            await stdout.WriteLineAsync(assessed is null ? line : line + "  -> " + Verdict(assessed[i])).ConfigureAwait(false);
         }
 
-        return 0;
+        return exitCode;
+
+        static string Verdict(Assessment a) => a.Eligible
+            ? string.Create(CultureInfo.InvariantCulture, $"eligible ({a.JobSlots} slot{(a.JobSlots == 1 ? "" : "s")})")
+            : "not eligible: " + JobRunner.SafeLine(a.Why ?? a.Code ?? "?");
     }
+
+    /// <summary>A health row with how the machine was judged for the --needs / --mem job (<paramref name="a"/> from <see cref="Scheduler.Assess"/>).</summary>
+    internal static HealthNeedsJson HealthNeedsRow(HealthJson row, Assessment a) => new(row)
+    {
+        Eligible = a.Eligible,
+        Why = a.Why is { } why ? JobRunner.SafeLine(why) : null,
+        Reason = a.Code,
+        Permanent = a.Permanent,
+        JobSlots = a.JobSlots,
+    };
 
     internal static HealthJson HealthRow(Machine m, MachineHealth h)
     {

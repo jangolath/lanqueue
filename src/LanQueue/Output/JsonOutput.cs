@@ -7,7 +7,7 @@ namespace LanQueue.Output;
 /// <param name="Reasons">Why the machine is held or down; empty when ok.</param>
 /// <param name="MemFreeGb">Null when the machine did not report memory.</param>
 /// <param name="LocalTime">The worker's own clock (yyyy-MM-ddTHH:mm:ss), or null when it did not report one.</param>
-internal sealed record HealthJson(
+internal record HealthJson(
     string Name, string State, IReadOnlyList<string> Reasons, double Load, double DiskFreeGb, double? MemFreeGb, int SlotsUsed, int MaxJobs, string? LocalTime)
 {
     /// <summary>Logical processors, or null when the machine did not report them (down, or an older probe).</summary>
@@ -24,6 +24,34 @@ internal sealed record HealthJson(
 
     /// <summary>What the machine suits, in lanq-makeready's words, for example "light: lint and unit-test shards + container builds".</summary>
     public string SuitedFor { get; init; } = "";
+}
+
+/// <summary>
+/// One machine in <c>lanq health --needs ... --json</c> (or --mem): the plain row plus how the machine was judged for such a job, by the rules
+/// lanq run uses. A separate type, so plain <c>lanq health --json</c> rows stay exactly as they were, while these fields are always present here
+/// (why and reason are null when eligible).
+/// </summary>
+internal sealed record HealthNeedsJson : HealthJson
+{
+    public HealthNeedsJson(HealthJson row)
+        : base(row)
+    {
+    }
+
+    /// <summary>True when the machine could take the job now.</summary>
+    public bool Eligible { get; init; }
+
+    /// <summary>Why not, for people (sanitised), or null when eligible.</summary>
+    public string? Why { get; init; }
+
+    /// <summary>The snake_case reason code (as in <see cref="ExcludedJson.Reason"/>), or null when eligible.</summary>
+    public string? Reason { get; init; }
+
+    /// <summary>True when waiting can never make this machine take the job (its config or the machine itself rules it out).</summary>
+    public bool Permanent { get; init; }
+
+    /// <summary>How many copies of the job (shards) the machine could take now, with --mem counted per copy; 0 when not eligible.</summary>
+    public int JobSlots { get; init; }
 }
 
 /// <summary>
@@ -114,6 +142,7 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(List<HealthJson>))]
+[JsonSerializable(typeof(List<HealthNeedsJson>))]
 [JsonSerializable(typeof(RunJson))]
 [JsonSerializable(typeof(ShardRunJson))]
 [JsonSerializable(typeof(ExcludedJson))]

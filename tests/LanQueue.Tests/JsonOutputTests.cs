@@ -29,7 +29,7 @@ public sealed class JsonOutputTests : IDisposable
         Assert.True(ParsedArgs.Parse(["run", "--json", "--", "dotnet", "test"]).Json);
         Assert.False(ParsedArgs.Parse(["health"]).Json);
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["stats", "--json"]));
-        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--needs", "dotnet"]));
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--dir", "x"])); // health takes --needs since 0.6.0, never --dir
     }
 
     [Fact]
