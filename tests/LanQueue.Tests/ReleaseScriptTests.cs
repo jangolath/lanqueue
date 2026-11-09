@@ -129,7 +129,7 @@ public sealed class ReleaseScriptTests : IDisposable
     /// "draft-empty" (a draft with no assets) or "published"; <paramref name="draftSums"/> is the SHA256SUMS the existing draft holds
     /// (null: none). Returns the exit code, the output and the gh calls made.
     /// </summary>
-    private (int Code, string Output, string[] Calls) Draft(string mode, string tag, string prerelease, string state, string? draftSums, string sums = "aa  lanq-win-x64.zip\n")
+    private (int Code, string Output, string[] Calls) Draft(string mode, string tag, string prerelease, string state, string? draftSums, string sums = "aa  lanq-win-x64.zip\n", string published = "")
     {
         var assets = Path.Combine(_dir, "release");
         Directory.CreateDirectory(assets);
@@ -138,6 +138,7 @@ public sealed class ReleaseScriptTests : IDisposable
         var bin = Path.Combine(_dir, "bin");
         Directory.CreateDirectory(bin);
         var log = Write("calls.txt", "");
+        Write("published", published);
         if (draftSums is not null)
         {
             Write("draft-sums", draftSums);
@@ -150,6 +151,7 @@ public sealed class ReleaseScriptTests : IDisposable
             "case \"$1 $2 $*\" in",
             "  'release view'*isDraft*) case \"$FAKE_STATE\" in none) echo 'release not found' >&2; exit 1 ;; published) echo false ;; *) echo true ;; esac ;;",
             "  'release view'*assets*) case \"$FAKE_STATE\" in draft-empty) ;; *) echo SHA256SUMS; echo lanq-win-x64.zip ;; esac ;;",
+            "  'release list'*) cat \"$FAKE_DIR/published\" ;;",
             "  'release download'*) [ -f \"$FAKE_DIR/draft-sums\" ] || exit 1; dir=.; while [ $# -gt 0 ]; do [ \"$1\" = -D ] && dir=$2; shift; done; cp \"$FAKE_DIR/draft-sums\" \"$dir/SHA256SUMS\" ;;",
             "  *) ;;",
             "esac",
@@ -200,15 +202,31 @@ public sealed class ReleaseScriptTests : IDisposable
         Assert.Contains("--latest=false", edit, StringComparison.Ordinal);
     }
 
-    [ShFact]
-    public void AStableReleaseIsPublishedAsLatest()
+    /// <summary>
+    /// A stable release becomes latest only when it is newer than every stable release already published, so a backport (v0.4.1 after
+    /// v0.5.0) never moves releases/latest, nor the Scoop manifest behind it.
+    /// </summary>
+    [ShTheory]
+    [InlineData("v0.5.0", "", true)] // the first release
+    [InlineData("v0.5.0", "v0.4.0\nv0.3.1\n", true)]
+    [InlineData("v0.4.1", "v0.5.0\nv0.4.0\n", false)] // a backport
+    [InlineData("v0.10.0", "v0.9.0\nv0.2.0\n", true)] // numeric, not string, comparison
+    [InlineData("v0.9.1", "v0.10.0\n", false)]
+    [InlineData("v1.0.0", "v0.99.99\nnightly\nv2.0.0-rc.1\n", true)] // other tags and prereleases do not count
+    [InlineData("v0.5.0", "v0.5.0\n", false)] // already published as is: never steal latest
+    public void AStableReleaseIsLatestOnlyWhenItIsTheNewest(string tag, string published, bool latest)
     {
-        var (code, output, calls) = Draft("publish", "v0.5.0", "false", "draft", null);
+        var (code, output, calls) = Draft("publish", tag, "false", "draft", null, published: published);
         Assert.True(code == 0, output);
         var edit = Assert.Single(calls, c => c.StartsWith("release edit", StringComparison.Ordinal));
         Assert.Contains("--draft=false", edit, StringComparison.Ordinal);
-        Assert.Contains("--latest", edit, StringComparison.Ordinal);
-        Assert.DoesNotContain("--latest=false", edit, StringComparison.Ordinal);
+        Assert.Contains(latest ? "--latest" : "--latest=false", edit, StringComparison.Ordinal);
+        if (latest)
+        {
+            Assert.DoesNotContain("--latest=false", edit, StringComparison.Ordinal);
+        }
+
+        Assert.Contains(calls, c => c.StartsWith("release list", StringComparison.Ordinal) && c.Contains("--exclude-drafts", StringComparison.Ordinal) && c.Contains("--exclude-pre-releases", StringComparison.Ordinal));
     }
 
     [ShFact]

@@ -43,6 +43,11 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    reuses an existing draft only when the draft is empty or holds the same `SHA256SUMS` as the assets being published,
    and never touches a published release; the NuGet push skips a version that is already there. If it refuses a stale
    draft, check it, delete it (`gh release delete <tag> --repo jangolath/lanqueue`, which keeps the tag) and re-run.
+   The same applies to a draft left **without** `SHA256SUMS` (an upload that stopped part-way): the job cannot tell
+   whose assets it holds and refuses it, so delete that draft, then use **Re-run failed jobs**; `publish` creates a fresh
+   draft from the same build's assets.
+   A stable release is marked latest only when it is newer than every stable release already published, so a backport
+   such as `v0.4.1` after `v0.5.0` stays off `releases/latest` (and its `lanq.json` off the Scoop latest URL).
    Runs for the same tag are queued (workflow `concurrency`), never cancelled. Check an asset with
    `gh attestation verify <file> --repo jangolath/lanqueue` (see "Verify a release" in the README).
 

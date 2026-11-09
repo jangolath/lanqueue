@@ -279,7 +279,6 @@ public sealed class StaticYamlTests
     [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!str \"22:00-07:00\"")]
     [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!seq [\"22:00-07:00\"]")]
     [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: [!!str \"22:00-07:00\"]")]
-    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: ! \"22:00-07:00\"")]
     [InlineData("max_jobs: 3", "max_jobs: !!str 3")]
     [InlineData("max_jobs: 3", "max_jobs: !!int \"3\"")]
     [InlineData("max_jobs: 3", "max_jobs: !!float 3.0")]
@@ -340,10 +339,24 @@ public sealed class StaticYamlTests
     [Fact]
     public void ATaggedNullIsTreatedAsIn04()
     {
-        // 0.4: a bare !!null means "not set"; !!null '' is an empty (invalid) entry.
+        // 0.4: a bare (plain) !!null means "not set"; a quoted one is refused (0.4 refused !!null '' too, as an empty entry).
         Assert.Null(ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null", StringComparison.Ordinal)).Machines[0].AllowedHours);
+        Assert.Null(ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null ~", StringComparison.Ordinal)).Machines[0].AllowedHours);
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null ''", StringComparison.Ordinal)));
-        Assert.Contains("allowed_hours entry ''", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("YAML tag 'tag:yaml.org,2002:null'", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A quoted scalar is a string, so a !!null on it would let the string "null" through as a value: refused.</summary>
+    [Theory]
+    [InlineData("MSBUILDNODECOUNT: \"1\"", "MSBUILDNODECOUNT: !!null \"null\"")]
+    [InlineData("  allowed_commands:\n    - dotnet build", "  allowed_commands:\n    - !!null \"null\"\n    - dotnet build")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: [dotnet, !!null '~']")]
+    public void ANullTagOnAQuotedScalarIsRefused(string from, string to)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+        Assert.Contains("YAML tag 'tag:yaml.org,2002:null' does not fit", ex.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -357,6 +370,89 @@ public sealed class StaticYamlTests
         Assert.NotEqual(Everything, yaml);
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
         Assert.Contains($"tag '{tag}' is not supported", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// !!str keeps a value a string: "~", "null" and an empty !!str are strings, never YAML null, so allowed_hours cannot silently turn
+    /// into "any time" (0.4 refused these as invalid entries).
+    /// </summary>
+    [Theory]
+    [InlineData("allowed_hours: !!str ~", "allowed_hours entry '~'")]
+    [InlineData("allowed_hours: !!str null", "allowed_hours entry 'null'")]
+    [InlineData("allowed_hours: !!str", "allowed_hours entry ''")]
+    [InlineData("allowed_hours: !!str ''", "allowed_hours entry ''")]
+    public void AStrTaggedNullWordIsAStringNotNull(string line, string mentions)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Everything.Replace("allowed_hours: \"22:00-07:00\"", line, StringComparison.Ordinal)));
+        Assert.Contains(mentions, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStrTaggedBoolWordIsAString()
+    {
+        var c = ConfigLoader.Parse(Everything
+            .Replace("    key_env: LANQ_KEY_LIN", "    key_env: !!str true", StringComparison.Ordinal)
+            .Replace("MSBUILDNODECOUNT: \"1\"", "MSBUILDNODECOUNT: !!str yes", StringComparison.Ordinal));
+        Assert.Equal("true", c.Machines[0].KeyEnv);
+        Assert.Equal("yes", c.Machines[0].Env["MSBUILDNODECOUNT"]);
+    }
+
+    /// <summary>A tag that contradicts its node (or the non-specific '!') is refused with the tag and line, never silently ignored.</summary>
+    [Theory]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: ! \"22:00-07:00\"", "'!'")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!map [\"22:00-07:00\"]", "'tag:yaml.org,2002:map'")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!map \"22:00-07:00\"", "'tag:yaml.org,2002:map'")]
+    [InlineData("    env:\n", "    env: !!seq\n", "'tag:yaml.org,2002:seq'")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!seq \"22:00-07:00\"", "'tag:yaml.org,2002:seq'")]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: !!str [dotnet, node]", "'tag:yaml.org,2002:str'")]
+    [InlineData("allowed_hours: \"22:00-07:00\"", "allowed_hours: !!null \"22:00-07:00\"", "'tag:yaml.org,2002:null'")]
+    [InlineData("max_jobs: 3", "max_jobs: !!int three", "'tag:yaml.org,2002:int'")]
+    [InlineData("max_jobs: 3", "max_jobs: !!int 3.5", "'tag:yaml.org,2002:int'")]
+    [InlineData("min_free_mem_gb: 2", "min_free_mem_gb: !!float two", "'tag:yaml.org,2002:float'")]
+    [InlineData("    ssh: build@lin.lan", "    ssh: !!bool build@lin.lan", "'tag:yaml.org,2002:bool'")]
+    public void TagsThatContradictTheirNodeAreRefused(string from, string to, string tag)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+        Assert.Contains("YAML tag " + tag, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("(line ", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("    os: linux", "    os: !!int 1", "os must be the word")]
+    [InlineData("max_jobs: 3", "max_jobs: !!float 2.5", "Invalid config")] // 0.4 truncated it to 2
+    [InlineData("  allowed_directories:", "  allowed_commands: [rm]\n  allowed_directories:", "Duplicate key")] // used to replace the allowlist
+    public void OtherShapesThat04AcceptedAreRefused(string from, string to, string mentions)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        Assert.Contains(mentions, Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml)).Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>An anchor whose node contains its own alias would recurse for ever; it is a config error, and --json still gives one object.</summary>
+    [Theory]
+    [InlineData("capabilities: [dotnet, node]", "capabilities: &s [*s]")]
+    [InlineData("    env:\n      NODE_OPTIONS", "    env: &e\n      SELF: *e\n      NODE_OPTIONS")]
+    public async Task ASelfReferencingAnchorIsRefused(string from, string to)
+    {
+        var yaml = Everything.Replace(from, to, StringComparison.Ordinal);
+        Assert.NotEqual(Everything, yaml);
+        Assert.Contains("refers to itself", Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml)).Message, StringComparison.Ordinal);
+
+        var path = Path.Combine(Path.GetTempPath(), "lanq-cycle-" + Guid.NewGuid().ToString("N") + ".yml");
+        File.WriteAllText(path, yaml);
+        try
+        {
+            var o = new StringWriter();
+            Assert.Equal(2, await Cli.RunAsync(["health", "--json", "--config", path], o, new StringWriter(), CancellationToken.None));
+            using var doc = System.Text.Json.JsonDocument.Parse(Assert.Single(o.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries)));
+            Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     /// <summary>A YAML alias for allowed_hours is accepted and means the anchored value (pinned behaviour).</summary>

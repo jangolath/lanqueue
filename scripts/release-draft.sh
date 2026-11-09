@@ -3,8 +3,9 @@
 #   draft <tag> <prerelease> <assets dir>  create a DRAFT release with every asset. On a re-run it reuses its own draft only when that
 #                                          draft is empty or holds the same SHA256SUMS as these assets; a published release, or a draft
 #                                          from another build, is refused.
-#   publish <tag> <prerelease>             make the draft public. A prerelease is never marked latest, so releases/latest (and the Scoop
-#                                          URL) never serve a release candidate.
+#   publish <tag> <prerelease>             make the draft public. It is marked latest only when it is a stable release newer than every
+#                                          stable release already published: a prerelease or a backport (v0.4.1 after v0.5.0) never
+#                                          moves releases/latest, so the Scoop latest URL only ever serves the newest stable release.
 # <prerelease> is true or false and must agree with the tag (a '-' in the version).
 set -eu
 
@@ -31,11 +32,31 @@ if [ "$prerelease" != "$want" ]; then
   exit 2
 fi
 
-if [ "$prerelease" = true ]; then
-  latest=--latest=false
-else
-  latest=--latest
-fi
+# True when stable version $1 (x.y.z) is newer than $2, comparing each part as a number.
+newer() {
+  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, "."); for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 } exit 1 }'
+}
+
+# --latest when $tag is a stable release newer than every published stable release (one tag per line on stdin), else --latest=false.
+latest_flag() {
+  if [ "$prerelease" = true ]; then
+    echo --latest=false
+    return
+  fi
+  mine=${tag#v}
+  while read -r other; do
+    case "$other" in
+      v*) other=${other#v} ;;
+      *) continue ;;
+    esac
+    printf '%s\n' "$other" | grep -q -E '^[0-9]+[.][0-9]+[.][0-9]+$' || continue
+    if ! newer "$mine" "$other"; then
+      echo --latest=false
+      return
+    fi
+  done
+  echo --latest
+}
 
 case "$mode" in
   draft)
@@ -61,6 +82,12 @@ case "$mode" in
     fi
     ;;
   publish)
+    if [ "$prerelease" = true ]; then
+      latest=--latest=false
+    else
+      published=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1000 --json tagName --jq '.[].tagName')
+      latest=$(printf '%s\n' "$published" | latest_flag)
+    fi
     gh release edit "$tag" --draft=false "$latest"
     ;;
   *)

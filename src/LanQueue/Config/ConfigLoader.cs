@@ -157,18 +157,40 @@ public static partial class ConfigLoader
             throw new ConfigException($"Invalid config: the file must be a mapping with policy: and machines: keys (line {root.Start.Line}).");
         }
 
-        Walk(root, "");
+        Walk(root, "", new HashSet<YamlNode>(ReferenceEqualityComparer.Instance));
 
         static string Shown(string path) => path.Replace("[]", "", StringComparison.Ordinal);
 
-        static void Walk(YamlNode node, string path)
+        // An anchor whose node holds its own alias (capabilities: &s [*s]) is a cycle that would recurse for ever: refused. The depth cap
+        // is a second guard; lanq's config is never more than a few levels deep.
+        static void Enter(YamlNode node, string path, HashSet<YamlNode> ancestors)
         {
+            if (ancestors.Contains(node))
+            {
+                throw new ConfigException($"Invalid config: '{Shown(path)}' refers to itself through a YAML alias (line {node.Start.Line}).");
+            }
+
+            if (ancestors.Count >= 32)
+            {
+                throw new ConfigException($"Invalid config: '{Shown(path)}' is nested too deeply (line {node.Start.Line}).");
+            }
+        }
+
+        static void Walk(YamlNode node, string path, HashSet<YamlNode> ancestors)
+        {
+            if (node is not (YamlMappingNode or YamlSequenceNode))
+            {
+                return;
+            }
+
+            ancestors.Add(node);
             switch (node)
             {
                 case YamlMappingNode map:
                     foreach (var (k, v) in map.Children)
                     {
                         var child = (path.Length == 0 ? "" : path + ".") + ((k as YamlScalarNode)?.Value ?? "");
+                        Enter(v, child, ancestors);
                         if (path == "env" || path.EndsWith(".env", StringComparison.Ordinal))
                         {
                             continue; // an env: value is checked, and its variable named, by Validate
@@ -179,23 +201,26 @@ public static partial class ConfigLoader
                             throw new ConfigException($"Invalid config: '{Shown(child)}' has no value (line {v.Start.Line}). Give it a value or leave the key out.");
                         }
 
-                        Walk(v, child);
+                        Walk(v, child, ancestors);
                     }
 
                     break;
                 case YamlSequenceNode list:
                     foreach (var item in list.Children)
                     {
+                        Enter(item, path, ancestors);
                         if (IsNull(item))
                         {
                             throw new ConfigException($"Invalid config: '{Shown(path)}' has an empty entry (line {item.Start.Line}).");
                         }
 
-                        Walk(item, path + "[]");
+                        Walk(item, path + "[]", ancestors);
                     }
 
                     break;
             }
+
+            ancestors.Remove(node);
         }
     }
 

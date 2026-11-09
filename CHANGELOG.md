@@ -23,9 +23,15 @@
   the normal `-warnaserror` build. `allowed_hours` now has its own type (`HoursList`) because the static generator
   does not carry a property's `[YamlConverter]` attribute; a test loads every config key in every accepted shape.
   State files written by 0.4 read unchanged.
-- **Config:** a duplicate key, such as two `name:` lines in one machine or the same name twice under `env:`, is now an
-  error instead of the last one silently winning. Explicit standard YAML tags (`!!str`, `!!int`, `!!float`, `!!null`,
-  `!!seq`, `!!map`) still load as in 0.4; any other tag (`!custom`, `!!binary`, `!!timestamp`) is refused by name.
+- **Config:** a duplicate key is now an error at every level instead of the last one silently winning: two `name:`
+  lines in one machine, the same name twice under `env:`, or a second `allowed_commands:` under `policy:` (which used
+  to replace the allowlist without a word). `os: 1` and `os: !!int 1` are refused (only the words `windows` and
+  `linux`), and `max_jobs: !!float 2.5` is refused (0.4 truncated it to 2). Explicit standard YAML tags (`!!str`,
+  `!!int`, `!!float`, `!!bool`, `!!null`, `!!seq`, `!!map`) still load as in 0.4 when they fit the value; `!!str` keeps
+  a value a string (`allowed_hours: !!str ~` is an invalid entry, never "any time"). A tag that contradicts its value
+  (`!!map` on a list, `!!int` on a word), the non-specific `!`, and any other tag (`!custom`, `!!binary`,
+  `!!timestamp`) are refused by name and line, and so is an anchor that refers to itself (`capabilities: &s [*s]`,
+  which used to crash lanq).
 - **Release order:** nothing is published unless every binary built and passed its smoke test. The publish job puts
   all assets on a draft GitHub release, pushes the package to nuget.org, then makes the release public; a re-run after
   a failure reuses the draft only when it is empty or holds the same `SHA256SUMS` (`scripts/release-draft.sh`); a

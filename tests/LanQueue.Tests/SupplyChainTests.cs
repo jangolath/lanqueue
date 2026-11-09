@@ -46,7 +46,7 @@ public sealed partial class SupplyChainTests
     [Fact]
     public void EveryWorkflowActionIsPinnedToAFullCommitSha()
     {
-        var files = Directory.GetFiles(Path.Combine(Root, ".github", "workflows"), "*.yml");
+        var files = WorkflowFiles(Path.Combine(Root, ".github", "workflows"));
         Assert.NotEmpty(files);
         foreach (var file in files)
         {
@@ -103,8 +103,30 @@ public sealed partial class SupplyChainTests
                 ? ((YamlSequenceNode)s).Cast<YamlMappingNode>().Select(step => (((YamlScalarNode)c.Key).Value!, step))
                 : []);
 
+    /// <summary>Every workflow file in a folder: GitHub reads both .yml and .yaml.</summary>
+    internal static string[] WorkflowFiles(string folder) =>
+        [.. Directory.GetFiles(folder, "*.yml").Concat(Directory.GetFiles(folder, "*.yaml")).Order(StringComparer.Ordinal)];
+
     public static TheoryData<string> Workflows() =>
-        new(Directory.GetFiles(Path.Combine(FindRoot(), ".github", "workflows"), "*.yml").Select(f => Path.GetFileName(f)));
+        new(WorkflowFiles(Path.Combine(FindRoot(), ".github", "workflows")).Select(f => Path.GetFileName(f)));
+
+    [Fact]
+    public void WorkflowGuardsSeeYmlAndYamlFiles()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "lanq-wf-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "a.yml"), "");
+            File.WriteAllText(Path.Combine(dir, "b.yaml"), "");
+            File.WriteAllText(Path.Combine(dir, "c.txt"), "");
+            Assert.Equal(["a.yml", "b.yaml"], WorkflowFiles(dir).Select(f => Path.GetFileName(f)));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 
     /// <summary>No ${{ }} inside a run: block: a ref name or step output there is pasted into the shell as code. Pass values via env:.</summary>
     [Theory]
