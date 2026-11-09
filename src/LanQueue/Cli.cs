@@ -7,7 +7,7 @@ using LanQueue.Ssh;
 
 namespace LanQueue;
 
-public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyList<string> Needs, string Directory, int WaitSeconds, bool Json, IReadOnlyList<string> Argv)
+public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyList<string> Needs, string Directory, int WaitSeconds, IReadOnlyList<string> Argv)
 {
     public const int DefaultTimeoutMinutes = 240;
 
@@ -55,7 +55,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             }
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, false, argv) { TimeoutMinutes = timeout };
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout };
     }
 }
 
