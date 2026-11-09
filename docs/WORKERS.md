@@ -61,6 +61,40 @@ sudo systemctl enable --now ssh
 
 Add your public key to `~/.ssh/authorized_keys` of the build user (`chmod 600`).
 
+## Wake-on-LAN for a sleeping worker
+
+Optional. If a PC sleeps or is shut down outside its `allowed_hours`, `lanq` can wake it with a magic packet (see
+"Waking a sleeping worker" in the README for the `wake:` setting). Three things must be true for the packet to work, and
+`lanq` can check none of them: it only sees that ssh does or does not answer later.
+
+- **Wired Ethernet.** Wake-on-LAN usually works only over a cable. Wi-Fi rarely supports it.
+- **BIOS/UEFI.** Enable the setting (often named "Wake on LAN", "Power On By PCI-E/PCI", "Resume by LAN" or similar).
+  Turn off "ErP" or "deep sleep" power-saving options that cut power to the network card.
+- **The network card driver and the OS** (below). The machine must be on the same LAN and broadcast domain as the PC
+  running `lanq`, and its MAC address is the one of the wired adapter (`ipconfig /all` on Windows, `ip link` on Linux).
+
+### Windows
+
+1. Device Manager, Network adapters, your Ethernet adapter, Properties.
+2. Power Management tab: tick **Allow this device to wake the computer** and **Only allow a magic packet to wake the
+   computer** (the second one stops other network traffic from waking the PC at random).
+3. Advanced tab: if present, set **Wake on Magic Packet** to Enabled.
+4. **Fast Startup:** a PC shut down with Fast Startup enabled (the Windows default) is really hibernated and often does
+   not wake from a magic packet, or does so unreliably. If it does not wake from a full shutdown, turn Fast Startup off
+   (Control Panel, Power Options, Choose what the power buttons do, Change settings that are currently unavailable,
+   untick Turn on fast startup). Waking from sleep usually works with it on.
+5. Test before relying on it: shut the PC down, then run `lanq wake <machine> --wait` from your PC.
+
+### Linux
+
+1. Check support: `sudo ethtool eth0` should list `Supports Wake-on: ...g...`; `Wake-on: d` means it is off.
+2. Turn it on: `sudo ethtool -s eth0 wol g` (use your adapter's name from `ip link`). This does not survive a reboot.
+3. Make it persistent, one of:
+   - NetworkManager: `nmcli connection modify "<connection name>" 802-3-ethernet.wake-on-lan magic`
+   - systemd-networkd: in the interface's `.link` file under `[Match]`/`[Link]`, add `WakeOnLan=magic`
+   - a small systemd unit running `ethtool -s eth0 wol g` after `network.target`.
+4. Test as above with `lanq wake <machine> --wait`. `lanq doctor` shows the wake line and the same reminder.
+
 ## Then, on your PC
 
 1. Add the worker to your `machines.yml` (see `machines.example.yml`): name, `os`, `ssh` target, `work_root`,

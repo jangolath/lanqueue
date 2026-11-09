@@ -43,6 +43,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
+    /// <summary>lanq wake --wait: after sending the packet, wait until the machine answers ssh (up to its wake.wait_seconds).</summary>
+    public bool WaitForSsh { get; init; }
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
@@ -52,10 +55,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force"],
+        ["wake"] = ["--wait", "--json"],
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
-    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready" };
+    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready", "wake" };
 
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
@@ -73,6 +77,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var all = false;
         var yes = false;
         var remote = false;
+        var waitForSsh = false;
         var force = false;
         string? sshTarget = null;
         MachineOs? os = null;
@@ -96,6 +101,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--dir" when i + 1 < own.Length:
                     dir = own[++i];
+                    break;
+                case "--wait" when command == "wake":
+                    waitForSsh = true;
                     break;
                 case "--wait" when i + 1 < own.Length:
                     wait = int.Parse(own[++i], CultureInfo.InvariantCulture);
@@ -163,7 +171,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take a command after --; only lanq run does.");
         }
 
-        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote, Force = force, SshTarget = sshTarget, Os = os };
+        return new ParsedArgs(command, config, needs, dir, wait, argv) { TimeoutMinutes = timeout, MemGb = mem, Json = json, Target = target, All = all, Yes = yes, Remote = remote, WaitForSsh = waitForSsh, Force = force, SshTarget = sshTarget, Os = os };
     }
 }
 
@@ -179,6 +187,7 @@ public static partial class Cli
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--json]
+          lanq wake <machine> [--wait] [--json] [--config FILE]
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
@@ -191,8 +200,11 @@ public static partial class Cli
         makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
         problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
         outside its allowed hours (--force scans anyway). lanq never changes a worker.
+        wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
+        up to its wake.wait_seconds for ssh. lanq run and lanq health also wake such a machine by themselves, once, when it is unreachable inside its
+        allowed hours. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
-        makeready prints the validated report.
+        makeready prints the validated report; wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
         """;
 
@@ -212,7 +224,7 @@ public static partial class Cli
             var message = JobRunner.SafeLine(ex.Message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" && own.Contains("--json"))
             {
                 await WriteJsonError(own[0], "Rejected", 2, message, stdout).ConfigureAwait(false);
             }
@@ -227,7 +239,7 @@ public static partial class Cli
             return Stats(log, stdout);
         }
 
-        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready"))
+        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake"))
         {
             // Help that was asked for goes to stdout; usage after a mistake goes to stderr, so stdout stays clean for scripts.
             var asked = p.Command is "help" or "--help" or "-h";
@@ -271,7 +283,13 @@ public static partial class Cli
             return await Unlock(p, config, ssh, stdout, stderr, ct).ConfigureAwait(false);
         }
 
-        var probe = new HealthProbe(ssh, TimeProvider.System);
+        var waker = new WakeService(new UdpMagicPacketSender(), TimeProvider.System);
+        if (p.Command == "wake")
+        {
+            return await Wake(p, config, waker, new HealthProbe(ssh, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
+        }
+
+        var probe = new HealthProbe(ssh, TimeProvider.System, waker);
         if (p.Command == "health")
         {
             return await Health(config, probe, stdout, stderr, ct, p.Json).ConfigureAwait(false);
@@ -395,7 +413,7 @@ public static partial class Cli
         MachineHealth[] results;
         try
         {
-            results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+            results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct, waitForWake: true))).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (json && ct.IsCancellationRequested)
         {

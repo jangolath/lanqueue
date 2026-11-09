@@ -18,7 +18,7 @@
   `75` no eligible machine (retry with `--wait 120`, or tell the developer).
 - Never edit the lanq machines file, the allowlists or any ssh/key configuration. The developer owns them. If a
   command is refused, say so and stop; do not look for a way around it.
-- Do not run `lanq unlock` or `lanq makeready` unless the developer asks: they act on someone's PC.
+- Do not run `lanq unlock`, `lanq makeready` or `lanq wake` unless the developer asks: they act on someone's PC.
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
   commands run through lanq. lanq rejects them anyway.
 - Never put secrets, tokens or key material in files or command lines that lanq will ship; it refuses them.

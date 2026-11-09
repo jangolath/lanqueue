@@ -150,7 +150,7 @@ public sealed class JobRunner(
         while (true)
         {
             // Probe every machine at once; WhenAll keeps the config order whatever order the answers arrive in.
-            var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+            var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct, allowWake: HasCapabilities(m, req.Needs)))).ConfigureAwait(false);
             var health = config.Machines.Zip(probes)
                 .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold, HoldKind = HoldKind.Job }) : h)
                 .Select(h => (h.First, WithMemRequirement(h.Item2, req.MinMemGb)))
@@ -167,7 +167,8 @@ public sealed class JobRunner(
                 }
             }
 
-            if (deadline.Elapsed >= req.Wait)
+            // A machine that was just sent a magic packet may still come up (at most its wake.wait_seconds): keep waiting for it even with --wait 0.
+            if (deadline.Elapsed >= req.Wait && probe.Waker?.AnyPending != true)
             {
                 var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
                 var archiveNote = archive.Failure is null ? "" : " Archive build failed: " + archive.Failure;

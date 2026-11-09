@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased (0.5.0)
+
+- **Wake-on-LAN for sleeping workers.** An optional per-machine `wake:` setting (`mac` required as `aa:bb:cc:dd:ee:ff`
+  or `aa-bb-cc-dd-ee-ff`; `broadcast` an IPv4 literal, default `255.255.255.255`; `port` 7 or 9, default 9;
+  `wait_seconds` 1 to 600, default 120). `lanq run` and `lanq health` send one magic packet when such a machine is
+  unreachable (connect timeout, no route, refused; never an auth or host-key failure) and its `allowed_hours` window is
+  open, then probe again with backoff until it answers or `wait_seconds` run out. At most once per machine per
+  invocation, never outside its hours, never for a machine the job cannot use. `lanq run` keeps using other machines
+  while one wakes and waits for it when it is the only choice.
+- **`lanq wake <machine> [--wait] [--json]`** sends the packet even outside `allowed_hours` (you asked by name) and says
+  so; `--wait` waits for ssh. `--json` prints exactly one object on every path.
+- `lanq doctor` reports the wake setting (OK, or WARN for a broadcast address that is not private or link-local) and
+  reminds that Wake-on-LAN must be enabled in the BIOS/UEFI and the network card driver and usually needs wired Ethernet.
+- Docs: Windows and Linux Wake-on-LAN setup in `docs/WORKERS.md`; the magic packet is unauthenticated and LAN-only,
+  which is why it is opt-in per machine (SECURITY.md).
+
 ## 0.4.0 (2026-11-09)
 
 Workers and windows: making old and shared PCs safe to lend to the queue.

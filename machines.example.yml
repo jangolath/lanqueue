@@ -73,6 +73,10 @@ machines:
     work_root: D:/lanq
     capabilities: [dotnet, node, windows]
     max_jobs: 1
+    # wake:                    # optional Wake-on-LAN: lanq wakes it (once per run) when it is unreachable inside its hours
+    #   mac: "aa:bb:cc:dd:ee:ff"     # needs WoL enabled in the BIOS/UEFI and NIC driver; usually wired Ethernet (docs/WORKERS.md)
+    #   broadcast: 10.20.30.255     # optional IPv4 literal; default 255.255.255.255
+    #   wait_seconds: 120            # optional, 1 to 600
     allowed_hours:
       - "Mon-Fri 22:00-07:00"  # weeknights, into the next morning
       - "Sat,Sun 01:00-09:00"  # weekend nights
