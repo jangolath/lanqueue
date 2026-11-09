@@ -38,7 +38,8 @@ values a test pins; they are updated only through `scripts/sync-makeready.sh`, w
 nothing is written to the worker. Its JSON report is untrusted: read up to 1 MB, parsed by a source-generated
 deserializer (no reflection), validated against the `lanq-makeready/v1` schema, sanitised before display, and never
 executed. `lanq doctor --remote` writes and removes one empty temporary file in `work_root` and runs version
-commands (`go` with `GOTOOLCHAIN=local`) in the job environment; `lanq doctor` without `--remote` makes no network
+commands (`go` with `GOTOOLCHAIN=local`, `cargo` with `RUSTUP_AUTO_INSTALL=0`, each stopped after 20 seconds) in the job
+environment, and, like `makeready`, skips a machine that is paused or outside its allowed hours unless `--force`; `lanq doctor` without `--remote` makes no network
 connection.
 
 On a git worker every git call runs with hooks disabled (`core.hooksPath` at the null device), `core.fsmonitor` off,

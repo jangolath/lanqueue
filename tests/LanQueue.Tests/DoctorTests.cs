@@ -1,4 +1,5 @@
 using LanQueue.Config;
+using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Ssh;
 using Xunit;
@@ -50,12 +51,192 @@ public sealed class DoctorTests : IDisposable
             _ => Task.FromResult(unencrypted),
             home ?? _home);
 
-    private static async Task<(int Code, string Out)> Doctor(DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false)
+    private static async Task<(int Code, string Out)> Doctor(
+        DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false, bool force = false, TimeProvider? clock = null)
     {
         var o = new StringWriter();
-        var p = ParsedArgs.Parse(remote ? ["doctor", "--remote"] : ["doctor"]);
-        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh ?? new FakeSsh(), o, CancellationToken.None);
+        var p = ParsedArgs.Parse([.. (string[])["doctor"], .. remote ? ["--remote"] : (string[])[], .. force ? ["--force"] : (string[])[]]);
+        ssh ??= new FakeSsh();
+        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, CancellationToken.None);
         return (code, o.ToString());
+    }
+
+    private const string HealthyProbe = "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok\npaused=0\n";
+
+    private static bool IsProbe(string command) => command.Contains("disk_free_gb", StringComparison.Ordinal) || Decoded(command).Contains("disk_free_gb", StringComparison.Ordinal);
+
+    private static string Decoded(string command) => command.Contains("-EncodedCommand ", StringComparison.Ordinal)
+        ? System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(command[(command.LastIndexOf(' ') + 1)..]))
+        : command;
+
+    /// <summary>Like lanq makeready, doctor --remote leaves a paused machine and one outside its hours alone unless --force.</summary>
+    [Fact]
+    public async Task RemoteRespectsAPauseFileAndAllowedHoursUnlessForced()
+    {
+        var config = T.Config(); // build-02 is allowed 22:00-07:00
+        var noon = new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero));
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => IsProbe(cmd)
+                ? new SshResult(0, HealthyProbe.Replace("paused=0", m.Name == "build-01" ? "paused=1" : "paused=0", StringComparison.Ordinal) + "local_time=2026-01-05T12:00:00\n")
+                : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=0|10.0.100\ncap.node=0|v22\n"),
+        };
+
+        var (code, o) = await Doctor(Host(), ssh, () => config, remote: true, clock: noon);
+
+        Assert.Equal(0, code); // a held machine is not a problem with the setup
+        Assert.DoesNotContain(ssh.Calls, c => !IsProbe(c.Command)); // nothing but the probe ran on either machine
+        Assert.Contains(Lines(o, "HOLD"), l => l.Contains("build-01", StringComparison.Ordinal) && l.Contains("paused", StringComparison.Ordinal) && l.Contains("--force", StringComparison.Ordinal));
+        Assert.Contains(Lines(o, "HOLD"), l => l.Contains("build-02", StringComparison.Ordinal) && l.Contains("outside allowed hours", StringComparison.Ordinal));
+
+        ssh.Calls.Clear();
+        (code, o) = await Doctor(Host(), ssh, () => config, remote: true, force: true, clock: noon);
+        Assert.Empty(Lines(o, "HOLD"));
+        Assert.DoesNotContain(ssh.Calls, c => IsProbe(c.Command));
+        Assert.Equal(2, ssh.Calls.Count);
+    }
+
+    [Fact]
+    public void ForceIsADoctorOption() => Assert.True(ParsedArgs.Parse(["doctor", "--remote", "--force"]).Force);
+
+    /// <summary>A check that hangs is reported as timed out; the others still report.</summary>
+    [Fact]
+    public async Task RemoteReportsATimedOutCheckAndKeepsTheOthers()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=timeout|\ncap.node=0|v22.1.0\n") };
+        var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
+        Assert.Equal(1, code);
+        Assert.Contains(Lines(o, "FAIL"), l => l.Contains("dotnet", StringComparison.Ordinal) && l.Contains("timed out", StringComparison.Ordinal));
+        Assert.Contains(Lines(o, "OK"), l => l.Contains("node", StringComparison.Ordinal) && l.Contains("v22.1.0", StringComparison.Ordinal));
+    }
+
+    /// <summary>If the whole ssh call runs out of time, what did arrive is still reported, and the rest says it did not finish.</summary>
+    [Fact]
+    public async Task RemoteParsesPartialOutputWhenTheWholeCallTimesOut()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(124, "root=ok\ntool=ok\ncap.dotnet=0|10.0.100\n", TimedOut: true) };
+        var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
+        Assert.Equal(1, code);
+        Assert.Contains(Lines(o, "OK"), l => l.Contains("dotnet", StringComparison.Ordinal) && l.Contains("10.0.100", StringComparison.Ordinal));
+        Assert.Contains(Lines(o, "FAIL"), l => l.Contains("node", StringComparison.Ordinal) && l.Contains("did not finish", StringComparison.Ordinal));
+        Assert.DoesNotContain(Lines(o, "FAIL"), l => l.Contains("unreachable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void EveryRemoteCheckHasItsOwnTimeout()
+    {
+        var linux = T.Linux();
+        linux.Capabilities = ["dotnet", "rust"];
+        var sh = RemoteScripts.Doctor(linux, checkSeconds: 7);
+        Assert.Contains("if timeout -k 5 1 true >/dev/null 2>&1; then T=\"timeout -k 5 7\"; fi", sh, StringComparison.Ordinal);
+        Assert.Contains("$T /bin/sh -c 'dotnet --version'", sh, StringComparison.Ordinal);
+        Assert.Contains("=timeout|", sh, StringComparison.Ordinal);
+
+        var windows = T.Windows();
+        windows.Capabilities = ["dotnet", "rust"];
+        var ps = RemoteScripts.Doctor(windows, checkSeconds: 7);
+        Assert.Contains("WaitForExit(7000)", ps, StringComparison.Ordinal);
+        Assert.Contains("taskkill /PID $p.Id /T /F", ps, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheRustCheckCanNeverInstallAToolchain()
+    {
+        var m = T.Linux();
+        m.Capabilities = ["rust", "go"];
+        Assert.Contains("RUSTUP_AUTO_INSTALL=0 cargo --version", RemoteScripts.Doctor(m), StringComparison.Ordinal);
+        Assert.Contains("GOTOOLCHAIN=local go version", RemoteScripts.Doctor(m), StringComparison.Ordinal);
+        var w = T.Windows();
+        w.Capabilities = ["rust", "go"];
+        Assert.Contains("$env:RUSTUP_AUTO_INSTALL = ''0''; cargo --version", RemoteScripts.Doctor(w), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWindowsDoctorScriptWithEveryCheckFitsTheCommandLine()
+    {
+        var m = T.Windows();
+        m.Capabilities = [.. RemoteScripts.ToolChecks.Keys];
+        m.Env["NODE_OPTIONS"] = "--max-old-space-size=2048";
+        m.PathPrepend.Add("C:/Users/build/.cargo/bin");
+        Assert.NotEmpty(RemoteScripts.Wrap(m, RemoteScripts.Doctor(m)));
+    }
+
+    private static void MakeTool(string bin, string name, string sh, string cmd)
+    {
+        File.WriteAllText(Path.Combine(bin, name + ".cmd"), cmd + (char)13 + (char)10);
+        var file = Path.Combine(bin, name);
+        File.WriteAllText(file, "#!/bin/sh" + (char)10 + sh + (char)10);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(file, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [ShFact]
+    public void TheRealShScriptStopsAHangingToolCheck() => TheRealScriptStopsAHangingToolCheck("linux");
+
+    [WindowsFact]
+    public void TheRealPowerShellScriptStopsAHangingToolCheck() => TheRealScriptStopsAHangingToolCheck("windows");
+
+    private static void TheRealScriptStopsAHangingToolCheck(string shell)
+    {
+        using var worker = new LocalWorker();
+        var bin = Path.Combine(worker.Root, "fake-bin");
+        Directory.CreateDirectory(bin);
+        MakeTool(bin, "dotnet", "sleep 60", "@ping -n 60 127.0.0.1 >nul");
+        MakeTool(bin, "npm", "echo 9.9.9-fake", "@echo 9.9.9-fake");
+        var dir = bin.Replace('\\', '/');
+        if (shell == "linux" && OperatingSystem.IsWindows())
+        {
+            dir = "/" + char.ToLowerInvariant(dir[0]) + dir[2..]; // Git for Windows sh: a PATH entry cannot contain "C:"
+        }
+
+        var m = worker.Machine;
+        m.Os = shell == "windows" ? MachineOs.Windows : MachineOs.Linux;
+        m.Capabilities = ["dotnet", "npm"];
+        m.PathPrepend = [dir];
+        m.Transfer = TransferMode.Archive;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var lines = StaleSlotTests.RunScript(shell, RemoteScripts.Doctor(m, checkSeconds: 3)).Replace("\r", "", StringComparison.Ordinal).Split('\n');
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), "took " + watch.Elapsed);
+        Assert.Contains("cap.dotnet=timeout|", lines);
+        Assert.Contains("cap.npm=0|9.9.9-fake", lines);
+    }
+
+    /// <summary>known_hosts lookups use the HostKeyAlias (bare, as ssh does) and the global known_hosts files from ssh -G.</summary>
+    [Fact]
+    public async Task KnownHostsHonoursHostKeyAliasAndTheGlobalFiles()
+    {
+        const string Global = "/etc/ssh/ssh_known_hosts";
+        var host = Host(
+            exec: line => line switch
+            {
+                "ssh -G user@build-01.lan" => new SshResult(0,
+                    "hostname 192.0.2.10\nport 2222\nhostkeyalias build01-key\nuserknownhostsfile ~/.ssh/known_hosts\nglobalknownhostsfile /etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2\n"),
+                "ssh-keygen -F build01-key -f " + Global => new SshResult(0, "# Host build01-key found: line 1\nbuild01-key ssh-ed25519 AAAA"),
+                _ when line.StartsWith("ssh-keygen -F build01-key", StringComparison.Ordinal) || line.StartsWith("ssh-keygen -F [192.0.2.10]", StringComparison.Ordinal) => new SshResult(1, ""),
+                _ => null,
+            },
+            exists: path => path is KnownHosts or Global or "/keys/build01");
+        var (code, o) = await Doctor(host);
+
+        Assert.Equal(0, code);
+        Assert.Contains(Lines(o, "OK"), l => l.Contains("build-01", StringComparison.Ordinal) && l.Contains("build01-key", StringComparison.Ordinal));
+        Assert.DoesNotContain(_ran, l => l.Contains("[192.0.2.10]:2222", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("hostkeyalias none\n")]
+    [InlineData("")]
+    public async Task NoHostKeyAliasMeansTheHostNameAndPort(string alias)
+    {
+        var host = Host(exec: line => line == "ssh -G user@build-01.lan" ? new SshResult(0, "hostname 192.0.2.10\nport 2222\n" + alias) : null);
+        await Doctor(host);
+        Assert.Contains("ssh-keygen -F [192.0.2.10]:2222", _ran);
     }
 
     private static string[] Lines(string output, string level) =>
@@ -162,8 +343,8 @@ public sealed class DoctorTests : IDisposable
         var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
 
         Assert.Equal(1, code);
-        Assert.Equal(2, ssh.Calls.Count); // one call per machine
-        var linux = ssh.Calls.Single(c => c.Machine == "build-01").Command;
+        Assert.Equal(2, ssh.Calls.Count(c => !IsProbe(c.Command))); // one doctor call per machine
+        var linux = ssh.Calls.Single(c => c.Machine == "build-01" && !IsProbe(c.Command)).Command;
         Assert.Contains("npm --version", linux, StringComparison.Ordinal);
         Assert.Contains("PATH=/opt/node/bin", linux, StringComparison.Ordinal); // run in the job environment
         Assert.DoesNotContain("gpu", linux, StringComparison.Ordinal);

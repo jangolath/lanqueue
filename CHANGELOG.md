@@ -122,11 +122,16 @@ Command line:
   ready, `1` not ready, `2` bad arguments, `70` ssh or unusable report, `75` the machine is paused or outside its
   allowed hours (`--force` scans anyway).
 - **`lanq doctor`** checks your own setup with no network: ssh/scp/git/ssh-keygen on PATH, the state folder, the
-  config, and per machine a `known_hosts` entry (resolved with `ssh -G`, `[host]:port` for other ports) and the
-  `key_env` file and passphrase. **`lanq doctor --remote`** adds one ssh call per machine (four at a time): `work_root`
-  writable, git or tar, and each capability's tool (`dotnet`, `node`, `npm`, `python`, `go`, `rust`, `java`, `docker`)
-  run in the job environment, so a tool missing from a non-login SSH session (fix: `path_prepend:`) shows up before a
-  job fails. Exit `0` when every line is OK.
+  config, and per machine a `known_hosts` entry (resolved with `ssh -G`: `[host]:port` for other ports, a
+  `HostKeyAlias` as it is, and both the user and the global known_hosts files) and the `key_env` file and passphrase.
+  **`lanq doctor --remote`** first probes each machine and, like `makeready`, leaves one that is paused or outside its
+  `allowed_hours` alone (a `HOLD` line; `--force` checks it anyway). Then it makes one ssh call per machine (four at
+  a time): `work_root` writable, git or tar (and, for git, a WARN when the worker's git is older than 2.32), and each
+  capability's tool (`dotnet`, `node`, `npm`, `python`, `go` with `GOTOOLCHAIN=local`, `rust` with
+  `RUSTUP_AUTO_INSTALL=0`, `java`, `docker`) run in the job environment, so a tool missing from a non-login SSH session
+  (fix: `path_prepend:`) shows up before a job fails. Each check may take 20 seconds (Linux `timeout`, Windows a child
+  PowerShell killed with its tree); a hanging one is reported as timed out and the others still run, and if the whole
+  call runs out of time what did arrive is still reported. Exit `0` when no line is WARN or FAIL.
 - **`--json`** for `lanq health` (one array: `name`, `state`, `reasons`, `load`, `diskFreeGb`, `memFreeGb`,
   `slotsUsed`, `maxJobs`, `localTime`) and `lanq run` (the job's output goes to stderr, then one object on stdout:
   `status`, `exitCode`, `machine`, `jobId`, `durationSeconds`, `message`). Agents should prefer it.

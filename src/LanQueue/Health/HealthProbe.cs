@@ -5,6 +5,25 @@ using LanQueue.Ssh;
 
 namespace LanQueue.Health;
 
+/// <summary>Why a machine is held, for code that must act on the reason (the text in <see cref="MachineHealth.Hold"/> is for people).</summary>
+public enum HoldKind
+{
+    None,
+    Unreachable,
+    Unreadable,
+    ToolMissing,
+    Paused,
+    OutsideHours,
+    WindowClosing,
+    LowDisk,
+    LowMemory,
+    MemoryPressure,
+    Load,
+
+    /// <summary>A hold the runner adds for one job (arguments not safe for Windows, --mem).</summary>
+    Job,
+}
+
 /// <param name="Hold">Null when the machine may take work; otherwise why it should be skipped.</param>
 public sealed record MachineHealth(
     string Name,
@@ -33,6 +52,9 @@ public sealed record MachineHealth(
     /// <summary>When the machine's current allowed-hours window ends (UTC), or null when it has no allowed_hours.</summary>
     public DateTimeOffset? WindowEndsUtc { get; init; }
 
+    /// <summary>Why the machine is held (<see cref="HoldKind.None"/> when it is not), for code that acts on the reason.</summary>
+    public HoldKind HoldKind { get; init; }
+
     /// <summary>The worker's own local time as it reported it (yyyy-MM-ddTHH:mm:ss), or null when it did not.</summary>
     public string? LocalTime { get; init; }
 }
@@ -49,26 +71,29 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
         }
         catch (InvalidOperationException ex)
         {
-            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", ex.Message);
+            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", ex.Message) { HoldKind = HoldKind.Unreachable };
         }
 
         if (!result.Ok)
         {
-            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", FirstLine(result.Output));
+            return new MachineHealth(machine.Name, false, 0, 0, 0, "unreachable", FirstLine(result.Output)) { HoldKind = HoldKind.Unreachable };
         }
 
         var values = Parse(result.Output);
         values.TryGetValue("tool", out var tool);
         if (tool is not ("ok" or "missing"))
         {
-            return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (tool check missing or invalid)", null);
+            return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (tool check missing or invalid)", null) { HoldKind = HoldKind.Unreadable };
         }
 
         if (!TryNum(values, "load", out var load) || !TryNum(values, "disk_free_gb", out var disk) || !TryNum(values, "slots_used", out var slotsRaw)
             || load < 0 || disk < 0 || slotsRaw < 0)
         {
             // A missing or garbled key must never read as "idle machine with space": hold instead.
-            return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (load, disk_free_gb or slots_used missing or invalid)", null);
+            return new MachineHealth(machine.Name, true, 0, 0, 0, "unreadable health output (load, disk_free_gb or slots_used missing or invalid)", null)
+            {
+                HoldKind = HoldKind.Unreadable,
+            };
         }
 
         // Hours are the worker's own: its local clock when it reports one, else (older probe output) the orchestrator's local clock.
@@ -90,14 +115,12 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
             LocalTime = workerNow?.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture),
             WindowEndsUtc = remaining is { } left ? clock.GetUtcNow() + left : null,
         };
-        return health with
-        {
-            Hold = tool == "missing"
-                ? machine.Transfer == TransferMode.Archive
-                    ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or bsdtar plus gzip on Linux, or a Windows built-in tar.exe that accepts --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions)"
-                    : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)"
-                : Evaluate(machine, policy, health, remaining),
-        };
+        var (kind, hold) = tool == "missing"
+            ? (HoldKind.ToolMissing, machine.Transfer == TransferMode.Archive
+                ? "tar is missing or unsupported on the machine (transfer: archive needs GNU tar or bsdtar plus gzip on Linux, or a Windows built-in tar.exe that accepts --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions)"
+                : "git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)")
+            : EvaluateHold(machine, policy, health, remaining);
+        return health with { Hold = hold, HoldKind = kind };
     }
 
     /// <summary>
@@ -105,44 +128,48 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock)
     /// above the threshold. Memory that the worker did not report (null) never holds: older kernels and odd hosts simply do not say.
     /// </summary>
     /// <param name="windowRemaining">Time left in the machine's current allowed-hours window; null when outside (or when it has none).</param>
-    public static string? Evaluate(Machine machine, PolicyConfig policy, MachineHealth h, TimeSpan? windowRemaining)
+    public static string? Evaluate(Machine machine, PolicyConfig policy, MachineHealth h, TimeSpan? windowRemaining) =>
+        EvaluateHold(machine, policy, h, windowRemaining).Text;
+
+    /// <inheritdoc cref="Evaluate"/>
+    public static (HoldKind Kind, string? Text) EvaluateHold(Machine machine, PolicyConfig policy, MachineHealth h, TimeSpan? windowRemaining)
     {
         if (h.Paused)
         {
-            return "paused on the machine";
+            return (HoldKind.Paused, "paused on the machine");
         }
 
         if (machine.AllowedHours is { Count: > 0 })
         {
             if (windowRemaining is not { } left)
             {
-                return "outside allowed hours";
+                return (HoldKind.OutsideHours, "outside allowed hours");
             }
 
             if (left < TimeSpan.FromMinutes(policy.MinWindowMinutes))
             {
-                return string.Create(CultureInfo.InvariantCulture, $"window closing ({Math.Ceiling(left.TotalMinutes):0} min left)");
+                return (HoldKind.WindowClosing, string.Create(CultureInfo.InvariantCulture, $"window closing ({Math.Ceiling(left.TotalMinutes):0} min left)"));
             }
         }
 
         if (h.DiskFreeGb < policy.MinFreeDiskGb)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"disk free {h.DiskFreeGb:0.#} GB below minimum {policy.MinFreeDiskGb:0.#} GB");
+            return (HoldKind.LowDisk, string.Create(CultureInfo.InvariantCulture, $"disk free {h.DiskFreeGb:0.#} GB below minimum {policy.MinFreeDiskGb:0.#} GB"));
         }
 
         if (h.MemFreeGb < (machine.MinFreeMemGb ?? policy.MinFreeMemGb))
         {
-            return string.Create(CultureInfo.InvariantCulture, $"low memory ({h.MemFreeGb:0.0} GB free)");
+            return (HoldKind.LowMemory, string.Create(CultureInfo.InvariantCulture, $"low memory ({h.MemFreeGb:0.0} GB free)"));
         }
 
         if (h.MemPressure > policy.MaxMemPressure)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"memory pressure (some avg10 {h.MemPressure:0.#}% above {policy.MaxMemPressure:0.#}%)");
+            return (HoldKind.MemoryPressure, string.Create(CultureInfo.InvariantCulture, $"memory pressure (some avg10 {h.MemPressure:0.#}% above {policy.MaxMemPressure:0.#}%)"));
         }
 
         return h.LoadRatio > policy.LoadThreshold
-            ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00} above threshold {policy.LoadThreshold:0.00}")
-            : null;
+            ? (HoldKind.Load, string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00} above threshold {policy.LoadThreshold:0.00}"))
+            : (HoldKind.None, null);
     }
 
     public static Dictionary<string, string> Parse(string output)

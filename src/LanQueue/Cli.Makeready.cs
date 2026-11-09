@@ -102,9 +102,12 @@ public static partial class Cli
                     return 70;
                 }
 
-                var held = h.Paused ? "paused (a PAUSE file is in its work_root)"
-                    : m.AllowedHours is { Count: > 0 } && h.Hold == "outside allowed hours" ? "outside allowed hours"
-                    : null;
+                var held = h.HoldKind switch
+                {
+                    HoldKind.Paused => "paused (a PAUSE file is in its work_root)",
+                    HoldKind.OutsideHours => "outside allowed hours",
+                    _ => null,
+                };
                 if (held is not null)
                 {
                     await stderr.WriteLineAsync($"{m.Name} is {held}; not scanning it now. Add --force to scan anyway.").ConfigureAwait(false);

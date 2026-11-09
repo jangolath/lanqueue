@@ -258,7 +258,7 @@ public static class RemoteScripts
             ["npm"] = ("npm --version", "npm --version"),
             ["python"] = ("python3 --version 2>&1 || python --version", "if (Get-Command python3 -ErrorAction SilentlyContinue) { python3 --version } else { python --version }"),
             ["go"] = ("GOTOOLCHAIN=local go version", "$env:GOTOOLCHAIN = 'local'; go version"),
-            ["rust"] = ("cargo --version", "cargo --version"),
+            ["rust"] = ("RUSTUP_AUTO_INSTALL=0 cargo --version", "$env:RUSTUP_AUTO_INSTALL = '0'; cargo --version"),
             ["java"] = ("java -version", "java -version"),
             ["docker"] = ("docker version --format '{{.Server.Version}}'", "docker version --format '{{.Server.Version}}'"),
         };
@@ -267,14 +267,17 @@ public static class RemoteScripts
     /// lanq doctor --remote, one ssh call per machine. Prints <c>root=ok|readonly|missing</c> (work_root writable, checked with a temporary
     /// file that is removed again; a missing work_root is not created), <c>tool=ok|missing</c> (git or tar, as the health probe checks), and
     /// <c>cap.NAME=EXITCODE|FIRST LINE</c> for each capability in <see cref="ToolChecks"/>, run in the job environment: the machine's
-    /// env: and path_prepend: applied exactly as for a job, in the same non-login shell.
+    /// env: and path_prepend: applied exactly as for a job, in the same non-login shell. Each check may take <paramref name="checkSeconds"/>:
+    /// on Linux it runs under <c>timeout</c> (when that works), on Windows in a child PowerShell killed with its tree when the wait runs
+    /// out; a check stopped that way prints <c>cap.NAME=timeout|</c> and the next check runs.
     /// </summary>
-    public static string Doctor(Machine m)
+    public static string Doctor(Machine m, int checkSeconds = 20)
     {
         var caps = m.Capabilities.Where(ToolChecks.ContainsKey).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var seconds = Math.Max(checkSeconds, 1).ToString(CultureInfo.InvariantCulture);
         if (m.Os == MachineOs.Windows)
         {
-            var checks = string.Join('\n', caps.Select(c => $"Cap {ShellQuote.PowerShell(c.ToLowerInvariant())} {{ {ToolChecks[c].Windows} }}"));
+            var checks = string.Join('\n', caps.Select(c => $"Cap {ShellQuote.PowerShell(c.ToLowerInvariant())} {ShellQuote.PowerShell(ToolChecks[c].Windows)}"));
             return $$"""
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
                 if (Test-Path -LiteralPath $root -PathType Container) {
@@ -283,18 +286,24 @@ public static class RemoteScripts
                 {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows + "\n" + GitVersionWindows)}}
                 {{JobEnvironmentPowerShell(m)}}
                 $ErrorActionPreference = 'Continue'
-                function Cap([string]$n, [scriptblock]$b) {
-                  $global:LASTEXITCODE = 0
-                  try { $o = @(& $b 2>&1 | ForEach-Object { "$_" }); $rc = $LASTEXITCODE } catch { $o = @("$_"); $rc = 1 }
-                  "cap.$n=$rc|" + "$($o | Where-Object { $_ } | Select-Object -First 1)"
+                function Cap([string]$n, [string]$code) {
+                  $si = New-Object System.Diagnostics.ProcessStartInfo ((Get-Process -Id $PID).Path)
+                  $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$global:LASTEXITCODE = 0; try { ' + $code + ' } catch { Write-Output "$_"; exit 1 }; exit $LASTEXITCODE'))
+                  $si.UseShellExecute = $false; $si.RedirectStandardOutput = $true; $si.RedirectStandardError = $true; $si.RedirectStandardInput = $true
+                  try { $p = [Diagnostics.Process]::Start($si) } catch { "cap.$n=1|$_"; return }
+                  $p.StandardInput.Close(); $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+                  if (-not $p.WaitForExit({{seconds}}000)) { & taskkill /PID $p.Id /T /F 2>$null | Out-Null; "cap.$n=timeout|"; return }
+                  $p.WaitForExit()
+                  "cap.$n=$($p.ExitCode)|" + "$(($o.Result + "`n" + $e.Result) -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)"
                 }
                 {{checks}}
                 """;
         }
 
         var env = JobEnvironmentPosix(m);
-        var lines = caps.Select(c =>
-            $"o=$({env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; echo \"cap.{c.ToLowerInvariant()}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"");
+        var lines = caps.Select(c => c.ToLowerInvariant()).Select(c =>
+            $"o=$($T {env}/bin/sh -c {ShellQuote.Posix(ToolChecks[c].Linux)} </dev/null 2>&1); rc=$?; "
+            + $"if [ -n \"$T\" ] && [ \"$rc\" = 124 ]; then echo \"cap.{c}=timeout|\"; else echo \"cap.{c}=$rc|$(printf '%s\\n' \"$o\" | sed -n '/./{{p;q;}}')\"; fi");
         return $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}
             if [ -d "$R" ]; then
@@ -302,6 +311,7 @@ public static class RemoteScripts
               if ( : > "$t" ) 2>/dev/null; then rm -f "$t"; echo root=ok; else echo root=readonly; fi
             else echo root=missing; fi
             {{(m.Transfer == TransferMode.Archive ? LinuxTarProbe : GitProbeLinux + "\n" + GitVersionLinux)}}
+            T=; if timeout -k 5 1 true >/dev/null 2>&1; then T="timeout -k 5 {{seconds}}"; fi
             {{string.Join('\n', lines)}}
             """;
     }

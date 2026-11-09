@@ -50,7 +50,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
-        ["doctor"] = ["--remote"],
+        ["doctor"] = ["--remote", "--force"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force"],
     };
 
@@ -171,7 +171,7 @@ public static partial class Cli
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--json] [--config FILE] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
-          lanq doctor [--remote] [--config FILE]
+          lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--json]
 
@@ -181,7 +181,8 @@ public static partial class Cli
         --mem is in GB: only machines reporting at least that much available memory take the job.
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
-        each worker over ssh (work_root, git or tar, and each capability's tool in the job environment). Exit 0 all OK, 1 otherwise.
+        each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
+        allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
         makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints verdicts,
         problems with advice, the capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 75 the machine is paused or
         outside its allowed hours (--force scans anyway). lanq never changes a worker.
@@ -219,7 +220,8 @@ public static partial class Cli
         FleetConfig LoadConfig() => ConfigLoader.Load(ResolveConfig(p.ConfigPath, Environment.GetEnvironmentVariable, OperatingSystem.IsWindows(), File.Exists));
         if (p.Command == "doctor")
         {
-            return await Doctor(p, LoadConfig, DoctorHost.Real(home), new ProcessSshClient(Environment.GetEnvironmentVariable), stdout, ct).ConfigureAwait(false);
+            var doctorSsh = new ProcessSshClient(Environment.GetEnvironmentVariable);
+            return await Doctor(p, LoadConfig, DoctorHost.Real(home), doctorSsh, new HealthProbe(doctorSsh, TimeProvider.System), stdout, ct).ConfigureAwait(false);
         }
 
         if (p.Command == "makeready")

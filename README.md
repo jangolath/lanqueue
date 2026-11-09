@@ -124,7 +124,7 @@ them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stop
 | `lanq health [--json]` | Probes every machine (one ssh call each, in parallel): load, disk, memory, slots, holds. |
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code. |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
-| `lanq doctor [--remote]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
+| `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
 
@@ -134,18 +134,23 @@ Every command takes `--config FILE`. An option a command does not use is an erro
 
 Local by default (no network): `ssh` (with its version), `scp`, `git` and `ssh-keygen` on PATH; the state folder is
 writable; the config loads (the loader's own error otherwise); and for each machine a `known_hosts` entry (host and
-port resolved with `ssh -G`, so `~/.ssh/config` counts; a non-22 port is looked up as `[host]:port`), the `key_env`
-file and whether it has a passphrase. `--remote` adds one ssh call per machine, four at a time: is `work_root`
+port resolved with `ssh -G`, so `~/.ssh/config` counts; a non-22 port is looked up as `[host]:port`, and a
+`HostKeyAlias` is looked up as it is; the user and global known_hosts files `ssh -G` names are searched), the `key_env`
+file and whether it has a passphrase. `--remote` first probes each machine like `lanq health`: a machine that is
+paused (PAUSE file) or outside its `allowed_hours` gets a `HOLD` line and nothing else is run there (`--force` checks
+it anyway; `HOLD` lines do not change the exit code). Then one ssh call per machine, four at a time: is `work_root`
 writable (a temporary file, removed again; a missing `work_root` is a warning and is not created), is git or tar
 there for the machine's transfer mode, and does each capability's tool answer **in the job environment**, with the
-machine's `env:` and `path_prepend:` applied exactly as for a job:
+machine's `env:` and `path_prepend:` applied exactly as for a job. Each check may take 20 seconds; a check that hangs
+is stopped (Linux `timeout`, Windows a child PowerShell whose tree is killed) and reported as timed out, and the
+other checks still run. On a git machine a worker git older than 2.32 is a `WARN` (see "Hardened git"):
 
 | Capability | Command run |
 | --- | --- |
 | `dotnet` / `node` / `npm` | `dotnet --version` / `node --version` / `npm --version` |
 | `python` | `python3 --version`, falling back to `python --version` |
 | `go` | `go version` with `GOTOOLCHAIN=local` (never downloads a toolchain) |
-| `rust` / `java` | `cargo --version` / `java -version` |
+| `rust` / `java` | `cargo --version` with `RUSTUP_AUTO_INSTALL=0` (never installs a toolchain) / `java -version` |
 | `docker` | `docker version --format '{{.Server.Version}}'` (the daemon must answer) |
 
 Other capability names are listed as `SKIP ... not checked`. This is how you find the classic "npm works when I log

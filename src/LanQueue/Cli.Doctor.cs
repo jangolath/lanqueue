@@ -1,4 +1,5 @@
 using LanQueue.Config;
+using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Ssh;
 
@@ -23,6 +24,9 @@ internal sealed record DoctorHost(
 
 public static partial class Cli
 {
+    /// <summary>How long one tool check of lanq doctor --remote may take on the worker before it is stopped and reported as timed out.</summary>
+    internal const int DoctorCheckSeconds = 20;
+
     /// <summary>How many machines lanq doctor --remote checks at once.</summary>
     internal const int DoctorParallelism = 4;
 
@@ -31,7 +35,7 @@ public static partial class Cli
     /// key_env file and its passphrase, work_root; the state folder. With --remote, one ssh call per machine (a few at a time) checks
     /// work_root, git or tar, and each known capability's tool in the job environment. Exit 0 when every line is OK, else 1.
     /// </summary>
-    internal static async Task<int> Doctor(ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, TextWriter stdout, CancellationToken ct)
+    internal static async Task<int> Doctor(ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, LanQueue.Health.HealthProbe probe, TextWriter stdout, CancellationToken ct)
     {
         var problems = 0;
         async Task Say(string level, string text)
@@ -81,6 +85,16 @@ public static partial class Cli
                 await gate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
+                    if (!p.Force)
+                    {
+                        // Like makeready: a family PC's PAUSE file and allowed hours are respected; the probe is the only call made then.
+                        var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
+                        if (h.HoldKind is HoldKind.Paused or HoldKind.OutsideHours)
+                        {
+                            return [("HOLD", $"{(h.HoldKind == HoldKind.Paused ? "paused (a PAUSE file is in its work_root)" : "outside allowed hours")}; not checked. Add --force to check it anyway")];
+                        }
+                    }
+
                     return await RemoteMachineChecks(m, ssh, ct).ConfigureAwait(false);
                 }
                 finally
@@ -153,8 +167,11 @@ public static partial class Cli
 
         var name = resolved.GetValueOrDefault("hostname") is { Length: > 0 } h ? h : m.Ssh[(m.Ssh.LastIndexOf('@') + 1)..];
         var port = resolved.GetValueOrDefault("port") is { Length: > 0 } pt ? pt : "22";
-        var key = port == "22" ? name : $"[{name}]:{port}";
-        var files = (resolved.GetValueOrDefault("userknownhostsfile") ?? "~/.ssh/known_hosts")
+        // ssh looks a host key up under HostKeyAlias when one is set, used as it is (no port); otherwise host, or [host]:port.
+        var alias = resolved.GetValueOrDefault("hostkeyalias") is { Length: > 0 } a && !a.Equals("none", StringComparison.OrdinalIgnoreCase) ? a : null;
+        var key = alias ?? (port == "22" ? name : $"[{name}]:{port}");
+        var files = ((resolved.GetValueOrDefault("userknownhostsfile") ?? "~/.ssh/known_hosts") + " "
+                + (resolved.GetValueOrDefault("globalknownhostsfile") ?? "/etc/ssh/ssh_known_hosts /etc/ssh/ssh_known_hosts2"))
             .Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Select(f => ExpandHome(f, host))
             .Where(f => f is not null && host.FileExists(f))
@@ -223,14 +240,19 @@ public static partial class Cli
         SshResult r;
         try
         {
-            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.Doctor(m)), null, TimeSpan.FromSeconds(120), ct).ConfigureAwait(false);
+            // Every check has its own limit on the worker; the call as a whole gets room for all of them.
+            var checks = m.Capabilities.Count(RemoteScripts.ToolChecks.ContainsKey);
+            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.Doctor(m, DoctorCheckSeconds)), null, TimeSpan.FromSeconds(60 + ((DoctorCheckSeconds + 10) * checks)), ct)
+                .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
             return [("FAIL", ex.Message)];
         }
 
-        if (r.ExitCode == 255 || r.TimedOut)
+        // A call that ran out of time still reports what arrived; only an ssh failure with nothing to show is "unreachable".
+        var partial = r.TimedOut && r.Output.Contains("root=", StringComparison.Ordinal);
+        if ((r.ExitCode == 255 || r.TimedOut) && !partial)
         {
             return [("FAIL", "unreachable: " + FirstLine(r.Output))];
         }
@@ -268,9 +290,12 @@ public static partial class Cli
             var raw = values.GetValueOrDefault("cap." + cap.ToLowerInvariant());
             var bar = raw?.IndexOf('|', StringComparison.Ordinal) ?? -1;
             var code = bar < 0 ? "?" : raw![..bar];
-            var text = bar < 0 ? "no answer" : raw![(bar + 1)..];
+            var text = bar < 0 ? (partial ? "did not finish before the ssh call timed out" : "no answer") : raw![(bar + 1)..];
             lines.Add(code == "0"
                 ? ("OK", $"{cap}: {text}")
+                : code == "timeout"
+                ? ("FAIL", $"{cap}: '{command}' timed out after {DoctorCheckSeconds} s in the job environment (stopped; the other checks went on)")
+                : bar < 0 ? ("FAIL", $"{cap}: {text}")
                 : ("FAIL", $"{cap}: '{command}' failed in the job environment ({(text.Length > 0 ? text : "exit " + code)}). "
                     + "If the tool is installed, a non-login ssh session does not see it: add its folder to path_prepend for this machine"));
         }

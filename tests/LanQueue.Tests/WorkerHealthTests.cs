@@ -141,6 +141,7 @@ public class WorkerHealthTests
         var h = await Probe("load=0.95\ndisk_free_gb=50\nslots_used=0\ntool=ok\npaused=1");
         Assert.True(h.Paused);
         Assert.Equal("paused on the machine", h.Hold); // reported ahead of the high load
+        Assert.Equal(HoldKind.Paused, h.HoldKind);
     }
 
     [Theory]

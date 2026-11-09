@@ -131,6 +131,7 @@ public sealed class JobRunner(
             ? h
             : h with
             {
+                HoldKind = HoldKind.Job,
                 Hold = h.MemFreeGb is { } free
                     ? string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, --mem needs {need:0.0} GB")
                     : "free memory unknown (--mem needs the machine to report it)",
@@ -151,7 +152,7 @@ public sealed class JobRunner(
             // Probe every machine at once; WhenAll keeps the config order whatever order the answers arrive in.
             var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
             var health = config.Machines.Zip(probes)
-                .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold }) : h)
+                .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold, HoldKind = HoldKind.Job }) : h)
                 .Select(h => (h.First, WithMemRequirement(h.Item2, req.MinMemGb)))
                 .ToList();
 

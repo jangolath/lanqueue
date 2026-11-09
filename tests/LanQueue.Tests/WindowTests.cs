@@ -291,6 +291,7 @@ public sealed class WindowTests : IDisposable
     {
         var h = await Probe(Healthy + "local_time=2026-01-05T12:00:00", MondayNoonUtc);
         Assert.Equal("outside allowed hours", h.Hold);
+        Assert.Equal(HoldKind.OutsideHours, h.HoldKind); // typed, so callers never compare the text
         Assert.Null(h.WindowEndsUtc);
     }
 
