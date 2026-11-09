@@ -79,8 +79,17 @@ public sealed class FetchReceiver : IDisposable
 
     public bool Done => _done;
 
-    private sealed class Current(string rel, long size, FileStream? stream, string fullPath)
+    /// <summary>Deletes a partial file; false when it could not (tests stand in for a locked file).</summary>
+    internal Func<string, bool> DeleteFile { get; init; } = TryDelete;
+
+    /// <summary>A file is written under its name plus this suffix and renamed to its name only once its size and hash are right.</summary>
+    internal const string PartialSuffix = ".lanq-partial";
+
+    private sealed class Current(string rel, long size, FileStream? stream, string fullPath, string finalPath = "")
     {
+        /// <summary>The name the file gets once it is complete (<see cref="FullPath"/> is the partial file being written).</summary>
+        public string FinalPath { get; } = finalPath;
+
         public string Rel { get; } = rel;
 
         public long Size { get; } = size;
@@ -283,10 +292,17 @@ public sealed class FetchReceiver : IDisposable
             return;
         }
 
+        var partial = full + PartialSuffix;
+        if (IsLink(partial))
+        {
+            _cur = new Current(rel, size, null, "") { DropReason = "the target is an existing link" };
+            return;
+        }
+
         FileStream stream;
         try
         {
-            stream = new FileStream(full, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024);
+            stream = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
         {
@@ -296,7 +312,7 @@ public sealed class FetchReceiver : IDisposable
 
         Claim(rel);
         _accepted++;
-        _cur = new Current(rel, size, stream, full);
+        _cur = new Current(rel, size, stream, partial, full);
     }
 
     /// <summary>The first name already taken that <paramref name="rel"/> (or one of its folders) collides with ignoring case, or null.</summary>
@@ -452,12 +468,31 @@ public sealed class FetchReceiver : IDisposable
         }
 
         cur.Stream!.Dispose();
+        if (File.Exists(cur.FinalPath) || Directory.Exists(cur.FinalPath) || IsLink(cur.FinalPath))
+        {
+            Fail("something now exists under its name; not overwritten");
+            return;
+        }
+
+        try
+        {
+            File.Move(cur.FullPath, cur.FinalPath, overwrite: false); // a rename: fails if the name appeared in between
+        }
+        catch (IOException ex)
+        {
+            Fail("could not give the file its name (not overwritten): " + ex.Message);
+            return;
+        }
+
         cur.Hash.Dispose();
         _fetched.Add(new FetchedFile(cur.Rel, cur.Written, actual));
         _cur = null;
     }
 
-    /// <summary>Fails the current file: its partial file is deleted, and the bytes it used no longer count against the total.</summary>
+    /// <summary>
+    /// Fails the current file: its partial file is deleted, and only once it is really gone do its bytes stop counting against the total
+    /// (a partial file that could not be deleted is still on disk).
+    /// </summary>
     private void Fail(string reason)
     {
         var cur = _cur!;
@@ -466,8 +501,10 @@ public sealed class FetchReceiver : IDisposable
         if (cur.Stream is not null)
         {
             cur.Stream.Dispose();
-            _total -= cur.Written;
-            TryDelete(cur.FullPath);
+            if (DeleteFile(cur.FullPath))
+            {
+                _total -= cur.Written;
+            }
         }
 
         if (!cur.Silent)
@@ -488,15 +525,16 @@ public sealed class FetchReceiver : IDisposable
         _skipped.Add(new FetchSkip(shown.Length > 300 ? shown[..300] + "..." : shown, reason));
     }
 
-    private static void TryDelete(string path)
+    private static bool TryDelete(string path)
     {
         try
         {
             File.Delete(path);
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // best effort; reported as failed either way
+            return false; // best effort; the file is reported as failed either way
         }
     }
 

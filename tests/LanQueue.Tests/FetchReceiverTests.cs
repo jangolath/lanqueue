@@ -358,6 +358,65 @@ public sealed class FetchReceiverTests : IDisposable
         Assert.Single(r.Fetched);
     }
 
+    [Fact]
+    public void AFileThatAppearsUnderTheFinalNameWhileStreamingIsNotOverwritten()
+    {
+        using var rx = new FetchReceiver(JobDir, ["**"], FetchLimits.Default, ignoreCase: false);
+        var frame = Frame("a.txt", Bytes(100)).ToList();
+        foreach (var l in frame.Take(frame.Count - 1))
+        {
+            rx.OnLine(l);
+        }
+
+        File.WriteAllText(Path.Combine(JobDir, "a.txt"), "mine");
+        rx.OnLine(frame[^1]);
+        rx.OnLine("LQF1 DONE");
+        var r = rx.Finish();
+
+        Assert.Empty(r.Fetched);
+        Assert.Contains("exists", Reason(r, "a.txt"), StringComparison.Ordinal);
+        Assert.Equal("mine", File.ReadAllText(Path.Combine(JobDir, "a.txt")));
+        Assert.False(File.Exists(Path.Combine(JobDir, "a.txt.lanq-partial")));
+    }
+
+    [Fact]
+    public void APartialFileIsRemovedWhenTheReceiverIsDisposedMidFile()
+    {
+        var rx = new FetchReceiver(JobDir, ["**"], FetchLimits.Default, ignoreCase: false);
+        foreach (var l in Frame("a.txt", Bytes(100)).SkipLast(1))
+        {
+            rx.OnLine(l);
+        }
+
+        Assert.True(File.Exists(Path.Combine(JobDir, "a.txt.lanq-partial")));
+        rx.Dispose(); // Ctrl+C: no Finish
+        Assert.Empty(Directory.EnumerateFiles(JobDir));
+    }
+
+    [Fact]
+    public void AWorkerCannotSendANameThatLooksLikeAPartialFile()
+    {
+        var r = Receive(Frame("a.txt.lanq-partial", Bytes(5)).Concat(Frame("b.LANQ-PARTIAL", Bytes(5))));
+        Assert.Empty(r.Fetched);
+        Assert.Equal(2, r.Skipped.Count);
+    }
+
+    /// <summary>Bytes of a failed file whose partial file could not be deleted are still on disk, so they keep counting against the total.</summary>
+    [Fact]
+    public void BytesThatCouldNotBeDeletedStillCountAgainstTheTotal()
+    {
+        using var rx = new FetchReceiver(JobDir, ["**"], new FetchLimits(500, 100, 100), ignoreCase: false) { DeleteFile = _ => false };
+        foreach (var l in Frame("bad.bin", Bytes(60), hash: new string('0', 64)).Concat(Frame("next.bin", Bytes(60))))
+        {
+            rx.OnLine(l);
+        }
+
+        rx.OnLine("LQF1 DONE");
+        var r = rx.Finish();
+        Assert.Empty(r.Fetched);
+        Assert.Equal("over the total size cap", Reason(r, "next.bin"));
+    }
+
     /// <summary>The Windows script sends 3072-byte chunks: exactly 4096 base64 characters per line, the most a data line may hold.</summary>
     [Fact]
     public void AnExactly4096CharacterDataLineIsAccepted()
@@ -370,7 +429,10 @@ public sealed class FetchReceiverTests : IDisposable
         Assert.Single(r.Fetched);
     }
 
-    /// <summary>The file is written as data lines arrive, not held until END: more than the write buffer is on disk before the frame ends.</summary>
+    /// <summary>
+    /// The file is written as data lines arrive, not held until END: more than the write buffer is on disk before the frame ends, under a
+    /// .lanq-partial name; the real name appears only once the hash matched.
+    /// </summary>
     [Fact]
     public void FilesAreStreamedToDisk()
     {
@@ -382,8 +444,10 @@ public sealed class FetchReceiverTests : IDisposable
             rx.OnLine(l);
         }
 
-        Assert.True(new FileInfo(Path.Combine(JobDir, "big.bin")).Length >= 200_000);
+        Assert.True(new FileInfo(Path.Combine(JobDir, "big.bin.lanq-partial")).Length >= 200_000);
+        Assert.False(File.Exists(Path.Combine(JobDir, "big.bin")));
         rx.OnLine(frame[^1]);
+        Assert.False(File.Exists(Path.Combine(JobDir, "big.bin.lanq-partial")));
         rx.OnLine("LQF1 DONE");
         Assert.Equal(data, File.ReadAllBytes(Path.Combine(JobDir, "big.bin")));
         Assert.Single(rx.Finish().Fetched);

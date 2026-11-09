@@ -52,6 +52,11 @@ internal static partial class FetchPath
             return "absolute path";
         }
 
+        if (rel.EndsWith(FetchReceiver.PartialSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return "a name ending in " + FetchReceiver.PartialSuffix + " (reserved for files lanq is still receiving)";
+        }
+
         foreach (var s in rel.Split('/'))
         {
             if (s.Length == 0 || s is "." or "..")
