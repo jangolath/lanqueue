@@ -78,7 +78,7 @@ public sealed class JobPriorityTests : IDisposable
         File.WriteAllText(file, "\ufeff" + script);
         try
         {
-            Assert.Equal("BelowNormal", WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file).Trim());
+            Assert.Equal("BelowNormal", T.JobOutput(WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file)).Trim());
         }
         finally
         {
@@ -93,7 +93,7 @@ public sealed class JobPriorityTests : IDisposable
         var m = T.Linux();
         m.WorkRoot = _root;
         var before = int.Parse(WorkerHealthTests.Capture("nice").Trim(), System.Globalization.CultureInfo.InvariantCulture);
-        var output = WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["nice"]));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["nice"])));
         Assert.Equal(Math.Min(before + 10, 19), int.Parse(output.Trim(), System.Globalization.CultureInfo.InvariantCulture));
     }
 }

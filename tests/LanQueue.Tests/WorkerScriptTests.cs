@@ -89,7 +89,7 @@ public sealed class WorkerScriptTests : IDisposable
     public void TheLinuxWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("linux", ["sh", "-c", "printf partial; exit 255"]);
 
     [PowerShellFact]
-    public void TheWindowsWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("windows", ["powershell", "-NoProfile", "-Command", "[Console]::Out.Write('partial'); exit 255"]);
+    public void TheWindowsWrapperEndsWithTheJobsExitMarker() => TheWrapperEndsWithTheJobsExitMarker("windows", [OperatingSystem.IsWindows() ? "powershell" : "pwsh", "-NoProfile", "-Command", "[Console]::Out.Write('partial'); exit 255"]);
 
     private void TheWrapperEndsWithTheJobsExitMarker(string shell, string[] argv)
     {

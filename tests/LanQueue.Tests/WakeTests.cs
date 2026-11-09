@@ -512,8 +512,16 @@ public sealed class WakeTests
         WorkRoot = os == MachineOs.Windows ? "D:/lanq" : "/srv/lanq",
         Capabilities = [.. caps ?? ["dotnet"]],
         AllowedHours = hours is null ? null : [hours],
-        Wake = wake ? new WakeConfig { Mac = "aa:bb:cc:dd:ee:" + (10 + Math.Abs(name.GetHashCode(StringComparison.Ordinal) % 80)).ToString(System.Globalization.CultureInfo.InvariantCulture) } : null,
+        Wake = wake ? new WakeConfig { Mac = MacFor(name) } : null,
     };
+
+    /// <summary>
+    /// A MAC per machine name that is stable across runs and distinct for distinct names: "02" (locally administered) plus five bytes of the
+    /// name's SHA-256. (string.GetHashCode is randomised per process, and the old "% 80" gave two sleepers the same MAC now and then, so one
+    /// packet woke both.)
+    /// </summary>
+    private static string MacFor(string name) =>
+        "02:" + string.Join(':', System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(name)).Take(5).Select(b => b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)));
 
     /// <summary>Runs one job over a fleet where only the machines in <paramref name="awake"/> answer ssh; a packet to a machine's MAC wakes it.</summary>
     private static async Task<(JobResult Result, FakeSender Sender, List<string> Lines, HashSet<string> Awake)> RunFleet(

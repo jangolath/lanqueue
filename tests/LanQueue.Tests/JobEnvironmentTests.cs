@@ -277,7 +277,7 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("FOO", Hostile));
         m.WorkRoot = _root;
         m.PathPrepend.Add(bin);
-        var output = WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["lanq-test-tool"]));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["lanq-test-tool"])));
         Assert.Equal(Hostile + "|", output);
         Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
     }
@@ -298,7 +298,7 @@ public sealed class JobEnvironmentTests : IDisposable
         File.WriteAllText(file, "\ufeff" + script);
         try
         {
-            var output = WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file);
+            var output = T.JobOutput(WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file));
             Assert.Equal("found" + Environment.NewLine + "True", output);
             Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
         }

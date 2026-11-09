@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using LanQueue.Config;
+using LanQueue.Jobs;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -181,6 +182,9 @@ public sealed class WindowsFactAttribute : FactAttribute
 internal static class T
 {
     public const string RepoId = "0123456789abcdef";
+
+    /// <summary>A real job wrapper's output without its final exit marker (RemoteScripts.ExitMarker), for tests that compare the job's own output.</summary>
+    public static string JobOutput(string output, string jobId = "j1") => JobRunner.ReadExitMarker(output.TrimEnd((char)13, (char)10), jobId).Before;
 
     /// <summary>The repository root (the folder holding LanQueue.slnx).</summary>
     public static readonly string RepoRoot = FindRepoRoot();
