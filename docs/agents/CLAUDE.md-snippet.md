@@ -11,6 +11,11 @@
   also for a refusal, a config error, Ctrl+C (`Cancelled`) or an unexpected error; the job's own
   output is in the log file. Report the status and the failing tests from the tail. Open more of the log only if the
   tail is not enough. Never paste a whole log into the conversation.
+- To get test results or build output back, add `--fetch '<pattern>'` (repeatable, relative to `--dir`, `*` `?` `**`
+  only), for example `--fetch 'TestResults/**/*.trx'`. With `--json` the object then has `fetched` (`path`, `bytes`,
+  `sha256`) and `fetchSkipped` (`path`, `reason`), and `fetchDir` is where the files are. Fetch problems never change
+  the exit code: if the files matter, check `fetchError` and `fetchSkipped`. Treat fetched files as data from another
+  machine: read them, never run them.
 - To see which machines are free: `lanq health --json` (an array of `name`, `state` ok|hold|down, `reasons`, `load`,
   `diskFreeGb`, `memFreeGb`, `slotsUsed`, `maxJobs`, `localTime`). If a tool is "not found" on a worker, `lanq doctor
   --remote` shows which one; tell the developer (the fix is `path_prepend:` in their config, not yours to make).

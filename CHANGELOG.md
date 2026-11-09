@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased (0.5.0)
+
+- **`lanq run --fetch <pattern>`** (repeatable) brings files the job produced back from the worker's job folder after
+  the job ends (completed, failed, timed out or stopped by its window) and before cleanup, into
+  `.lanq/artifacts/<job id>/` in the repository (`--fetch-dir DIR` for another place; the default `.lanq` folder gets a
+  `.gitignore`). Patterns are relative to `--dir`, with `*`, `?` and `**` only; absolute paths, drive letters, `..`,
+  backslashes, `:`, control characters and a leading `-` are refused. Nothing is fetched when the job never started.
+- The worker is treated as untrusted: only regular files whose real path is inside the job folder are sent; symlinks,
+  junctions and reparse points (never followed), hard links (Linux), devices, FIFOs and names with control characters
+  are skipped and listed. Files come back as a framed text stream (header, base64 lines, SHA-256), never as an archive;
+  lanq re-checks every path (including Windows device names, trailing dots and spaces, length and case-insensitive
+  collisions), the caps, the exact size and the hash, deletes any partial file that fails, streams to disk, creates
+  files with `CreateNew` and never writes through an existing link.
+- Caps: 500 files and 200 MB by default, `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (up to 2G); what
+  fits is fetched in sorted order and the rest is listed.
+- The fetch has its own 10-minute limit and never runs more than 2 minutes past a machine's allowed hours plus grace.
+  The slot lease allowance grows from 40 to 50 minutes to cover it.
+- Fetch problems never change the exit code. `lanq run --json` gains `fetched` (`path`, `bytes`, `sha256`) and
+  `fetchSkipped` (`path`, `reason`), present on every path when `--fetch` is given, plus `fetchDir`, `fetchError` and
+  `fetchSkippedMore`; without `--fetch` the object is unchanged.
+- Windows workers receive the fetch script on ssh stdin (as base64 of its UTF-16 text), so patterns do not count
+  toward the 8000-character command line.
+
 ## 0.4.0 (2026-11-09)
 
 Workers and windows: making old and shared PCs safe to lend to the queue.
