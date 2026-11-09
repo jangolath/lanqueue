@@ -309,7 +309,7 @@ public static partial class Cli
         outside its allowed hours (--force scans anyway). lanq never changes a worker.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
-        inside its allowed hours and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
+        inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report; wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended.
@@ -345,7 +345,8 @@ public static partial class Cli
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" && own.Contains("--json"))
             {
-                await WriteJsonError(own[0], "Rejected", 2, message, stdout).ConfigureAwait(false);
+                // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
+                await WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch")).ConfigureAwait(false);
             }
 
             return 2;
@@ -396,7 +397,7 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             if (p.Json)
             {
-                await WriteJsonError(p.Command, "Rejected", 2, message, stdout).ConfigureAwait(false);
+                await WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0).ConfigureAwait(false);
             }
 
             return 2;

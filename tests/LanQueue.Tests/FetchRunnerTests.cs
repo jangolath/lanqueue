@@ -131,6 +131,74 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Single(r.Fetch!.Fetched);
     }
 
+    // ---- the SSH connection drops while the job runs ----
+
+    private static bool IsStop(string text) => text.Contains(RemoteScripts.StopJobMarker, StringComparison.Ordinal);
+
+    /// <summary>The job may still run on the worker: it is stopped and its files fetched on a fresh connection, before cleanup.</summary>
+    [Theory]
+    [InlineData("build-01")]
+    [InlineData("build-02")]
+    public async Task AJobWhoseConnectionDroppedIsStoppedAndFetchedOnAFreshConnection(string target)
+    {
+        var (runner, ssh, lines) = Make(target, 255, Stream(("a.trx", "x")));
+
+        var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Contains("SSH connection failed while running the job", r.Message, StringComparison.Ordinal);
+        var texts = Texts(ssh);
+        var stop = texts.FindIndex(IsStop);
+        Assert.True(texts.FindIndex(IsExecute) < stop && stop < texts.FindIndex(IsFetch) && texts.FindIndex(IsFetch) < texts.FindIndex(IsCleanup));
+        Assert.Single(r.Fetch!.Fetched);
+        Assert.Null(r.Fetch.Error);
+        Assert.Contains(lines, l => l.Contains("stopping the job before fetching", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AJobWhoseConnectionDroppedAndStaysDownReportsWhyNothingWasFetched()
+    {
+        var (runner, ssh, lines) = Make("build-01", 255, Stream(("a.trx", "x")));
+        var inner = ssh.Handler;
+        ssh.Handler = (m, cmd) => IsStop(Decode(m, cmd)) ? new SshResult(255, "ssh: connect to host build-01.lan port 22: Connection timed out") : inner(m, cmd);
+
+        var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
+
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Empty(r.Fetch!.Fetched);
+        Assert.StartsWith("not fetched: the SSH connection failed during the job", r.Fetch.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain(Texts(ssh), IsFetch);
+        Assert.Contains(lines, l => l.Contains("not fetched: the SSH connection failed during the job", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RunJsonShowsAFetchErrorWhenTheConnectionDroppedDuringTheJob()
+    {
+        var (code, json, _) = await RunCli(
+            ["run", "--json", "--needs", "dotnet", "--fetch", "*.trx", "--fetch-dir", OutRoot, "--", "dotnet", "test"],
+            Stream(("a.trx", "x")),
+            ssh =>
+            {
+                var inner = ssh.Handler;
+                ssh.Handler = (m, cmd) => IsExecute(Decode(m, cmd)) || IsStop(Decode(m, cmd)) ? new SshResult(255, "Connection reset") : inner(m, cmd);
+            });
+
+        Assert.Equal(70, code);
+        Assert.Equal("InfraError", json.GetProperty("status").GetString());
+        Assert.StartsWith("not fetched: the SSH connection failed during the job", json.GetProperty("fetchError").GetString(), StringComparison.Ordinal);
+        Assert.Equal(0, json.GetProperty("fetched").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task AJobWhoseConnectionDroppedWithoutFetchIsNotStoppedEarly()
+    {
+        var (runner, ssh, _) = Make("build-01", 255, Stream());
+        var r = await runner.RunAsync(Req(), CancellationToken.None);
+        Assert.Equal(JobStatus.InfraError, r.Status);
+        Assert.Null(r.Fetch);
+        Assert.DoesNotContain(Texts(ssh), IsStop);
+    }
+
     [Fact]
     public async Task ACompletedJobIsNotStoppedBeforeTheFetch()
     {
@@ -305,9 +373,10 @@ public sealed class FetchRunnerTests : IDisposable
 
     // ---- lanq run --json ----
 
-    private async Task<(int Code, JsonElement Json, string Stderr)> RunCli(string[] args, string fetchOutput)
+    private async Task<(int Code, JsonElement Json, string Stderr)> RunCli(string[] args, string fetchOutput, Action<FakeSsh>? tweak = null)
     {
         var (_, ssh, _) = Make("build-01", 0, fetchOutput);
+        tweak?.Invoke(ssh);
         var o = new StringWriter();
         var e = new StringWriter();
         var code = await Cli.Run(
@@ -365,5 +434,61 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Equal(2, code);
         using var doc = JsonDocument.Parse(o.ToString());
         Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal(0, doc.RootElement.GetProperty("fetched").GetArrayLength());
+        Assert.Equal(0, doc.RootElement.GetProperty("fetchSkipped").GetArrayLength());
+    }
+
+    /// <summary>The README promises fetched and fetchSkipped on every path when --fetch is given, the early exits included.</summary>
+    [Theory]
+    [InlineData("bad-wait")]
+    [InlineData("bad-pattern")]
+    [InlineData("missing-config")]
+    [InlineData("invalid-config")]
+    public async Task EveryEarlyRunJsonErrorWithFetchCarriesTheFetchKeys(string path)
+    {
+        var bad = Path.Combine(_dir, "bad.yml");
+        await File.WriteAllTextAsync(bad, "machines: [ this is: not: valid\n");
+        string[] args = path switch
+        {
+            "bad-wait" => ["run", "--json", "--wait", "soon", "--fetch", "*.trx", "--", "dotnet", "test"],
+            "bad-pattern" => ["run", "--json", "--fetch", "../x", "--", "dotnet", "test"],
+            "missing-config" => ["run", "--json", "--config", Path.Combine(_dir, "nope.yml"), "--fetch", "*.trx", "--", "dotnet", "test"],
+            _ => ["run", "--json", "--config", bad, "--fetch", "*.trx", "--", "dotnet", "test"],
+        };
+        var o = new StringWriter();
+
+        var code = await Cli.RunAsync(args, o, new StringWriter(), CancellationToken.None);
+
+        Assert.Equal(2, code);
+        Assert.Single(o.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal(0, doc.RootElement.GetProperty("fetched").GetArrayLength());
+        Assert.Equal(0, doc.RootElement.GetProperty("fetchSkipped").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("bad-wait")]
+    [InlineData("missing-config")]
+    public async Task EarlyRunJsonErrorsWithoutFetchStillLeaveTheFetchKeysOut(string path)
+    {
+        string[] args = path == "bad-wait"
+            ? ["run", "--json", "--wait", "soon", "--", "dotnet", "test"]
+            : ["run", "--json", "--config", Path.Combine(_dir, "nope.yml"), "--", "dotnet", "test"];
+        var o = new StringWriter();
+
+        Assert.Equal(2, await Cli.RunAsync(args, o, new StringWriter(), CancellationToken.None));
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.False(doc.RootElement.TryGetProperty("fetched", out _));
+        Assert.False(doc.RootElement.TryGetProperty("fetchSkipped", out _));
+    }
+
+    [Fact]
+    public async Task AFetchPatternAfterTheDoubleDashIsTheJobsNotLanqs()
+    {
+        var o = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--json", "--wait", "soon", "--", "dotnet", "test", "--fetch", "x"], o, new StringWriter(), CancellationToken.None));
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.False(doc.RootElement.TryGetProperty("fetched", out _));
     }
 }

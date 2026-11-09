@@ -453,7 +453,7 @@ public sealed class JobRunner(
         }
         else if (run.IsSshFailure)
         {
-            return new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.");
+            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.");
         }
         else
         {
@@ -467,10 +467,19 @@ public sealed class JobRunner(
 
         // A job lanq stopped (timeout or window) may still be running on the worker, which enforces the limit only a margin later: stop it
         // first, so the fetch reads files that are no longer being written. Cleanup would kill it anyway, but only after the fetch.
-        if (req.Fetch is not null && result.Status is JobStatus.TimedOut or JobStatus.WindowClosed)
+        // A job whose ssh connection dropped may also still be running there: it is stopped the same way, on a fresh connection (the caller's
+        // cleanup would kill it on one anyway). When the machine does not answer that either, nothing is fetched and the report says why.
+        var dropped = run.IsSshFailure && !run.TimedOut;
+        if (req.Fetch is not null && (dropped || result.Status is JobStatus.TimedOut or JobStatus.WindowClosed))
         {
             onLine($"[lanq] {machine.Name}: stopping the job before fetching its files");
-            await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.StopJob(machine, jobId)), null, StopBeforeFetchTimeout, ct).ConfigureAwait(false);
+            var stop = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.StopJob(machine, jobId)), null, StopBeforeFetchTimeout, ct).ConfigureAwait(false);
+            if (dropped && stop.IsSshFailure)
+            {
+                var lost = new FetchReport(Path.GetFullPath(Path.Combine(req.Fetch.OutputRoot, jobId)), [], [], "not fetched: the SSH connection failed during the job, and the machine did not answer afterwards");
+                Summarise(lost, result, onLine);
+                return result with { Fetch = lost };
+            }
         }
 
         // The job ran (completed, failed, or was stopped): bring back what it produced, before the caller's cleanup deletes the job folder.
@@ -528,6 +537,7 @@ public sealed class JobRunner(
             JobStatus.Completed => "completed",
             JobStatus.Failed => $"failed (exit {job.ExitCode.ToString(CultureInfo.InvariantCulture)})",
             JobStatus.TimedOut => "timed out",
+            JobStatus.InfraError => "lost its ssh connection",
             _ => "was stopped at the end of its machine's allowed hours",
         };
         onLine($"[lanq] fetch (the job {after}): {report.Fetched.Count.ToString(CultureInfo.InvariantCulture)} file(s), {Size(report.Bytes)} -> {report.Directory}");
