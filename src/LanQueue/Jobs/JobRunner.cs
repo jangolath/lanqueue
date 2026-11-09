@@ -289,12 +289,15 @@ public sealed class JobRunner(
     }
 
     /// <summary>
-    /// Remote output is untrusted: C0 controls (except tab), DEL and C1 controls become '?', so a worker cannot move the cursor,
-    /// retitle the window or send other terminal escape sequences to the console or the job log.
+    /// Remote output is untrusted: C0 controls (except tab), DEL, C1 controls, bidi controls and zero-width characters become '?', so a
+    /// worker cannot move the cursor, retitle the window, send other terminal escape sequences or disguise text in the console or job log.
     /// </summary>
     internal static string SafeLine(string line)
     {
-        static bool Unsafe(char c) => (c < 0x20 && c != (char)0x09) || (c >= 0x7f && c <= 0x9f);
+        static bool Unsafe(char c) =>
+            (c < 0x20 && c != (char)0x09) || (c >= 0x7f && c <= 0x9f) // C0 (except tab), DEL, C1
+            || (c >= 0x200b && c <= 0x200f) || c == 0xfeff // zero-width characters and marks
+            || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069); // bidi embeddings, overrides and isolates
         if (!line.Any(Unsafe))
         {
             return line;

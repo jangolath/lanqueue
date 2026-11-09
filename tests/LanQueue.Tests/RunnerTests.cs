@@ -429,8 +429,9 @@ public sealed class RunnerTests : IDisposable
     [Fact]
     public async Task RemoteControlCharactersNeverReachTheTerminalOrTheLog()
     {
-        const char Esc = (char)0x1b, Bel = (char)0x07, Csi = (char)0x9b, Del = (char)0x7f, Cr = (char)0x0d, Tab = (char)0x09;
-        var hostile = $"a{Esc}]0;pwned{Bel}b{Esc}[2Jc{Csi}d{Del}e{Cr}f{Tab}g";
+        // The real reader splits on newlines and strips CRLF, so a hostile line carries ESC/OSC/CSI/DEL, a backspace and a bidi override.
+        const char Esc = (char)0x1b, Bel = (char)0x07, Csi = (char)0x9b, Del = (char)0x7f, Bs = (char)0x08, Rlo = (char)0x202e, Tab = (char)0x09;
+        var hostile = $"a{Esc}]0;pwned{Bel}b{Esc}[2Jc{Csi}d{Del}e{Bs}f{Rlo}g{Tab}h";
         var (runner, _, _, log) = Make((m, cmd) =>
             DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
             : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1))
@@ -439,7 +440,7 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
 
         Assert.Equal(JobStatus.Completed, r.Status);
-        var safe = $"a?]0;pwned?b?[2Jc?d?e?f{Tab}g";
+        var safe = $"a?]0;pwned?b?[2Jc?d?e?f?g{Tab}h";
         Assert.Contains(safe, _output);
         Assert.Contains(safe, File.ReadAllText(log.LogPathFor(r.JobId)), StringComparison.Ordinal);
         Assert.DoesNotContain(_output, l => l.Contains(Esc, StringComparison.Ordinal));
@@ -579,5 +580,23 @@ public sealed class RunnerTests : IDisposable
         Assert.Equal(2, r.CliExitCode);
         Assert.Contains("cmd.exe", r.Message, StringComparison.Ordinal);
         Assert.Empty(ssh.Uploads);
+    }
+
+    [Theory]
+    [InlineData(0x202A)]
+    [InlineData(0x202E)]
+    [InlineData(0x2066)]
+    [InlineData(0x2069)]
+    [InlineData(0x200B)]
+    [InlineData(0x200F)]
+    [InlineData(0xFEFF)]
+    public void BidiAndZeroWidthCharactersAreReplaced(int codePoint) =>
+        Assert.Equal("a?b", JobRunner.SafeLine("a" + (char)codePoint + "b"));
+
+    [Fact]
+    public void OrdinaryUnicodeIsKept()
+    {
+        var text = "caf" + (char)0xe9 + " " + char.ConvertFromUtf32(0x1F600) + " " + (char)0x4e2d + (char)0x09 + "ok";
+        Assert.Equal(text, JobRunner.SafeLine(text));
     }
 }
