@@ -113,6 +113,35 @@ public class ScriptSafetyTests
     public void ShortWindowsCommandsWrapFine() =>
         Assert.NotEmpty(RemoteScripts.Wrap(T.Windows(), RemoteScripts.Execute(T.Windows(), "j", ".", ["dotnet", "test"])));
 
+    /// <summary>
+    /// Every fixed Windows worker script (with a realistic job id, work_root, env and path_prepend) leaves room under the 8000-character
+    /// encoded-command cap (800 characters for a longer work_root, job arguments and env), so a growing script fails here instead of on a worker.
+    /// </summary>
+    [Fact]
+    public void EveryWindowsWorkerScriptLeavesRoomUnderTheCommandLineCap()
+    {
+        var m = WithJobEnvironment(T.Windows());
+        m.Capabilities = [.. RemoteScripts.ToolChecks.Keys];
+        const string Job = "20261109-221503-a1b2c3";
+        var scripts = new Dictionary<string, string>
+        {
+            ["probe"] = RemoteScripts.Probe(m),
+            ["acquire"] = RemoteScripts.AcquireSlot(m, Job, TimeSpan.FromHours(4)),
+            ["prepare"] = RemoteScripts.Prepare(m, Job, T.RepoId),
+            ["execute"] = RemoteScripts.Execute(m, Job, "src", ["dotnet", "test"], TimeSpan.FromHours(4)),
+            ["cleanup"] = RemoteScripts.Cleanup(m, Job, "1", T.RepoId),
+            ["unlock"] = RemoteScripts.Unlock(m, all: false),
+            ["doctor"] = RemoteScripts.Doctor(m),
+            ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), Job),
+            ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), Job, "1"),
+        };
+        foreach (var (name, script) in scripts)
+        {
+            var length = RemoteScripts.Wrap(m, script).Length;
+            Assert.True(length <= 7200, $"the Windows '{name}' script is {length} characters once encoded; keep each under 7200");
+        }
+    }
+
     [ShFact]
     public void GeneratedLinuxScriptsPassShSyntaxCheck()
     {

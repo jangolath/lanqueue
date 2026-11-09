@@ -18,8 +18,11 @@ public static class RemoteScripts
             return "sh -c " + ShellQuote.Posix(script);
         }
 
+        // Indentation and blank lines cost characters under the encoded-command cap and mean nothing to PowerShell here: none of these
+        // scripts has a here-string, and no value spliced into them can contain a line break.
+        var compact = string.Join('\n', script.Split('\n').Select(l => l.TrimStart(' ', '\t').TrimEnd('\r')).Where(l => l.Trim().Length > 0));
         var command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
-            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + script));
+            + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + compact));
         return command.Length > MaxWindowsCommandLength
             ? throw new InvalidOperationException(
                 $"The command is too long for Windows machine '{m.Name}' ({command.Length} > {MaxWindowsCommandLength} characters once encoded). Shorten the arguments.")
@@ -188,35 +191,15 @@ public static class RemoteScripts
     /// <see cref="WindowsKillRecorded"/>: only processes whose pid AND start time match what the job recorded.
     /// </summary>
     internal const string WindowsSlotFunctions = """
-        $tok = "$PID." + [guid]::NewGuid().ToString('N')
-        function Take([string]$f) {
-          $k = "$f.reclaim"
-          $o = "$k.old.$PID"; $old = [DateTime]::UtcNow.AddMinutes(-10)
-          try {
-            if ((Test-Path -LiteralPath $k) -and [IO.File]::GetLastWriteTimeUtc($k) -lt $old) {
-              [IO.File]::Move($k, $o)
-              if ([IO.File]::GetLastWriteTimeUtc($o) -ge $old) { try { [IO.File]::Move($o, $k) } catch { } }
-              if (Test-Path -LiteralPath $o) { [IO.File]::Delete($o) }
-            }
-          } catch { }
-          try {
-            $s = [IO.File]::Open($k, 'CreateNew', 'Write', 'None'); $b = [Text.Encoding]::ASCII.GetBytes($tok); $s.Write($b, 0, $b.Length); $s.Close(); $true
-          } catch { $false }
-        }
-        function Drop([string]$f) {
-          $k = "$f.reclaim"; $o = "$k.drop.$PID"
-          try {
-            if ([IO.File]::ReadAllText($k) -cne $tok) { return }
-            [IO.File]::Move($k, $o)
-            if ([IO.File]::ReadAllText($o) -cne $tok) { try { [IO.File]::Move($o, $k) } catch { } }
-            if (Test-Path -LiteralPath $o) { [IO.File]::Delete($o) }
-          } catch { }
-        }
-        function StopJob([string]$j) {
-          if ($j -cnotmatch '^[A-Za-z0-9_-]{1,64}\z') { return }
-          $kp = "$root/locks/job-$j.pid"
-          if (Test-Path -LiteralPath $kp) { KillRecorded $kp $false }
-        }
+        $tok = "$PID." + [guid]::NewGuid().ToString('N'); $IOFile = [IO.File]
+        function Take($f) {
+        $k = "$f.reclaim"; $o = "$k.old.$PID"; $old = [DateTime]::UtcNow.AddMinutes(-10)
+        try { if ($IOFile::Exists($k) -and $IOFile::GetLastWriteTimeUtc($k) -lt $old) { $IOFile::Move($k, $o); if ($IOFile::GetLastWriteTimeUtc($o) -ge $old) { try { $IOFile::Move($o, $k) } catch { } }; $IOFile::Delete($o) } } catch { }
+        try { $s = $IOFile::Open($k, 'CreateNew', 'Write', 'None'); $b = [Text.Encoding]::ASCII.GetBytes($tok); $s.Write($b, 0, $b.Length); $s.Close(); $true } catch { $false } }
+        function Drop($f) {
+        $k = "$f.reclaim"; $o = "$k.drop.$PID"
+        try { if ($IOFile::ReadAllText($k) -cne $tok) { return }; $IOFile::Move($k, $o); if ($IOFile::ReadAllText($o) -cne $tok) { try { $IOFile::Move($o, $k) } catch { } }; $IOFile::Delete($o) } catch { } }
+        function StopJob($j) { $kp = "$root/locks/job-$j.pid"; if ($j -cmatch '^[A-Za-z0-9_-]{1,64}\z' -and $IOFile::Exists($kp)) { KillRecorded $kp $false } }
         """ + "\n" + WindowsKillRecorded;
 
     /// <summary>
@@ -228,22 +211,15 @@ public static class RemoteScripts
     /// (<paramref name="legacy"/>), with the old "is a PowerShell process" check; a stale-slot reclaim never kills on it.
     /// </summary>
     internal const string WindowsKillRecorded = """
-        function KillRecorded([string]$pf, [bool]$legacy) {
-          $l = @(Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue | ForEach-Object { "$_".Trim() })
-          $timed = $false
-          for ($i = $l.Count - ($l.Count % 2) - 2; $i -ge 0; $i -= 2) {
-            if ($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i + 1] -notmatch '^[0-9]{1,19}\z') { continue }
-            $timed = $true
-            $p = Get-Process -Id ([int]$l[$i]) -ErrorAction SilentlyContinue
-            $t = $null; if ($p) { try { $t = "$($p.StartTime.ToUniversalTime().Ticks)" } catch { } }
-            if ($t -and $t -eq $l[$i + 1]) { & taskkill /PID $l[$i] /T /F 2>$null | Out-Null }
-          }
-          if (-not $timed -and $legacy -and $l.Count -ge 1 -and $l[0] -match '^[0-9]{1,9}\z') {
-            $p = Get-Process -Id ([int]$l[0]) -ErrorAction SilentlyContinue
-            if ($p -and ($p.ProcessName -like 'powershell*' -or $p.ProcessName -like 'pwsh*')) { & taskkill /PID $l[0] /T /F 2>$null | Out-Null }
-          }
-          Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
-        }
+        function KillRecorded($pf, $legacy) {
+        $l = @(Get-Content -LiteralPath $pf -EA 0 | ForEach-Object { "$_".Trim() }); $timed = $false
+        for ($i = $l.Count - $l.Count % 2 - 2; $i -ge 0; $i -= 2) {
+        if ($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i + 1] -notmatch '^[0-9]{1,19}\z') { continue }
+        $timed = $true; $p = Get-Process -Id $l[$i] -EA 0; $t = $null
+        if ($p) { try { $t = "$($p.StartTime.ToUniversalTime().Ticks)" } catch { } }
+        if ($t -and $t -eq $l[$i + 1]) { taskkill /PID $l[$i] /T /F 2>$null | Out-Null } }
+        if (-not $timed -and $legacy -and $l[0] -match '^[0-9]{1,9}\z') { $p = Get-Process -Id $l[0] -EA 0; if ($p.ProcessName -match '^(powershell|pwsh)') { taskkill /PID $l[0] /T /F 2>$null | Out-Null } }
+        Remove-Item -Force -EA 0 -LiteralPath $pf }
         """;
 
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
@@ -276,13 +252,13 @@ public static class RemoteScripts
                 for ($i = 1; $i -le {{max}}; $i++) {
                   $f = "$root/locks/slot-$i"
                   try {
-                    $c = [IO.File]::ReadAllText($f); $l = $c -split "`n"
+                    $c = $IOFile::ReadAllText($f); $l = $c -split "`n"
                     if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim() + {{grace}}) -and (Take $f)) {
-                      try { if ([IO.File]::ReadAllText($f) -ceq $c) { StopJob $l[0].Trim(); $t = "$f.stale.$PID"; [IO.File]::Move($f, $t); [IO.File]::Delete($t) } } catch { } finally { Drop $f }
+                      try { if ($IOFile::ReadAllText($f) -ceq $c) { StopJob $l[0].Trim(); $t = "$f.stale.$PID"; $IOFile::Move($f, $t); $IOFile::Delete($t) } } catch { } finally { Drop $f }
                     }
                   } catch { }
                   try {
-                    $fs = [System.IO.File]::Open($f, 'CreateNew', 'Write', 'None')
+                    $fs = $IOFile::Open($f, 'CreateNew', 'Write', 'None')
                     $b = [Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}} + "`n" + $deadline + "`n"); $fs.Write($b, 0, $b.Length); $fs.Close()
                     'SLOT=' + $i; exit 0
                   } catch [System.IO.IOException] { }
