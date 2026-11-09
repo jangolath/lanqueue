@@ -91,7 +91,8 @@ internal static class Shells
         using var p = Process.Start(psi)!;
         var err = p.StandardError.ReadToEndAsync();
         var output = p.StandardOutput.ReadToEndAsync();
-        if (!p.WaitForExit(Guard) || !Task.WhenAll(output, err).Wait(Guard))
+        var started = Stopwatch.StartNew();
+        if (!p.WaitForExit(Guard) || !Task.WhenAll(output, err).Wait(Guard - started.Elapsed > TimeSpan.Zero ? Guard - started.Elapsed : TimeSpan.Zero))
         {
             try
             {
@@ -376,5 +377,41 @@ internal static class TestTree
         }
 
         Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>Processes a test job recorded about itself, so a kill can be proved by the process being gone rather than by timing.</summary>
+internal static class Recorded
+{
+    /// <summary>
+    /// A PowerShell line that writes "pid starttimeticks" of the running PowerShell to <paramref name="file"/> (no characters the Windows argv
+    /// policy refuses).
+    /// </summary>
+    public static string PowerShellWrite(string file) =>
+        "Set-Content -LiteralPath '" + file + "' -Value ([string]$PID + ' ' + (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)";
+
+    /// <summary>
+    /// Waits up to <paramref name="wait"/> for the process recorded in <paramref name="file"/> ("pid" or "pid starttimeticks") to be gone. A pid
+    /// that Windows has given to a new process (different start time) counts as gone.
+    /// </summary>
+    public static bool Gone(string file, TimeSpan wait)
+    {
+        var parts = File.ReadAllText(file).Trim().Split(' ');
+        var pid = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+        long? ticks = parts.Length > 1 ? long.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture) : null;
+        return SpinWait.SpinUntil(() => !Running(pid, ticks), wait);
+    }
+
+    private static bool Running(int pid, long? ticks)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited && (ticks is null || p.StartTime.ToUniversalTime().Ticks == ticks);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 }

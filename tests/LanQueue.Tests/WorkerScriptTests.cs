@@ -122,40 +122,25 @@ public sealed class WorkerScriptTests : IDisposable
     [WindowsFact]
     public void RealPowerShellJobPastItsDeadlineIsStoppedWithItsTree()
     {
-        // The job (a grandchild PowerShell) records its own pid, then would sleep five minutes and leave a marker. The worker's 3 s deadline
-        // must stop it with its whole tree. Proved by events, not tight wall-clock windows: exit 124, the run returning long before the five
-        // minutes (stdout stays open while any process of the tree lives), and the recorded grandchild process being gone.
+        // The job starts a grandchild PowerShell with its stdout and stderr detached to files (so nothing depends on pipe inheritance); the
+        // grandchild records its pid and start time, then would sleep five minutes and leave a marker. The worker's deadline must stop the
+        // whole tree. The deadline (30 s) leaves room for both PowerShells to start on a busy machine, so the grandchild always exists before
+        // it fires; the proof is that the recorded process is gone, not how long anything took.
         var marker = Path.Combine(_root, "survivor").Replace('/', (char)92);
         var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
-        var watch = Stopwatch.StartNew();
-        var (code, _) = Shells.Run(
+        var inner = Recorded.PowerShellWrite(grandchild) + "; Start-Sleep -Seconds 300; New-Item -ItemType File '" + marker + "'";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(inner));
+        var detached = "Start-Process -Wait -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile -EncodedCommand " + encoded + "'"
+            + " -RedirectStandardOutput '" + Path.Combine(_root, "gc.out").Replace('/', (char)92) + "'"
+            + " -RedirectStandardError '" + Path.Combine(_root, "gc.err").Replace('/', (char)92) + "'";
+        var (code, output) = Shells.Run(
             "windows",
-            RemoteScripts.Execute(
-                Worker(MachineOs.Windows), "j1", ".",
-                ["powershell", "-NoProfile", "-Command", "Set-Content -LiteralPath " + grandchild + " -Value $PID; Start-Sleep -Seconds 300; New-Item -ItemType File " + marker],
-                TimeSpan.FromSeconds(3)));
+            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["powershell", "-NoProfile", "-Command", detached], TimeSpan.FromSeconds(30)));
         Assert.Equal(124, code);
-        Assert.True(watch.Elapsed < TimeSpan.FromMinutes(4), "took " + watch.Elapsed);
-        if (File.Exists(grandchild) && int.TryParse(File.ReadAllText(grandchild).Trim(), out var pid))
-        {
-            Assert.True(SpinWait.SpinUntil(() => !IsRunning(pid), TimeSpan.FromSeconds(60)), $"the job's process {pid} survived");
-        }
-
+        Assert.True(File.Exists(grandchild), "the grandchild never started: " + output);
+        Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the deadline");
         Assert.False(File.Exists(marker));
         Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
-    }
-
-    private static bool IsRunning(int pid)
-    {
-        try
-        {
-            using var p = Process.GetProcessById(pid);
-            return !p.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
     }
 
     [PowerShellFact]
@@ -182,13 +167,16 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var m = Worker(MachineOs.Windows);
         var script = Path.Combine(Path.GetTempPath(), "lanq-orphan-" + Guid.NewGuid().ToString("N") + ".ps1");
-        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 120"], TimeSpan.FromMinutes(10)));
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 600"], TimeSpan.FromMinutes(30)));
         var pidFile = Path.Combine(_root, "locks", "job-j1.pid");
         using var wrapper = Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
         try
         {
             string[] lines = [];
-            for (var i = 0; i < 200 && lines.Length < 4; i++)
+            // Event-based waits with generous bounds: two PowerShells start here, which takes seconds on a busy machine. The child would sleep
+            // ten minutes, so it being gone within a minute of cleanup still proves cleanup stopped it.
+            var started = Stopwatch.StartNew();
+            while (lines.Length < 4 && started.Elapsed < TimeSpan.FromMinutes(2))
             {
                 Thread.Sleep(100);
                 try
@@ -203,12 +191,12 @@ public sealed class WorkerScriptTests : IDisposable
             Assert.True(lines.Length >= 4, "the wrapper did not record its child: " + string.Join("|", lines));
             using var child = Process.GetProcessById(int.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture));
             wrapper.Kill(entireProcessTree: false);
-            Assert.True(wrapper.WaitForExit(10000));
+            Assert.True(wrapper.WaitForExit(TimeSpan.FromSeconds(60)));
             Assert.False(child.HasExited);
 
             var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
             Assert.True(code == 0, output);
-            Assert.True(child.WaitForExit(10000), "the orphaned job child is still running");
+            Assert.True(child.WaitForExit(TimeSpan.FromSeconds(60)), "the orphaned job child is still running");
         }
         finally
         {
