@@ -188,6 +188,31 @@ public sealed class JobRunner(
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
 
+    /// <summary>Why a machine did not take the job, for the NoCapacity message: its hold or ssh error, a missing capability, or no free slot.</summary>
+    internal static string WhyNot(Machine m, MachineHealth h, IReadOnlyCollection<string> needs)
+    {
+        if (!h.Reachable)
+        {
+            // The ssh error says what to fix (host key, key, sshd); the bare hold would only say "unreachable".
+            return "unreachable: " + (h.Error ?? h.Hold ?? "no answer");
+        }
+
+        if (h.Hold is { } hold)
+        {
+            return hold;
+        }
+
+        var missing = needs.Where(n => !m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (missing.Count > 0)
+        {
+            return $"lacks {string.Join(", ", missing)} (capabilities: {string.Join(", ", m.Capabilities)})";
+        }
+
+        return h.SlotsUsed >= m.MaxJobs
+            ? string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs})")
+            : "no free slot when the job tried to start (busy, or ssh failed)";
+    }
+
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, JobPayload payload, LazyArchive archive, LazyBundles bundles, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
@@ -224,7 +249,7 @@ public sealed class JobRunner(
 
             if (deadline.Elapsed >= req.Wait)
             {
-                var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {h.Item2.Hold ?? h.Item2.Error ?? "no match / full"}"));
+                var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {WhyNot(h.Item1, h.Item2, req.Needs)}"));
                 var archiveNote = archive.Failure is null ? "" : " Archive build failed: " + archive.Failure;
                 return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + archiveNote);
             }

@@ -272,7 +272,7 @@ public static partial class Cli
         var partial = r.TimedOut && r.Output.Contains("root=", StringComparison.Ordinal);
         if ((r.ExitCode == 255 || r.TimedOut) && !partial)
         {
-            return [("FAIL", "unreachable: " + FirstLine(r.Output))];
+            return [("FAIL", "unreachable: " + SshErrors.Explain(r.Output, m.Ssh))];
         }
 
         var values = LanQueue.Health.HealthProbe.Parse(r.Output);
