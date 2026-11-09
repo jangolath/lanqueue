@@ -376,7 +376,8 @@ public static partial class Cli
         if (p.Fetch.Count > 0)
         {
             var total = p.FetchMaxBytes ?? FetchLimits.DefaultMaxTotalBytes;
-            fetch = new FetchRequest(p.Fetch, FetchRoot(p.FetchDir, repoDir), new FetchLimits(p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total));
+            var (root, anchor) = FetchRoot(p.FetchDir, repoDir);
+            fetch = new FetchRequest(p.Fetch, root, new FetchLimits(p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total), anchor);
         }
 
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
@@ -446,11 +447,16 @@ public static partial class Cli
     /// every .lanq folder, so fetched files never travel back to a worker; the default .lanq folder also gets a .gitignore of "*" so they
     /// stay out of git status and commits.
     /// </summary>
-    internal static string FetchRoot(string? fetchDir, string repoDir)
+    /// <returns>
+    /// The output root, and the anchor: the folder lanq trusts as given (the repository top, or --fetch-dir itself). Every folder below the
+    /// anchor down to out/jobid must be a real folder, never a symlink or junction.
+    /// </returns>
+    internal static (string Root, string Anchor) FetchRoot(string? fetchDir, string repoDir)
     {
         if (fetchDir is not null)
         {
-            return Path.GetFullPath(fetchDir);
+            var dir = Path.GetFullPath(fetchDir);
+            return (dir, dir);
         }
 
         var top = Path.GetFullPath(repoDir);
@@ -466,6 +472,12 @@ public static partial class Cli
         var lanq = Path.Combine(top, ".lanq");
         try
         {
+            // A committed .lanq symlink or junction is never written through (the receiver refuses every file below it too).
+            if (FetchReceiver.IsLink(lanq))
+            {
+                return (Path.Combine(lanq, "artifacts"), top);
+            }
+
             Directory.CreateDirectory(lanq);
             using var ignore = new FileStream(Path.Combine(lanq, ".gitignore"), FileMode.CreateNew, FileAccess.Write);
             ignore.Write("*\n"u8);
@@ -479,7 +491,7 @@ public static partial class Cli
             // likewise
         }
 
-        return Path.Combine(lanq, "artifacts");
+        return (Path.Combine(lanq, "artifacts"), top);
     }
 
     /// <summary>The final line on stderr; TimedOut and WindowClosed (both exit 124) are told apart here.</summary>

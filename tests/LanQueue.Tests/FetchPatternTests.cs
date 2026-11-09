@@ -156,6 +156,29 @@ public sealed class FetchPatternTests
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--fetch", "*.trx"]));
 
     [Fact]
+    public void ALinkedDotLanqFolderGetsNoGitignoreWrittenThroughIt()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "lanq-fetchroot-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var repo = Path.Combine(root, "repo");
+            var outside = Path.Combine(root, "outside");
+            Directory.CreateDirectory(Path.Combine(repo, ".git"));
+            Directory.CreateDirectory(outside);
+            FetchReceiverTests.MakeDirLink(Path.Combine(repo, ".lanq"), outside);
+
+            var (_, anchor) = Cli.FetchRoot(null, repo);
+
+            Assert.Equal(Path.GetFullPath(repo), anchor);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+        }
+        finally
+        {
+            TestTree.Delete(root);
+        }
+    }
+
+    [Fact]
     public void TheDefaultFolderIsDotLanqArtifactsInTheRepositoryAndIgnoredByGit()
     {
         var repo = Path.Combine(Path.GetTempPath(), "lanq-fetchroot-" + Guid.NewGuid().ToString("N"));
@@ -163,10 +186,11 @@ public sealed class FetchPatternTests
         {
             Directory.CreateDirectory(Path.Combine(repo, ".git"));
             Directory.CreateDirectory(Path.Combine(repo, "src", "app"));
-            var root = Cli.FetchRoot(null, Path.Combine(repo, "src", "app"));
+            var (root, anchor) = Cli.FetchRoot(null, Path.Combine(repo, "src", "app"));
             Assert.Equal(Path.Combine(Path.GetFullPath(repo), ".lanq", "artifacts"), root);
+            Assert.Equal(Path.GetFullPath(repo), anchor);
             Assert.Equal("*\n", File.ReadAllText(Path.Combine(repo, ".lanq", ".gitignore")));
-            Assert.Equal(Path.GetFullPath("elsewhere"), Cli.FetchRoot("elsewhere", repo));
+            Assert.Equal((Path.GetFullPath("elsewhere"), Path.GetFullPath("elsewhere")), Cli.FetchRoot("elsewhere", repo));
         }
         finally
         {

@@ -52,6 +52,7 @@ public sealed class FetchReceiver : IDisposable
     };
 
     private readonly string _dir;
+    private readonly string _anchor;
     private readonly Regex _matcher;
     private readonly FetchLimits _limits;
     private readonly List<FetchedFile> _fetched = [];
@@ -70,9 +71,14 @@ public sealed class FetchReceiver : IDisposable
 
     /// <param name="dir">out/jobid: created on the first file; must not be a link.</param>
     /// <param name="ignoreCase">The worker matched case-insensitively (Windows), so the local pattern check does too.</param>
-    public FetchReceiver(string dir, IReadOnlyList<string> patterns, FetchLimits limits, bool ignoreCase)
+    /// <param name="anchor">
+    /// The folder trusted as given; every folder from below it down to <paramref name="dir"/> must be a real folder. Null means the parent of
+    /// <paramref name="dir"/>.
+    /// </param>
+    public FetchReceiver(string dir, IReadOnlyList<string> patterns, FetchLimits limits, bool ignoreCase, string? anchor = null)
     {
         _dir = Path.GetFullPath(dir);
+        _anchor = Path.GetFullPath(anchor ?? Path.GetDirectoryName(_dir)!);
         _matcher = FetchPatterns.Matcher(patterns, ignoreCase);
         _limits = limits;
     }
@@ -353,10 +359,9 @@ public sealed class FetchReceiver : IDisposable
     {
         if (!_dirReady)
         {
-            Directory.CreateDirectory(_dir);
-            if (IsLink(_dir))
+            if (OutputFolderProblem() is { } problem)
             {
-                return "the output folder is a link";
+                return problem;
             }
 
             _dirReady = true;
@@ -389,6 +394,40 @@ public sealed class FetchReceiver : IDisposable
 
         var target = Path.Combine(_dir, rel.Replace('/', Path.DirectorySeparatorChar));
         return IsLink(target) ? "the target is an existing link" : null;
+    }
+
+    /// <summary>
+    /// Creates out/jobid one level at a time below the anchor (the repository top or --fetch-dir), checking each level with lstat semantics
+    /// before and after: a committed .lanq or .lanq/artifacts symlink or junction, or any other link on the way, refuses every file.
+    /// </summary>
+    private string? OutputFolderProblem()
+    {
+        var rel = Path.GetRelativePath(_anchor, _dir);
+        if (rel == ".." || rel.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(rel))
+        {
+            return "the output folder is not below its anchor folder";
+        }
+
+        var path = _anchor;
+        foreach (var segment in rel == "." ? [] : rel.Split(Path.DirectorySeparatorChar))
+        {
+            path = Path.Combine(path, segment);
+            if (IsLink(path))
+            {
+                return "a folder on the way to the output folder is a link: " + path;
+            }
+
+            if (!Directory.Exists(path))
+            {
+                Directory.CreateDirectory(path);
+                if (IsLink(path))
+                {
+                    return "a folder on the way to the output folder is a link: " + path;
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>True when something exists at <paramref name="path"/> and is a symlink, junction or other reparse point (dangling ones too).</summary>

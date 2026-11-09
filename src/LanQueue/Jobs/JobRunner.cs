@@ -35,7 +35,8 @@ public sealed record JobRequest(
 
 /// <param name="Patterns">Validated --fetch patterns (see <see cref="FetchPatterns"/>).</param>
 /// <param name="OutputRoot">The local folder; files land in OutputRoot/jobid/relpath.</param>
-public sealed record FetchRequest(IReadOnlyList<string> Patterns, string OutputRoot, FetchLimits Limits);
+/// <param name="Anchor">The folder trusted as given (repository top or --fetch-dir); null means <paramref name="OutputRoot"/>.</param>
+public sealed record FetchRequest(IReadOnlyList<string> Patterns, string OutputRoot, FetchLimits Limits, string? Anchor = null);
 
 public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, string? Machine, string Message)
 {
@@ -449,7 +450,7 @@ public sealed class JobRunner(
         }
 
         FetchReport report;
-        using (var receiver = new FetchReceiver(dir, fetch.Patterns, fetch.Limits, ignoreCase: machine.Os == MachineOs.Windows))
+        using (var receiver = new FetchReceiver(dir, fetch.Patterns, fetch.Limits, ignoreCase: machine.Os == MachineOs.Windows, anchor: fetch.Anchor ?? fetch.OutputRoot))
         {
             var script = FetchScripts.Fetch(machine, jobId, directory, fetch.Patterns, fetch.Limits);
             var r = machine.Os == MachineOs.Windows

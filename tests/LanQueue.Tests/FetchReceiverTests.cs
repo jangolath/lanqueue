@@ -417,6 +417,32 @@ public sealed class FetchReceiverTests : IDisposable
         Assert.Equal("over the total size cap", Reason(r, "next.bin"));
     }
 
+    /// <summary>A repository can commit a .lanq or .lanq/artifacts symlink; nothing is ever written through it.</summary>
+    [Theory]
+    [InlineData(".lanq")]
+    [InlineData(".lanq/artifacts")]
+    public void ALinkBetweenTheRepositoryAndTheOutputFolderIsNeverWrittenThrough(string linked)
+    {
+        var repo = Path.Combine(_root, "repo");
+        var outside = Path.Combine(_root, "outside");
+        Directory.CreateDirectory(outside);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(repo, linked))!);
+        MakeDirLink(Path.Combine(repo, linked), outside);
+
+        using var rx = new FetchReceiver(Path.Combine(repo, ".lanq", "artifacts", "job1"), ["**"], FetchLimits.Default, ignoreCase: false, anchor: repo);
+        foreach (var l in Frame("x.txt", Bytes(10)))
+        {
+            rx.OnLine(l);
+        }
+
+        rx.OnLine("LQF1 DONE");
+        var r = rx.Finish();
+
+        Assert.Empty(r.Fetched);
+        Assert.Contains("link", Reason(r, "x.txt"), StringComparison.Ordinal);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+    }
+
     /// <summary>The Windows script sends 3072-byte chunks: exactly 4096 base64 characters per line, the most a data line may hold.</summary>
     [Fact]
     public void AnExactly4096CharacterDataLineIsAccepted()
