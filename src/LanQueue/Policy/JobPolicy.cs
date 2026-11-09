@@ -26,6 +26,24 @@ public static class JobPolicy
         "ask-for-approval=never",
     ];
 
+    /// <summary>Characters cmd.exe interprets, plus the double quote that PowerShell 5.1 native-argument passing re-splits on.</summary>
+    private static readonly char[] WindowsUnsafeChars = [(char)34, '&', '|', '<', '>', '^', '%'];
+
+    /// <summary>
+    /// Extra rule for Windows workers. PowerShell 5.1 rebuilds a native command line without escaping embedded double quotes, and a
+    /// .cmd/.bat shim (npm.cmd, yarn.cmd and similar) re-parses that line through cmd.exe, so an argument like "&amp;calc" would run a
+    /// second command. Arguments containing any of " &amp; | &lt; &gt; ^ % are therefore refused for Windows machines.
+    /// </summary>
+    public static PolicyResult ValidateForWindows(IReadOnlyList<string> argv)
+    {
+        var bad = argv.FirstOrDefault(a => a.IndexOfAny(WindowsUnsafeChars) >= 0);
+        return bad is null
+            ? PolicyResult.Allow
+            : PolicyResult.Deny(
+                $"Argument '{bad}' contains one of \" & | < > ^ %, which Windows workers refuse: PowerShell 5.1 passes embedded quotes "
+                + "through unescaped and .cmd shims such as npm.cmd re-parse the command line through cmd.exe, which could run another command.");
+    }
+
     public static PolicyResult Validate(PolicyConfig policy, IReadOnlyList<string> argv, string directory)
     {
         if (argv.Count == 0)

@@ -187,6 +187,12 @@ public static class RemoteScripts
         var pidFile = $"{m.WorkRoot}/locks/job-{jobId}.pid";
         if (m.Os == MachineOs.Windows)
         {
+            var windows = JobPolicy.ValidateForWindows(argv);
+            if (!windows.Ok)
+            {
+                throw new InvalidOperationException(windows.Reason);
+            }
+
             var parts = string.Join(' ', argv.Select(ShellQuote.PowerShell));
             return $$"""
                 $pf = {{ShellQuote.PowerShell(pidFile)}}

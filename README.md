@@ -340,8 +340,10 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   whole working snapshot each time, with no history and no cache.
 - A crashed orchestrator can leave a slot file behind; delete `locks/slot-N` (and any stale `locks/job-*.pid`) under
   the machine's `work_root`.
-- No persistent queue: `--wait` polls every 15 seconds. Windows arguments containing embedded double quotes can
-  be mangled by PowerShell 5.1 native-command argument passing.
+- No persistent queue: `--wait` polls every 15 seconds.
+- On Windows workers, arguments containing any of `"` `&` `|` `<` `>` `^` `%` are refused. PowerShell 5.1 passes
+  embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through
+  `cmd.exe`, so such an argument could run a second command. Linux workers accept them.
 - `allowed_hours` uses the clock of the machine running `lanq`. In tests the generated Linux scripts are
   checked with `sh -n` and the Windows scripts with the PowerShell parser, but only when those shells exist on the
   machine running the tests (otherwise those checks are skipped), and the scripts have so far been exercised only

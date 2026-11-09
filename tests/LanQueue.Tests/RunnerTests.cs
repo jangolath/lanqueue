@@ -568,4 +568,16 @@ public sealed class RunnerTests : IDisposable
         public Task<SshResult> UploadAsync(Config.Machine machine, string localPath, string remotePath, TimeSpan timeout, CancellationToken ct) =>
             Task.FromResult(new SshResult(0, ""));
     }
+
+    [Fact]
+    public async Task CmdMetacharacterArgumentIsRefusedOnAWindowsWorkerBeforeUpload()
+    {
+        var (runner, ssh, _, _) = Make();
+        var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None); // build-02 (Windows) is least loaded
+
+        Assert.Equal(JobStatus.Rejected, r.Status);
+        Assert.Equal(2, r.CliExitCode);
+        Assert.Contains("cmd.exe", r.Message, StringComparison.Ordinal);
+        Assert.Empty(ssh.Uploads);
+    }
 }
