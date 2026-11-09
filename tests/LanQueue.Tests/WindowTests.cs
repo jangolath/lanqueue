@@ -246,7 +246,8 @@ public sealed class WindowTests : IDisposable
     {
         var m = T.Linux();
         m.WorkRoot = Path.Combine(_dir, "shroot").Replace((char)92, '/');
-        var (_, output) = Shells.Run("linux", RemoteScripts.Probe(m), new Dictionary<string, string> { ["TZ"] = "EST5EDT" });
+        // A full POSIX rule, not the legacy name: Ubuntu 26.04 moved EST5EDT to tzdata-legacy and its uutils date reads an unknown zone as UTC.
+        var (_, output) = Shells.Run("linux", RemoteScripts.Probe(m), new Dictionary<string, string> { ["TZ"] = "EST5EDT,M3.2.0,M11.1.0" });
         var v = HealthProbe.Parse(output);
         var table = UtcOffsetTable.TryParse(v.GetValueOrDefault("now_epoch"), v.GetValueOrDefault("tz_start"), v.GetValueOrDefault("tz_offsets"));
         Assert.True(table is not null, "probe output: " + output);
