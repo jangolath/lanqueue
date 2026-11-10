@@ -80,6 +80,54 @@ public sealed class InitTests : IDisposable
         Assert.True(File.Exists(Path.Combine(appData, "lanq", "machines.yml")), o.ToString());
     }
 
+    /// <summary>
+    /// A relative XDG_CONFIG_HOME is ignored (the XDG spec says so): init and lookup use ~/.config instead, never a folder under the current
+    /// one.
+    /// </summary>
+    [Fact]
+    public async Task ARelativeXdgConfigHomeIsIgnored()
+    {
+        var home = Path.Combine(_dir, "home");
+        string? Relative(string n) => n switch { "XDG_CONFIG_HOME" => "config", "HOME" => home, _ => null };
+        var expected = Path.Combine(home, ".config", "lanq", "machines.yml");
+        Assert.Equal(expected, Cli.UserConfigPath(Relative, windows: false));
+
+        var (code, _, err) = await InitWith(Relative);
+        Assert.True(code == 0, err);
+        Assert.True(File.Exists(expected));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_cwd));
+        Assert.Equal(expected, Cli.ResolveConfig(null, Relative, windows: false, File.Exists));
+    }
+
+    /// <summary>
+    /// No per-user folder at all (HOME / APPDATA empty and the system has no answer either): init refuses with exit 2 and says how to name a
+    /// file, instead of writing lanq/machines.yml under the current folder; lookup refuses the same way.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WithoutAPerUserFolderInitAndLookupRefuse(bool windows)
+    {
+        static string NoFolder(Environment.SpecialFolder _) => "";
+        string? Empty(string n) => n is "HOME" or "APPDATA" ? "" : n == "XDG_CONFIG_HOME" ? "relative/config" : null;
+        var o = new StringWriter();
+        var e = new StringWriter();
+
+        var code = await Cli.Init(ParsedArgs.Parse(["init", "--json"]), _cwd, Empty, windows, o, e, folder: NoFolder);
+
+        Assert.Equal(2, code);
+        Assert.Contains("per-user config folder", e.ToString(), StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(o.ToString());
+        Assert.Equal("Rejected", json.RootElement.GetProperty("status").GetString());
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_cwd));
+        var ex = Assert.Throws<ConfigException>(() => Cli.ResolveConfig(null, Empty, windows, _ => true, NoFolder));
+        Assert.Contains("--config FILE", ex.Message, StringComparison.Ordinal);
+
+        // --config still works without one.
+        var named = Path.Combine(_dir, "named.yml");
+        Assert.Equal(0, await Cli.Init(ParsedArgs.Parse(["init", "--config", named]), _cwd, Empty, windows, new StringWriter(), new StringWriter(), folder: NoFolder));
+    }
+
     /// <summary>LANQ_CONFIG names the file lookup reads, so init writes that one.</summary>
     [Fact]
     public async Task LanqConfigNamesTheFileInitWrites()

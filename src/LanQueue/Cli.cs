@@ -990,7 +990,8 @@ public static partial class Cli
     }
 
     /// <summary>Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder. Never the current directory.</summary>
-    internal static string ResolveConfig(string? explicitPath, Func<string, string?> env, bool windows, Func<string, bool> exists)
+    internal static string ResolveConfig(
+        string? explicitPath, Func<string, string?> env, bool windows, Func<string, bool> exists, Func<Environment.SpecialFolder, string>? folder = null)
     {
         var path = explicitPath ?? env("LANQ_CONFIG");
         if (!string.IsNullOrEmpty(path))
@@ -998,7 +999,7 @@ public static partial class Cli
             return exists(path) ? path : throw new ConfigException($"Config file not found: {path}. Check the path, or write a starter file with: lanq init --config {path}");
         }
 
-        var userFile = UserConfigPath(env, windows);
+        var userFile = UserConfigPath(env, windows, folder);
         return exists(userFile)
             ? userFile
             : throw new ConfigException(
@@ -1006,22 +1007,42 @@ public static partial class Cli
                 + "A machines file in the current directory is never picked up implicitly.");
     }
 
-    /// <summary>The per-user config file lanq reads when neither --config nor $LANQ_CONFIG is given.</summary>
-    internal static string UserConfigPath(Func<string, string?> env, bool windows)
+    /// <summary>
+    /// The per-user config file lanq reads when neither --config nor $LANQ_CONFIG is given: %APPDATA%\lanq\machines.yml on Windows, else
+    /// $XDG_CONFIG_HOME/lanq/machines.yml or ~/.config/lanq/machines.yml. Only a full path counts: a relative XDG_CONFIG_HOME is ignored (as the
+    /// XDG spec says), and a relative or empty HOME / APPDATA falls back to the system's answer; when that is empty too there is no per-user
+    /// folder, and this throws (exit 2) instead of resolving against the current folder.
+    /// </summary>
+    /// <param name="folder">Environment.GetFolderPath (tests pass their own).</param>
+    /// <exception cref="ConfigException">The per-user folder cannot be determined.</exception>
+    internal static string UserConfigPath(Func<string, string?> env, bool windows, Func<Environment.SpecialFolder, string>? folder = null) =>
+        TryUserConfigPath(env, windows, folder) ?? throw new ConfigException(NoUserConfigFolder(windows));
+
+    /// <summary>Why there is no per-user config file to read or write (<see cref="UserConfigPath"/>).</summary>
+    internal static string NoUserConfigFolder(bool windows) =>
+        $"lanq cannot tell where your per-user config folder is ({(windows ? "APPDATA is" : "HOME and XDG_CONFIG_HOME are")} not set to a full path). "
+        + "Pass --config FILE, or set LANQ_CONFIG to the config file's full path.";
+
+    /// <summary><see cref="UserConfigPath"/>, or null when the per-user folder cannot be determined.</summary>
+    internal static string? TryUserConfigPath(Func<string, string?> env, bool windows, Func<Environment.SpecialFolder, string>? folder = null)
     {
-        string userDir;
+        folder ??= Environment.GetFolderPath;
+        string? userDir;
         if (windows)
         {
-            var appData = env("APPDATA");
-            userDir = Path.Combine(string.IsNullOrEmpty(appData) ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) : appData, "lanq");
+            userDir = FullPath(env("APPDATA")) ?? FullPath(folder(Environment.SpecialFolder.ApplicationData));
         }
         else
         {
-            var xdg = env("XDG_CONFIG_HOME");
-            userDir = Path.Combine(!string.IsNullOrEmpty(xdg) ? xdg : Path.Combine(HomeDir(env), ".config"), "lanq");
+            var home = FullPath(env("HOME")) ?? FullPath(folder(Environment.SpecialFolder.UserProfile));
+            userDir = FullPath(env("XDG_CONFIG_HOME")) ?? (home is null ? null : Path.Combine(home, ".config"));
         }
 
-        return Path.Combine(userDir, "machines.yml");
+        return userDir is null ? null : Path.Combine(userDir, "lanq", "machines.yml");
+
+        // A full path in either system's form (tests apply the other system's rules too): /x, C:/x or C:\x, \\server\share.
+        static string? FullPath(string? p) =>
+            !string.IsNullOrEmpty(p) && (Path.IsPathRooted(p) || p[0] == '/' || (p.Length >= 3 && char.IsAsciiLetter(p[0]) && p[1] == ':' && p[2] is '/' or '\\')) ? p : null;
     }
 
     private static string HomeDir(Func<string, string?> env) =>
