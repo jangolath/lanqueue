@@ -526,7 +526,7 @@ public sealed class DoctorTests : IDisposable
         var ssh = new FakeSsh
         {
             Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n"),
-            InputHandler = (_, _, input) => Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+            InputHandler = (_, cmd, input) => cmd == RemoteScripts.FindToolchainCommand(MachineOs.Linux) && Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
                 ? new SshResult(0, "open.dotnet=/srv/shared/dotnet|10.0.102\n")
                 : new SshResult(1, ""),
         };
@@ -669,6 +669,20 @@ public sealed class DoctorTests : IDisposable
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    /// <summary>A Windows worker gets the PowerShell search on stdin through the command that runs it from memory.</summary>
+    [Fact]
+    public async Task TheWindowsSearchGoesOnStdinToPowerShell()
+    {
+        var ssh = new FakeSsh { InputHandler = (_, _, _) => new SshResult(0, "found.dotnet=D:/build/dotnet|10.0.102\n") };
+        var search = await Cli.FindToolchain(T.Windows(), ssh, "dotnet", CancellationToken.None);
+        Assert.Equal("D:/build/dotnet", search!.Value.Found!.Value.Dir);
+        var run = Assert.Single(ssh.InputRuns);
+        Assert.Equal(RemoteScripts.FindToolchainCommand(MachineOs.Windows), run.Command);
+        Assert.StartsWith(RemoteScripts.FindToolchainMarker + " dotnet", Encoding.UTF8.GetString(run.Input), StringComparison.Ordinal);
+        Assert.Contains("Test-SafeFolder", Encoding.UTF8.GetString(run.Input), StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
     }
 
     [Fact]

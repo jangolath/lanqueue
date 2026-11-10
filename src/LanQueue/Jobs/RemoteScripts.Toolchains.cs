@@ -25,11 +25,12 @@ public static partial class RemoteScripts
     /// fixed drive; on Linux and macOS /etc/dotnet/install_location (and _ARCH), /usr/share/dotnet, /usr/lib/dotnet, /usr/lib64/dotnet,
     /// /opt/dotnet, /snap/dotnet-sdk/current, /usr/local/share/dotnet and the Homebrew folders. When the dotnet on PATH has no SDK but a
     /// runtime, it also prints <c>runtime.dotnet=VERSION</c> (the highest Microsoft.NETCore.App). A folder other local users could plant code
-    /// in prints <c>open.dotnet=DIR|VERSION</c> instead and is never proposed for path_prepend, as lanq-makeready 0.3.0 judges it: the folder,
-    /// its dotnet, its newest SDK folder, host, host/fxr and its version folders must be owned by Administrators, SYSTEM, TrustedInstaller
-    /// (root) or this account with a DACL that gives nobody else more than read/execute (on Linux no write for others, nor for a group other
-    /// than root's or the account's own private group); every parent folder must have such an owner and let nobody else delete or rename
-    /// what is in it (on Linux: not writable by others or another group unless sticky).
+    /// in prints <c>open.dotnet=DIR|VERSION</c> instead and is never proposed for path_prepend, as lanq-makeready 0.3.0 judges it. Trusted:
+    /// Administrators, SYSTEM, TrustedInstaller (root), members of the local Administrators group and this account. The folder, its dotnet,
+    /// sdk and the newest SDK folder, host, host/fxr, shared (every framework), packs, sdk-manifests and their version folders: a trusted owner and a
+    /// DACL giving nobody else more than read/execute (on Linux no write for others, nor for a group other than root's or the account's own
+    /// private group; POSIX ACLs are not read). Every parent folder: a trusted owner, and nobody else may delete or rename what is in it (on
+    /// Linux: not writable by others or another group unless sticky). Only absolute folders; on Windows a junction or link folder is refused.
     /// </summary>
     public static string FindToolchain(Machine m, string tool)
     {
@@ -47,9 +48,9 @@ public static partial class RemoteScripts
         : "sh -s";
 
     private const string WindowsDotnetSearch = """
-                $sw = [Diagnostics.Stopwatch]::StartNew(); $seen = @{}
                 $tr = @(); try { $tr += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { }
                 try { $tr += @((Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop).SID.Value) } catch { }
+                $sw = [Diagnostics.Stopwatch]::StartNew(); $seen = @{}
                 function Test-Sddl([string]$Sd, [int]$Kind) {
                   $trust = '^(BA|SY|CO|OW|S-1-5-32-544|S-1-5-18|S-1-3-0|S-1-3-4|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464|' + ((@($tr) | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')$'
                   if ($Sd -notmatch '^O:([^G]+)G:' -or $Matches[1] -notmatch $trust) { return $false }
@@ -64,14 +65,15 @@ public static partial class RemoteScripts
                   return $true
                 }
                 function Test-SafeFolder([string]$Dir, [string]$Sdk) {
-                  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\sdk", 0), @("$Dir\sdk\$Sdk", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3), @("$Dir\shared", 3), @("$Dir\shared\Microsoft.NETCore.App", 3))
-                  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue) + @(Get-ChildItem -LiteralPath "$Dir\shared\Microsoft.NETCore.App" -Directory -ErrorAction SilentlyContinue)) { $chk += , @($x.FullName, 0) }
+                  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\sdk", 0), @("$Dir\sdk\$Sdk", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3), @("$Dir\shared", 3), @("$Dir\packs", 3), @("$Dir\sdk-manifests", 3))
+                  $fw = @(Get-ChildItem -LiteralPath "$Dir\shared" -Directory -ErrorAction SilentlyContinue)
+                  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue) + $fw + @($fw | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue })) { $chk += , @($x.FullName, 0) }
                   $parts = @($Dir -split '\\')
                   for ($i = $parts.Count - 2; $i -ge 0; $i--) { if ($i -eq 0) { $chk += , @("$($parts[0])\", 2) } else { $chk += , @(($parts[0..$i] -join '\'), 1) } }
                   foreach ($c in $chk) {
                     $k = $c[1]; if ($k -eq 3) { if (-not (Test-Path -LiteralPath $c[0])) { continue }; $k = 0 }
                     try { $it = Get-Item -LiteralPath $c[0] -Force -ErrorAction Stop; $sd = "$((Get-Acl -LiteralPath $c[0] -ErrorAction Stop).Sddl)" } catch { return $false }
-                    if ($k -ne 2 -and ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+                    if ($k -ne 2 -and $it.PSIsContainer -and ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
                     if (-not (Test-Sddl $sd $k)) { return $false } }
                   return $true
                 }
@@ -100,8 +102,8 @@ public static partial class RemoteScripts
                 end=$(( $(date +%s) + 5 ))
                 u=$(id -u); g=0; [ "$(id -gn)" = "$(id -un)" ] && g=$(id -g)
                 safe() { # $1 = folder, $2 = its newest SDK: no other local user can plant code a job's dotnet runs (as lanq-makeready 0.3.0 judges it)
-                  for x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1/shared/Microsoft.NETCore.App" "$1"/shared/Microsoft.NETCore.App/*; do
-                    case "$x" in "$1/host"*|"$1/shared"*) [ -e "$x" ] || continue ;; esac
+                  for x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1"/shared/* "$1"/shared/*/* "$1/packs" "$1/sdk-manifests"; do
+                    case "$x" in "$1/host"*|"$1/shared"*|"$1/packs"|"$1/sdk-manifests") [ -e "$x" ] || continue ;; esac
                     x=$(readlink -f -- "$x" 2>/dev/null) && [ -n "$(find "$x" -maxdepth 0 \( -user 0 -o -user "$u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) 2>/dev/null)" ] || return 1
                   done
                   r=$(readlink -f -- "$1" 2>/dev/null) || return 1

@@ -5,10 +5,13 @@
 ### Security
 
 - The .NET SDK search behind `lanq doctor --remote` and `lanq makeready --add` no longer proposes `path_prepend` for a
-  folder other local users could plant a `dotnet` in: the folder or its `dotnet` not owned by Administrators, SYSTEM,
-  TrustedInstaller (root on Linux) or the build account, or writable by Users, Authenticated Users, Interactive or
-  Everyone (others, or a group other than root's). On a shared PC, a world-writable folder such as `C:\tools\dotnet`
-  could otherwise make every later .NET job run a planted program as the build account. Such a folder is skipped.
+  folder other local users could plant code in, judged as lanq-makeready 0.3.0 does: only Administrators, SYSTEM,
+  TrustedInstaller (root), members of the local Administrators group and the build account may write the folder, its
+  `dotnet`, `sdk`, `host` and `shared` trees, and nobody else may rename or replace it through a parent folder (on Linux
+  the file modes; POSIX ACLs are not read). On a shared PC, a world-writable folder such as `C:\tools\dotnet` could
+  otherwise make every later .NET job run a planted program as the build account. Such a folder is skipped, and
+  `doctor --remote` and `--add` say so. The search now goes to the worker on stdin and runs from memory, like
+  `lanq makeready`, instead of on the command line.
 
 ### Behaviour changes
 
