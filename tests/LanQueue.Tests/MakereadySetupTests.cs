@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
+using LanQueue.Ssh;
 using Xunit;
 
 namespace LanQueue.Tests;
@@ -265,5 +266,47 @@ public sealed class MakereadySetupTests : IDisposable
         Assert.Equal(2, code);
         Assert.Empty(o);
         Assert.NotEmpty(e);
+    }
+
+    /// <summary>The deferred phase-D row: when the worker refused the key or its host key is unknown, the next steps add --setup (for the developer).</summary>
+    [Theory]
+    [InlineData("me@10.20.30.31: Permission denied (publickey).", true)]
+    [InlineData("Host key verification failed.", true)]
+    [InlineData("No ED25519 host key is known for 10.20.30.31 and you have requested strict checking.", true)]
+    [InlineData("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\nHost key verification failed.", false)]
+    [InlineData("ssh: connect to host 10.20.30.31 port 22: Connection refused", false)]
+    public async Task AKeyOrHostKeyFailureSuggestsTheSetup(string sshError, bool suggested)
+    {
+        Assert.Equal(suggested, SshErrors.SetupWouldHelp(sshError));
+        foreach (var json in new[] { false, true })
+        {
+            var ssh = new FakeSsh { InputHandler = (_, _, _) => new SshResult(255, "") { ErrorOutput = sshError } };
+            var o = new StringWriter();
+            var e = new StringWriter();
+            string[] args = ["makeready", "--ssh", "me@10.20.30.31", "--os", "linux", "--key-env", "LANQ_KEY", .. json ? new[] { "--json" } : []];
+            var code = await Cli.Makeready(ParsedArgs.Parse(args), T.Config, ssh, new HealthProbe(ssh, TimeProvider.System), o, e, CancellationToken.None, Host());
+            Assert.Equal(70, code);
+            var line = "Next: (for the developer) if the PC is not set up for your key yet, print its one-time setup";
+            Assert.Equal(suggested, e.ToString().Contains(line, StringComparison.Ordinal));
+            if (suggested)
+            {
+                Assert.Contains(": lanq makeready --ssh me@10.20.30.31 --os linux --setup --key-env LANQ_KEY", e.ToString(), StringComparison.Ordinal);
+            }
+
+            if (json)
+            {
+                using var doc = JsonDocument.Parse(o.ToString());
+                var steps = doc.RootElement.GetProperty("nextSteps").EnumerateArray().ToList();
+                var setup = steps.Where(s => s.TryGetProperty("argv", out var a) && a.EnumerateArray().Any(t => t.GetString() == "--setup")).ToList();
+                Assert.Equal(suggested ? 1 : 0, setup.Count);
+                Assert.All(setup, s => Assert.False(s.GetProperty("safeToRunUnattended").GetBoolean()));
+            }
+        }
+
+        // A configured machine never gets it (--setup takes --ssh user@host).
+        var configured = new FakeSsh { Handler = (_, _) => new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok\npaused=0\n"), InputHandler = (_, _, _) => new SshResult(255, "") { ErrorOutput = sshError } };
+        var err = new StringWriter();
+        Assert.Equal(70, await Cli.Makeready(ParsedArgs.Parse(["makeready", "build-01"]), T.Config, configured, new HealthProbe(configured, TimeProvider.System), new StringWriter(), err, CancellationToken.None, Host()));
+        Assert.DoesNotContain("--setup", err.ToString(), StringComparison.Ordinal);
     }
 }

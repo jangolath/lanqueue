@@ -164,6 +164,10 @@ public sealed class NextStepsTests : IDisposable
             yield return ($"makeready {f}", NextSteps.ForMakereadyError(f, "message", SuggestedCommand.Makeready("big-01", "fleet.yml"), "fleet.yml"));
         }
 
+        var setup = SuggestedCommand.Setup("build@10.20.30.40", MachineOs.Linux, "LANQ_KEY");
+        yield return ("makeready --ssh key refused", NextSteps.ForMakereadyError(
+            NextSteps.MakereadyFailure.Unreachable, "message", SuggestedCommand.Makeready(null, null, "build@10.20.30.40", MachineOs.Linux), null, setup));
+
         foreach (var verdict in new[] { "OK", "WARN", "FAIL", "held", "unreachable", "error" })
         {
             yield return ($"makeready --all row {verdict}", NextSteps.ForMakereadyRow("big-01", verdict, "problem", "fleet.yml"));
@@ -210,9 +214,18 @@ public sealed class NextStepsTests : IDisposable
             var p = ParsedArgs.Parse([.. s.Argv.Skip(1)]);
             Assert.Contains(p.Command, new[] { "run", "health", "doctor", "makeready" });
             var own = Own(s.Argv);
-            foreach (var banned in new[] { "--force", "--yes", "--wake", "--add", "--setup" })
+            foreach (var banned in new[] { "--force", "--yes", "--wake", "--add" })
             {
                 Assert.DoesNotContain(banned, own);
+            }
+
+            // --setup only as lanq makeready --ssh ... --setup (it connects to nothing), and never safe unattended: it is for the developer.
+            if (own.Contains("--setup"))
+            {
+                Assert.True(p.Setup);
+                Assert.Equal("makeready", p.Command);
+                Assert.NotNull(p.SshTarget);
+                Assert.False(s.SafeToRunUnattended);
             }
 
             Assert.DoesNotContain(own[0], new[] { "unlock", "init", "wake" });
@@ -456,6 +469,38 @@ public sealed class NextStepsTests : IDisposable
         var line = Assert.Single(NextSteps.Lines(NextSteps.ForMakereadyRow("big-01", "FAIL", "git missing", null)));
         Assert.StartsWith("Next: (for the developer) big-01 is NOT READY", line, StringComparison.Ordinal);
         Assert.EndsWith(": lanq makeready big-01", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// --setup is suggested only by its own factory (lanq makeready --ssh ... --setup, never safe unattended); --add and --yes never, not even
+    /// smuggled in as a value the factories pass on.
+    /// </summary>
+    [Fact]
+    public void SetupIsOnlyEverSuggestedByItsOwnFactoryAndAddAndYesNever()
+    {
+        var setup = SuggestedCommand.Setup("build@10.20.30.40", MachineOs.Windows, "LANQ_KEY")!;
+        Assert.Equal(["lanq", "makeready", "--ssh", "build@10.20.30.40", "--os", "windows", "--setup", "--key-env", "LANQ_KEY"], setup.Argv);
+        Assert.False(setup.SafeToRunUnattended);
+        Assert.Equal("Next: (for the developer) why: lanq makeready --ssh build@10.20.30.40 --os windows --setup --key-env LANQ_KEY",
+            Assert.Single(NextSteps.Lines([NextSteps.Step(NextAction.AskDeveloper, "why", setup)])));
+
+        // A banned word passed as a value never becomes a suggestion.
+        Assert.Null(SuggestedCommand.Setup("build@10.20.30.40", MachineOs.Linux, "--add"));
+        Assert.Null(SuggestedCommand.Setup("--yes", MachineOs.Linux, null));
+        Assert.Null(SuggestedCommand.Makeready(null, null, "build@10.20.30.40", MachineOs.Linux, "--setup"));
+        Assert.Null(SuggestedCommand.Makeready("--add", null));
+        Assert.Null(SuggestedCommand.Doctor(remote: true, "--yes"));
+
+        // No step anywhere carries --add or --yes; --setup only on that one command.
+        foreach (var s in EveryStep().Where(s => s.Argv is not null))
+        {
+            var own = Own(s.Argv!);
+            Assert.DoesNotContain("--add", own);
+            Assert.DoesNotContain("--yes", own);
+            Assert.True(!own.Contains("--setup") || (own[0] == "makeready" && !s.SafeToRunUnattended));
+        }
+
+        Assert.Contains(EveryStep(), s => s.Argv?.Contains("--setup") == true);
     }
 
     private async Task<(int Code, string Stdout, string Stderr)> Run(PoolSsh ssh, params string[] args)

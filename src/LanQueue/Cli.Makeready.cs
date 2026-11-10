@@ -73,7 +73,7 @@ public static partial class Cli
                 : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct, failed).ConfigureAwait(false);
             if (failed.Kind is { } kind)
             {
-                await NextSteps.WriteAsync(stderr, NextSteps.ForMakereadyError(kind, failed.Message, again, p.ConfigPath)).ConfigureAwait(false);
+                await NextSteps.WriteAsync(stderr, NextSteps.ForMakereadyError(kind, failed.Message, again, p.ConfigPath, SetupStep(p, failed))).ConfigureAwait(false);
             }
 
             return result;
@@ -123,7 +123,7 @@ public static partial class Cli
                 130 => NextSteps.MakereadyFailure.Cancelled,
                 _ => NextSteps.MakereadyFailure.Unexpected,
             };
-            var steps = NextSteps.ForMakereadyError(kind, message, again, p.ConfigPath);
+            var steps = NextSteps.ForMakereadyError(kind, message, again, p.ConfigPath, SetupStep(p, failed));
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             await WriteJsonError("makeready", status, code, message, stdout, steps).ConfigureAwait(false);
         }
@@ -133,10 +133,17 @@ public static partial class Cli
         static string LastLine(string text) => text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
     }
 
+    /// <summary>lanq makeready --ssh ... --setup as a next step, when the worker refused the key or its host key is unknown (never for a configured machine).</summary>
+    private static SuggestedCommand? SetupStep(ParsedArgs p, MakereadyFailed failed) =>
+        failed.SetupWouldHelp && p.SshTarget is { } target && p.Os is { } os ? SuggestedCommand.Setup(target, os, p.KeyEnv) : null;
+
     /// <summary>Why lanq makeready ended without a report (set where that happens; null when there was a report or the --all table).</summary>
     private sealed class MakereadyFailed
     {
         public NextSteps.MakereadyFailure? Kind { get; private set; }
+
+        /// <summary>ssh failed because the key was refused or the host key is unknown (see <see cref="SshErrors.SetupWouldHelp"/>).</summary>
+        public bool SetupWouldHelp { get; set; }
 
         /// <summary>The line lanq printed about it (sanitised).</summary>
         public string Message { get; private set; } = "";
@@ -153,7 +160,7 @@ public static partial class Cli
     /// 70 unreachable or unusable report, 75 held), <paramref name="Message"/> the line it prints on stderr when there is no report, and
     /// <paramref name="Reason"/> the same without the machine's name (for the --all table).
     /// </summary>
-    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false);
+    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false, bool SetupWouldHelp = false);
 
     /// <summary>
     /// Scans one machine. With <paramref name="policy"/> (a configured machine) and without <paramref name="force"/>, a health probe first:
@@ -199,7 +206,7 @@ public static partial class Cli
             var why = JobRunner.SafeLine(r.TimedOut
                 ? "timed out after " + ProcessSshClient.Describe(MakereadyTimeout)
                 : "ssh failed: " + SshErrors.Explain(r.ErrorOutput, machine.Ssh));
-            return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why);
+            return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why, SetupWouldHelp: !r.TimedOut && SshErrors.SetupWouldHelp(r.ErrorOutput));
         }
 
         try
@@ -274,6 +281,7 @@ public static partial class Cli
             failed.Set(
                 scan.Code == 75 ? NextSteps.MakereadyFailure.Held : scan.Unusable ? NextSteps.MakereadyFailure.Unusable : NextSteps.MakereadyFailure.Unreachable,
                 scan.Message);
+            failed.SetupWouldHelp = scan.SetupWouldHelp;
             return scan.Code;
         }
 

@@ -42,11 +42,12 @@ internal enum NextAction
 
 /// <summary>
 /// A command lanq suggests. Only the factories below make one, so a suggestion can only ever be one of these commands: never unlock,
-/// init, wake, health --wake, --force, --yes, --add or --setup, and never more than the command that produced it (see <see cref="Rerun"/>).
+/// init, wake, health --wake, --force, --yes or --add, never more than the command that produced it (see <see cref="Rerun"/>), and
+/// --setup only through <see cref="Setup"/>, which is never safe unattended.
 /// </summary>
 internal sealed class SuggestedCommand
 {
-    /// <summary>lanq's own options a suggestion never carries (whatever the user typed).</summary>
+    /// <summary>lanq's own options a suggestion never carries (whatever the user typed); --setup only through <see cref="Setup"/>.</summary>
     internal static readonly string[] NeverSuggested = ["--force", "--yes", "--wake", "--add", "--setup"];
 
     /// <summary>The only commands a suggestion may be.</summary>
@@ -143,6 +144,13 @@ internal sealed class SuggestedCommand
         return machine is null ? null : Make(WithConfig(["lanq", "makeready", machine], config), safe: false);
     }
 
+    /// <summary>
+    /// lanq makeready --ssh user@host --os X --setup [--key-env VAR]: it connects to nothing, but what it prints is for the developer and the
+    /// PC's owner to read and run, so it is never safe unattended. The only suggestion that may carry --setup.
+    /// </summary>
+    public static SuggestedCommand? Setup(string sshTarget, MachineOs os, string? keyEnv) =>
+        Make(WithKeyEnv(["lanq", "makeready", "--ssh", sshTarget, "--os", OsWord(os), "--setup"], keyEnv), safe: false, setup: true);
+
     private static string OsWord(MachineOs os) => os == MachineOs.Windows ? "windows" : "linux";
 
     private static List<string> WithKeyEnv(List<string> argv, string? keyEnv)
@@ -165,13 +173,23 @@ internal sealed class SuggestedCommand
         return argv;
     }
 
-    /// <summary>The last guard: a suggestion that is not one of the allowed commands, carries a banned option or would not parse is never made.</summary>
-    private static SuggestedCommand? Make(List<string> argv, bool safe)
+    /// <summary>
+    /// The last guard: a suggestion that is not one of the allowed commands, carries a banned option or would not parse is never made. Only
+    /// <see cref="Setup"/> passes <paramref name="setup"/>: then --setup (and nothing else on the banned list) is allowed, only on lanq
+    /// makeready, and the step is never safe unattended whatever <paramref name="safe"/> says.
+    /// </summary>
+    private static SuggestedCommand? Make(List<string> argv, bool safe, bool setup = false)
     {
         var own = argv.Skip(1).Take(CommandLine.IndexOfDashDash(argv) is var dash and >= 0 ? dash - 1 : argv.Count).ToList();
-        if (own.Count == 0 || !SuggestedVerbs.Contains(own[0]) || own.Any(NeverSuggested.Contains))
+        if (own.Count == 0 || !SuggestedVerbs.Contains(own[0])
+            || own.Any(o => NeverSuggested.Contains(o) && !(setup && o == "--setup" && own[0] == "makeready")))
         {
             return null;
+        }
+
+        if (setup)
+        {
+            safe = false;
         }
 
         try
@@ -510,12 +528,21 @@ internal static class NextSteps
         Unexpected,
     }
 
-    /// <summary>lanq makeready's error object. A rescan is never safe unattended (it runs a script on someone else's PC).</summary>
-    public static List<NextStepJson> ForMakereadyError(MakereadyFailure failure, string message, SuggestedCommand? again, string? config) => failure switch
+    /// <summary>
+    /// lanq makeready's error object. A rescan is never safe unattended (it runs a script on someone else's PC). <paramref name="setup"/> (lanq
+    /// makeready --ssh, when the worker refused the key or its host key is not in known_hosts yet) adds the one-time setup, for the developer.
+    /// </summary>
+    public static List<NextStepJson> ForMakereadyError(MakereadyFailure failure, string message, SuggestedCommand? again, string? config, SuggestedCommand? setup = null) => failure switch
     {
         MakereadyFailure.Arguments => ArgumentsError(message),
         MakereadyFailure.Config => ConfigError(config, message),
         MakereadyFailure.Held => [Step(NextAction.Wait, "the machine is paused or outside its allowed hours; check it later", again)],
+        MakereadyFailure.Unreachable when setup is not null =>
+        [
+            Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config)),
+            Step(NextAction.AskDeveloper, message),
+            Step(NextAction.AskDeveloper, "if the PC is not set up for your key yet, print its one-time setup (it connects to nothing; the PC's owner runs the worker part)", setup),
+        ],
         MakereadyFailure.Unreachable =>
         [
             Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config)),
