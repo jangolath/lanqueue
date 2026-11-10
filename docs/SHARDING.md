@@ -9,8 +9,9 @@ lanq run --needs node --shards 4 -- npx jest --shard={shard}/{shards}
 lanq run --needs node --shards auto -- npx playwright test --shard={shard}/{shards}
 ```
 
-This page covers how the option works, how to cut each ecosystem's tests into pieces, how to size machines, and how to
-route work in a pool of mixed machines. Setting up the pool itself (lanq on the orchestrator, OpenSSH on Windows and
+This page covers how the option works, how to pick N from earlier runs (`--target-minutes`), how to cut each
+ecosystem's tests into pieces and balance them by duration, how to size machines, and how to route work in a pool of
+mixed machines. Setting up the pool itself (lanq on the orchestrator, OpenSSH on Windows and
 Linux workers, `lanq init`, `lanq makeready --all`) is in [TEAM-QUICKSTART.md](TEAM-QUICKSTART.md).
 
 ## How `--shards` works
@@ -19,7 +20,9 @@ Linux workers, `lanq init`, `lanq makeready --all`) is in [TEAM-QUICKSTART.md](T
   job id, slot, log and cleanup. `--shards auto` sets N to the number of free slots on the machines that can take this
   job right now: the right capabilities, inside their allowed hours, enough `--mem`, and not held. It is at least 1 and
   at most 64, and lanq prints the choice and why, for example
-  `[lanq] --shards auto: 5 shard(s) (free slots: tiny-01 1, big-01 4)`.
+  `[lanq] --shards auto: 5 shard(s) (free slots: tiny-01 1, big-01 4)`. With `--target-minutes M`, lanq instead
+  picks N from earlier runs of the same command, so each shard takes about M minutes (see
+  [Choosing N from history](#choosing-n-from-history---target-minutes)).
 - **Preview with `--dry-run`.** The same command with `--dry-run` probes the machines once and prints the N that
   `--shards auto` would pick and where each shard would start, then runs nothing (no slot, no upload, no wake):
 
@@ -126,6 +129,100 @@ fields) plus `shard` and `attempts`. It is empty when nothing ran (a refused com
 ```bash
 lanq run --needs dotnet,linux --shards 4 --fetch 'tests/**/TestResults/*.trx' -- sh scripts/lanq/dotnet-test-shard.sh tests/App.Tests/App.Tests.csproj
 ```
+
+## Choosing N from history: --target-minutes
+
+Plain `--shards auto` uses every free slot. That is fast for one person, but it takes the whole pool for a suite that
+would finish nearly as soon on fewer machines. `--shards auto --target-minutes M` (M from 1 to 1440) asks a different
+question: how many shards does this suite need so that each one takes about M minutes?
+
+```bash
+lanq run --needs node --shards auto --target-minutes 10 -- npx jest --shard={shard}/{shards}
+```
+
+`--target-minutes` works only with `--shards auto`; with `--shards N` or without `--shards` the command line is
+refused (exit 2). Plain `--shards auto` is unchanged and never reads the job log.
+
+### The rule
+
+1. **History.** lanq reads `jobs.jsonl` (and `jobs.1.jsonl`) on this computer. It keeps the jobs of the same command
+   (the same arguments, with `{shard}` and `{shards}` as written, and the same `--dir`; `--needs` and `--mem` do not
+   matter) that completed, have a recorded run time and started in the last 90 days. The shards of one run count as
+   one run, and a retried shard counts once. A run counts when at least half of its shards completed. lanq uses the
+   newest 10 such runs.
+2. **Work and overhead.** For each run, the work is the sum of its shards' own run times when every shard completed,
+   else N times the median shard. Each shard's run time is first divided by its machine's speed factor (below), so
+   the work is "on a typical machine". The overhead is the median, over the run's shards, of wall-clock minus run
+   time: waiting for the slot, upload, prepare, fetch and cleanup. W and O are the medians over the runs (the plain
+   median: the mean of the two middle values for an even count).
+3. **Speed factors.** Every completed job of the last 90 days that ran 30 s or more (any command) is a sample: its run
+   time times its N, divided by the median of that over its command. A machine with 5 or more samples gets the median
+   of its own, clamped to 0.25 to 4 and rounded to two decimals; 1.62 means 62% slower than typical. A machine with
+   fewer borrows the median factor of the measured machines of its size class (light, medium or heavy, from this
+   probe); else it counts as 1. `lanq stats` shows each machine's factor.
+4. **Pick.** The budget per shard is 60 x M - O seconds. N0 = ceil(W / budget). lanq deals N0 shards over the free
+   slots as a run would and takes the largest speed factor f among those machines, then N = ceil(f x W / budget). When
+   that N is larger, it is dealt once more and f taken again (two passes at most, so the choice is stable). The
+   slowest machine a shard would go to decides.
+5. **Cap.** N is never more than the free slots that can take the job now, nor 64. With no free slot N is 1.
+6. **Overhead.** When the overhead leaves less than a tenth of M for the work, more shards cannot reach M: lanq uses
+   every free slot.
+
+Each shard should then take about (O + f x W / N) / 60 minutes on the slowest machine. lanq prints the reasoning on
+the `--shards auto` line:
+
+```text
+[lanq] --shards auto: 4 shard(s) (--target-minutes 5: 3 earlier runs, about 10.7 min of work + 30 s per shard, slowest machine tiny-01 x1.62: about 4.8 min each; free slots: big-01 4, tiny-01 1)
+```
+
+The slowest machine is named only when its speed is known (measured or from its size class).
+
+### Preview with --dry-run
+
+```text
+$ lanq run --needs node --shards auto --target-minutes 5 --dry-run -- npx jest --shard={shard}/{shards}
+...
+--shards auto would pick 4 (free slots: big-01 4, tiny-01 1)
+Timing:   --target-minutes 5: 3 earlier runs, about 10.7 min of work + 30 s per shard, slowest machine tiny-01 x1.62: about 4.8 min each
+Placement now: big-01 shards 1,3,4; tiny-01 shard 2; 0 waiting
+```
+
+With `--json` the plan has `shardCountWhy` and a `shardTiming` object (`basis`, `runsUsed`, `workMinutes`,
+`overheadSeconds`, `slowestMachine`, `speedFactor`, `wanted`, `freeSlots`, `capped`, `picked`,
+`expectedShardMinutes`, `why`); see [JSON.md](JSON.md#shardtiming). `lanq run --shards auto --target-minutes M --json`
+carries the same `shardTiming`. A dry run reads the job log and never writes it, and it picks the same N as a run
+would from the same history and probe.
+
+The other `Timing:` lines you may see:
+
+```text
+Timing:   --target-minutes 5: no completed run of this command in the last 90 days; --shards auto falls back to the free slots
+Timing:   --target-minutes 3: 6 earlier runs, about 16.8 min of work + 41 s per shard; 8 shards would be needed for 3 min; capped at 5 free slots: about 4.0 min each
+Timing:   --target-minutes 5: 6 earlier runs, about 16.8 min of work + 6.2 min per shard; the per-shard overhead (6.2 min) is above --target-minutes 5; more shards cannot reach it, so all 5 free slots: about 9.6 min each
+```
+
+### No history, and history from a different N
+
+- **No history.** Timing history starts with 0.7.0: older `jobs.jsonl` lines have no command key or run time. The
+  first run of a command (or the first after 90 days) uses the free slots, as plain `--shards auto`, and says so. From
+  the next run on, lanq has a run to learn from. `lanq stats` shows `timing: none yet` until then.
+- **A different N.** The work is the whole suite, not one shard, so runs with any N count: 4 shards of 4 minutes and
+  8 shards of 2 minutes are both 16 minutes of work. A single run (`--shards` not used) of the same command counts
+  too, as a run of 1 shard; a command with `{shard}` in it is a different command from one without.
+- **A changed command.** Other arguments or another `--dir` are another command, with its own history. Failed and
+  timed-out runs never count, and one cold run (a fresh cache on a worker) moves the medians little.
+
+### When plain auto is better
+
+- You want the result as soon as possible and nobody else needs the pool now: plain `--shards auto` takes every slot.
+- The suite changes a lot between runs (tests added or removed in bulk), so the history no longer fits.
+- The test runner splits unevenly: lanq can only pick N. If one shard always takes twice as long as the others, fix
+  the split first (see the recipes below), or every estimate is off by that shard.
+- The overhead is most of a shard's time (a long build in every shard): `--target-minutes` then uses every free slot
+  anyway, and fewer, larger shards may be better (`--shards N`).
+
+`lanq stats` (and `lanq stats --json`) shows each command's `timing` (the work and per-shard overhead lanq would use),
+and `lanq stats --target-minutes M` adds the shards M needs on a typical machine, without probing anything.
 
 ## Splitting the work, by ecosystem
 
@@ -258,6 +355,159 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
 Each shard compiles the test binaries on its worker; on small boxes `CARGO_BUILD_JOBS` under the machine's `env:`
 keeps the compile from running out of memory.
 
+## Balancing shards: recipes
+
+lanq picks N. The test runner decides which tests go in which shard. Splitting by count or by position (as above)
+is fine while tests take about the same time; when a few slow files or classes land together, one shard runs long
+and the whole run waits for it. These recipes split by recorded durations instead. Each is a sketch: check the
+runner's own docs for its exact options and version. Every command must still be in `policy.allowed_commands`.
+
+### pytest: pytest-split with committed durations
+
+[pytest-split](https://github.com/jerry-git/pytest-split) balances by the durations in a `.test_durations` file at the
+repository root. Record them on a worker once in a while and commit the file:
+
+```bash
+lanq run --needs python --fetch .test_durations -- python -m pytest --store-durations
+```
+
+The file comes back in `.lanq/artifacts/<job id>/.test_durations`; copy it to the repository root and commit it. Then
+shard as usual (`--splits {shards} --group {shard}`). New tests that are not in the file still run; refresh the file
+when the suite has changed a lot. See pytest-split's README for `--durations-path` and its splitting algorithms.
+
+### Jest: a testSequencer with a shard() method
+
+Jest 28 and later call a custom `testSequencer`'s `shard(tests, {shardIndex, shardCount})` for `--shard`. Read a
+durations file (seconds per test file, relative to the repository root) and deal the files, longest first, to the
+shard with the least time so far. Every shard computes the same split, so it must be deterministic:
+
+```js
+// durations-sequencer.js; in jest.config.js: testSequencer: './durations-sequencer.js'
+const Sequencer = require('@jest/test-sequencer').default;
+const path = require('path');
+const fs = require('fs');
+
+const durations = fs.existsSync('test-durations.json') ? JSON.parse(fs.readFileSync('test-durations.json', 'utf8')) : {};
+
+class DurationsSequencer extends Sequencer {
+  shard(tests, { shardIndex, shardCount }) {
+    const key = (t) => path.relative(process.cwd(), t.path).split(path.sep).join('/');
+    const time = (t) => durations[key(t)] ?? 10; // a new file counts as 10 s
+    const sorted = [...tests].sort((a, b) => time(b) - time(a) || (key(a) < key(b) ? -1 : 1));
+    const load = new Array(shardCount).fill(0);
+    const mine = [];
+    for (const t of sorted) {
+      let best = 0;
+      for (let s = 1; s < shardCount; s++) if (load[s] < load[best]) best = s;
+      load[best] += time(t);
+      if (best === shardIndex - 1) mine.push(t);
+    }
+    return mine;
+  }
+}
+
+module.exports = DurationsSequencer;
+```
+
+Build `test-durations.json` (`{"src/cart.test.ts": 42.5, ...}`) from the per-file times of a full run, for example
+the output of `npx jest --json --outputFile=jest-results.json` fetched back with `--fetch jest-results.json`, and
+commit it. See Jest's `testSequencer` docs.
+
+### Playwright: --shard with fullyParallel
+
+Playwright shards whole test files by default. With `fullyParallel: true` in `playwright.config` it shards single
+tests, which evens the shards out without any durations file:
+
+```bash
+lanq run --needs node --shards auto --target-minutes 10 --fetch 'blob-report/**' -- npx playwright test --shard={shard}/{shards} --reporter=blob
+```
+
+Each shard's blob report comes back in its own `.lanq/artifacts/<job id>/blob-report/`. Copy the files into one folder
+and run `npx playwright merge-reports --reporter html <folder>` locally. See Playwright's sharding docs.
+
+### .NET: a filter per shard from earlier trx durations
+
+`dotnet test` has no durations-based split, so a script does it. On the dev box, turn earlier `.trx` files (fetched
+with `--fetch 'tests/**/TestResults/*.trx'`) into one line per test class, `Namespace.Class seconds`, and commit it:
+
+```powershell
+# scripts/lanq/make-test-durations.ps1 <folder with .trx files>: writes test-durations.txt
+$t = @{}
+foreach ($f in Get-ChildItem -Recurse -Filter *.trx $args[0]) {
+  $x = [xml](Get-Content -Raw $f.FullName)
+  $class = @{}
+  foreach ($u in $x.TestRun.TestDefinitions.UnitTest) { $class[$u.id] = $u.TestMethod.className.Split(',')[0] }
+  foreach ($r in $x.TestRun.Results.UnitTestResult) {
+    if ($class[$r.testId] -and $r.duration) { $t[$class[$r.testId]] += [TimeSpan]::Parse($r.duration).TotalSeconds }
+  }
+}
+$t.Keys | Sort-Object | ForEach-Object { [string]::Format([cultureinfo]::InvariantCulture, '{0} {1:0.0}', $_, $t[$_]) } | Set-Content test-durations.txt
+```
+
+A small helper deals names to shards by those durations, longest first, each to the shard with the least time so
+far (the same for every shard):
+
+```sh
+#!/bin/sh
+# scripts/lanq/shard-by-durations.sh DURATIONS: reads names on stdin, prints this shard's ($LANQ_SHARD of $LANQ_SHARDS).
+# A name missing from DURATIONS (a new class or package) counts as 10 s.
+set -eu
+awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '
+  FILENAME == ARGV[1] { d[$1] = $2; next }
+  { k++; name[k] = $1; t[k] = ($1 in d) ? d[$1] + 0 : 10 }
+  END {
+    for (a = 1; a <= k; a++) for (b = a + 1; b <= k; b++)
+      if (t[b] > t[a] || (t[b] == t[a] && name[b] < name[a])) { x = t[a]; t[a] = t[b]; t[b] = x; y = name[a]; name[a] = name[b]; name[b] = y }
+    for (a = 1; a <= k; a++) {
+      best = 1; for (s = 2; s <= n; s++) if (load[s] < load[best]) best = s
+      load[best] += t[a]; if (best == i) print name[a]
+    }
+  }' "$1" -
+```
+
+In `dotnet-test-shard.sh` above, replace the `awk` that takes every Nth class with
+`sh scripts/lanq/shard-by-durations.sh test-durations.txt`. A long class list makes a long `--filter`: Windows caps a
+command line at 32,767 characters and cmd.exe at 8,191, so write the filter into a `.runsettings` file and pass that
+instead (`TreatNoTestsAsError` makes a shard that ran no tests fail):
+
+```sh
+filter=$(printf '%s\n' "$classes" | sed 's/.*/FullyQualifiedName~&./' | paste -sd'|' -)
+printf '<RunSettings><RunConfiguration><TestCaseFilter>%s</TestCaseFilter><TreatNoTestsAsError>true</TreatNoTestsAsError></RunConfiguration></RunSettings>\n' "$filter" > shard.runsettings
+exec dotnet test "$PROJECT" -c Release --no-build --settings shard.runsettings -nologo --logger "trx;LogFileName=shard-$LANQ_SHARD.trx"
+```
+
+A `&` in a filter must be written `&amp;` in the file. See Microsoft's ".runsettings" docs for `TestCaseFilter`.
+
+### Go: split packages by go test -json durations
+
+`go test -json` reports each package's time in its `pass` or `fail` event (the one without a `Test` field). Record it
+on the dev box (or through lanq with a script and `--fetch`), and commit the result:
+
+```bash
+go test -json ./... | jq -r 'select(.Test == null and (.Action == "pass" or .Action == "fail") and .Elapsed != null) | "\(.Package) \(.Elapsed)"' > go-durations.txt
+```
+
+Then the shard script deals packages with the same helper:
+
+```sh
+#!/bin/sh
+set -eu
+pkgs=$(go list ./... | sh scripts/lanq/shard-by-durations.sh go-durations.txt)
+[ -n "$pkgs" ] || { echo "shard $LANQ_SHARD/$LANQ_SHARDS: nothing to run"; exit 0; }
+exec go test $pkgs
+```
+
+### Two more rules
+
+- **Give each shard its own services.** Shards run at the same time, and several can share one machine. A test
+  database or broker on a fixed port, shared by all shards, makes them collide. Start one container per shard on a
+  random free port (for example with Testcontainers) and read the port back, or give each shard its own database
+  name from `LANQ_SHARD`.
+- **Treat "no tests ran" as a failure.** A wrong filter or a renamed folder can make a shard pass with no tests at
+  all. Make that fail: `TreatNoTestsAsError` for .NET, pytest's own exit 5 when it collects nothing, and no
+  `--passWithNoTests` for Jest. The one exception is a shard that is empty on purpose because there are more shards
+  than pieces (the scripts above print a line and exit 0 then); keep N below the number of pieces.
+
 ## What to keep local and what to send
 
 Keep on the dev box: editing, compiling while you work, a single test you are iterating on, anything interactive.
@@ -362,7 +612,8 @@ would otherwise sit in a drawer add real test capacity, so the team buys fewer n
    (`--needs bigmem` if the developer tags machines that way, or `--mem`). A long suite that splits cleanly goes as
    `--shards auto`, or `--shards N` with N at most the sum of `freeSlots` on machines that can take it.
    `lanq health --needs <caps> --json` gives each machine's `jobSlots` for the job, and the run with `--dry-run`
-   shows N and the placement without running anything.
+   shows N and the placement without running anything. Once the command has history (`lanq stats --json` shows a
+   `timing` for it), prefer `--shards auto --target-minutes 10`, previewed with `--dry-run`.
 3. Only shard commands that are safe to run several times at once: tests, lint, checks. Never shard a command that is
    not idempotent or that writes shared state (deploys, migrations against a shared database, publishing, anything that
    pushes).
