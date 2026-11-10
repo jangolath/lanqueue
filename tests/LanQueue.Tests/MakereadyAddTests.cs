@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
+using LanQueue.Jobs;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -39,11 +40,11 @@ public sealed class MakereadyAddTests : IDisposable
 
     private async Task<Result> Add(
         string[] args, string? report = null, bool? answer = null, Action? beforeWrite = null, SshResult? scan = null, Dictionary<string, string>? env = null,
-        bool withConfig = true)
+        bool withConfig = true, string? found = null)
     {
         var ssh = new FakeSsh
         {
-            Handler = (_, _) => new SshResult(0, Healthy),
+            Handler = (_, cmd) => found is not null && cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal) ? new SshResult(0, found) : new SshResult(0, Healthy),
             InputHandler = (_, _, _) => scan ?? new SshResult(0, report ?? Report()),
         };
         var asked = 0;
@@ -238,7 +239,7 @@ public sealed class MakereadyAddTests : IDisposable
     /// <summary>The comparison covers every machine setting: a new property on Machine must be added to Cli.Describe too.</summary>
     [Fact]
     public void TheMachineComparisonCoversEveryProperty() =>
-        Assert.Equal(14, typeof(Machine).GetProperties().Length);
+        Assert.Equal(15, typeof(Machine).GetProperties().Length);
 
     [Fact]
     public async Task AddNeedsYesWithoutATerminalAndWithJson()
@@ -384,6 +385,30 @@ public sealed class MakereadyAddTests : IDisposable
         var r = await Add(AddArgs(more: "--yes"));
         Assert.Equal(0, r.Code);
         Assert.Contains("warning: example-01, the example machine from lanq init, is still in", r.Err, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The scan saw no .NET SDK (the dotnet on the ssh session's PATH has runtimes only), but one is installed in a private folder: the entry
+    /// shown and written proposes the dotnet capability with path_prepend: and DOTNET_ROOT for that folder, and it loads.
+    /// </summary>
+    [Fact]
+    public async Task MakereadyAddProposesPathPrepend()
+    {
+        var r = await Add(AddArgs(more: "--yes"), MakereadyTests.Report(caps: "\"java\""), found: "found.dotnet=/srv/build/dotnet|10.0.102\n");
+        Assert.Equal(0, r.Code);
+        Assert.Contains("    capabilities: [dotnet, java, linux]", Config(), StringComparison.Ordinal);
+        Assert.Contains("    path_prepend: [\"/srv/build/dotnet\"]   # .NET SDK 10.0.102 found here, outside the ssh session's PATH", r.Out, StringComparison.Ordinal);
+        var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
+        Assert.Equal(["/srv/build/dotnet"], added.PathPrepend);
+        Assert.Equal("/srv/build/dotnet", added.Env["DOTNET_ROOT"]);
+        Assert.Contains(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+
+        // When the scan already lists dotnet, nothing is searched and the entry stays as the report suggests.
+        await File.WriteAllTextAsync(ConfigPath, Cli.StarterConfig);
+        r = await Add(AddArgs(more: "--yes"), found: "found.dotnet=/srv/build/dotnet|10.0.102\n");
+        Assert.Equal(0, r.Code);
+        Assert.DoesNotContain("path_prepend", Config(), StringComparison.Ordinal);
+        Assert.DoesNotContain(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
     }
 
     [Fact]

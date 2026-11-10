@@ -48,15 +48,41 @@ public sealed class JobEnvironmentTests : IDisposable
     }
 
     /// <summary>
-    /// Loading measures the job script only. Its fixed part is today larger than the doctor script's with every tool check, so a doctor
-    /// script cannot overflow on its own yet; doctor still checks its own size (DoctorTests) in case that changes.
+    /// The load check measures the job script at its largest: a job given &amp; or | carries the native .exe check too. An env: just long
+    /// enough that the script fits without that check but not with it is refused at load, not on the first such job.
+    /// </summary>
+    [Fact]
+    public void TheLoadCheckCountsTheNativeExeCheckOfAJobGivenAmpersandOrBar()
+    {
+        var m = ConfigLoader.Parse(Windows(ManyEnv(1, 10))).Machines[1];
+        int Size(string[] argv) => RemoteScripts.WindowsCommand(RemoteScripts.Execute(
+            m, "20260101-000000-000000", ".", argv, JobRequest.DefaultTimeout, new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards),
+            new string('x', LanQueue.Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
+        var n = Enumerable.Range(10, 4000).First(i =>
+        {
+            m.Env["VAR_0"] = new string('x', i);
+            return Size(["x", "|"]) > RemoteScripts.MaxWindowsCommandLength;
+        });
+
+        Assert.True(Size([]) <= RemoteScripts.MaxWindowsCommandLength, "the plain job script should still fit at " + n);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(ManyEnv(1, n))));
+        Assert.Matches("[0-9]+ over the 8000", ex.Message);
+        Assert.Single(ConfigLoader.Parse(Windows(ManyEnv(1, n - 1))).Machines[1].Env);
+    }
+
+    /// <summary>
+    /// Loading measures the job script only, at its largest (a sharded plan job given &amp; or |, as ConfigLoader measures it). That is today
+    /// larger than the doctor script with every tool check, so a doctor script cannot overflow on its own yet; doctor still checks its own
+    /// size (DoctorTests) in case that changes.
     /// </summary>
     [Fact]
     public void TheJobScriptIsTheOneThatGatesLoading()
     {
         var m = ConfigLoader.Parse(Windows(ManyEnv(4, 60))).Machines[1];
         m.Capabilities = [.. RemoteScripts.ToolChecks.Keys];
-        var job = RemoteScripts.WindowsCommand(RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], JobRequest.DefaultTimeout)).Length;
+        var job = RemoteScripts.WindowsCommand(RemoteScripts.Execute(
+            m, "20260101-000000-000000", ".", ["x", "|"], JobRequest.DefaultTimeout, new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards),
+            new string('x', LanQueue.Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
         var doctor = RemoteScripts.WindowsCommand(RemoteScripts.Doctor(m)).Length;
         Assert.True(doctor < job, $"doctor {doctor}, job {job}");
     }

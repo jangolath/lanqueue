@@ -42,7 +42,7 @@ public sealed class LogOutputTests : IDisposable
     /// <summary>A job that prints "line 1" to "line 10", then the wrapper's exit marker.</summary>
     private static PoolSsh TenLines() => new()
     {
-        OnExecute = (e, _) => Task.FromResult(new SshResult(0, string.Join('\n', Enumerable.Range(1, 10).Select(i => $"line {i}")) + $"\nLANQ_EXIT={e.JobId}:0")),
+        OnExecute = (e, _) => Task.FromResult(new SshResult(0, string.Join('\n', Enumerable.Range(1, 10).Select(i => $"line {i}")) + $"\n{e.Marker}0")),
     };
 
     [Fact(Timeout = TestTimeout)]

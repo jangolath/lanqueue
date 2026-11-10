@@ -6,7 +6,7 @@ using LanQueue.Policy;
 namespace LanQueue.Jobs;
 
 /// <summary>Builds the remote command strings (sh on Linux, PowerShell on Windows). Pure functions, unit tested.</summary>
-public static class RemoteScripts
+public static partial class RemoteScripts
 {
     /// <summary>Conservative cap on the whole remote command line for Windows hosts (cmd.exe allows 8191 characters).</summary>
     internal const int MaxWindowsCommandLength = 8000;
@@ -36,20 +36,33 @@ public static class RemoteScripts
             + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + compact));
     }
 
+    /// <summary>
+    /// The health probe: one <c>key=value</c> per line. On Windows <c>load=</c> and memory come from CIM when the ssh user may use it, else
+    /// load from GetSystemTimes (<see cref="WindowsProbeLoad"/>) and memory from .NET's ComputerInfo (GlobalMemoryStatusEx underneath);
+    /// <c>load_source=cim|native|none</c> and <c>mem_source=cim|vb|none</c> say which (with none, load= stays 0 for an older lanq, and this one
+    /// shows the load as unknown). Keys are only ever added, so an older lanq reads the output of a newer probe.
+    /// </summary>
     public static string Probe(Machine m) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
             $inv = [cultureinfo]::InvariantCulture
-            $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+            $cpu = $null; $ls = 'cim'
+            try { $cpu = (Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average } catch { }
+            if ($null -eq $cpu) { $ls = 'none'; try {
+            {{WindowsProbeLoad}}
+            } catch { } }
             if ($null -eq $cpu) { $cpu = 0 }
             $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
             $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }).Count
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
+            'load_source=' + $ls
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
             'slots_used=' + $slots
-            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-            if ($os -and $os.FreePhysicalMemory) { 'mem_free_gb=' + ([double]$os.FreePhysicalMemory / 1MB).ToString('0.##', $inv) }
-            if ($os -and $os.TotalVisibleMemorySize) { 'mem_total_gb=' + ([double]$os.TotalVisibleMemorySize / 1MB).ToString('0.##', $inv) }
+            $mt = 0; $ms = 'cim'
+            try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $mt = 1KB * $os.TotalVisibleMemorySize; $mf = 1KB * $os.FreePhysicalMemory } catch { }
+            if (-not $mt) { $ms = 'vb'; try { Add-Type -AssemblyName Microsoft.VisualBasic; $vb = New-Object Microsoft.VisualBasic.Devices.ComputerInfo; $mt = $vb.TotalPhysicalMemory; $mf = $vb.AvailablePhysicalMemory } catch { } }
+            if ($mt) { 'mem_free_gb=' + ($mf / 1GB).ToString('0.##', $inv); 'mem_total_gb=' + ($mt / 1GB).ToString('0.##', $inv) } else { $ms = 'none' }
+            'mem_source=' + $ms
             'cores=' + [Environment]::ProcessorCount
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
@@ -193,36 +206,34 @@ public static class RemoteScripts
     /// unique token; an abandoned lock renamed away and put back if fresh; Drop removes only a lock that still holds its own token), and <c>StopJob</c>, which kills a stale slot's still-running job (wrapper and child, with their trees) through
     /// <see cref="WindowsKillRecorded"/>: only processes whose pid AND start time match what the job recorded.
     /// </summary>
-    internal const string WindowsSlotFunctions = """
-        $tok = "$PID." + [guid]::NewGuid().ToString('N'); $IOFile = [IO.File]
-        function Take($f) {
-        $k = "$f.reclaim"; $o = "$k.old.$PID"; $old = [DateTime]::UtcNow.AddMinutes(-10)
-        try { if ($IOFile::Exists($k) -and $IOFile::GetLastWriteTimeUtc($k) -lt $old) { $IOFile::Move($k, $o); if ($IOFile::GetLastWriteTimeUtc($o) -ge $old) { try { $IOFile::Move($o, $k) } catch { } }; $IOFile::Delete($o) } } catch { }
-        try { $s = $IOFile::Open($k, 'CreateNew', 'Write', 'None'); $b = [Text.Encoding]::ASCII.GetBytes($tok); $s.Write($b, 0, $b.Length); $s.Close(); $true } catch { $false } }
-        function Drop($f) {
-        $k = "$f.reclaim"; $o = "$k.drop.$PID"
-        try { if ($IOFile::ReadAllText($k) -cne $tok) { return }; $IOFile::Move($k, $o); if ($IOFile::ReadAllText($o) -cne $tok) { try { $IOFile::Move($o, $k) } catch { } }; $IOFile::Delete($o) } catch { } }
-        function StopJob($j) { $kp = "$root/locks/job-$j.pid"; if ($j -cmatch '^[A-Za-z0-9_-]{1,64}\z' -and $IOFile::Exists($kp)) { KillRecorded $kp $false } }
+    internal static string WindowsSlotFunctions => """
+        $tok="$PID."+[guid]::NewGuid().ToString('N');$IOFile=[IO.File]
+        function Take($f){$k="$f.reclaim";$o="$k.old.$PID";$old=[DateTime]::UtcNow.AddMinutes(-10)
+        try{if($IOFile::Exists($k) -and $IOFile::GetLastWriteTimeUtc($k) -lt $old){$IOFile::Move($k,$o);if($IOFile::GetLastWriteTimeUtc($o) -ge $old){try{$IOFile::Move($o,$k)}catch{}};$IOFile::Delete($o)}}catch{}
+        try{$s=$IOFile::Open($k,'CreateNew','Write','None');$b=[Text.Encoding]::ASCII.GetBytes($tok);$s.Write($b,0,$b.Length);$s.Close();$true}catch{$false}}
+        function Drop($f){$k="$f.reclaim";$o="$k.drop.$PID"
+        try{if($IOFile::ReadAllText($k) -cne $tok){return};$IOFile::Move($k,$o);if($IOFile::ReadAllText($o) -cne $tok){try{$IOFile::Move($o,$k)}catch{}};$IOFile::Delete($o)}catch{}}
+        function StopJob($j){$kp="$root/locks/job-$j.pid";if($j -cmatch '^[A-Za-z0-9_-]{1,64}\z' -and $IOFile::Exists($kp)){KillRecorded $kp $false}}
         """ + "\n" + WindowsKillRecorded;
 
     /// <summary>
-    /// <c>KillRecorded $pf $legacy</c>: the Windows job wrapper records pairs of "pid" and "process start time (UTC ticks)" in
-    /// locks/job-ID.pid, first its own PowerShell, then the child that runs the job. Each recorded process (child first) is killed with
-    /// its tree (taskkill /T /F) only when a process with that pid exists AND started at that very instant, so a pid that Windows has
-    /// since given to another process (for example the owner's own PowerShell) is never touched, and an orphaned child whose wrapper
-    /// died is still reached. A pid file without start times (an older lanq) is honoured only by cleanup right after its job
-    /// (<paramref name="legacy"/>), with the old "is a PowerShell process" check; a stale-slot reclaim never kills on it.
+    /// <c>KillRecorded $pf $legacy</c> (needs $root): the Windows job wrapper records pairs of "pid" and "process start time (UTC ticks)" in
+    /// locks/job-ID.pid, first its own PowerShell, then the child that runs the job. The job object the wrapper put the child in (named after
+    /// the pid file, see <see cref="WindowsJobHelper"/>) is terminated first when it still exists. Then each recorded process (child first) is
+    /// stopped with its tree (<c>LqKill</c>: a toolhelp walk, no WMI; taskkill /T where the helper is not available) only when a process with
+    /// that pid exists AND started at that very instant, so a pid that Windows has since given to another process (for example the owner's
+    /// own PowerShell) is never touched, and an orphaned child whose wrapper died is still reached. A pid file without start times (an older
+    /// lanq) is honoured only by cleanup right after its job (<paramref name="legacy"/>), with the old "is a PowerShell process" check; a
+    /// stale-slot reclaim never kills on it.
     /// </summary>
-    internal const string WindowsKillRecorded = """
-        function KillRecorded($pf, $legacy) {
-        $l = @(Get-Content -LiteralPath $pf -EA 0 | ForEach-Object { "$_".Trim() }); $timed = $false
-        for ($i = $l.Count - $l.Count % 2 - 2; $i -ge 0; $i -= 2) {
-        if ($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i + 1] -notmatch '^[0-9]{1,19}\z') { continue }
-        $timed = $true; $p = Get-Process -Id $l[$i] -EA 0; $t = $null
-        if ($p) { try { $t = "$($p.StartTime.ToUniversalTime().Ticks)" } catch { } }
-        if ($t -and $t -eq $l[$i + 1]) { taskkill /PID $l[$i] /T /F 2>$null | Out-Null } }
-        if (-not $timed -and $legacy -and $l[0] -match '^[0-9]{1,9}\z') { $p = Get-Process -Id $l[0] -EA 0; if ($p.ProcessName -match '^(powershell|pwsh)') { taskkill /PID $l[0] /T /F 2>$null | Out-Null } }
-        Remove-Item -Force -EA 0 -LiteralPath $pf }
+    internal static string WindowsKillRecorded => WindowsHelperLoad("\"$root/bin/lanq-" + WindowsJobHelperHash[..10] + ".ps1\"") + "\n" + """
+        function KillRecorded($pf,$lg){LqEndJob $pf
+        $l=@(Get-Content -LiteralPath $pf -EA 0|%{"$_".Trim()});$tm=$false
+        for($i=$l.Count-$l.Count%2-2;$i -ge 0;$i-=2){if($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i+1] -notmatch '^[0-9]{1,19}\z'){continue}
+        $tm=$true;$p=Get-Process -Id $l[$i] -EA 0;$t=$null;if($p){try{$t="$($p.StartTime.ToUniversalTime().Ticks)"}catch{}}
+        if($t -and $t -eq $l[$i+1]){LqKill $l[$i]}}
+        if(!$tm -and $lg -and $l[0] -match '^[0-9]{1,9}\z'){$p=Get-Process -Id $l[0] -EA 0;if($p.ProcessName -match '^(powershell|pwsh)'){LqKill $l[0]}}
+        Remove-Item -Force -EA 0 -LiteralPath $pf}
         """;
 
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
@@ -251,23 +262,22 @@ public static class RemoteScripts
         return m.Os == MachineOs.Windows
             ? $$"""
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
-                New-Item -ItemType Directory -Force -Path "$root/locks" | Out-Null
-                $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-                $deadline = $now + {{lease}}
+                [void][IO.Directory]::CreateDirectory("$root/locks")
+                $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
                 {{WindowsSlotFunctions}}
-                for ($i = 1; $i -le {{max}}; $i++) {
-                  $f = "$root/locks/slot-$i"
+                for($i=1;$i -le {{max}};$i++){
+                  $f="$root/locks/slot-$i"
                   try {
-                    $c = $IOFile::ReadAllText($f); $l = $c -split "`n"
-                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim() + {{grace}}) -and (Take $f)) {
-                      try { if ($IOFile::ReadAllText($f) -ceq $c) { StopJob $l[0].Trim(); $t = "$f.stale.$PID"; $IOFile::Move($f, $t); $IOFile::Delete($t) } } catch { } finally { Drop $f }
+                    $c=$IOFile::ReadAllText($f);$l=$c -split "`n"
+                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+{{grace}}) -and (Take $f)) {
+                      try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}
                     }
                   } catch { }
                   try {
-                    $fs = $IOFile::Open($f, 'CreateNew', 'Write', 'None')
-                    $b = [Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}} + "`n" + $deadline + "`n"); $fs.Write($b, 0, $b.Length); $fs.Close()
-                    'SLOT=' + $i; exit 0
-                  } catch [System.IO.IOException] { }
+                    $fs=$IOFile::Open($f,'CreateNew','Write','None')
+                    $b=[Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}}+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close()
+                    "SLOT=$i";exit 0
+                  }catch [IO.IOException]{}
                 }
                 'SLOT=FULL'
                 """
@@ -319,7 +329,8 @@ public static class RemoteScripts
     /// <c>cap.NAME=EXITCODE|FIRST LINE</c> for each capability in <see cref="ToolChecks"/>, run in the job environment: the machine's
     /// env: and path_prepend: applied exactly as for a job, in the same non-login shell. Each check may take <paramref name="checkSeconds"/>:
     /// on Linux it runs under <c>timeout</c> (when that works), on Windows in a child PowerShell killed with its tree when the wait runs
-    /// out; a check stopped that way prints <c>cap.NAME=timeout|</c> and the next check runs.
+    /// out (with the worker's helper, <see cref="WindowsJobHelper"/>, by a process snapshot walk that needs no WMI); a check stopped that way
+    /// prints <c>cap.NAME=timeout|</c> and the next check runs.
     /// </summary>
     public static string Doctor(Machine m, int checkSeconds = 20)
     {
@@ -336,13 +347,14 @@ public static class RemoteScripts
                 {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows + "\n" + GitVersionWindows)}}
                 {{JobEnvironmentPowerShell(m)}}
                 $ErrorActionPreference = 'Continue'
+                {{WindowsHelperLoad(ShellQuote.PowerShell(WindowsHelperPath(m)))}}
                 function Cap([string]$n, [string]$code) {
                   $si = New-Object System.Diagnostics.ProcessStartInfo ((Get-Process -Id $PID).Path)
                   $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$global:LASTEXITCODE = 0; try { ' + $code + ' } catch { Write-Output "$_"; exit 1 }; exit $LASTEXITCODE'))
                   $si.UseShellExecute = $false; $si.RedirectStandardOutput = $true; $si.RedirectStandardError = $true; $si.RedirectStandardInput = $true
                   try { $p = [Diagnostics.Process]::Start($si) } catch { "cap.$n=1|$_"; return }
                   $p.StandardInput.Close(); $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
-                  if (-not $p.WaitForExit({{seconds}}000)) { & taskkill /PID $p.Id /T /F 2>$null | Out-Null; "cap.$n=timeout|"; return }
+                  if (-not $p.WaitForExit({{seconds}}000)) { LqKill $p.Id; "cap.$n=timeout|"; return }
                   $p.WaitForExit()
                   "cap.$n=$($p.ExitCode)|" + "$(($o.Result + "`n" + $e.Result) -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)"
                 }
@@ -387,18 +399,18 @@ public static class RemoteScripts
             """,
         (MachineOs.Windows, false) => $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
-            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             {{WindowsSlotFunctions}}
-            foreach ($f in @(Get-ChildItem -LiteralPath "$root/locks" -Filter 'slot-*' -File -ErrorAction SilentlyContinue)) {
-              $n = $f.Name; $p = $f.FullName
+            foreach($f in @(Get-ChildItem -LiteralPath "$root/locks" -Filter 'slot-*' -File -EA 0)){
+              $n=$f.Name;$p=$f.FullName
               if ($n -notmatch '^slot-[0-9]+\z') { continue }
-              try { $c = [IO.File]::ReadAllText($p) } catch { continue }
-              $l = $c -split "`n"
+              try{$c=$IOFile::ReadAllText($p)}catch{continue}
+              $l=$c -split "`n"
               if ($l.Count -lt 2 -or $l[1].Trim() -notmatch '^[0-9]{1,18}\z') { "KEPT=$n nodeadline"; continue }
               if ($now -le [long]$l[1].Trim()) { "KEPT=$n live"; continue }
               if (-not (Take $p)) { "KEPT=$n changed"; continue }
               try {
-                if ([IO.File]::ReadAllText($p) -ceq $c) { StopJob $l[0].Trim(); $t = "$p.stale.$PID"; [IO.File]::Move($p, $t); [IO.File]::Delete($t); 'REMOVED=' + $n + ' ' + $l[0].Trim() }
+                if ($IOFile::ReadAllText($p) -ceq $c){StopJob $l[0].Trim();$t="$p.stale.$PID";$IOFile::Move($p,$t);$IOFile::Delete($t);'REMOVED='+$n+' '+$l[0].Trim()}
                 else { "KEPT=$n changed" }
               } catch { "KEPT=$n changed" } finally { Drop $p }
             }
@@ -550,8 +562,9 @@ public static class RemoteScripts
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
 
+    /// <summary>Creates incoming/ before an upload; on Windows also writes the job wrapper's helper (<see cref="WindowsInstallHelper"/>).</summary>
     public static string EnsureIncoming(Machine m) => m.Os == MachineOs.Windows
-        ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null"
+        ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null\n" + WindowsInstallHelper(m)
         : $"mkdir -p {ShellQuote.Posix(m.WorkRoot + "/incoming")}";
 
     /// <summary>
@@ -559,10 +572,19 @@ public static class RemoteScripts
     /// normalized one (never the raw input) and its real path must stay inside the worktree. The job's process group
     /// (Linux, via setsid) or PowerShell PID (Windows) is recorded in locks/job-ID.pid so cleanup can kill it. With a
     /// <paramref name="limit"/> the worker also stops the job itself: on Linux under <c>timeout -k 30</c> when that works (exit 124), on
-    /// Windows by running it in a child PowerShell and killing that tree (taskkill /T /F) when the wait runs out (exit 124).
+    /// Windows by running it in a child PowerShell and ending that tree when the wait runs out (exit 124). On Windows the child runs in a job
+    /// object (<see cref="WindowsJobHelper"/>, loaded from the file <see cref="EnsureIncoming"/> wrote): the timeout terminates it, and it ends
+    /// by itself when the wrapper dies; without the helper the tree is stopped with taskkill /T (which needs WMI) and Stop-Process.
     /// </summary>
     /// <param name="shard">lanq run --shards: sets LANQ_SHARD and LANQ_SHARDS for the job (next to LANQ_JOB), or null.</param>
-    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null)
+    /// <param name="planJob">lanq run --plan: sets LANQ_PLAN_JOB to the plan job's name, or null.</param>
+    /// <param name="nonce">
+    /// This run's <see cref="NewMarkerNonce"/>, put into the wrapper's own marker lines (<see cref="ExitMarker"/>, <see cref="WindowsArgsMarker"/>)
+    /// and nowhere else (not in the job's environment), so a job that prints a marker-like line cannot pass it off as the wrapper's. Null
+    /// leaves it out (tests that run the wrapper by hand).
+    /// </param>
+    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null, string? planJob = null,
+        string? nonce = null)
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
@@ -578,45 +600,37 @@ public static class RemoteScripts
 
             var parts = string.Join(' ', argv.Select(ShellQuote.PowerShell));
             return $$"""
-                $pf = {{ShellQuote.PowerShell(pidFile)}}
-                $wr = (Resolve-Path -LiteralPath {{ShellQuote.PowerShell(worktree)}}).ProviderPath
+                $pf={{ShellQuote.PowerShell(pidFile)}}
+                $wr=(Resolve-Path -LiteralPath {{ShellQuote.PowerShell(worktree)}}).ProviderPath
                 Set-Location -LiteralPath {{ShellQuote.PowerShell(dir)}}
-                $here = (Get-Location).ProviderPath
-                $sep = [IO.Path]::DirectorySeparatorChar
-                if (-not (($here + $sep).StartsWith($wr + $sep, [StringComparison]::OrdinalIgnoreCase))) { exit 126 }
-                $p = Get-Item -LiteralPath $here
-                while ($p.FullName.Length -gt $wr.Length) {
-                  if ($p.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 126 }
-                  $p = $p.Parent
-                }
+                $here=(Get-Location).ProviderPath;$sep=[IO.Path]::DirectorySeparatorChar
+                if(!(($here+$sep).StartsWith($wr+$sep,'OrdinalIgnoreCase'))){exit 126}
+                $p=Get-Item -LiteralPath $here
+                while($p.FullName.Length -gt $wr.Length){if($p.Attributes -band [IO.FileAttributes]::ReparsePoint){exit 126};$p=$p.Parent}
                 {{JobEnvironmentPowerShell(m)}}
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{ShardEnvironmentPowerShell(shard)}}
-                {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
-                Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
-                $job = {
+                {{PlanJobEnvironmentPowerShell(planJob)}}
+                {{WindowsNativeCheck(jobId, argv, nonce)}}
+                {{(m.Priority == JobPriority.Low ? "try{(Get-Process -Id $PID).PriorityClass = 'BelowNormal'}catch{}" : "")}}
+                {{WindowsHelperLoad(ShellQuote.PowerShell(WindowsHelperPath(m)), job: true)}}
+                $me=Get-Process -Id $PID
+                Set-Content -LiteralPath $pf @($PID,$me.StartTime.ToUniversalTime().Ticks)
+                $job={
                 & {{parts}}
                 }
-                $inner = '$ProgressPreference = ''SilentlyContinue''; $global:LASTEXITCODE = 0' + "`n" + 'try {' + "`n" + $job.ToString() + "`n" + 'exit $LASTEXITCODE' + "`n" + '} catch { Write-Output "$_"; exit 1 }'
-                $si = New-Object System.Diagnostics.ProcessStartInfo ((Get-Process -Id $PID).Path)
-                $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
-                $si.UseShellExecute = $false
-                $si.WorkingDirectory = $here
-                $code = 1
-                try {
-                  $cp = [Diagnostics.Process]::Start($si)
-                  Add-Content -LiteralPath $pf -Value @($cp.Id, $cp.StartTime.ToUniversalTime().Ticks)
-                  if ($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})) { $cp.WaitForExit(); $code = $cp.ExitCode }
-                  else {
-                    & taskkill /PID $cp.Id /T /F 2>$null | Out-Null; $code = 124
-                    # A process the child was starting at that very moment is not in the tree taskkill saw: stop any left whose parent was the child.
-                    Start-Sleep -Milliseconds 500
-                    Get-CimInstance Win32_Process -Filter "ParentProcessId=$($cp.Id)" -EA 0 | Where-Object { $_.CreationDate -ge $cp.StartTime } | ForEach-Object { & taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }
-                  }
-                } finally {
-                  Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
-                }
-                [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId))}} + $code)
+                $inner='$ProgressPreference=''SilentlyContinue'';$global:LASTEXITCODE=0'+"`ntry{`n"+$job.ToString()+"`nexit `$LASTEXITCODE`n"+'}catch{Write-Output "$_";exit 1}'
+                $si=[Diagnostics.ProcessStartInfo]::new($me.Path)
+                $si.Arguments='-NoProfile -NonInteractive -ep Bypass -ec '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+                $si.UseShellExecute=$false;$si.WorkingDirectory=$here;$code=1
+                try{
+                  $cp=[Diagnostics.Process]::Start($si)
+                  $jo=if($LqW){LqJob $pf $cp.Handle}
+                  Add-Content -LiteralPath $pf @($cp.Id,$cp.StartTime.ToUniversalTime().Ticks)
+                  if($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})){$cp.WaitForExit();$code=$cp.ExitCode}
+                  else{$code=124;LqKill $cp.Id;if($jo){[void]$LqW::TerminateJobObject($jo,124)} }
+                }finally{Remove-Item -Force -EA 0 -LiteralPath $pf}
+                [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce))}} + $code)
                 exit $code
                 """;
         }
@@ -631,13 +645,13 @@ public static class RemoteScripts
             T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
-            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
             printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
             rc=$?
             rm -f "$P"
-            printf '%s%s\n' {{ShellQuote.Posix(ExitMarker(jobId))}} "$rc"
+            printf '%s%s\n' {{ShellQuote.Posix(ExitMarker(jobId, nonce))}} "$rc"
             exit $rc
             """;
     }
@@ -661,7 +675,7 @@ public static class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null)
+    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
         if (jobId is not null)
@@ -673,6 +687,11 @@ public static class RemoteScripts
         if (shard is not null)
         {
             words.AddRange(ShardVariables(shard).Select(v => ShellQuote.Posix(v.Name + "=" + v.Value)));
+        }
+
+        if (planJob is not null)
+        {
+            words.Add(ShellQuote.Posix(PlanJobVariable + "=" + SafePlanJob(planJob)));
         }
 
         if (m.PathPrepend.Count > 0)
@@ -690,11 +709,53 @@ public static class RemoteScripts
     internal const string JobMarker = "LANQ_JOB";
 
     /// <summary>
-    /// The start of the job wrapper's last stdout line, followed by the job's exit code: <c>LANQ_EXIT=&lt;job id&gt;:&lt;code&gt;</c>. ssh passes a
+    /// The start of the job wrapper's last stdout line, followed by the job's exit code: <c>LANQ_EXIT=&lt;job id&gt;:&lt;nonce&gt;:&lt;code&gt;</c>
+    /// (<c>LANQ_EXIT=&lt;job id&gt;:&lt;code&gt;</c> without a <paramref name="nonce"/>). ssh passes a
     /// remote exit code through, so 255 alone cannot tell a job that exited 255 from a lost connection; this line, printed only after the job
     /// is over, can, when it is the final output line (<see cref="JobRunner.ReadExitMarker"/>). It decides only that; any other code is ssh's.
     /// </summary>
-    internal static string ExitMarker(string jobId) => "LANQ_EXIT=" + SafeJobId(jobId) + ":";
+    internal static string ExitMarker(string jobId, string? nonce = null) => "LANQ_EXIT=" + SafeJobId(jobId) + ":" + NonceField(nonce);
+
+    /// <summary>
+    /// The line the Windows job wrapper prints instead of starting a job given &amp; or | whose program does not resolve to a native .exe:
+    /// <c>LANQ_WINARGS=&lt;job id&gt;:&lt;nonce&gt;:&lt;what it resolved to&gt;</c> (the file's path, "Alias where" and the like, or nothing when not found),
+    /// followed by the exit marker with 2. lanq reports that as Rejected (exit 2, <see cref="RejectKind.WindowsArgs"/>).
+    /// </summary>
+    internal static string WindowsArgsMarker(string jobId, string? nonce = null) => "LANQ_WINARGS=" + SafeJobId(jobId) + ":" + NonceField(nonce);
+
+    /// <summary>
+    /// A fresh random value for one run of the job wrapper (16 lowercase hex digits): its marker lines carry it, so only the wrapper's own lines
+    /// count as markers (see <see cref="Execute"/>).
+    /// </summary>
+    internal static string NewMarkerNonce() => Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8));
+
+    private static string NonceField(string? nonce) =>
+        nonce is null ? ""
+        : nonce.Length == 16 && nonce.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f')) ? nonce + ":"
+        : throw new ArgumentException("Invalid marker nonce.", nameof(nonce));
+
+    /// <summary>
+    /// For a job given &amp; or | (<see cref="JobPolicy.HasShimUnsafe"/>), the Windows wrapper's check before anything starts: argv[0] is looked
+    /// up exactly as the job's call operator will look it up (same PATH with path_prepend:, same folder, aliases and functions first) and
+    /// must be an application whose file is an .exe and not cmd or a package-manager shim; otherwise nothing runs and the wrapper prints
+    /// <see cref="WindowsArgsMarker"/> and exits 2. A .cmd/.bat (say a dotnet.cmd earlier on PATH) would re-parse the arguments through
+    /// cmd.exe. Empty for other jobs.
+    /// </summary>
+    private static string WindowsNativeCheck(string jobId, IReadOnlyList<string> argv, string? nonce)
+    {
+        if (!JobPolicy.HasShimUnsafe(argv))
+        {
+            return "";
+        }
+
+        var shims = string.Join(",", JobPolicy.WindowsShimPrograms.Select(ShellQuote.PowerShell));
+        return $$"""
+            $lc=Get-Command -Name {{ShellQuote.PowerShell(argv[0])}} -EA 0|select -First 1;$la=$null -ne $lc -and $lc.CommandType -eq 'Application'
+            if(!($la -and $lc.Path -like '*.exe' -and @({{shims}}) -notcontains [IO.Path]::GetFileNameWithoutExtension($lc.Path))){
+            $lr=if($la){$lc.Path}elseif($null -ne $lc){[string]$lc.CommandType+' '+$lc.Name}else{''}
+            [Console]::Out.WriteLine({{ShellQuote.PowerShell(WindowsArgsMarker(jobId, nonce))}}+$lr);[Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce) + "2")}});exit 2}
+            """;
+    }
 
     /// <summary>A job id is 1 to 64 of A-Z, a-z, 0-9, '_' and '-' (lanq makes them as yyyyMMdd-HHmmss-xxxxxx).</summary>
     internal static string SafeJobId(string jobId) =>
@@ -713,6 +774,18 @@ public static class RemoteScripts
         yield return ("LANQ_SHARD", shard.Index.ToString(CultureInfo.InvariantCulture));
         yield return ("LANQ_SHARDS", shard.Count.ToString(CultureInfo.InvariantCulture));
     }
+
+    /// <summary>LANQ_PLAN_JOB: the name of the lanq.yml job this job runs for (lanq run --plan).</summary>
+    internal const string PlanJobVariable = "LANQ_PLAN_JOB";
+
+    /// <summary>A plan job name as lanq.yml allows it (1 to 32 of A-Z, a-z, 0-9, '_' and '-', not starting with '_' or '-'), checked again here.</summary>
+    internal static string SafePlanJob(string name) =>
+        name.Length is > 0 and <= 32 && char.IsAsciiLetterOrDigit(name[0]) && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
+            ? name
+            : throw new ArgumentException("Invalid plan job name.", nameof(name));
+
+    private static string PlanJobEnvironmentPowerShell(string? planJob) =>
+        planJob is null ? "" : $"$env:{PlanJobVariable} = '{SafePlanJob(planJob)}'";
 
     private static string ShardEnvironmentPowerShell(ShardInfo? shard) =>
         shard is null ? "" : string.Join('\n', ShardVariables(shard).Select(v => $"$env:{v.Name} = '{v.Value}'"));

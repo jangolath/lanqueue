@@ -83,6 +83,24 @@ developer its `reason` and stop.
   summarises the local job log: per machine `medianSeconds`, `p90Seconds` and `speedFactor`; per command `runs`,
   results and `timing` (the work and per-shard overhead). Both are safe to run.
 
+## Route jobs and run a plan file
+
+- `--size light,medium` or `--min-size heavy` keeps a job to machines of that size (the machine's `size:` in the
+  developer's config, else probed); `--on big-01` keeps it to the named machines. Every other rule still applies.
+  `lanq health --min-size heavy --json` shows which machines qualify (`wrong_size`, `size_unknown` are permanent).
+- A repository with a `lanq.yml` lists its jobs (build, tests, a serial tail). Preview, then run:
+
+```bash
+lanq run --plan --dry-run --json --no-wake 2>/dev/null                 # each job's lanq run line and where it would go
+lanq run --plan --json --log-tail 60 --no-wake 2>/dev/null; echo "exit=$?"
+lanq run --plan --json --no-wake --only unit,arch 2>/dev/null          # only some jobs
+```
+
+stdout is one object: `status`, `exitCode`, `order`, `jobs` (each `name`, `status`, `exitCode`, `message`, `logPath`
+or `shards`, `logTail` with `--log-tail`) and `nextSteps`. Report each job whose `status` is not `Completed` by `name`
+with its `message` (`Skipped`: it never started, because a job it runs after did not complete). Never edit `lanq.yml`
+or the machines file to get a job through.
+
 ## Shard long work across the pool
 
 Use `--shards` for a long suite that splits cleanly (Jest, Vitest, Playwright, nextest, or a helper script the
@@ -155,7 +173,8 @@ than one case.
 - Do not run `lanq makeready --add`, `lanq makeready --setup` or anything with `--yes`: adding machines is the
   developer's job.
 - Do not run a `nextSteps` command whose `safeToRunUnattended` is `false`, and run a safe one at most once.
-- Do not ssh to the machines yourself, and do not try to work around a refusal.
+- Do not ssh to the machines yourself, and do not try to work around a refusal (never by editing `lanq.yml` or the
+  machines file).
 - Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Do not pass permission-skipping flags such as `--dangerously-skip-permissions`; lanq rejects them.

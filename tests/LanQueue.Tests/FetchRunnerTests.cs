@@ -207,7 +207,7 @@ public sealed class FetchRunnerTests : IDisposable
         ssh.Handler = (m, cmd) =>
         {
             var text = Decode(m, cmd);
-            return IsExecute(text) ? new SshResult(255, jobOutput + RemoteScripts.ExitMarker(JobIdOf(text)) + "255\n") : inner(m, cmd);
+            return IsExecute(text) ? new SshResult(255, jobOutput + T.ExitMarkerOf(text) + "255\n") : inner(m, cmd);
         };
 
         var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
@@ -236,7 +236,7 @@ public sealed class FetchRunnerTests : IDisposable
         Assert.Contains(Texts(ssh), IsStop);
     }
 
-    /// <summary>Runs one job whose execute call answers <paramref name="exit"/> and the output <paramref name="output"/>(job id).</summary>
+    /// <summary>Runs one job whose execute call answers <paramref name="exit"/> and the output <paramref name="output"/>(the wrapper's exit marker, with its nonce).</summary>
     private async Task<(JobResult Result, FakeSsh Ssh, List<string> Lines)> RunJob(int exit, Func<string, string> output)
     {
         var (runner, ssh, lines) = Make("build-01", 0, Stream(("a.trx", "x")));
@@ -244,7 +244,7 @@ public sealed class FetchRunnerTests : IDisposable
         ssh.Handler = (m, cmd) =>
         {
             var text = Decode(m, cmd);
-            return IsExecute(text) ? new SshResult(exit, output(JobIdOf(text))) : inner(m, cmd);
+            return IsExecute(text) ? new SshResult(exit, output(T.ExitMarkerOf(text))) : inner(m, cmd);
         };
 
         var r = await runner.RunAsync(Req(["*.trx"]), CancellationToken.None);
@@ -255,7 +255,7 @@ public sealed class FetchRunnerTests : IDisposable
     [Fact]
     public async Task AMarkerMidOutputDoesNotHideALostConnection()
     {
-        var (r, ssh, lines) = await RunJob(255, id => "start\n" + RemoteScripts.ExitMarker(id) + "0\nstill running\n");
+        var (r, ssh, lines) = await RunJob(255, marker => "start\n" + marker + "0\nstill running\n");
 
         Assert.Equal(JobStatus.InfraError, r.Status);
         Assert.Contains("SSH connection failed", r.Message, StringComparison.Ordinal);
@@ -270,7 +270,7 @@ public sealed class FetchRunnerTests : IDisposable
     [InlineData(1, "255")]
     public async Task AMarkerThatDisagreesWithANon255ExitLosesToSsh(int ssh, string marked)
     {
-        var (r, _, lines) = await RunJob(ssh, id => "out\n" + RemoteScripts.ExitMarker(id) + marked + "\n");
+        var (r, _, lines) = await RunJob(ssh, marker => "out\n" + marker + marked + "\n");
 
         Assert.Equal(ssh == 0 ? JobStatus.Completed : JobStatus.Failed, r.Status);
         Assert.Equal(ssh, r.ExitCode);
@@ -281,7 +281,7 @@ public sealed class FetchRunnerTests : IDisposable
     [Fact]
     public async Task AWindowsCrashCodeIsTheJobsCodeAndItsMarkerIsNotShown()
     {
-        var (r, _, lines) = await RunJob(-1073741819, id => "boom\n" + RemoteScripts.ExitMarker(id) + "-1073741819\n");
+        var (r, _, lines) = await RunJob(-1073741819, marker => "boom\n" + marker + "-1073741819\n");
 
         Assert.Equal(JobStatus.Failed, r.Status);
         Assert.Equal(-1073741819, r.ExitCode);

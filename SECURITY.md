@@ -12,9 +12,11 @@ volunteer-maintained project.
 checking, a command and directory allowlist, a best-effort secret scan and a ban on permission-skipping agent flags.
 
 On Windows workers every argument is passed to PowerShell as a single-quoted literal (all five PowerShell
-single-quote characters are escaped), and arguments containing `"` `&` `|` `<` `>` `^` `%` never go to a Windows worker, because
+single-quote characters are escaped), and arguments containing `"` `<` `>` `^` `%` never go to a Windows worker, because
 PowerShell 5.1 native-argument passing and `cmd.exe` (which runs `.cmd` shims such as `npm.cmd`) would re-parse
-them. Output from a worker is treated as untrusted: control and invisible formatting characters (C0 except tab, DEL,
+them. `&` and `|` go to a Windows worker only for a native `.exe`: the program must look like one (a bare name or path
+with no extension or `.exe`, not `cmd` or a package-manager shim such as `npm`), and the worker resolves it with the
+job's own PATH before starting anything and refuses (exit 2, nothing started) unless it is an `.exe`. Output from a worker is treated as untrusted: control and invisible formatting characters (C0 except tab, DEL,
 C1, bidi controls and marks, zero-width characters, U+2028/U+2029 and U+2060 to U+2064) are shown as `?`, and so are
 they in error messages that quote your own input.
 
@@ -42,7 +44,17 @@ deserializer (no reflection), validated against the `lanq-makeready/v1` schema, 
 executed. `lanq doctor --remote` writes and removes one empty temporary file in `work_root` and runs version
 commands (`go` with `GOTOOLCHAIN=local`, `cargo` with `RUSTUP_AUTO_INSTALL=0`, each stopped after 20 seconds) in the job
 environment, and, like `makeready`, skips a machine that is paused or outside its allowed hours unless `--force`; `lanq doctor` without `--remote` makes no network
-connection.
+connection. When a capability's tool is missing there, doctor also lists a few install folders and asks the dotnet on `PATH`
+for its SDKs and runtimes (read-only, about five seconds) to suggest a `path_prepend:` line; it never changes the config or the worker.
+
+On a Windows worker lanq writes one helper script to `work_root/bin/lanq-<hash>.ps1` before each job (and writes it
+again whenever the file there is not exactly lanq's text); the job wrapper, stop, cleanup, slot reclaim and doctor
+scripts use it to run the job in a Windows job object and to stop process trees without WMI. A job runs as the build
+account and can change that file, so no script runs it as it finds it: each one reads the file once, compares its
+SHA-256 with the hash lanq computed from its own copy, and runs exactly the bytes it checked only when they match.
+A changed or unreadable helper is never run (the script falls back to taskkill and Stop-Process), and the load sits in
+`try`/`catch`, so cleanup still removes the job's folder and frees its slot. A job can still leave programs running or
+change that account's other files, which is one more reason to give the build account nothing but its work folder.
 
 Wake-on-LAN is opt-in per machine (`wake:` in the config). The magic packet is a plain, unauthenticated UDP broadcast
 that only works inside the LAN: anyone on the LAN who knows a machine's MAC address can send the same packet, so

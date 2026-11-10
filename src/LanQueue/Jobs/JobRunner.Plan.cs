@@ -38,8 +38,9 @@ public sealed partial class JobRunner
         }
 
         TryDelete(payload.ArchivePath); // never built (PayloadKinds.None); nothing may stay behind
-        var needs = new JobNeeds(req.Needs, req.MinMemGb, !JobPolicy.ValidateForWindows(req.Argv).Ok);
-        var (probes, assessed) = await ProbeForJobAsync(needs, ct).ConfigureAwait(false);
+        var needs = NeedsOf(req, !JobPolicy.ValidateForWindows(req.Argv).Ok);
+        var candidates = Candidates(req);
+        var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
         var ranked = Scheduler.Rank(assessed);
         var plan = new JobPlan(JobPlan.WouldRun, 0, ranked.Count > 0 ? "would run on " + ranked[0].Machine.Name : "")
         {
@@ -49,7 +50,7 @@ public sealed partial class JobRunner
             AllowedBy = JobPolicy.AllowedBy(config.Policy, req.Argv),
             UncommittedFiles = payload.ChangedFiles.Count,
         };
-        return ranked.Count > 0 ? plan : NoneNow(id, req, needs, probes, plan);
+        return ranked.Count > 0 ? plan : NoneNow(id, req, needs, candidates, probes, plan);
     }
 
     private async Task<JobPlan> PlanShardsAsync(string id, JobRequest template, ShardOptions options, CancellationToken ct)
@@ -81,7 +82,7 @@ public sealed partial class JobRunner
         }
         else
         {
-            (probes, var autoAssessed) = await ProbeForJobAsync(ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
+            (probes, var autoAssessed) = await ProbeForJobAsync(Candidates(template), ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
             (count, autoWhy, timing) = PickShardCount(template, autoAssessed, options.TargetMinutes);
         }
 
@@ -99,14 +100,15 @@ public sealed partial class JobRunner
 
         TryDelete(payload.ArchivePath);
         var needs = ShardNeeds(template, shards);
+        var candidates = Candidates(template);
         List<Assessment> assessed;
         if (probes is null)
         {
-            (probes, assessed) = await ProbeForJobAsync(needs, ct).ConfigureAwait(false);
+            (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
         }
         else
         {
-            assessed = Scheduler.Assess(config.Machines.Zip(probes), needs);
+            assessed = Scheduler.Assess(candidates.Zip(probes), needs);
         }
 
         // A fresh run has no shard of its own anywhere yet: the free slots are FreeFor with none placed, dealt round-robin as DispatchShards does.
@@ -131,7 +133,7 @@ public sealed partial class JobRunner
             Placement = placement,
             Waiting = waiting,
         };
-        return dealt.Count > 0 ? plan : NoneNow("shard", template, needs, probes, plan);
+        return dealt.Count > 0 ? plan : NoneNow("shard", template, needs, candidates, probes, plan);
     }
 
     /// <summary>"build-01 shards 1,3; micro-02 shard 2".</summary>
@@ -142,10 +144,10 @@ public sealed partial class JobRunner
     /// No machine can take the job now: the NoCapacity lanq run would end with (its message, retryable), and the sleeper it would wake first,
     /// by the rules of <see cref="Dispatch"/>: only with --wait above 0, without --no-wake, and when not every machine is ruled out for good.
     /// </summary>
-    private JobPlan NoneNow(string id, JobRequest req, JobNeeds needs, MachineHealth[] probes, JobPlan plan)
+    private JobPlan NoneNow(string id, JobRequest req, JobNeeds needs, IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobPlan plan)
     {
         var none = NoCapacity(id, [.. plan.Assessed], "");
-        var wake = !plan.Never && req.Wait > TimeSpan.Zero && !req.NoWake ? WouldWake(needs, probes) : null;
+        var wake = !plan.Never && req.Wait > TimeSpan.Zero && !req.NoWake ? WouldWake(candidates, needs, probes) : null;
         return plan with { Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable, WouldWake = wake };
     }
 
@@ -153,14 +155,15 @@ public sealed partial class JobRunner
     /// The machine <see cref="WakeBestSleeperAsync"/> would send a packet to: the first by name that <see cref="CouldWakeFor"/> allows and that
     /// <see cref="WakeService.Evaluate"/> says to wake. Asks the rules of a fresh WakeService whose sender refuses to send, so nothing is claimed or sent.
     /// </summary>
-    private string? WouldWake(JobNeeds needs, MachineHealth[] probes)
+    /// <param name="candidates">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> is index-aligned with it.</param>
+    private string? WouldWake(IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes)
     {
         var rules = new WakeService(new RefusingMagicPacketSender(), clock);
         var now = clock.GetLocalNow().DateTime;
-        return WakeOrder()
-            .Where(i => CouldWakeFor(config.Machines[i], probes[i], needs, archiveFailed: false)
-                && rules.Evaluate(config.Machines[i], probes[i], now, config.Policy).Decision == WakeDecision.Wake)
-            .Select(i => config.Machines[i].Name)
+        return WakeOrder(candidates)
+            .Where(i => CouldWakeFor(candidates[i], probes[i], needs, archiveFailed: false)
+                && rules.Evaluate(candidates[i], probes[i], now, config.Policy).Decision == WakeDecision.Wake)
+            .Select(i => candidates[i].Name)
             .FirstOrDefault();
     }
 

@@ -825,7 +825,103 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["npm", "test", "&calc"]), CancellationToken.None);
 
         Assert.Equal(JobStatus.NoCapacity, r.Status);
-        Assert.Contains("build-02: arguments not safe for Windows cmd shims", r.Message, StringComparison.Ordinal);
+        Assert.Contains("build-02: " + Scheduling.Scheduler.WindowsUnsafeHold, r.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The Windows worker found that the program given | resolves to a .cmd there: its wrapper started nothing and said so. That is Rejected
+    /// (exit 2, windows_args) naming what it resolved to, the marker line is not shown as job output, and nothing is fetched.
+    /// </summary>
+    [Fact]
+    public async Task AWindowsWorkerRefusingANonExeProgramIsRejected()
+    {
+        var output = new List<string>();
+        var (runner, ssh, _, _) = Make((m, cmd) =>
+        {
+            if (DecodedContains(m, cmd, "SLOT="))
+            {
+                return new SshResult(0, "SLOT=1");
+            }
+
+            if (DecodedContains(m, cmd, "disk_free_gb"))
+            {
+                return new SshResult(0, Healthy(m.Name == "build-01" ? 0.9 : 0.1)); // build-01 (linux) over the load threshold
+            }
+
+            if (DecodedContains(m, cmd, "LANQ_WINARGS="))
+            {
+                return new SshResult(2, $"{T.WindowsArgsMarkerOf(cmd)}C:\\tools\\dotnet.cmd\n{T.ExitMarkerOf(cmd)}2");
+            }
+
+            return new SshResult(0, "");
+        });
+        var r = await runner.RunAsync(Req(["dotnet", "test", "--filter", "Category=Unit|Category=Arch"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal((JobStatus.Rejected, 2, RejectKind.WindowsArgs, "build-02"), (r.Status, r.CliExitCode, r.RejectKind, r.Machine));
+        Assert.Contains("'dotnet' resolves to C:\\tools\\dotnet.cmd there, not a native .exe", r.Message, StringComparison.Ordinal);
+        Assert.Contains("nothing was started", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(_output, l => l.Contains("LANQ_WINARGS=", StringComparison.Ordinal));
+        Assert.Contains(ssh.Calls, c => c.Machine == "build-02" && DecodedContains(T.Windows(), c.Command, "/locks/slot-")); // the slot is still released
+    }
+
+    /// <summary>A refusal line from a job that then exits with anything but 2 (its own output, say) is ordinary output, never a refusal.</summary>
+    [Fact]
+    public async Task ARefusalLineWithoutExitTwoIsOrdinaryOutput()
+    {
+        var (runner, _, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.9 : 0.1))
+            : DecodedContains(m, cmd, "LANQ_WINARGS=") ? new SshResult(1, $"{T.WindowsArgsMarkerOf(cmd)}x\n{T.ExitMarkerOf(cmd)}1")
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test", "--filter", "A|B"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal((JobStatus.Failed, 1, (RejectKind?)null), (r.Status, r.CliExitCode, r.RejectKind));
+    }
+
+    /// <summary>
+    /// The job itself prints the wrapper's refusal and exit lines (it can know its job id: LANQ_JOB) and exits 2. They lack this run's nonce,
+    /// which only the wrapper's script holds, so they are the job's output: Failed with 2, never a Rejected WindowsArgs refusal.
+    /// </summary>
+    [Fact]
+    public async Task AJobPrintingTheWrappersLinesItselfIsOrdinaryOutput()
+    {
+        var (runner, _, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.9 : 0.1))
+            : DecodedContains(m, cmd, "LANQ_WINARGS=") && JobIdOf(m, cmd) is { } job
+                ? new SshResult(2, $"LANQ_WINARGS={job}:C:\\tools\\dotnet.cmd\nLANQ_EXIT={job}:2\n{T.ExitMarkerOf(cmd)}2")
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test", "--filter", "A|B"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal((JobStatus.Failed, 2, (RejectKind?)null), (r.Status, r.CliExitCode, r.RejectKind));
+        Assert.Contains(_output, l => l.Contains("LANQ_WINARGS=", StringComparison.Ordinal));
+        Assert.Contains(_output, l => l.Contains("LANQ_EXIT=", StringComparison.Ordinal)); // the job's own line, shown as it printed it
+    }
+
+    /// <summary>The nonce is in the wrapper's own marker lines only: not in the job's environment (Linux env prefix, Windows $env: lines).</summary>
+    [Fact]
+    public void TheMarkerNonceIsOnlyInTheWrappersOwnLines()
+    {
+        const string Nonce = "0123456789abcdef";
+        var linux = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], TimeSpan.FromMinutes(5), nonce: Nonce);
+        Assert.Contains("LANQ_EXIT=j1:" + Nonce + ":", linux, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(linux, Nonce));
+        Assert.DoesNotContain(Nonce, RemoteScripts.JobEnvironmentPosix(T.Linux(), "j1"), StringComparison.Ordinal);
+
+        var windows = RemoteScripts.Execute(T.Windows(), "j1", ".", ["dotnet", "test", "--filter", "A|B"], TimeSpan.FromMinutes(5), nonce: Nonce);
+        Assert.Contains("LANQ_WINARGS=j1:" + Nonce + ":", windows, StringComparison.Ordinal);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(windows, Nonce).Count); // the refusal line, its exit line, the final exit line
+        Assert.DoesNotContain(windows.Split('\n'), l => l.Contains("$env:", StringComparison.Ordinal) && l.Contains(Nonce, StringComparison.Ordinal));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], nonce: "not-hex"));
+    }
+
+    private static string? JobIdOf(Config.Machine m, string cmd)
+    {
+        var text = m.Os == Config.MachineOs.Windows && cmd.Contains("-EncodedCommand ", StringComparison.Ordinal)
+            ? System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(cmd[(cmd.LastIndexOf(' ') + 1)..]))
+            : cmd;
+        var at = text.IndexOf("'LANQ_EXIT=", StringComparison.Ordinal);
+        return at < 0 ? null : text[(at + "'LANQ_EXIT=".Length)..text.IndexOf(':', at)];
     }
 
     [Theory]

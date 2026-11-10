@@ -34,7 +34,7 @@ including Windows 10 build users, low-RAM micro PCs and overnight family PCs.
 | Shell | **Required** | Windows: Windows PowerShell (built in). Linux: `sh` | — |
 | `base64`, `sha256sum`, `find`, `awk`, `sort`, `readlink` (Linux) | Only for `lanq run --fetch` | the fetch script lists the files and sends them back as checksummed text. Standard on every distribution (coreutils, findutils; busybox has them too); Windows needs nothing extra | `command -v base64 sha256sum find awk sort readlink` |
 | Writable work folder (`work_root`) with free disk | **Required** | each job gets its own worktree or folder there; `lanq health` holds a machine with low disk | `lanq health` from your PC |
-| Toolchain your jobs run (e.g. .NET SDK, Node) | Per job | tag the machine with matching `capabilities` (`dotnet`, `node`, ...) | `dotnet --version`, `node --version` |
+| Toolchain your jobs run (e.g. .NET SDK, Node) | Per job | tag the machine with matching `capabilities` (`dotnet`, `node`, ...); for `dotnet` an SDK, not only a runtime | `dotnet --list-sdks`, `node --version`; see [Toolchain in a non-standard place](#toolchain-in-a-non-standard-place) |
 | Docker | Only for jobs that need it | e.g. integration tests with Testcontainers; tag the machine `docker` | `docker version` |
 | Internet access to package registries | Only if jobs restore packages | `dotnet restore` / `npm ci` download from nuget.org / npm | — |
 | Credentials for private package feeds | Only if you use private feeds | configure them **on the worker** (user-level config); never pass secrets in a job | — |
@@ -133,11 +133,63 @@ Optional. If a PC sleeps or is shut down outside its `allowed_hours`, `lanq` can
    - a small systemd unit running `ethtool -s eth0 wol g` after `network.target`.
 4. Test as above with `lanq wake <machine> --wait`. `lanq doctor` shows the wake line and the same reminder.
 
+## Toolchain in a non-standard place
+
+A job finds its tools through the ssh session's `PATH`, which is not your login shell's. On some workers the tool on
+that `PATH` is not the one the jobs need: a runtime-only .NET install in `C:\Program Files\dotnet` ("No .NET SDKs
+were found") while the SDK lives in a private folder such as `D:\build\dotnet`, or a version manager (nvm, volta,
+fnm) that only your interactive shell sets up.
+
+`lanq doctor --remote` checks this for you. Its `dotnet` check (`dotnet --version`) fails without an SDK; doctor then
+says when the dotnet on `PATH` has runtimes only ("dotnet 6.0.11 runtime only, no SDK") and searches the worker's usual
+and private install folders (read-only, at most about five seconds): `$DOTNET_ROOT` and `~/.dotnet` everywhere; on Windows also `%ProgramFiles%\dotnet`,
+`%LOCALAPPDATA%\Microsoft\dotnet` (the dotnet-install default), `%USERPROFILE%\.dotnet`, the registry's install
+location, and `X:\dotnet` and `X:\<folder>\dotnet` on every fixed drive (one level deep, at most 64 folders a drive);
+on Linux and macOS `/etc/dotnet/install_location`, `/usr/share/dotnet`, `/usr/lib/dotnet`, `/opt/dotnet`, the snap and
+Homebrew folders. For the folder with the highest SDK it prints the fix, for example:
+
+```text
+FAIL  build-02 (remote): dotnet: 'dotnet --version' failed in the job environment (dotnet 6.0.11 runtime only, no SDK), but .NET SDK 10.0.102 is installed in D:/build/dotnet, a folder the ssh session's PATH does not reach
+      fix: add `path_prepend: [D:/build/dotnet]` to build-02 in machines.yml (found .NET SDK 10.0.102 there), and `DOTNET_ROOT: D:/build/dotnet` under its env: so the SDK's tools find the runtimes next to it
+```
+
+Add those lines to the machine yourself (lanq never edits `machines.yml` or a worker's `PATH` by itself):
+
+```yaml
+  - name: build-02
+    # ...
+    path_prepend: [D:/build/dotnet]
+    env:
+      DOTNET_ROOT: D:/build/dotnet
+```
+
+## Windows workers where WMI is denied
+
+On some Windows workers the build account (a normal user, not an administrator) is denied WMI/CIM, typically on a
+PC tuned as a server: `Get-CimInstance` answers "Access denied", and so does `taskkill` (it uses WMI to find a process
+tree). lanq works there without WMI (since 0.8.0):
+
+- **Memory** comes from CIM when allowed, else from .NET (`Microsoft.VisualBasic.Devices.ComputerInfo`, which reads
+  `GlobalMemoryStatusEx`). The probe says which (`mem_source=cim|vb`), so `--mem`, `size` routing and the memory hold
+  keep working.
+- **Load** comes from CIM when allowed, else from two `GetSystemTimes` samples a second apart (`load_source=native`).
+  If neither works, `lanq health` shows `load ?` (JSON `loadKnown: false`) and load alone never holds the machine.
+- **Stopping a job** (timeout, Ctrl+C, a stale slot, cleanup) does not need WMI: each job runs in a Windows job object
+  that the job wrapper creates (with kill-on-close, so the whole tree also ends when the wrapper itself is killed or
+  its ssh session drops), and lanq's stop and cleanup steps end that job object by name or walk the recorded
+  processes' trees with a process snapshot. The helper that does this is written to `work_root/bin/` before each job.
+  Processes a job leaves running (build servers, for example) end with the job.
+
+`lanq doctor --remote` shows a `wmi` WARN for such a worker. Nothing has to change; if the machine's owner wants the
+faster CIM probe, they can grant the account WMI read: `wmimgmt.msc`, WMI Control, Properties, Security, `Root\CIMV2`,
+Security, then Enable Account and Remote Enable for the build user.
+
 ## What a job sees
 
 Every job runs with `LANQ_JOB=<job id>` in its environment (on Linux and Windows), besides the machine's own `env:`
-and `path_prepend:` (names starting with `LANQ_` are reserved, so `env:` cannot set them). A build script may read it,
-for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
+and `path_prepend:` (names starting with `LANQ_` are reserved, so `env:` cannot set them). A shard also gets
+`LANQ_SHARD` and `LANQ_SHARDS`, and a job of a plan file (`lanq run --plan`) `LANQ_PLAN_JOB=<its name in lanq.yml>`.
+A build script may read them, for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
 the environment of long-running helper processes you want stopped with the job.
 
 ## Then, on your PC

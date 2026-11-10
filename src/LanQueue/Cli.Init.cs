@@ -79,14 +79,34 @@ public static partial class Cli
         """;
 
     /// <summary>
-    /// lanq init [--config PATH] [--json]: writes <see cref="StarterConfig"/> to PATH (default machines.yml in the current folder), creating
-    /// its folder; never over an existing file. Exit 0 written, 2 the file exists (or bad arguments), 70 it could not be written. With
-    /// --json, stdout is one object (status, exitCode, path, message) and the next steps go to stderr.
+    /// lanq init [--config PATH] [--json]: writes <see cref="StarterConfig"/> to PATH, else to $LANQ_CONFIG, else to the per-user config file
+    /// that lookup reads without flags (<see cref="UserConfigPath"/>; never the current folder, which may be a repository), creating its
+    /// folder; never over an existing file. Exit 0 written, 2 the file exists (or bad arguments, or no --config and no per-user folder to write to),
+    /// 70 it could not be written. With --json, stdout is one object (status, exitCode, path, message) and the next steps go to stderr.
     /// </summary>
     internal static async Task<int> Init(
-        ParsedArgs p, string currentDir, Func<string, string?> env, bool windows, TextWriter stdout, TextWriter stderr, Action? beforeWrite = null)
+        ParsedArgs p, string currentDir, Func<string, string?> env, bool windows, TextWriter stdout, TextWriter stderr, Action? beforeWrite = null,
+        Func<Environment.SpecialFolder, string>? folder = null)
     {
-        var path = Path.GetFullPath(p.ConfigPath ?? "machines.yml", currentDir);
+        // The same places lookup reads (ResolveConfig), so the file is found afterwards without flags. Without --config or LANQ_CONFIG and
+        // without a per-user folder (no HOME / APPDATA as a full path), refuse: a relative path would land in the current folder.
+        var chosen = p.ConfigPath ?? (env("LANQ_CONFIG") is { Length: > 0 } named ? named : TryUserConfigPath(env, windows, folder));
+        if (chosen is null)
+        {
+            var why = JobRunner.SafeLine(NoUserConfigFolder(windows));
+            await stderr.WriteLineAsync(why).ConfigureAwait(false);
+            var steps = NextSteps.ForInit("Rejected", null, why, fileExists: false, p.Json);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+            if (p.Json)
+            {
+                await stdout.WriteLineAsync(JsonSerializer.Serialize(new InitJson("Rejected", 2, null, why) { NextSteps = steps }, LanqJson.Default.InitJson))
+                    .ConfigureAwait(false);
+            }
+
+            return 2;
+        }
+
+        var path = Path.GetFullPath(chosen, currentDir);
         var exists = $"{path} already exists; lanq init never overwrites a file. Edit it, or pass --config with a new path.";
         async Task<int> Done(string status, int code, string message, IEnumerable<string>? steps = null)
         {
@@ -149,7 +169,7 @@ public static partial class Cli
             return await Done("InfraError", 70, $"could not write {path}: {ex.Message}").ConfigureAwait(false);
         }
 
-        return await Done("Created", 0, $"Wrote {path} (one example machine to replace; a Windows and a Linux example are commented out).", InitSteps(path, env, windows))
+        return await Done("Created", 0, $"Wrote {path} (one example machine to replace; a Windows and a Linux example are commented out).", InitSteps(path, env, windows, folder))
             .ConfigureAwait(false);
     }
 
@@ -166,10 +186,10 @@ public static partial class Cli
         }
     }
 
-    private static IEnumerable<string> InitSteps(string path, Func<string, string?> env, bool windows)
+    private static IEnumerable<string> InitSteps(string path, Func<string, string?> env, bool windows, Func<Environment.SpecialFolder, string>? folder)
     {
-        var userFile = UserConfigPath(env, windows);
-        var isDefault = string.Equals(Path.GetFullPath(userFile), path, windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        var userFile = TryUserConfigPath(env, windows, folder);
+        var isDefault = userFile is not null && string.Equals(Path.GetFullPath(userFile), path, windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         var config = isDefault ? "" : " --config " + (path.Contains(' ', StringComparison.Ordinal) ? "\"" + path + "\"" : path);
         yield return "";
         yield return "Next steps:";

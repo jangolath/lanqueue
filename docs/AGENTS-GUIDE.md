@@ -13,11 +13,12 @@ JSON field is in [JSON.md](JSON.md).
 | | The developer | The agent |
 | --- | --- | --- |
 | `machines.yml`, `policy.allowed_commands`, `policy.allowed_directories` | writes and owns | never edits |
+| `lanq.yml` (the repository's plan file) | writes and reviews with the team | never edits to get around a refusal |
 | SSH keys, ssh-agent, `known_hosts` | sets up | never touches |
 | Workers (OpenSSH, tools, `PAUSE` files) | sets up, or asks each PC's owner | never touches |
 | `lanq makeready --setup`, `lanq makeready --add` (and its `--yes`), `lanq init` | runs | never |
 | `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake` | runs | only when asked |
-| `lanq health --json` (also `--needs`), `lanq run --json` (also `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
+| `lanq health --json` (also `--needs`, `--on`, `--size`, `--min-size`), `lanq run --json` (also `--dry-run`, `--on`, `--size`, `--min-size`), `lanq run --plan --json --no-wake` (also `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
 | `jobs.jsonl`, `jobs.1.jsonl` and `logs/` in lanq's state folder | owns (lanq writes them) | never touches (reads them through `lanq stats --json` and `logPath`) |
 | `nextSteps` with `safeToRunUnattended: true` | | runs, at most once |
 
@@ -61,21 +62,27 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 - Never shard a command that is not idempotent. Retry at most once.
 - Long suites: --shards auto --target-minutes 10 once lanq stats --json shows a "timing" for the command; preview
   with --dry-run.
+- Route with --size light,medium / --min-size heavy or --on <machine>. A repository with lanq.yml: lanq run --plan
+  --json --no-wake [--only a,b] (preview with --dry-run); report each job in "jobs" whose status is not Completed,
+  by name. Never edit lanq.yml or machines.yml to get around a refusal.
 - Never edit or delete lanq's jobs.jsonl or logs/ folder.
 ```
 
 ## The standard loop
 
-1. `lanq health --json`. Pick capabilities and, for a heavy job, a `size` that suits it (`--needs bigmem` if you tag
-   machines that way, or `--mem GB`). `lanq health --needs <caps> [--mem GB] --json` says per machine whether it
+1. `lanq health --json`. Pick capabilities and, for a heavy job, a `size` that suits it (`--min-size heavy`,
+   `--needs bigmem` if you tag machines that way, or `--mem GB`; `--on <machine>` pins it). `lanq health --needs <caps> [--mem GB] --json` says per machine whether it
    could take such a job now (`eligible`, `why`, `jobSlots`); `lanq run ... --dry-run --json` says which machine the
    run would take, and why the others are out, without sending anything.
 2. `lanq run --json --log-tail 60 --no-wake --needs <caps> [--dir D] [--fetch PATTERN] -- <command>`, with stderr
    dropped (the log is in `logTail` and at `logPath`). A long suite that splits: `--shards auto` (see
    [SHARDING.md](SHARDING.md)); once `lanq stats --json` shows a `timing` for the command,
    `--shards auto --target-minutes 10`, previewed with `--dry-run`.
+   A repository with a `lanq.yml`: `lanq run --plan --json --log-tail 60 --no-wake` runs all its jobs
+   ([PLANS.md](PLANS.md)), `--only a,b` some of them, `--dry-run` previews.
 3. Read the exit code, then `status`, then `nextSteps`. Read `logTail` only to explain a failure.
-4. Report in a line or two: status, machine, and the failing tests or the message.
+4. Report in a line or two: status, machine, and the failing tests or the message. For a plan, each job that is not
+   `Completed`, by name, with its `message`.
 
 ## Failure playbook
 
@@ -84,7 +91,7 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | `Failed` | job's code | The tests or build failed. | Summarise the failures from the tail; fix the code if that is the task. | Nothing, unless the failure looks environmental (a missing tool, a full disk). |
 | `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload, a config error. | Report the message. Stop. | Whether to allowlist the command or fix the config. |
 | `NoCapacity`, `retryable: true` | 75 | Every machine busy, held (hours, pause, memory, load), asleep or unreachable. | Run the `wait` step from `nextSteps` once (the same run with `--wait 120`). | Whether to wait, wake a machine, or run locally. |
-| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, `--mem` is above every machine's RAM, git or tar is missing. lanq ended at once. | Stop. Report `excluded`. | Whether to add the capability or a machine, or run locally. |
+| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, none is of the `--size`/`--min-size` asked for, `--mem` is above every machine's RAM, git or tar is missing. lanq ended at once. | Stop. Report `excluded`. Do not drop `--on`/`--size` or edit `lanq.yml` to get it through. | Whether to add the capability or a machine, change the job's routing, or run locally. |
 | `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote --json`; report the `fail` checks with their `fix`. No retry loop. | To fix the worker or the key setup. |
 | `TimedOut` | 124 | The job ran past `--timeout` (default 240 minutes). | Report it. | Whether a longer `--timeout` is fine. |
 | `WindowClosed` | 124 | The machine's allowed hours ended while the job ran. | Report it. | Whether to run it again later or elsewhere. |

@@ -6,8 +6,11 @@ namespace LanQueue.Scheduling;
 
 public static class Scheduler
 {
-    /// <summary>The hold put on a Windows machine for a job whose arguments cmd.exe shims would re-parse.</summary>
-    public const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
+    /// <summary>
+    /// The hold put on a Windows machine for a job whose arguments are unsafe there (<see cref="LanQueue.Policy.JobPolicy.ValidateForWindows"/>): any of
+    /// " &lt; &gt; ^ %, or &amp; | for a program that is not a native .exe (a .cmd/.bat shim would re-parse them through cmd.exe).
+    /// </summary>
+    public const string WindowsUnsafeHold = "arguments not safe for Windows (\" < > ^ %, or & | for a program that is not an .exe)";
 
     /// <summary>
     /// Eligible machines (all required capabilities, reachable, not on hold, a free slot), least loaded first.
@@ -26,8 +29,9 @@ public static class Scheduler
 
     /// <summary>
     /// Judges every machine for one job from its probe result (pure: no network). Each machine gets the first reason it cannot take the
-    /// job, in this order: the permanent ones (a missing capability, Windows for arguments unsafe there, --mem above its total memory or a
-    /// machine that never reports memory, git or tar missing), then unreachable or asleep, then the probe's hold, then --mem above its free
+    /// job, in this order: the permanent ones (a missing capability, a declared size: outside --size / --min-size, Windows for arguments
+    /// unsafe there, --mem above its total memory or a machine that never reports memory, a probed size outside the rule or unknown, git or
+    /// tar missing), then unreachable or asleep, then the probe's hold, then --mem above its free
     /// memory, then <paramref name="avoid"/>, then no free slot. The result keeps the input order.
     /// </summary>
     /// <param name="raw">Each machine with its probe result as the probe returned it (no job holds added).</param>
@@ -38,7 +42,8 @@ public static class Scheduler
     private static Assessment AssessOne(Machine m, MachineHealth h, JobNeeds needs, IReadOnlySet<string>? avoid)
     {
         var (reason, why) = Judge(m, h, needs, avoid);
-        var jobHold = reason is Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal or Exclusion.MemUnknown or Exclusion.MemBelowRequest;
+        var jobHold = reason is Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal or Exclusion.MemUnknown or Exclusion.MemBelowRequest
+            or Exclusion.WrongSize or Exclusion.SizeUnknown;
         var health = jobHold ? h with { Hold = why, HoldKind = HoldKind.Job } : h;
         return new Assessment(
             m,
@@ -56,6 +61,12 @@ public static class Scheduler
         if (missing.Count > 0)
         {
             return (Exclusion.MissingCapability, Eligibility.Lacks(m, missing));
+        }
+
+        // A declared size: is known without a probe, so it is judged even for a machine that does not answer.
+        if (Eligibility.DeclaredSizeMismatch(m, needs.Size) is { } wrongSize)
+        {
+            return (Exclusion.WrongSize, wrongSize);
         }
 
         if (needs.WindowsUnsafe && m.Os == MachineOs.Windows)
@@ -76,6 +87,24 @@ public static class Scheduler
             if (h.MemFreeGb is null)
             {
                 return (Exclusion.MemUnknown, "free memory unknown (--mem needs the machine to report it)");
+            }
+        }
+
+        // --size / --min-size on a machine without size: the probed class, only from a machine that answered (an unreachable one stays
+        // unreachable, which may pass). No total memory means no class: that machine can never be judged, so it is permanent too.
+        if (needs.Size is { } rule && MachineSize.Declared(m) is null && reportsHealth)
+        {
+            var probed = MachineSize.Classify(h.MemTotalGb, h.Cores);
+            if (probed == SizeClass.Unknown)
+            {
+                return (Exclusion.SizeUnknown, $"size unknown (the machine did not report its total memory; give it a size: in machines.yml); {rule.Text}");
+            }
+
+            if (!rule.Allows(probed))
+            {
+                return (Exclusion.WrongSize, string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"size {MachineSize.Word(probed)} (probe: {MachineSize.RoundedGb(h.MemTotalGb!.Value):0} GB, {(h.Cores is { } c ? c.ToString(CultureInfo.InvariantCulture) : "?")} cores); {rule.Text}"));
             }
         }
 

@@ -95,6 +95,31 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     public int? TargetMinutes { get; init; }
 
     /// <summary>
+    /// --on m[,m] (run and health): only these machines (names as typed; matched to the config ignoring case once it is loaded, an unknown
+    /// name refused before any network). Null without --on.
+    /// </summary>
+    public IReadOnlyList<string>? On { get; init; }
+
+    /// <summary>--size C[,C] or --min-size C (run and health): the machine size classes a job may run on. Null without either.</summary>
+    public SizeRule? Size { get; init; }
+
+    /// <summary>lanq run --plan (or --plan-file PATH, which implies it): run the jobs of the repository's lanq.yml.</summary>
+    public bool Plan { get; init; }
+
+    /// <summary>lanq run --plan-file PATH: the plan file to read (relative to the current folder) instead of lanq.yml at the repository top.</summary>
+    public string? PlanFile { get; init; }
+
+    /// <summary>lanq run --plan --only a,b: only these jobs of the plan file (as typed; checked against the file). Null without --only.</summary>
+    public IReadOnlyList<string>? Only { get; init; }
+
+    /// <summary>lanq run --fail-fast: with --shards the first shard that does not complete cancels the rest (also in <see cref="Shards"/>); with --plan the first job.</summary>
+    public bool FailFast { get; init; }
+
+    /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
+    internal static readonly string[] PlanFileOptions =
+        ["--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files"];
+
+    /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
     /// (see <see cref="Output.SuggestedCommand.Rerun"/>), so the user's own options and job arguments survive unchanged.
     /// </summary>
@@ -103,8 +128,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
-        ["health"] = ["--json", "--wake", "--needs", "--mem"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run"],
+        ["health"] = ["--json", "--wake", "--needs", "--mem", "--on", "--size", "--min-size"],
+        ["run"] =
+        [
+            "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
+            "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
+        ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force", "--json"],
@@ -152,6 +181,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         int? fetchMaxFiles = null;
         int? logTail = null;
         int? targetMinutes = null;
+        List<string>? on = null;
+        SizeRule? size = null;
+        var plan = false;
+        string? planFile = null;
+        List<string>? only = null;
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -242,6 +276,32 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     }
 
                     break;
+                case "--on" when i + 1 < own.Length:
+                    on ??= [];
+                    on.AddRange(Names(own[++i], "--on must name at least one machine from the config (for example --on big-01 or --on big-01,build-01)."));
+                    break;
+                case "--size" when i + 1 < own.Length:
+                    size = SizeRule.AnyOfText(own[++i]);
+                    break;
+                case "--min-size" when i + 1 < own.Length:
+                    size = SizeRule.AtLeastText(own[++i]);
+                    break;
+                case "--plan":
+                    plan = true;
+                    break;
+                case "--plan-file" when i + 1 < own.Length:
+                    planFile = own[++i];
+                    if (planFile.Length == 0 || planFile.Any(char.IsControl))
+                    {
+                        throw new ArgumentException("--plan-file must be a file path.");
+                    }
+
+                    plan = true;
+                    break;
+                case "--only" when i + 1 < own.Length:
+                    only ??= [];
+                    only.AddRange(Names(own[++i], "--only must name at least one job of lanq.yml (for example --only build,unit)."));
+                    break;
                 case "--all":
                     all = true;
                     break;
@@ -312,6 +372,16 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException("--needs must name at least one capability (for example --needs dotnet,linux).");
         }
 
+        if (seen.Contains("--size") && seen.Contains("--min-size"))
+        {
+            throw new ArgumentException("--size and --min-size do not go together; --size light,medium or --min-size medium.");
+        }
+
+        if (command == "run")
+        {
+            CheckPlanOptions(seen, plan, split >= 0);
+        }
+
         if (logTail is not null && !json)
         {
             throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
@@ -356,8 +426,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
-            Shards = shards.Build(),
+            Shards = plan ? null : shards.Build(),
             TargetMinutes = targetMinutes,
+            On = on,
+            Size = size,
+            Plan = plan,
+            PlanFile = planFile,
+            Only = only,
+            FailFast = shards.FailFast,
             LogTail = logTail,
             Raw = [.. args],
         };
@@ -383,6 +459,40 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         if (!add && (seen.Contains("--name") || seen.Contains("--yes")))
         {
             throw new ArgumentException("--name and --yes go with --add (lanq makeready --ssh user@host --os windows|linux --add --name NAME).");
+        }
+    }
+
+    /// <summary>A comma list of names (--on, --only): trimmed, empty entries dropped; at least one, without control characters.</summary>
+    private static string[] Names(string text, string error)
+    {
+        var names = text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return names.Length > 0 && !names.Any(n => n.Any(char.IsControl)) ? names : throw new ArgumentException(error);
+    }
+
+    /// <summary>
+    /// lanq run --plan takes its jobs from lanq.yml: no command after --, and none of the options a job sets there; --only and --plan-file
+    /// only with --plan.
+    /// </summary>
+    private static void CheckPlanOptions(List<string> seen, bool plan, bool hasCommand)
+    {
+        if (!plan)
+        {
+            if (seen.Contains("--only"))
+            {
+                throw new ArgumentException("--only goes with --plan (it picks jobs of lanq.yml): lanq run --plan --only build,unit");
+            }
+
+            return;
+        }
+
+        if (hasCommand)
+        {
+            throw new ArgumentException("with --plan the jobs and their commands come from lanq.yml; leave out the command after --.");
+        }
+
+        if (seen.FirstOrDefault(o => PlanFileOptions.Contains(o)) is { } option)
+        {
+            throw new ArgumentException($"with --plan each job's {option} comes from lanq.yml; leave {option} out (lanq run --plan takes --plan-file, --only, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config).");
         }
     }
 
@@ -421,6 +531,9 @@ public static partial class Cli
           lanq run ... --shards N|auto [--target-minutes M] [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
+          lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test
+          lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
+          lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
@@ -433,10 +546,15 @@ public static partial class Cli
           lanq wake <machine> [--wait] [--json] [--config FILE]
           lanq --version
 
-        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
+        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory); lanq init writes there too.
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
+        --min-size light|medium|heavy (that class or larger) or --size C[,C] (one of these classes) routes by machine size: a machine's size:
+        in machines.yml when it has one, else its probed class (under 6 GB light; 16 GB or more with 4 cores heavy; else medium). A machine of
+        another size, or one that does not report its memory, can never take the job (wrong_size, size_unknown). --on m[,m] uses only the
+        named machines (an unknown name is refused before any network); every other rule still applies (capabilities, size, --mem, holds,
+        allowed hours, slots, wake). On health, --size / --min-size judge each machine like --needs and --on shows only those machines.
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
@@ -475,7 +593,7 @@ public static partial class Cli
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
-        init writes a commented starter machines.yml (default ./machines.yml, or --config FILE) and never overwrites a file or writes through
+        init writes a commented starter machines.yml (default the per-user config file, or --config FILE) and never overwrites a file or writes through
         a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
@@ -504,6 +622,13 @@ public static partial class Cli
         started shard is cleaned up). --target-minutes M (1 to 1440, with --shards auto only) picks N from earlier completed runs of the same
         command and --dir (the newest 10 of the last 90 days) so each shard takes about M minutes on the slowest machine it would go to,
         never more than the free slots; with no such run it is plain auto. The --shards auto line says why (--json adds shardTiming).
+        run --plan runs the jobs of lanq.yml at the repository top (or --plan-file PATH; see docs/PLANS.md): each job is the lanq run line it
+        expands to (the same checks; the dry run prints it), every job's command line is checked before anything is sent (one refusal refuses
+        the plan, exit 2; a job no machine can ever take ends it with 75), the repository is snapshotted once and jobs run side by side unless
+        after: orders them (a job whose after: job did not complete is Skipped). --only a,b runs only those jobs; --fail-fast cancels the rest
+        after the first job that does not complete; --wait counts only while no job of the plan holds a slot. Lines are prefixed [job machine];
+        a summary table, then the status line. Exit 0 only when every job completed, else the first failed job's own code, then 2, 124, 70, 75,
+        130. --json prints one object (status, exitCode, plan, durationSeconds, message, order, jobs, warnings, nextSteps).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
@@ -540,7 +665,9 @@ public static partial class Cli
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
-                await (own[0] == "run" && own.Contains("--dry-run")
+                await (own[0] == "run" && (own.Contains("--plan") || own.Contains("--plan-file"))
+                    ? WritePlanFileJsonError(own.Contains("--dry-run"), "Rejected", 2, message, stdout, steps, logTail: own.Contains("--log-tail"))
+                    : own[0] == "run" && own.Contains("--dry-run")
                     ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"), steps)
                     : own[0] == "run" && own.Contains("--shards")
                     ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
@@ -603,7 +730,9 @@ public static partial class Cli
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
-                await (p.DryRun
+                await (p.Plan
+                    ? WritePlanFileJsonError(p.DryRun, "Rejected", 2, message, stdout, steps, logTail: p.LogTail is not null)
+                    : p.DryRun
                     ? WritePlanJsonError("Rejected", 2, message, stdout, p.LogTail is not null, steps)
                     : p.Shards is not null
                     ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
@@ -628,9 +757,10 @@ public static partial class Cli
         var probe = new HealthProbe(ssh, TimeProvider.System, waker);
         if (p.Command == "health")
         {
-            // --needs / --mem: judge each machine for such a job exactly as lanq run does (Windows-safe arguments assumed).
-            var needs = p.Needs.Count > 0 || p.MemGb is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) : null;
-            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs, p.ConfigPath).ConfigureAwait(false);
+            // --needs / --mem / --size / --min-size: judge each machine for such a job exactly as lanq run does (Windows-safe arguments
+            // assumed). --on only narrows the rows.
+            var needs = p.Needs.Count > 0 || p.MemGb is not null || p.Size is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) { Size = p.Size } : null;
+            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs, p.ConfigPath, p.On).ConfigureAwait(false);
         }
 
         return await Run(p, config, ssh, new GitPayloadBuilder(), probe, log, home, Directory.GetCurrentDirectory(), stdout, stderr, ct).ConfigureAwait(false);
@@ -641,6 +771,12 @@ public static partial class Cli
         ParsedArgs p, FleetConfig config, ISshClient ssh, IPayloadBuilder payloads, HealthProbe probe, JobLog log, string home, string repoDir,
         TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
+        if (p.Plan)
+        {
+            // lanq.yml (see Cli.PlanFile.cs); its dry run too.
+            return await RunPlanFile(p, config, ssh, payloads, probe, log, home, repoDir, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
         if (p.DryRun)
         {
             // Before anything below: FetchRoot creates the .lanq folder, and the runner here would use bases.json.
@@ -667,7 +803,7 @@ public static partial class Cli
         try
         {
             result = await runner.RunAsync(
-                new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch) { NoWake = p.NoWake },
+                RequestOf(p, repoDir, fetch),
                 ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
@@ -719,6 +855,15 @@ public static partial class Cli
 
         return result.CliExitCode;
     }
+
+    /// <summary>The job lanq run (or its dry run) asks for, from its command line: one job, or the template of every shard.</summary>
+    internal static JobRequest RequestOf(ParsedArgs p, string repoDir, FetchRequest? fetch) =>
+        new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
+        {
+            NoWake = p.NoWake,
+            On = p.On,
+            Size = p.Size,
+        };
 
     /// <summary>
     /// After a run's result is decided and before its Next and status lines (the status line stays the last stderr line): deletes old job logs
@@ -794,16 +939,7 @@ public static partial class Cli
             return (dir, dir);
         }
 
-        var top = Path.GetFullPath(repoDir);
-        for (var d = new DirectoryInfo(top); d is not null; d = d.Parent)
-        {
-            if (Directory.Exists(Path.Combine(d.FullName, ".git")) || File.Exists(Path.Combine(d.FullName, ".git")))
-            {
-                top = d.FullName;
-                break;
-            }
-        }
-
+        var top = Plan.PlanFileLoader.RepositoryTop(repoDir) ?? Path.GetFullPath(repoDir);
         var lanq = Path.Combine(top, ".lanq");
         try
         {
@@ -854,7 +990,8 @@ public static partial class Cli
     }
 
     /// <summary>Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder. Never the current directory.</summary>
-    internal static string ResolveConfig(string? explicitPath, Func<string, string?> env, bool windows, Func<string, bool> exists)
+    internal static string ResolveConfig(
+        string? explicitPath, Func<string, string?> env, bool windows, Func<string, bool> exists, Func<Environment.SpecialFolder, string>? folder = null)
     {
         var path = explicitPath ?? env("LANQ_CONFIG");
         if (!string.IsNullOrEmpty(path))
@@ -862,7 +999,7 @@ public static partial class Cli
             return exists(path) ? path : throw new ConfigException($"Config file not found: {path}. Check the path, or write a starter file with: lanq init --config {path}");
         }
 
-        var userFile = UserConfigPath(env, windows);
+        var userFile = UserConfigPath(env, windows, folder);
         return exists(userFile)
             ? userFile
             : throw new ConfigException(
@@ -870,22 +1007,42 @@ public static partial class Cli
                 + "A machines file in the current directory is never picked up implicitly.");
     }
 
-    /// <summary>The per-user config file lanq reads when neither --config nor $LANQ_CONFIG is given.</summary>
-    internal static string UserConfigPath(Func<string, string?> env, bool windows)
+    /// <summary>
+    /// The per-user config file lanq reads when neither --config nor $LANQ_CONFIG is given: %APPDATA%\lanq\machines.yml on Windows, else
+    /// $XDG_CONFIG_HOME/lanq/machines.yml or ~/.config/lanq/machines.yml. Only a full path counts: a relative XDG_CONFIG_HOME is ignored (as the
+    /// XDG spec says), and a relative or empty HOME / APPDATA falls back to the system's answer; when that is empty too there is no per-user
+    /// folder, and this throws (exit 2) instead of resolving against the current folder.
+    /// </summary>
+    /// <param name="folder">Environment.GetFolderPath (tests pass their own).</param>
+    /// <exception cref="ConfigException">The per-user folder cannot be determined.</exception>
+    internal static string UserConfigPath(Func<string, string?> env, bool windows, Func<Environment.SpecialFolder, string>? folder = null) =>
+        TryUserConfigPath(env, windows, folder) ?? throw new ConfigException(NoUserConfigFolder(windows));
+
+    /// <summary>Why there is no per-user config file to read or write (<see cref="UserConfigPath"/>).</summary>
+    internal static string NoUserConfigFolder(bool windows) =>
+        $"lanq cannot tell where your per-user config folder is ({(windows ? "APPDATA is" : "HOME and XDG_CONFIG_HOME are")} not set to a full path). "
+        + "Pass --config FILE, or set LANQ_CONFIG to the config file's full path.";
+
+    /// <summary><see cref="UserConfigPath"/>, or null when the per-user folder cannot be determined.</summary>
+    internal static string? TryUserConfigPath(Func<string, string?> env, bool windows, Func<Environment.SpecialFolder, string>? folder = null)
     {
-        string userDir;
+        folder ??= Environment.GetFolderPath;
+        string? userDir;
         if (windows)
         {
-            var appData = env("APPDATA");
-            userDir = Path.Combine(string.IsNullOrEmpty(appData) ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) : appData, "lanq");
+            userDir = FullPath(env("APPDATA")) ?? FullPath(folder(Environment.SpecialFolder.ApplicationData));
         }
         else
         {
-            var xdg = env("XDG_CONFIG_HOME");
-            userDir = Path.Combine(!string.IsNullOrEmpty(xdg) ? xdg : Path.Combine(HomeDir(env), ".config"), "lanq");
+            var home = FullPath(env("HOME")) ?? FullPath(folder(Environment.SpecialFolder.UserProfile));
+            userDir = FullPath(env("XDG_CONFIG_HOME")) ?? (home is null ? null : Path.Combine(home, ".config"));
         }
 
-        return Path.Combine(userDir, "machines.yml");
+        return userDir is null ? null : Path.Combine(userDir, "lanq", "machines.yml");
+
+        // A full path in either system's form (tests apply the other system's rules too): /x, C:/x or C:\x, \\server\share.
+        static string? FullPath(string? p) =>
+            !string.IsNullOrEmpty(p) && (Path.IsPathRooted(p) || p[0] == '/' || (p.Length >= 3 && char.IsAsciiLetter(p[0]) && p[1] == ':' && p[2] is '/' or '\\')) ? p : null;
     }
 
     private static string HomeDir(Func<string, string?> env) =>
@@ -896,17 +1053,34 @@ public static partial class Cli
     /// the same rules lanq run uses: JSON rows gain eligible, why, reason, permanent and jobSlots, text lines gain "  -> ...", and the exit code is
     /// 0 when at least one machine could take the job now, 75 when none could. Without it the output and exit code are exactly as before.
     /// </summary>
+    /// <param name="on">--on: only these machines are probed and printed (names matched ignoring case; an unknown one is refused, exit 2).</param>
     internal static async Task<int> Health(
         FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false, JobNeeds? needs = null,
-        string? configPath = null)
+        string? configPath = null, IReadOnlyList<string>? on = null)
     {
-        async Task<int> Error(string status, int code, string message)
+        async Task<int> Error(string status, int code, string message, List<NextStepJson>? steps = null)
         {
-            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath, json);
+            if (steps is not null)
+            {
+                await stderr.WriteLineAsync(message).ConfigureAwait(false); // a refusal before any probe says why, with or without --json
+            }
+
+            steps ??= NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath, json, on, needs?.Size);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
-            await WriteJsonError("health", status, code, message, stdout, steps).ConfigureAwait(false);
+            if (json)
+            {
+                await WriteJsonError("health", status, code, message, stdout, steps).ConfigureAwait(false);
+            }
+
             return code;
         }
+
+        if (Pinning.Resolve(config, on).Error is { } unknown)
+        {
+            return await Error("Rejected", 2, unknown, NextSteps.ArgumentsError(unknown)).ConfigureAwait(false);
+        }
+
+        var machines = Pinning.Candidates(config, on);
 
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
@@ -917,7 +1091,7 @@ public static partial class Cli
         MachineHealth[] results;
         try
         {
-            results = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct, wake ? WakeMode.SendAndWait : WakeMode.None))).ConfigureAwait(false);
+            results = await Task.WhenAll(machines.Select(m => probe.ProbeAsync(m, config.Policy, ct, wake ? WakeMode.SendAndWait : WakeMode.None))).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (json && ct.IsCancellationRequested)
         {
@@ -928,22 +1102,22 @@ public static partial class Cli
             return await Error("InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}")).ConfigureAwait(false);
         }
 
-        var assessed = needs is null ? null : Scheduler.Assess(config.Machines.Zip(results), needs);
+        var assessed = needs is null ? null : Scheduler.Assess(machines.Zip(results), needs);
         var exitCode = assessed is null || assessed.Any(a => a.Eligible) ? 0 : 75;
 
         // What to do about each machine: in every JSON row, and for people one "Next:" line per step on stderr (stdout is unchanged).
-        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath, json)).ToList();
+        var next = machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath, json)).ToList();
         await NextSteps.WriteAsync(stderr, next.SelectMany(s => s)).ConfigureAwait(false);
         if (json)
         {
-            var rows = config.Machines.Zip(results).Select((x, i) => HealthRow(x.First, x.Second) with { NextSteps = next[i] }).ToList();
+            var rows = machines.Zip(results).Select((x, i) => HealthRow(x.First, x.Second) with { NextSteps = next[i] }).ToList();
             await stdout.WriteLineAsync(assessed is null
                 ? JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)
                 : JsonSerializer.Serialize([.. rows.Zip(assessed, HealthNeedsRow)], LanqJson.Default.ListHealthNeedsJson)).ConfigureAwait(false);
             return exitCode;
         }
 
-        foreach (var (i, (m, h)) in config.Machines.Zip(results).Index())
+        foreach (var (i, (m, h)) in machines.Zip(results).Index())
         {
             var line = HealthLine(m, h);
             await stdout.WriteLineAsync(assessed is null ? line : line + "  -> " + Verdict(assessed[i])).ConfigureAwait(false);
@@ -961,9 +1135,9 @@ public static partial class Cli
     {
         var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
         var detail = h.Reachable
-            ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
+            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
                 + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
-                + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
+                + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores) + DeclaredSizeNote(m, h)
             : h.Error ?? "";
         return $"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd();
     }
@@ -987,14 +1161,24 @@ public static partial class Cli
         {
             Cores = h.Cores,
             MemTotalGb = h.MemTotalGb,
+            LoadKnown = !h.Reachable || h.LoadKnown,
             FreeSlots = h.Reachable ? FreeSlots(m, h) : 0,
-            Size = MachineSize.Classify(h.MemTotalGb, h.Cores).ToString().ToLowerInvariant(),
+            Size = MachineSize.Word(MachineSize.Effective(m, h.MemTotalGb, h.Cores)),
+            SizeSource = MachineSize.Declared(m) is null ? "probe" : "config",
             SuitedFor = MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores),
         };
     }
 
+    /// <summary>With a size: in machines.yml, " (size: heavy in machines.yml; probe: medium)" after the suited text; empty without one (the line stays as before).</summary>
+    private static string DeclaredSizeNote(Machine m, MachineHealth h) =>
+        MachineSize.Declared(m) is { } declared
+            ? $" (size: {MachineSize.Word(declared)} in machines.yml; probe: {MachineSize.Word(MachineSize.Classify(h.MemTotalGb, h.Cores))})"
+            : "";
+
     /// <summary>Slots a job could take now: max_jobs minus the slots in use (never below 0).</summary>
     private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsUsed);
+
+    private static string Load(MachineHealth h) => h.LoadKnown ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}") : "load ?";
 
     private static string Size(MachineHealth h) =>
         (h.Cores is { } c ? string.Create(CultureInfo.InvariantCulture, $"cores {c}") : "cores ?")

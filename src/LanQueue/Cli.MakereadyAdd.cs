@@ -197,6 +197,14 @@ public static partial class Cli
                 .ConfigureAwait(false);
         }
 
+        // A .NET SDK the scan did not see because it sits outside the ssh session's PATH (a private folder such as D:/build/dotnet): one more
+        // read-only search, and the entry proposes the capability with path_prepend: and DOTNET_ROOT for it, shown and confirmed like the rest.
+        if (!(report.SuggestedMachine.Capabilities ?? []).Contains("dotnet", StringComparer.OrdinalIgnoreCase)
+            && await FindToolchain(AdHocMachine(target, os, p.KeyEnv), ssh, "dotnet", ct).ConfigureAwait(false) is { Found: { } dotnet })
+        {
+            WithToolchain(item, "dotnet", dotnet.Dir, dotnet.What);
+        }
+
         // The report comes from the worker: a value with a line break or another control character is never written to machines.yml.
         if (item.Any(l => l.Any(char.IsControl) || JobRunner.SafeLine(l) != l))
         {
@@ -262,6 +270,29 @@ public static partial class Cli
         }
 
         return await done("Added", 0, AddOutcome.Added, $"Added {name} to {path}.", placeholder: placeholder).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Adds a toolchain found outside the PATH to a suggested entry: the capability, <c>path_prepend: [DIR]</c> and, for dotnet,
+    /// <c>DOTNET_ROOT: DIR</c> under <c>env:</c>.
+    /// </summary>
+    internal static void WithToolchain(List<string> item, string capability, string dir, string what)
+    {
+        const string Caps = "    capabilities: [";
+        var i = item.FindIndex(l => l.StartsWith(Caps, StringComparison.Ordinal) && l.EndsWith(']'));
+        if (i < 0)
+        {
+            return;
+        }
+
+        var listed = item[i][Caps.Length..^1];
+        item[i] = Caps + (listed.Length == 0 ? capability : capability + ", " + listed) + "]";
+        item.Add($"    path_prepend: [{Yaml(dir)}]   # {what} found here, outside the ssh session's PATH");
+        if (capability == "dotnet")
+        {
+            item.Add("    env:");
+            item.Add($"      DOTNET_ROOT: {Yaml(dir)}");
+        }
     }
 
     private static ReadOnlySpan<byte> Utf8Bom => [0xEF, 0xBB, 0xBF];
@@ -332,7 +363,8 @@ public static partial class Cli
         m.Priority,
         m.AllowedHours is null ? "-" : string.Join(',', m.AllowedHours),
         m.Transfer,
-        m.Wake is { } w ? string.Create(CultureInfo.InvariantCulture, $"{w.Mac}/{w.Broadcast}/{w.Port}/{w.WaitSeconds}") : "-");
+        m.Wake is { } w ? string.Create(CultureInfo.InvariantCulture, $"{w.Mac}/{w.Broadcast}/{w.Port}/{w.WaitSeconds}") : "-",
+        m.Size ?? "-");
 
     private static string Describe(PolicyConfig p) => string.Join(
         "\u001f",

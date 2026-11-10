@@ -82,11 +82,20 @@ one object with a `shards` array. `lanq health` shows cores, total RAM, free slo
 Recipes for .NET, Node, Python, Go and Rust:
 [docs/SHARDING.md](https://github.com/jangolath/lanqueue/blob/main/docs/SHARDING.md).
 
+## Route jobs and run a whole plan
+
+`--min-size heavy` or `--size light,medium` sends a job only to machines of that size (probed, or `size:` in
+`machines.yml`), and `--on big-01` only to named machines; every other rule still applies. A repository's `lanq.yml`
+lists its jobs (build, unit tests, integration tests, a serial tail with `after:`), each one `lanq run` line, and
+`lanq run --plan` runs them side by side on one snapshot with one result (`--only`, `--dry-run`, `--json`):
+[docs/PLANS.md](https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md).
+
 ## Safe by default
 
 - Key-only SSH with strict host-key checking; there is no password option.
 - Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell (Windows
-  workers never take arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
+  workers never take arguments containing `"` `<` `>` `^` `%`, nor `&` `|` unless the program is a native `.exe`,
+  since `cmd.exe` shims would re-parse them).
 - Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
 - `--fetch` treats the worker as untrusted: regular files only (links never followed), sent as checksummed text (no
   archive is ever extracted), every path, size, count and hash checked again locally, files created new below

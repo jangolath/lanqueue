@@ -1,5 +1,104 @@
 # Changelog
 
+## 0.8.0 (2026-11-10)
+
+### Routing
+
+- `--min-size light|medium|heavy` (that class or larger) and `--size C[,C]` (one of these classes) on `lanq run`
+  (single, `--shards`, `--dry-run`) and `lanq health`. They do not go together. A machine's size is its `size:` in
+  `machines.yml` when it has one, else the probed class (under 6 GB light; 16 GB or more with 4 cores heavy; else
+  medium).
+- Optional machine key `size: light|medium|heavy`: declare a 16 GB laptop `medium` to keep heavy jobs off it, or a
+  machine whose memory cannot be probed. Without it nothing changes.
+- New permanent reason codes `wrong_size` (the machine's size does not match) and `size_unknown` (no declared size and
+  no reported memory). A declared size is judged from the config alone, so a job no machine can ever take for its
+  size ends at once with 75 and `retryable: false`, before any ssh.
+- `--on m[,m]` on `lanq run` (also `--shards`, `--dry-run`) and `lanq health`: only these machines, matched ignoring
+  case; an unknown name is refused (exit 2) before any network. It only narrows: capabilities, size, `--mem`, holds,
+  allowed hours, slots and wake rules all still apply. A pinned machine that is busy or held is `NoCapacity`
+  (`retryable: true`, waits out `--wait`); one that can never take the job ends at once (`retryable: false`).
+  Suggested next steps keep `--on`, `--size` and `--min-size` and never drop them.
+
+### Plan files
+
+- `lanq run --plan` runs the jobs of `lanq.yml` at the repository top (`--plan-file PATH` for another file):
+  `version: 1`, optional `defaults:`, and up to 32 `jobs:`, each one `lanq run` line (`command`, `dir`, `needs`,
+  `mem`, `size` or `min_size`, `on`, `timeout`, `shards`, `target_minutes`, `shard_retries`, `fail_fast`, `fetch`)
+  plus `after:` to order them. Jobs run side by side on one snapshot of the repository and give one result.
+- Every job is checked as its own `lanq run` line before anything is sent (allowlist, allowed directories, flags,
+  command-line and payload secret scans, the Windows rule): one refusal refuses the plan (2), and a job no machine can
+  ever take ends it with 75 before the snapshot.
+- A job whose `after:` job did not complete is `Skipped`. Others keep running unless `--fail-fast` (running jobs are
+  cancelled and cleaned up, the rest skipped). `--wait` counts only while no job of the plan holds a slot.
+- `--only a,b` runs only those jobs; `--dry-run` prints each job's equivalent `lanq run` line and what it would do now
+  (`WouldRun`, `WouldWait`, `Pending`, `NoCapacity`), sending nothing; `--json` prints one object with a `jobs` array.
+  Exit 0 only when every job completed, else the first failed job's own code, then 2, 124, 70, 75, 130.
+- `lanq.yml` has no keys for hosts, ssh, keys, env, paths, wake, priority or policy: unknown keys are refused with the
+  line and a did-you-mean, and machine settings are pointed back to `machines.yml`. YAML anchors, aliases and merge
+  keys are refused (share values with `defaults:`). A job can do nothing its `lanq run` line could not.
+- Guide: https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md
+
+### Windows workers
+
+- `&` and `|` in arguments are allowed when the program is a native `.exe` (`dotnet test --filter "A|B"`): a bare name
+  or a path with no extension or `.exe`, not `cmd` or a package-manager shim (`npm`, `npx`, `pnpm`, `yarn`,
+  `corepack`). The worker checks again before starting anything: when the name resolves there (with `path_prepend:`)
+  to anything but an `.exe`, nothing runs and the job is `Rejected` (2) naming what it found. `"` `<` `>` `^` `%` stay
+  refused for every program.
+- Workers whose build account is denied WMI/CIM now work: memory falls back to .NET (`GlobalMemoryStatusEx`), load to
+  two `GetSystemTimes` samples, and with no source at all `lanq health` shows `load ?` and load never holds the
+  machine. Each job runs in a Windows job object, so a timeout, Ctrl+C, a stale slot or cleanup ends the whole process
+  tree without WMI (`taskkill` stays the fallback).
+- `lanq doctor --remote` shows a `wmi` WARN for such a worker, with what the owner could grant.
+
+### Setup
+
+- `lanq init` without `--config` writes the per-user config file lanq reads without flags
+  (`%APPDATA%\lanq\machines.yml`, `~/.config/lanq/machines.yml`), creating the folder; never the current folder.
+- When the `dotnet` check fails (`dotnet --version` now needs an SDK: a runtime-only install counts as missing),
+  `lanq doctor --remote` searches the worker's usual and private install folders (read-only, about five seconds) and
+  names the `path_prepend:` and `DOTNET_ROOT` lines to add; `lanq makeready --add` proposes them in the entry it shows.
+  lanq still never edits a config or a worker's `PATH` by itself.
+
+### Behaviour changes
+
+- `lanq health --json`: `size` is the effective size (the machine's `size:` when set, else the probe), and every row
+  gains `sizeSource` (`probe` or `config`) and `loadKnown` (`false` when the worker could not measure its load). The
+  text line changes only for a machine with `size:` (`(size: medium in machines.yml; probe: heavy)`).
+- `jobs.jsonl` lines of a plan run gain optional `planJob` (the job's name) and `planRun` (shared by one plan run);
+  `v` stays 2.
+- Jobs of a plan run get `LANQ_PLAN_JOB=<name>` in their environment.
+- On Windows, processes a job leaves running (build servers, for example) now end with the job.
+- `lanq init` no longer writes `./machines.yml` (see Setup).
+
+- Loading a config now checks the Windows job script at its largest (a job given `&` or `|`, the longest plan job
+  name), so a Windows machine whose `env:` leaves no room for such a job is refused at load instead of at run time.
+- With no per-user config folder (no usable `HOME`/`APPDATA`), `lanq init` and config lookup exit 2 and name
+  `--config`/`LANQ_CONFIG`; a relative `XDG_CONFIG_HOME` is ignored.
+
+### Security
+
+- Windows workers run lanq's helper script (`work_root/bin`) only when its SHA-256 matches lanq's own copy, and lanq
+  rewrites it before each job if it changed, so a job cannot plant code in later jobs' wrapper, stop, cleanup or doctor
+  scripts, or stop a cleanup before it frees the slot.
+- The job wrapper's `LANQ_EXIT` and `LANQ_WINARGS` lines carry a per-run random value that is not in the job's
+  environment, so a job that prints them is ordinary output, not a refusal or an exit code.
+- `lanq.yml` refuses YAML anchors and aliases (`&name`, `*name`) with their line number, so an alias-bomb file cannot
+  hang lanq.
+
+### Fixed
+
+- Windows workers denied WMI showed `ram ?`, a silent `load 0.00` and size `unknown`, and a timeout, stop or stale-slot
+  cleanup could leave the job's process tree running.
+- `dotnet` passed `lanq doctor --remote` on a worker with only a .NET runtime, and the job then failed with "No .NET
+  SDKs were found".
+- With `--plan` and `--wait 0`, a job no longer ends `NoCapacity` when a sibling frees the slot just after the job saw
+  it taken; it looks again first (also for jobs with shards).
+- When several plan jobs fail, the plan exits with the first failed job's own exit code in `lanq.yml` order, whatever
+  order they were launched in.
+- When a Windows job times out, its process tree is walked before the job object is ended, so a grandchild started
+  before the job object took hold is stopped too.
+
 ## 0.7.0 (2026-11-10)
 
 ### Agents and scripts

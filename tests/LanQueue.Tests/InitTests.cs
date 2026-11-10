@@ -10,31 +10,133 @@ public sealed class InitTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "lanq-init-" + Guid.NewGuid().ToString("N"));
 
-    public InitTests() => Directory.CreateDirectory(_dir);
+    /// <summary>The current folder lanq init runs in (a repository, say).</summary>
+    private readonly string _cwd;
+
+    /// <summary>The per-user config file (XDG_CONFIG_HOME points into the test folder, never at the real one).</summary>
+    private readonly string _userFile;
+
+    public InitTests()
+    {
+        _cwd = Path.Combine(_dir, "repo");
+        _userFile = Path.Combine(_dir, "config", "lanq", "machines.yml");
+        Directory.CreateDirectory(_cwd);
+    }
 
     public void Dispose() => Directory.Delete(_dir, recursive: true);
 
-    private async Task<(int Code, string Out, string Err)> Init(params string[] args)
+    private string? Env(string name) => name == "XDG_CONFIG_HOME" ? Path.Combine(_dir, "config") : null;
+
+    private Task<(int Code, string Out, string Err)> Init(params string[] args) => InitWith(Env, args);
+
+    private async Task<(int Code, string Out, string Err)> InitWith(Func<string, string?> env, params string[] args)
     {
         var o = new StringWriter();
         var e = new StringWriter();
-        var code = await Cli.Init(ParsedArgs.Parse(["init", .. args]), _dir, _ => null, windows: false, o, e);
+        var code = await Cli.Init(ParsedArgs.Parse(["init", .. args]), _cwd, env, windows: false, o, e);
         return (code, o.ToString(), e.ToString());
     }
 
+    /// <summary>The user folder may not exist yet; a test that puts something at the default path first creates it.</summary>
+    private void UserFolder() => Directory.CreateDirectory(Path.GetDirectoryName(_userFile)!);
+
     [Fact]
-    public async Task WritesMachinesYmlInTheCurrentFolderAndPrintsTheNextSteps()
+    public async Task InitWithoutConfigWritesToTheUserFolder()
     {
         var (code, o, _) = await Init();
         Assert.Equal(0, code);
-        var path = Path.Combine(_dir, "machines.yml");
-        Assert.True(File.Exists(path));
-        Assert.Contains(path, o, StringComparison.Ordinal);
+        Assert.True(File.Exists(_userFile)); // its folder created
+        Assert.Contains(_userFile, o, StringComparison.Ordinal);
         Assert.Contains("docs/WORKERS.md", o, StringComparison.Ordinal);
         Assert.Contains("lanq makeready --ssh user@host --os windows|linux", o, StringComparison.Ordinal);
         Assert.Contains("lanq doctor --remote", o, StringComparison.Ordinal);
-        // lanq never reads a config from the current folder by itself, so the steps say how to point at this one.
-        Assert.Contains("--config " + path, o, StringComparison.Ordinal);
+        // lookup finds it there without flags, so the steps need no --config.
+        Assert.DoesNotContain("--config", o, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitNeverWritesIntoTheCurrentDirectory()
+    {
+        Assert.Equal(0, (await Init()).Code);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_cwd));
+    }
+
+    [Fact]
+    public async Task InitThenLookupFindsItWithoutFlags()
+    {
+        Assert.Equal(0, (await Init()).Code);
+        Assert.Equal(_userFile, Cli.ResolveConfig(null, Env, windows: false, File.Exists));
+        Assert.Single(ConfigLoader.Load(Cli.ResolveConfig(null, Env, windows: false, File.Exists)).Machines);
+    }
+
+    /// <summary>Windows: %APPDATA%/lanq/machines.yml, the same file lookup reads.</summary>
+    [Fact]
+    public async Task OnWindowsInitWritesUnderAppData()
+    {
+        var appData = Path.Combine(_dir, "AppData", "Roaming");
+        var o = new StringWriter();
+        var code = await Cli.Init(ParsedArgs.Parse(["init"]), _cwd, n => n == "APPDATA" ? appData : null, windows: true, o, new StringWriter());
+        Assert.Equal(0, code);
+        Assert.True(File.Exists(Path.Combine(appData, "lanq", "machines.yml")), o.ToString());
+    }
+
+    /// <summary>
+    /// A relative XDG_CONFIG_HOME is ignored (the XDG spec says so): init and lookup use ~/.config instead, never a folder under the current
+    /// one.
+    /// </summary>
+    [Fact]
+    public async Task ARelativeXdgConfigHomeIsIgnored()
+    {
+        var home = Path.Combine(_dir, "home");
+        string? Relative(string n) => n switch { "XDG_CONFIG_HOME" => "config", "HOME" => home, _ => null };
+        var expected = Path.Combine(home, ".config", "lanq", "machines.yml");
+        Assert.Equal(expected, Cli.UserConfigPath(Relative, windows: false));
+
+        var (code, _, err) = await InitWith(Relative);
+        Assert.True(code == 0, err);
+        Assert.True(File.Exists(expected));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_cwd));
+        Assert.Equal(expected, Cli.ResolveConfig(null, Relative, windows: false, File.Exists));
+    }
+
+    /// <summary>
+    /// No per-user folder at all (HOME / APPDATA empty and the system has no answer either): init refuses with exit 2 and says how to name a
+    /// file, instead of writing lanq/machines.yml under the current folder; lookup refuses the same way.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WithoutAPerUserFolderInitAndLookupRefuse(bool windows)
+    {
+        static string NoFolder(Environment.SpecialFolder _) => "";
+        string? Empty(string n) => n is "HOME" or "APPDATA" ? "" : n == "XDG_CONFIG_HOME" ? "relative/config" : null;
+        var o = new StringWriter();
+        var e = new StringWriter();
+
+        var code = await Cli.Init(ParsedArgs.Parse(["init", "--json"]), _cwd, Empty, windows, o, e, folder: NoFolder);
+
+        Assert.Equal(2, code);
+        Assert.Contains("per-user config folder", e.ToString(), StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(o.ToString());
+        Assert.Equal("Rejected", json.RootElement.GetProperty("status").GetString());
+        Assert.Empty(Directory.EnumerateFileSystemEntries(_cwd));
+        var ex = Assert.Throws<ConfigException>(() => Cli.ResolveConfig(null, Empty, windows, _ => true, NoFolder));
+        Assert.Contains("--config FILE", ex.Message, StringComparison.Ordinal);
+
+        // --config still works without one.
+        var named = Path.Combine(_dir, "named.yml");
+        Assert.Equal(0, await Cli.Init(ParsedArgs.Parse(["init", "--config", named]), _cwd, Empty, windows, new StringWriter(), new StringWriter(), folder: NoFolder));
+    }
+
+    /// <summary>LANQ_CONFIG names the file lookup reads, so init writes that one.</summary>
+    [Fact]
+    public async Task LanqConfigNamesTheFileInitWrites()
+    {
+        var named = Path.Combine(_dir, "team", "fleet.yml");
+        var (code, _, _) = await InitWith(n => n == "LANQ_CONFIG" ? named : Env(n));
+        Assert.Equal(0, code);
+        Assert.True(File.Exists(named));
+        Assert.False(File.Exists(_userFile));
     }
 
     /// <summary>The steps show the one-time setup first, then adding a ready worker with --add --name (lanq writes it; no pasting).</summary>
@@ -43,9 +145,9 @@ public sealed class InitTests : IDisposable
     {
         var (code, o, e) = await Init();
         Assert.Equal(0, code);
-        var path = Path.Combine(_dir, "machines.yml");
+        var path = _userFile;
         var setup = o.IndexOf("lanq makeready --ssh user@host --os windows|linux --setup", StringComparison.Ordinal);
-        var add = o.IndexOf($"lanq makeready --ssh user@host --os windows|linux --add --name NAME --config {path}", StringComparison.Ordinal);
+        var add = o.IndexOf("lanq makeready --ssh user@host --os windows|linux --add --name NAME", StringComparison.Ordinal);
         Assert.True(setup >= 0, o);
         Assert.True(add > setup, o);
         Assert.Contains($"Delete example-01 from {path}.", o, StringComparison.Ordinal);
@@ -61,7 +163,7 @@ public sealed class InitTests : IDisposable
     public async Task TheGeneratedFileLoadsAsWritten()
     {
         Assert.Equal(0, (await Init()).Code);
-        var config = ConfigLoader.Load(Path.Combine(_dir, "machines.yml"));
+        var config = ConfigLoader.Load(_userFile);
         var machine = Assert.Single(config.Machines);
         Assert.Equal(1, machine.MaxJobs);
         Assert.True(config.Policy.MinFreeMemGb >= 1);
@@ -92,7 +194,8 @@ public sealed class InitTests : IDisposable
     [Fact]
     public async Task RefusesToOverwriteAnExistingFile()
     {
-        var path = Path.Combine(_dir, "machines.yml");
+        UserFolder();
+        var path = _userFile;
         await File.WriteAllTextAsync(path, "mine");
         var (code, o, e) = await Init();
         Assert.Equal(2, code);
@@ -104,7 +207,7 @@ public sealed class InitTests : IDisposable
     [Fact]
     public async Task RefusesAnExistingFolderWithAClearMessage()
     {
-        Directory.CreateDirectory(Path.Combine(_dir, "machines.yml"));
+        Directory.CreateDirectory(_userFile);
         var (code, o, e) = await Init("--json");
         Assert.Equal(2, code);
         Assert.Contains("is a folder", e, StringComparison.Ordinal);
@@ -116,7 +219,8 @@ public sealed class InitTests : IDisposable
     [Fact]
     public async Task RefusesADanglingLink()
     {
-        var path = Path.Combine(_dir, "machines.yml");
+        UserFolder();
+        var path = _userFile;
         var nowhere = Path.Combine(_dir, "missing", "target.yml");
         try
         {
@@ -128,20 +232,35 @@ public sealed class InitTests : IDisposable
             FetchReceiverTests.MakeDirLink(path, nowhere);
         }
 
-        var (code, _, e) = await Init();
-        Assert.Equal(2, code);
-        Assert.Contains("is a link", e, StringComparison.Ordinal);
-        Assert.False(File.Exists(nowhere));
-        Assert.False(Directory.Exists(Path.GetDirectoryName(nowhere)));
+        try
+        {
+            var (code, _, e) = await Init();
+            Assert.Equal(2, code);
+            Assert.Contains("is a link", e, StringComparison.Ordinal);
+            Assert.False(File.Exists(nowhere));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(nowhere)));
+        }
+        finally
+        {
+            // The link itself, not recursively: a recursive delete of a junction to a missing folder is refused for a non-admin account.
+            try
+            {
+                Directory.Delete(path);
+            }
+            catch (IOException)
+            {
+                File.Delete(path);
+            }
+        }
     }
 
     [Fact]
     public async Task AFileThatAppearsBeforeTheWriteIsNotOverwritten()
     {
-        var path = Path.Combine(_dir, "machines.yml");
+        var path = _userFile;
         var o = new StringWriter();
         var e = new StringWriter();
-        var code = await Cli.Init(ParsedArgs.Parse(["init", "--json"]), _dir, _ => null, windows: false, o, e, beforeWrite: () => File.WriteAllText(path, "theirs"));
+        var code = await Cli.Init(ParsedArgs.Parse(["init", "--json"]), _cwd, Env, windows: false, o, e, beforeWrite: () => File.WriteAllText(path, "theirs"));
         Assert.Equal(2, code);
         Assert.Equal("theirs", await File.ReadAllTextAsync(path));
         Assert.Contains("already exists", e.ToString(), StringComparison.Ordinal);
@@ -170,14 +289,14 @@ public sealed class InitTests : IDisposable
         Assert.Equal(0, code);
         using var doc = JsonDocument.Parse(o);
         Assert.Equal("Created", doc.RootElement.GetProperty("status").GetString());
-        Assert.Equal(Path.Combine(_dir, "machines.yml"), doc.RootElement.GetProperty("path").GetString());
+        Assert.Equal(_userFile, doc.RootElement.GetProperty("path").GetString());
         Assert.Contains("lanq doctor --remote", e, StringComparison.Ordinal); // the next steps still go to people, on stderr
 
         (code, o, _) = await Init("--json");
         Assert.Equal(2, code);
         using var again = JsonDocument.Parse(o);
         Assert.Equal("Rejected", again.RootElement.GetProperty("status").GetString());
-        Assert.Equal(Path.Combine(_dir, "machines.yml"), again.RootElement.GetProperty("path").GetString());
+        Assert.Equal(_userFile, again.RootElement.GetProperty("path").GetString());
     }
 
     [Fact]

@@ -68,6 +68,8 @@ public sealed class NextStepsTests : IDisposable
             PlainRun,
             Args("run", "--json", "--wait", "60", "--needs", "node", "--", "npx", "jest"),
             Args("run", "--json", "--wait", "300", "--no-wake", "--config", "fleet.yml", "--mem", "4", "--timeout", "10080", "--", "npx", "jest"),
+            Args("run", "--json", "--on", "big-01,micro-01", "--min-size", "medium", "--needs", "node", "--", "npx", "jest"),
+            Args("run", "--size", "light,medium", "--wait", "30", "--on", "micro-02", "--", "npx", "jest"),
         ];
         var unreachable = new ExcludedMachine("big-01", "unreachable", "ssh: connect to host big-01 port 22: Connection refused", false);
         var lacks = new ExcludedMachine("big-01", "missing_capability", "lacks gpu (capabilities: node)", true);
@@ -128,6 +130,11 @@ public sealed class NextStepsTests : IDisposable
             }
         }
 
+        foreach (var (name, _, steps) in PlanMappings())
+        {
+            yield return (name, steps);
+        }
+
         var m = Machine(hours: "22:00-07:00");
         var needs = new JobNeeds(["node", "gpu"], 4, false);
         MachineHealth[] rows =
@@ -148,6 +155,13 @@ public sealed class NextStepsTests : IDisposable
         foreach (var status in new[] { "Rejected", "InfraError", "Cancelled" })
         {
             yield return ($"health error {status}", NextSteps.ForHealthError(status, "message", ["node"], 4, "fleet.yml"));
+            yield return ($"health error {status} --on --size", NextSteps.ForHealthError(status, "message", ["node"], null, "fleet.yml", true, ["big-01"], SizeRule.AnyOfText("medium,heavy")));
+        }
+
+        var sized = new JobNeeds(["node"], null, false) { Size = SizeRule.AtLeastText("heavy") };
+        foreach (var h in new[] { Up(), Up() with { MemTotalGb = null } })
+        {
+            yield return ($"health --min-size {h.MemTotalGb}", NextSteps.ForHealthRow(m, h, Scheduler.Assess([(m, h)], sized)[0], null));
         }
 
         foreach (var status in new[] { "Sent", "Awake", "NoAnswer", "Rejected", "InfraError", "Cancelled" })
@@ -216,6 +230,122 @@ public sealed class NextStepsTests : IDisposable
     }
 
     private static IEnumerable<NextStepJson> EveryStep() => EveryMapping().SelectMany(x => x.Steps);
+
+    /// <summary>Every lanq run --plan (and its dry run) status, for several plan command lines.</summary>
+    private static IEnumerable<(string Case, ParsedArgs P, List<NextStepJson> Steps)> PlanMappings()
+    {
+        ParsedArgs[] plans =
+        [
+            Args("run", "--plan", "--json"),
+            Args("run", "--plan-file", "ci/lanq.yml", "--wait", "300", "--no-wake", "--config", "fleet.yml", "--json", "--log-tail", "20"),
+            Args("run", "--plan", "--only", "a,b,c", "--wait", "30", "--fail-fast"),
+        ];
+        var jobs = new Dictionary<string, ParsedArgs>
+        {
+            ["a"] = Args("run", "--needs", "node", "--on", "big-01", "--", "npm", "test"),
+            ["b"] = Args("run", "--min-size", "heavy", "--mem", "4", "--", "npm", "run", "e2e"),
+        };
+        var lacks = new ExcludedMachine("big-01", "missing_capability", "lacks gpu (capabilities: node)", true);
+        static PlanJobOutcome J(string name, string status, int exit, InfraKind? infra = null, bool may = false) =>
+            new(name, status, exit, "m", []) { InfraKind = infra, MayStillRun = may, LogPath = "/state/logs/" + name + ".log", Machine = "big-01" };
+        var shardRun = new ShardRunResult("Failed", 1, 2, [Shard(1, "Completed"), Shard(2, "Failed", 1)], "1 of 2 shard(s) completed");
+        PlanRunResult[] results =
+        [
+            JobRunner.AggregatePlan([J("a", "Completed", 0), J("b", "Completed", 0)], false),
+            JobRunner.AggregatePlan([J("a", "Failed", 3), J("b", "Skipped", 0), J("c", "Completed", 0)], false),
+            JobRunner.AggregatePlan([J("a", "Completed", 0), new PlanJobOutcome("b", "Failed", 1, "m", []) { Sharded = shardRun }], false),
+            JobRunner.AggregatePlan([J("a", "Completed", 0), J("b", "NoCapacity", 75) with { Retryable = true, Excluded = [] }, J("c", "Skipped", 0)], false),
+            JobRunner.AggregatePlan([J("a", "NoCapacity", 75) with { Retryable = false, Excluded = [lacks] }, J("b", "Skipped", 0)], false),
+            JobRunner.AggregatePlan([J("a", "InfraError", 70, InfraKind.Connection), J("b", "Completed", 0)], false),
+            JobRunner.AggregatePlan([J("a", "InfraError", 70, InfraKind.Connection, may: true), J("b", "Cancelled", 130)], false),
+            JobRunner.AggregatePlan([J("a", "InfraError", 70, InfraKind.Unexpected)], false),
+            new("InfraError", 70, "Could not snapshot the repository", []) { InfraKind = InfraKind.Snapshot },
+            JobRunner.AggregatePlan([J("a", "TimedOut", 124), J("b", "Completed", 0)], false),
+            JobRunner.AggregatePlan([J("a", "WindowClosed", 124), J("b", "Skipped", 0)], false),
+            JobRunner.AggregatePlan([J("a", "Cancelled", 130), J("b", "Skipped", 0)], cancelled: true),
+            new("Cancelled", 130, "cancelled (Ctrl+C) before any job started", []),
+            .. Enum.GetValues<RejectKind>().Select(k => new PlanRunResult("Rejected", 2, "job 'a': refused", []) { RejectKind = k, Decided = "a" }),
+        ];
+        foreach (var p in plans)
+        {
+            foreach (var r in results)
+            {
+                yield return ($"plan {string.Join(' ', p.Raw)}: {r.Status} {r.RejectKind}{r.InfraKind}", p, NextSteps.ForPlanFile(p, r, jobs));
+            }
+
+            var dry = Args([.. p.Raw.Take(1), "--dry-run", .. p.Raw.Skip(1)]);
+            foreach (var (status, retryable) in new[] { ("WouldRun", (bool?)null), ("NoCapacity", true), ("NoCapacity", false), ("InfraError", null), ("Cancelled", null) })
+            {
+                yield return ($"plan dry-run {status} {retryable}", dry, NextSteps.ForPlanFileDry(dry, status, "job 'b': message", retryable, null, InfraKind.Snapshot, jobs["b"]));
+            }
+
+            foreach (var k in Enum.GetValues<RejectKind>())
+            {
+                yield return ($"plan dry-run Rejected {k}", dry, NextSteps.ForPlanFileDry(dry, "Rejected", "message", null, k, null, null));
+            }
+        }
+    }
+
+    /// <summary>
+    /// A plan's suggestions are the same lanq run --plan with at most --only (the jobs that did not complete, never more than were run),
+    /// --wait raised to 120 and --no-wake added; --dry-run is only ever dropped (proceed) or kept. Nothing else changes.
+    /// </summary>
+    [Fact]
+    public void PlanSuggestionsAddOnlyOnly()
+    {
+        static List<string> Strip(IEnumerable<string> raw)
+        {
+            var list = raw.ToList();
+            var kept = new List<string>();
+            for (var i = 0; i < list.Count; i++)
+            {
+                if (list[i] is "--only" or "--wait")
+                {
+                    i++;
+                }
+                else if (list[i] is not ("--no-wake" or "--dry-run"))
+                {
+                    kept.Add(list[i]);
+                }
+            }
+
+            return kept;
+        }
+
+        var seen = 0;
+        foreach (var (name, p, steps) in PlanMappings())
+        {
+            foreach (var s in steps.Where(s => s.Argv is { Count: > 1 } a && a[1] == "run"))
+            {
+                seen++;
+                var parsed = ParsedArgs.Parse([.. s.Argv!.Skip(1)]);
+                Assert.True(parsed.Plan, name);
+                Assert.Equal(Strip(p.Raw), Strip(s.Argv!.Skip(1)));
+                Assert.Equal(p.PlanFile, parsed.PlanFile);
+                Assert.True(parsed.NoWake || !p.NoWake, name); // --no-wake is never dropped
+                Assert.True(parsed.WaitSeconds is var w && (w == p.WaitSeconds || w == SuggestedCommand.WaitSeconds), name);
+                if (p.Only is { } only && parsed.Only is { } narrowed)
+                {
+                    Assert.Subset(only.ToHashSet(StringComparer.Ordinal), narrowed.ToHashSet(StringComparer.Ordinal));
+                }
+
+                if (s.Action is "retry" or "wait" && !p.DryRun)
+                {
+                    Assert.NotNull(parsed.Only);
+                    Assert.False(parsed.DryRun, name);
+                    Assert.True(s.SafeToRunUnattended);
+                }
+            }
+        }
+
+        Assert.True(seen > 10);
+        var plan = Args("run", "--plan", "--wait", "30");
+        Assert.Equal(["lanq", "run", "--plan", "--wait", "30", "--only", "lint"], SuggestedCommand.RerunPlan(plan, ["lint"])!.Argv);
+        Assert.Equal(["lanq", "run", "--plan", "--only", "b", "--json", "--no-wake"], SuggestedCommand.RerunPlan(Args("run", "--plan", "--only", "a,b", "--json"), ["b"])!.Argv);
+        Assert.Equal(["lanq", "run", "--plan", "--only", "a", "--wait", "120", "--no-wake"], SuggestedCommand.RerunPlan(Args("run", "--plan"), ["a"], 120)!.Argv);
+        Assert.Null(SuggestedCommand.RerunPlan(PlainRun, ["a"]));
+        Assert.Null(SuggestedCommand.RerunPlan(plan, []));
+    }
 
     /// <summary>The part of an argv before a bare "--" (lanq's own words), without "lanq".</summary>
     private static List<string> Own(IReadOnlyList<string> argv) => [.. argv.Skip(1).TakeWhile(t => t != "--")];
@@ -308,6 +438,82 @@ public sealed class NextStepsTests : IDisposable
 
         // The factories refuse even when asked: a run with --force is not a run lanq would suggest again.
         Assert.Null(SuggestedCommand.Rerun(Args("health", "--json")));
+    }
+
+    /// <summary>Every retry, wait and health step of a run with --on / --size / --min-size keeps them exactly; none is added where it was not.</summary>
+    [Fact]
+    public void RetryAndHealthKeepOnAndSize()
+    {
+        foreach (var raw in new[]
+        {
+            new[] { "run", "--json", "--on", "big-01,micro-01", "--min-size", "medium", "--needs", "node", "--", "npx", "jest", "--on", "x" },
+            ["run", "--size", "light,medium", "--wait", "30", "--on", "micro-02", "--", "npx", "jest"],
+            ["run", "--json", "--needs", "node", "--shards", "2", "--size", "heavy", "--", "npx", "jest"],
+        })
+        {
+            var p = Args(raw);
+            var steps = EveryRunStep(p).Where(s => s.Argv is not null).ToList();
+            Assert.NotEmpty(steps);
+            foreach (var s in steps)
+            {
+                var q = ParsedArgs.Parse([.. s.Argv!.Skip(1)]);
+                Assert.Equal(p.On, q.On);
+                Assert.Equal(p.Size?.Text, q.Size?.Text);
+                if (q.Command == "run")
+                {
+                    Assert.Equal(p.Argv, q.Argv); // the job's own "--on x" stays the job's
+                }
+            }
+
+            Assert.Contains(steps, s => s.Argv![1] == "health");
+        }
+
+        // A plain run never gains narrowing flags.
+        Assert.All(EveryRunStep(PlainRun).Where(s => s.Argv is not null), s => Assert.DoesNotContain(s.Argv!, a => a is "--on" or "--size" or "--min-size"));
+        Assert.Equal(
+            ["lanq", "health", "--on", "big-01", "--needs", "node", "--mem", "4", "--size", "medium,heavy", "--json", "--config", "fleet.yml"],
+            SuggestedCommand.Health(["node"], 4, "fleet.yml", ["big-01"], SizeRule.AnyOfText("heavy,medium"))!.Argv);
+    }
+
+    /// <summary>Every step lanq run (and its --shards and --dry-run forms) can give for <paramref name="p"/>.</summary>
+    private static IEnumerable<NextStepJson> EveryRunStep(ParsedArgs p)
+    {
+        var excluded = new ExcludedMachine("big-01", "busy", "busy (slots 4/4)", false);
+        var never = new ExcludedMachine("big-01", "wrong_size", "size light (config); --min-size heavy", true);
+        foreach (var o in new[]
+        {
+            Outcome("NoCapacity", 75, retryable: true, excluded: [excluded]),
+            Outcome("NoCapacity", 75, retryable: false, excluded: [never]),
+            Outcome("InfraError", 70, infra: InfraKind.Connection),
+            Outcome("InfraError", 70, infra: InfraKind.Connection, mayStillRun: true),
+            Outcome("TimedOut", 124),
+            Outcome("WindowClosed", 124),
+        })
+        {
+            foreach (var s in NextSteps.ForRun(p, o))
+            {
+                yield return s;
+            }
+        }
+
+        foreach (var s in NextSteps.ForPlan(Args([.. p.Raw.Take(1), "--dry-run", .. p.Raw.Skip(1)]), new("NoCapacity", 75, "none") { Retryable = true }))
+        {
+            yield return s;
+        }
+    }
+
+    [Fact]
+    public void PinnedNeverSuggestsDroppingOn()
+    {
+        var p = Args("run", "--json", "--on", "micro-01", "--needs", "gpu", "--", "npx", "jest");
+        var lacks = new ExcludedMachine("micro-01", "missing_capability", "lacks gpu (capabilities: node, dotnet)", true);
+        var steps = NextSteps.ForRun(p, Outcome("NoCapacity", 75, retryable: false, excluded: [lacks]));
+
+        Assert.Equal(["ask_developer", "run_health"], steps.Select(s => s.Action));
+        Assert.Equal("--on micro-01 cannot ever take this job: micro-01: lacks gpu (capabilities: node, dotnet); pick another machine or drop --on", steps[0].Reason);
+        Assert.Null(steps[0].Argv); // text only: only the developer decides to drop --on
+        Assert.Equal(["lanq", "health", "--on", "micro-01", "--needs", "gpu", "--json"], steps[1].Argv);
+        Assert.All(EveryRunStep(p).Where(s => s.Argv is not null), s => Assert.Equal(["micro-01"], ParsedArgs.Parse([.. s.Argv!.Skip(1)]).On));
     }
 
     [Theory]
