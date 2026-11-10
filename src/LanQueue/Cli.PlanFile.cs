@@ -233,11 +233,11 @@ public static partial class Cli
         JobRunner.SafeLine(result.Message),
         order,
         [.. result.Jobs.Select(j => PlanJobJsonOf(j, specs.FirstOrDefault(s => s.Name == j.Name)?.Request.Fetch is not null, logTail))])
-    {
-        Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
-        Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
-        Warnings = [.. warnings.Select(JobRunner.SafeLine)],
-    };
+        {
+            Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
+            Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+            Warnings = [.. warnings.Select(JobRunner.SafeLine)],
+        };
 
     /// <summary>One job of <see cref="PlanFileRunJson"/>: exitCode null only for Skipped; logTail (single job) and fetch keys as lanq run --json.</summary>
     internal static PlanFileJobJson PlanJobJsonOf(PlanJobOutcome j, bool fetch, int? logTail)

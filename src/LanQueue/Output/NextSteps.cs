@@ -653,11 +653,11 @@ internal static class NextSteps
     /// <summary>lanq health's error object: Rejected (arguments or config), InfraError (retry the same read-only health), Cancelled.</summary>
     public static List<NextStepJson> ForHealthError(
         string status, string message, IReadOnlyCollection<string> needs, double? memGb, string? config, bool json = false, IReadOnlyList<string>? on = null, SizeRule? size = null) => status switch
-    {
-        "InfraError" => [Step(NextAction.Retry, "lanq health broke unexpectedly (" + message + "); try once more", SuggestedCommand.Health(needs, memGb, config, on, size))],
-        "Cancelled" => Nothing("cancelled (Ctrl+C)"),
-        _ => [Step(NextAction.AskDeveloper, message), Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config, json))],
-    };
+        {
+            "InfraError" => [Step(NextAction.Retry, "lanq health broke unexpectedly (" + message + "); try once more", SuggestedCommand.Health(needs, memGb, config, on, size))],
+            "Cancelled" => Nothing("cancelled (Ctrl+C)"),
+            _ => [Step(NextAction.AskDeveloper, message), Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config, json))],
+        };
 
     /// <summary>lanq wake: Sent -> look at the machines with lanq health (read-only); never a wake command.</summary>
     public static List<NextStepJson> ForWake(string status, string message, string? config) => status switch
