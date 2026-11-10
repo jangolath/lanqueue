@@ -88,8 +88,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --dry-run: say what the run would do now (see Cli.DryRun.cs), and send, claim, log and wake nothing.</summary>
     public bool DryRun { get; init; }
 
-    /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
+    /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast, --target-minutes M (see Cli.Shards.cs); null without --shards.</summary>
     public ShardOptions? Shards { get; init; }
+
+    /// <summary>--target-minutes M (1 to 1440): lanq run --shards auto picks N for it; lanq stats adds suggestedShards. Null without it.</summary>
+    public int? TargetMinutes { get; init; }
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -101,8 +104,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json", "--wake", "--needs", "--mem"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail", "--dry-run"],
-        ["stats"] = ["--json"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run"],
+        ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force", "--json"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
@@ -148,6 +151,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         long? fetchMax = null;
         int? fetchMaxFiles = null;
         int? logTail = null;
+        int? targetMinutes = null;
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -229,6 +233,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--fail-fast":
                     shards.FailFast = true;
+                    break;
+                case "--target-minutes" when i + 1 < own.Length:
+                    targetMinutes = Cli.ParseTargetMinutes(own[++i]);
+                    if (command == "run")
+                    {
+                        shards.Target(targetMinutes.Value);
+                    }
+
                     break;
                 case "--all":
                     all = true;
@@ -345,6 +357,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
             Shards = shards.Build(),
+            TargetMinutes = targetMinutes,
             LogTail = logTail,
             Raw = [.. args],
         };
@@ -405,7 +418,7 @@ public static partial class Cli
           lanq health --needs dotnet,linux [--mem 4] [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
-          lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
+          lanq run ... --shards N|auto [--target-minutes M] [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
           lanq stats [--json]
@@ -472,7 +485,8 @@ public static partial class Cli
         of every machine and the same choice (machine, --shards N or auto and placement, every excluded machine and why, the sleeper it would
         wake); it claims no slot, sends, logs, fetches and wakes nothing (the snapshot's git objects are written as for a run). Every run option
         is accepted. Exit 0 would start now, 75 no machine could take it now, 2 refused, 70 the snapshot failed, 130 Ctrl+C; --json prints one
-        object with status WouldRun (or the status run would end with), machine, ranked, machines, placement, wouldWake and retryable.
+        object with status WouldRun (or the status run would end with), machine, ranked, machines, placement, shardCountWhy, shardTiming,
+        wouldWake and retryable.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
@@ -485,7 +499,9 @@ public static partial class Cli
         same steps are "Next: ..." lines on stderr ("[lanq] Next: ..." in run), never for none, always before the final status line.
         --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
         in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
-        started shard is cleaned up).
+        started shard is cleaned up). --target-minutes M (1 to 1440, with --shards auto only) picks N from earlier completed runs of the same
+        command and --dir (the newest 10 of the last 90 days) so each shard takes about M minutes on the slowest machine it would go to,
+        never more than the free slots; with no such run it is plain auto. The --shards auto line says why (--json adds shardTiming).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 

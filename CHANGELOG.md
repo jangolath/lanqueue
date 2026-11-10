@@ -18,6 +18,26 @@
   is `{files, megabytes, keepDays}`. `speedFactor`, `speedSamples` and `timing` are present and null for now. Status
   `Ok` (0, also with no job log), `Rejected` (2), `InfraError` (70, the job log could not be read) or `Cancelled`
   (130). Times are UTC. stats never suggests a command.
+- `lanq run --dry-run --json` adds `shardCountWhy` (with `--shards auto`: why that N, as `lanq run` prints it) and
+  `shardTiming` (with `--target-minutes`), both always present and null when they do not apply. `lanq run --shards
+  auto --target-minutes M --json` adds `shardTiming` (only then): `{targetMinutes, command, dir, basis, runsUsed,
+  lastRunUtc, workMinutes, overheadSeconds, slowestMachine, speedFactor, wanted, freeSlots, capped, picked,
+  expectedShardMinutes, why}`; `basis` is `history`, `no_history` or `overhead`, `capped` is `free_slots`,
+  `max_shards` or null.
+
+### Sharding
+
+- `--shards auto --target-minutes M` (1 to 1440) picks N from earlier completed runs of the same command (same
+  arguments and `--dir`; the newest 10 runs of the last 90 days in which at least half the shards completed) so each
+  shard takes about M minutes: the work W and the per-shard overhead O come from `runSeconds` and `wallSeconds`,
+  N = ceil(f x W / (60 x M - O)) where f is the speed factor of the slowest machine the shards would be dealt to
+  now, never more than the free slots (or 64). Without history, N is the free slots, as plain `--shards auto`; when
+  the overhead alone is near or above M, every free slot is used. The reasoning is printed on the `--shards auto`
+  line (and as a `Timing:` line in `--dry-run`). Plain `--shards auto` is unchanged and never reads the job log.
+  Timing history starts with 0.7.0 runs.
+- Per-machine speed factors: how much longer a machine takes than is typical for the same command, from its own
+  completed jobs of the last 90 days that ran at least 30 s (5 or more; clamped to 0.25 to 4). A machine with fewer
+  borrows the median of the measured machines of its size class; else 1.
 
 ### Behaviour changes
 

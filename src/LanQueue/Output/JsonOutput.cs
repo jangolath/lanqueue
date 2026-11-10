@@ -154,9 +154,35 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
 
+    /// <summary>--shards auto --target-minutes only: how N was picked from earlier runs (left out otherwise).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ShardTimingJson? ShardTiming { get; init; }
+
     /// <summary>What to do next for the whole run (see <see cref="NextStepJson"/>).</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 }
+
+/// <summary>
+/// How --shards auto --target-minutes picked N (<see cref="Scheduling.ShardTiming.Pick"/>): in lanq run --shards --json and in the dry run's
+/// plan. Every member is always written (null where it does not apply); members are only ever added.
+/// </summary>
+/// <param name="Command">The command's key (its template argv, {shard}/{shards} literal).</param>
+/// <param name="Dir">The normalised --dir.</param>
+/// <param name="Basis">history, no_history or overhead (more may be added).</param>
+/// <param name="RunsUsed">How many earlier runs the estimate comes from (at most 10, of the last 90 days).</param>
+/// <param name="LastRunUtc">The newest of them, or null.</param>
+/// <param name="WorkMinutes">The command's whole work on a machine of speed factor 1, or null.</param>
+/// <param name="OverheadSeconds">Per shard: wall-clock minus the command's own run time, or null.</param>
+/// <param name="SlowestMachine">The slowest machine the shards would be dealt to now, or null.</param>
+/// <param name="SpeedFactor">Its speed factor (above 1 is slower), or null.</param>
+/// <param name="Wanted">The N the target needs before any cap, or null.</param>
+/// <param name="FreeSlots">The free slots that can take the job now.</param>
+/// <param name="Capped">free_slots or max_shards when that capped N, else null.</param>
+/// <param name="Picked">N (the same as shardCount).</param>
+/// <param name="ExpectedShardMinutes">About how long each shard takes on the slowest machine, or null.</param>
+internal sealed record ShardTimingJson(
+    int TargetMinutes, string Command, string Dir, string Basis, int RunsUsed, DateTime? LastRunUtc, double? WorkMinutes, double? OverheadSeconds,
+    string? SlowestMachine, double? SpeedFactor, int? Wanted, int FreeSlots, string? Capped, int Picked, double? ExpectedShardMinutes, string Why);
 
 /// <summary>One machine in excluded (NoCapacity only).</summary>
 /// <param name="Reason">
@@ -190,6 +216,12 @@ internal sealed record PlanJson(string Status, int ExitCode)
 
     /// <summary>--shards only: true for --shards auto; else null.</summary>
     public bool? ShardCountAuto { get; init; }
+
+    /// <summary>--shards auto only: why that N (the free slots, and with --target-minutes the timing first, as lanq run prints it); else null.</summary>
+    public string? ShardCountWhy { get; init; }
+
+    /// <summary>--shards auto --target-minutes only: how N was picked from earlier runs; else null.</summary>
+    public ShardTimingJson? ShardTiming { get; init; }
 
     /// <summary>--shards only: where the shards would start now (empty when none could); else null.</summary>
     public IReadOnlyList<PlacementJson>? Placement { get; init; }
@@ -322,6 +354,7 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]
 [JsonSerializable(typeof(PlanJson))]
+[JsonSerializable(typeof(ShardTimingJson))]
 [JsonSerializable(typeof(DoctorJson))]
 [JsonSerializable(typeof(DoctorCheckJson))]
 [JsonSerializable(typeof(DoctorCountsJson))]

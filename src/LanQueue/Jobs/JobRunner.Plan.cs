@@ -73,6 +73,7 @@ public sealed partial class JobRunner
         // --shards auto picks N from a probe before the snapshot, as lanq run does; the plan then places the shards from that same probe.
         MachineHealth[]? probes = null;
         string? autoWhy = null;
+        ShardTimingResult? timing = null;
         int count;
         if (options.Count is { } n)
         {
@@ -81,20 +82,19 @@ public sealed partial class JobRunner
         else
         {
             (probes, var autoAssessed) = await ProbeForJobAsync(ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
-            var (picked, total, free) = Scheduler.AutoCount(autoAssessed, template.MinMemGb, ShardInfo.MaxShards);
-            (count, autoWhy) = (picked, AutoShardWhy(total, free));
+            (count, autoWhy, timing) = PickShardCount(template, autoAssessed, options.TargetMinutes);
         }
 
         var shards = Enumerable.Range(1, count).Select(i => new ShardInfo(i, count)).ToList();
         if (PrecheckShards(template, shards) is { } refusal)
         {
-            return Ended(refusal.Refused with { Message = refusal.Message }, null) with { ShardCount = count, ShardCountAuto = auto, AutoWhy = autoWhy };
+            return Ended(refusal.Refused with { Message = refusal.Message }, null) with { ShardCount = count, ShardCountAuto = auto, AutoWhy = autoWhy, Timing = timing };
         }
 
         var (payload, failed) = await SnapshotAndScanAsync(id, template, PayloadKinds.None, ct).ConfigureAwait(false);
         if (payload is null)
         {
-            return Ended(failed!, null) with { ShardCount = count, ShardCountAuto = auto, AutoWhy = autoWhy };
+            return Ended(failed!, null) with { ShardCount = count, ShardCountAuto = auto, AutoWhy = autoWhy, Timing = timing };
         }
 
         TryDelete(payload.ArchivePath);
@@ -127,6 +127,7 @@ public sealed partial class JobRunner
             ShardCount = count,
             ShardCountAuto = auto,
             AutoWhy = autoWhy,
+            Timing = timing,
             Placement = placement,
             Waiting = waiting,
         };

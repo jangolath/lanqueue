@@ -47,6 +47,52 @@ public sealed class ShardTimingTests
         return (assessed, [.. Scheduler.Rank(assessed).Select(a => (a, a.JobSlots)).Where(x => x.JobSlots > 0)]);
     }
 
+    /// <summary>The jest template of ShardTests and DryRunTests (npx jest --shard={shard}/{shards}) as jobs.jsonl keys it.</summary>
+    internal static string JestKey => JobHistory.Key(["npx", "jest", "--shard={shard}/{shards}"]);
+
+    /// <summary>
+    /// History for the pool of ShardTests (big-01, 4 slots; tiny-01, 1 slot), relative to <paramref name="now"/>: three earlier 4-shard
+    /// runs of the jest template on big-01 (160 s of work and 190 s wall-clock per shard: W = 640 s, O = 30 s), and "npm test" jobs that make
+    /// tiny-01 1.62 times slower than big-01. --target-minutes 5: N0 = 3 reaches tiny-01, so N = ceil(1.62 x 640 / 270) = 4, about 4.8 min each.
+    /// </summary>
+    internal static void SeedHistory(JobLog log, DateTimeOffset now)
+    {
+        var id = 0;
+        JobRecord Rec(string machine, string key, double run, double wall, DateTimeOffset at, string? runId = null, int? shard = null, int? shards = null) =>
+            new($"20261101-100000-{++id:x6}", machine, key, at, wall, 0, "Completed")
+            {
+                V = 2,
+                Key = key,
+                Dir = ".",
+                RunId = runId,
+                Shard = shard,
+                Shards = shards,
+                RunSeconds = run,
+            };
+
+        for (var r = 1; r <= 3; r++)
+        {
+            for (var i = 1; i <= 4; i++)
+            {
+                log.Append(Rec("big-01", JestKey, 160, 190, now.AddDays(-r).AddMinutes(i), "seed" + r, i, 4));
+            }
+        }
+
+        for (var i = 1; i <= 6; i++)
+        {
+            log.Append(Rec("big-01", "npm test", 100, 110, now.AddDays(-5).AddMinutes(i)));
+        }
+
+        for (var i = 1; i <= 5; i++)
+        {
+            log.Append(Rec("tiny-01", "npm test", 162, 172, now.AddDays(-5).AddMinutes(10 + i)));
+        }
+    }
+
+    /// <summary>What lanq run prints for <see cref="SeedHistory"/> with --target-minutes 5 on the pool.</summary>
+    internal const string SeededWhy =
+        "--target-minutes 5: 3 earlier runs, about 10.7 min of work + 30 s per shard, slowest machine tiny-01 x1.62: about 4.8 min each";
+
     private static (List<Assessment> Assessed, List<(Assessment Machine, int Free)> Free) Slots(int n) => Fleet(("build-01", n, 0.1, null, null));
 
     private static TimingHistory History(IEnumerable<JobRecord> records) => JobHistory.From([.. records], Key, ".", Now);

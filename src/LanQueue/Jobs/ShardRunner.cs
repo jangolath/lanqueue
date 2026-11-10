@@ -40,7 +40,11 @@ public sealed record ShardInfo(int Index, int Count)
 /// <param name="Count">N, or null for --shards auto (N = the free slots that can take the job right now).</param>
 /// <param name="Retries">--shard-retries: re-runs of a shard whose machine stopped answering (never a job's own failure).</param>
 /// <param name="FailFast">--fail-fast: the first shard that does not complete cancels the rest.</param>
-public sealed record ShardOptions(int? Count, int Retries = 0, bool FailFast = false);
+/// <param name="TargetMinutes">
+/// --target-minutes M (with --shards auto only): N from earlier runs of the same command, so each shard takes about M minutes
+/// (<see cref="ShardTiming.Pick"/>); null keeps plain auto (N = the free slots).
+/// </param>
+public sealed record ShardOptions(int? Count, int Retries = 0, bool FailFast = false, int? TargetMinutes = null);
 
 /// <summary>One shard's outcome. Status is a <see cref="JobStatus"/> name or Cancelled; JobId and Machine are null when it never ran.</summary>
 public sealed record ShardResult(int Index, string Status, int ExitCode, string? Machine, string? JobId, TimeSpan Duration, int Attempts, string Message)
@@ -81,6 +85,9 @@ public sealed record ShardRunResult(string Status, int ExitCode, int Count, IRea
 
     /// <summary>InfraError only: where it came from (the snapshot, or the shard that decided the status). Null otherwise.</summary>
     public InfraKind? InfraKind { get; init; }
+
+    /// <summary>--shards auto --target-minutes: how N was picked (<see cref="ShardTiming.Pick"/>); null otherwise.</summary>
+    public ShardTimingResult? Timing { get; init; }
 }
 
 public sealed partial class JobRunner
@@ -115,7 +122,17 @@ public sealed partial class JobRunner
             return Refused(options.Count ?? 1, "shard 1: " + firstCheck.Message, firstCheck);
         }
 
-        var count = options.Count ?? await AutoShardCountAsync(template, ct).ConfigureAwait(false);
+        ShardTimingResult? timing = null;
+        int count;
+        if (options.Count is { } given)
+        {
+            count = given;
+        }
+        else
+        {
+            (count, timing) = await AutoShardCountAsync(template, options.TargetMinutes, ct).ConfigureAwait(false);
+        }
+
         if (count is < 1 or > ShardInfo.MaxShards)
         {
             return Refused(Math.Clamp(count, 1, ShardInfo.MaxShards), $"--shards must be from 1 to {ShardInfo.MaxShards}.", null);
@@ -124,7 +141,7 @@ public sealed partial class JobRunner
         var shards = Enumerable.Range(1, count).Select(i => new ShardInfo(i, count)).ToList();
         if (PrecheckShards(template, shards) is { } refusal)
         {
-            return Refused(count, refusal.Message, refusal.Refused);
+            return Refused(count, refusal.Message, refusal.Refused) with { Timing = timing };
         }
 
         var payloadId = NewId();
@@ -134,7 +151,12 @@ public sealed partial class JobRunner
         var (prepared, failed) = await PrepareAsync(payloadId, template, output, ct).ConfigureAwait(false);
         if (prepared is null)
         {
-            return new ShardRunResult(failed!.Status.ToString(), failed.CliExitCode, count, [], failed.Message) { RejectKind = failed.RejectKind, InfraKind = failed.InfraKind };
+            return new ShardRunResult(failed!.Status.ToString(), failed.CliExitCode, count, [], failed.Message)
+            {
+                RejectKind = failed.RejectKind,
+                InfraKind = failed.InfraKind,
+                Timing = timing,
+            };
         }
 
         await using (prepared.ConfigureAwait(false))
@@ -142,7 +164,7 @@ public sealed partial class JobRunner
             // DispatchShards returns only once every shard it started has finished (and cleaned up), so the payload outlives them all.
             var results = await DispatchShards(template, shards, options, prepared, ct).ConfigureAwait(false);
             // Ctrl+C that came after every shard had already finished does not turn a real result into Cancelled.
-            return Aggregate(count, results, ct.IsCancellationRequested && results.Any(r => r.Status == Cancelled));
+            return Aggregate(count, results, ct.IsCancellationRequested && results.Any(r => r.Status == Cancelled)) with { Timing = timing };
         }
 
         static ShardRunResult Refused(int n, string message, JobResult? r) =>
@@ -151,14 +173,34 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// --shards auto: the free slots (<see cref="Scheduler.FreeFor"/>) on every machine that can take the job right now (capabilities, allowed
-    /// hours, --mem per shard, holds, and Windows-safe arguments), at least 1 and at most <see cref="ShardInfo.MaxShards"/>. Prints the choice and why.
+    /// hours, --mem per shard, holds, and Windows-safe arguments), at least 1 and at most <see cref="ShardInfo.MaxShards"/>; with
+    /// --target-minutes, N from earlier runs (<see cref="PickShardCount"/>). Prints the choice and why.
     /// </summary>
-    private async Task<int> AutoShardCountAsync(JobRequest template, CancellationToken ct)
+    private async Task<(int Count, ShardTimingResult? Timing)> AutoShardCountAsync(JobRequest template, int? targetMinutes, CancellationToken ct)
     {
         var (_, assessed) = await ProbeForJobAsync(ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
+        var (n, freeWhy, timing) = PickShardCount(template, assessed, targetMinutes);
+        output(string.Create(CultureInfo.InvariantCulture, $"[lanq] --shards auto: {n} shard(s) ({ShardTiming.ShardCountWhy(timing, freeWhy)})"));
+        return (n, timing);
+    }
+
+    /// <summary>
+    /// --shards auto's N from one probe, for lanq run and its dry run alike: <see cref="Scheduler.AutoCount"/> (and why, as
+    /// <see cref="AutoShardWhy"/> says it); with <paramref name="targetMinutes"/>, <see cref="ShardTiming.Pick"/> on the command's history in
+    /// jobs.jsonl (read only), the free slots dealt as a fresh run deals them. Without it the job log is not read at all.
+    /// </summary>
+    private (int Count, string FreeWhy, ShardTimingResult? Timing) PickShardCount(JobRequest template, IReadOnlyList<Assessment> assessed, int? targetMinutes)
+    {
         var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards);
-        output(string.Create(CultureInfo.InvariantCulture, $"[lanq] --shards auto: {n} shard(s) ({AutoShardWhy(total, free)})"));
-        return n;
+        var why = AutoShardWhy(total, free);
+        if (targetMinutes is not { } minutes)
+        {
+            return (n, why, null);
+        }
+
+        var history = JobHistory.For(log, template.CommandKey ?? JobHistory.Key(template.Argv), JobHistory.Dir(template.Directory), clock.GetUtcNow());
+        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template.MinMemGb, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
+        return (timing.Picked, why, timing);
     }
 
     /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>

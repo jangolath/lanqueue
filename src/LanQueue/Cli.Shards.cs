@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using LanQueue.Jobs;
 using LanQueue.Output;
+using LanQueue.Scheduling;
 
 namespace LanQueue;
 
@@ -14,8 +15,12 @@ public static partial class Cli
     {
         private string? _count;
         private string? _retries;
+        private int? _target;
 
         public bool FailFast { get; set; }
+
+        /// <summary>--target-minutes, already checked to be 1 to 1440 (<see cref="ParseTargetMinutes"/>).</summary>
+        public void Target(int minutes) => _target = minutes;
 
         public void Set(string option, string value)
         {
@@ -29,9 +34,17 @@ public static partial class Cli
             }
         }
 
-        /// <summary>Null without --shards; refuses --shard-retries or --fail-fast without it, a count outside 1 to 64 (or auto) and retries outside 0 to 3.</summary>
+        /// <summary>
+        /// Null without --shards; refuses --shard-retries or --fail-fast without it, --target-minutes without --shards auto, a count outside
+        /// 1 to 64 (or auto) and retries outside 0 to 3.
+        /// </summary>
         public ShardOptions? Build()
         {
+            if (_target is not null && _count != "auto")
+            {
+                throw new ArgumentException(TargetMinutesNeedsAuto);
+            }
+
             if (_count is null)
             {
                 return _retries is not null || FailFast
@@ -53,9 +66,18 @@ public static partial class Cli
                 throw new ArgumentException($"--shard-retries must be a whole number from 0 to {ShardInfo.MaxRetries}.");
             }
 
-            return new ShardOptions(count, retries, FailFast);
+            return new ShardOptions(count, retries, FailFast, _target);
         }
     }
+
+    /// <summary>Why --target-minutes was refused without --shards auto.</summary>
+    internal const string TargetMinutesNeedsAuto = "--target-minutes goes with --shards auto (it picks N from earlier runs of the same command)";
+
+    /// <summary>--target-minutes M: whole minutes from 1 to 1440 (one day).</summary>
+    internal static int ParseTargetMinutes(string text) =>
+        int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var m) && m is >= 1 and <= ShardTiming.MaxTargetMinutes
+            ? m
+            : throw new ArgumentException($"--target-minutes must be a whole number of minutes from 1 to {ShardTiming.MaxTargetMinutes}.");
 
     /// <summary>
     /// lanq run --shards. Each shard's lines stream prefixed [i/N machine]; at the end a summary table (shard, machine, status, exit code,
@@ -136,8 +158,15 @@ public static partial class Cli
     {
         Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
         Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+        ShardTiming = TimingJson(result.Timing),
         NextSteps = nextSteps ?? [],
     };
+
+    /// <summary>The shardTiming object of --shards auto --target-minutes (sanitised: the key, dir and machine come from the job log); null without it.</summary>
+    internal static ShardTimingJson? TimingJson(ShardTimingResult? t) => t is null ? null : new(
+        t.TargetMinutes, JobRunner.SafeLine(t.Command), JobRunner.SafeLine(t.Dir), t.Basis, t.RunsUsed, t.LastRunUtc?.UtcDateTime, t.WorkMinutes, t.OverheadSeconds,
+        t.SlowestMachine is { } m ? JobRunner.SafeLine(m) : null, t.SpeedFactor, t.Wanted, t.FreeSlots, t.Capped, t.Picked, t.ExpectedShardMinutes,
+        JobRunner.SafeLine(t.Why));
 
     /// <summary>The summary table: one line per shard, in index order.</summary>
     internal static string ShardTable(ShardRunResult result)

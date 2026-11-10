@@ -775,4 +775,24 @@ public sealed class NextStepsTests : IDisposable
         Assert.All(all, s => Assert.DoesNotContain(s.Reason, c => char.IsControl(c) || c == '\u202e'));
         Assert.All(NextSteps.Lines(all), l => Assert.Equal(JobRunner.SafeLine(l), l));
     }
+
+    /// <summary>A rerun is an edit of the raw command line, so --shards auto --target-minutes stays as typed (and parses back the same).</summary>
+    [Fact]
+    public void RetryKeepsTargetMinutes()
+    {
+        var p = Args("run", "--json", "--shards", "auto", "--target-minutes", "10", "--needs", "node", "--", "npx", "jest", "--shard={shard}/{shards}");
+        var lost = new ShardRunResult("InfraError", 70, 4, [Shard(1, "InfraError", 70, InfraKind.Connection)], "lost") { InfraKind = InfraKind.Connection };
+        var retry = Assert.Single(NextSteps.ForShards(p, lost));
+        Assert.Equal("retry", retry.Action);
+        Assert.Equal(
+            ["lanq", "run", "--json", "--shards", "auto", "--target-minutes", "10", "--needs", "node", "--shard-retries", "1", "--no-wake", "--", "npx", "jest", "--shard={shard}/{shards}"],
+            retry.Argv);
+        Assert.Equal(new ShardOptions(null, 1, false, 10), ParsedArgs.Parse([.. retry.Argv!.Skip(1)]).Shards);
+
+        // Every other rerun keeps it too (the wait step, and the dry run's proceed).
+        var wait = Assert.Single(NextSteps.ForRun(p, Outcome("NoCapacity", 75, retryable: true, excluded: [])), s => s.Action == "wait");
+        Assert.Equal(10, ParsedArgs.Parse([.. wait.Argv!.Skip(1)]).Shards!.TargetMinutes);
+        var dry = Args(["run", "--dry-run", .. p.Raw.Skip(1)]);
+        Assert.Equal(10, ParsedArgs.Parse([.. SuggestedCommand.Rerun(dry, dropDryRun: true)!.Argv.Skip(1)]).TargetMinutes);
+    }
 }

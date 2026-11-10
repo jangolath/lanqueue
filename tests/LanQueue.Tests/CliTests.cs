@@ -37,6 +37,8 @@ public class CliTests
     [InlineData("[--no-wake]")]
     [InlineData("[--log-tail 60]")]
     [InlineData("lanq run ... --dry-run [--json]")]
+    [InlineData("--shards N|auto [--target-minutes M]")]
+    [InlineData("--target-minutes M (1 to 1440, with --shards auto only) picks N from earlier completed runs")]
     [InlineData("run --dry-run says what lanq run would do now")]
     [InlineData("lanq health [--json] [--wake]")]
     [InlineData("lanq health --needs dotnet,linux [--mem 4] [--json]")]
