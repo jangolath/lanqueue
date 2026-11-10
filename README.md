@@ -50,8 +50,9 @@ stays free for writing code and orchestrating. Along the way the author hit the 
 incremental builds after file overlays, "Filename too long" in deep worktrees, quirks of running tests over SSH).
 `lanq` is that routine turned into a tool.
 
-`lanq stats` records wall-clock time per job in a local log. There are no published measurements yet, and this README
-makes no speed-up claim.
+`lanq stats` reads a local log of every job: per machine and per command the counts, median and p90 times, each
+machine's speed factor, and how long a command's work and per-shard overhead are. There are no published measurements
+yet, and this README makes no speed-up claim.
 
 ## Install
 
@@ -196,7 +197,7 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
    (`--no-wake` prevents that; see [Wake-on-LAN](#waking-a-sleeping-worker-wake-on-lan)). `--timeout 60` stops the job after 60 minutes (default 240). `--mem 4` sends the job
    only to a machine that reports at least 4 GB of available memory. `--fetch 'TestResults/**/*.trx'` brings test
    results, coverage or build output back after the job (see [Fetching results](#fetching-results---fetch)). `lanq stats`
-   sums wall-clock time from your local log.
+   summarises your local job log.
 
 Exit codes: the job's own code; `2` rejected by policy or bad arguments; `70` infrastructure error (SSH, git);
 `75` no eligible machine; `124` the job ran past `--timeout`, or past the end of its machine's `allowed_hours` plus
@@ -220,8 +221,9 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | `lanq run ... --json --log-tail N -- CMD...` | Adds the last N lines (1 to 200) of the job's log to the JSON object as `logTail`; `logPath` is always there. |
 | `lanq run ... --dry-run [--json] -- CMD...` | Says what `lanq run` would do now (the checks, the snapshot scan, the machine, every excluded machine and why, `--shards` N and placement) and does none of it. |
 | `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
-| `lanq stats` | Wall-clock time per machine, from your local job log. |
-| `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
+| `lanq run --shards auto --target-minutes M ... -- CMD {shard}/{shards}` | Picks N from earlier runs of the same command so each shard takes about M minutes (1 to 1440), never more than the free slots; see [docs/SHARDING.md](docs/SHARDING.md#choosing-n-from-history---target-minutes). |
+| `lanq stats [--json] [--target-minutes M]` | Summarises your local job log: totals, per machine (median and p90 of completed jobs, speed factor) and per command (runs, results, the work and per-shard overhead), and the size of the job logs. `--target-minutes M` adds the shards M would need. |
+| `lanq doctor [--remote [--force]] [--json]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. `--json` prints one object with every check and its fix. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--key-env VAR] [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. `--key-env VAR` scans with the key file whose path is in `VAR`. |
 | `lanq makeready --ssh user@host --os windows\|linux --setup [--key-env VAR]` | Prints the PC's full one-time setup (build user, your public key, work folder, firewall, password logins off, the fingerprint check) and connects to nothing. |
 | `lanq makeready --ssh user@host --os windows\|linux --add --name NAME [--key-env VAR] [--yes] [--json]` | Scans the PC and, only when it is READY, adds it to your `machines.yml` (it shows the lines and asks first; `--yes` without a terminal). |
@@ -236,7 +238,8 @@ Every command takes `--config FILE`. An option a command does not use is an erro
 ### lanq doctor
 
 Local by default (no network): `ssh` (with its version), `scp`, `git` and `ssh-keygen` on PATH; the state folder is
-writable; the config loads (the loader's own error otherwise); and for each machine a `known_hosts` entry (host and
+writable; the config loads (the loader's own error otherwise); the job logs in `logs/` (count and size, `WARN` over
+2 GB when `policy.keep_logs_days` is 0); and for each machine a `known_hosts` entry (host and
 port resolved with `ssh -G`, so `~/.ssh/config` counts; a non-22 port is looked up as `[host]:port`, and a
 `HostKeyAlias` is looked up as it is; the user and global known_hosts files `ssh -G` names are searched), the `key_env`
 file and whether it has a passphrase. `--remote` first probes each machine like `lanq health`: a machine that is
@@ -266,11 +269,23 @@ $ lanq doctor --remote
 OK    ssh: OpenSSH_9.6p1, OpenSSL 3.0.13 30 Jan 2024
 OK    git: git version 2.47.0
 OK    config: 2 machine(s)
+OK    logs: 388 files, 96.2 MB (kept 30 days)
 OK    build-01: known_hosts has build-01.lan
 OK    build-01 (remote): dotnet: 10.0.100
 FAIL  build-01 (remote): npm: 'npm --version' failed in the job environment (sh: 1: npm: not found). If the tool is installed, ...
 SKIP  build-01 (remote): gpu: not checked (no known tool command)
 ```
+
+`--json` (also with `--remote`) puts those lines on stderr and prints one object on stdout: `status` (`Ok`,
+`Warnings`, `Failing`, ...), `exitCode`, `counts` and one entry per line in `checks`, each with a `name`, `level` and,
+where there is one, a `fix`:
+
+```bash
+$ lanq doctor --remote --json 2>/dev/null | jq -c '.checks[] | select(.level == "fail")'
+{"scope":"remote","machine":"build-01","name":"capability","level":"fail","detail":"npm: 'npm --version' failed in the job environment (...)","fix":"add the tool's folder to path_prepend for this machine","capability":"npm"}
+```
+
+The check names and every field are in [docs/JSON.md](docs/JSON.md#lanq-doctor---json).
 
 ### lanq makeready
 
@@ -491,9 +506,11 @@ config prints `{"status":"Rejected","exitCode":2,"message":...,"nextSteps":[...]
 and error messages still go to stderr, and so does the usage text after an unknown command (`lanq --help` prints it
 on stdout). `lanq run --dry-run --json` prints one object with `status` `WouldRun` (exit `0`) or the status the run
 would end with, the machine, every machine as judged for the job and, with `--shards`, N and the placement.
+`lanq doctor --json` prints one object with every check (see [lanq doctor](#lanq-doctor)), and `lanq stats --json` one
+object with the totals, `machines`, `commands` (each with its `timing`) and `logs`.
 
-**`nextSteps`.** Every `--json` object (each `lanq health` row, the run, dry-run, init, wake, `makeready --all` and
-`--add` objects and every error object) carries `nextSteps`, at least one entry:
+**`nextSteps`.** Every `--json` object (each `lanq health` row, the run, dry-run, init, wake, doctor, stats,
+`makeready --all` and `--add` objects and every error object) carries `nextSteps`, at least one entry:
 `{"action","reason","command"?,"argv"?,"safeToRunUnattended"}`. `action` is `proceed`, `retry`, `wait`, `fix_code`,
 `fix_command`, `ask_developer`, `run_doctor`, `run_health` or `none`; treat one you do not know as `ask_developer`.
 `argv` is the exact command and is authoritative; `command` is the same as one line for bash and PowerShell, left out
@@ -523,7 +540,7 @@ sequenceDiagram
     L->>M: Run the allowlisted command in the worktree
     M-->>L: Stream the log (terminal and state folder)
     L->>M: Kill the process group, remove worktree, ref, bundle and slot
-    L->>L: Record wall-clock time in jobs.jsonl
+    L->>L: Record the job in jobs.jsonl
     L-->>Dev: Exit code = the job's exit code
 ```
 
@@ -551,8 +568,30 @@ Where each safety check sits (numbers are the diagram steps):
    `<state>` is `$LANQ_HOME` or a per-user folder (`%LOCALAPPDATA%\lanq`, or `~/.local/state/lanq`), never your repo.
 6. With `--fetch`, the matching files are streamed back as checksummed text and written below
    `.lanq/artifacts/<job id>/`.
-7. The worktree, ref, bundle and slot are removed, even if the job failed. Wall-clock time is appended to
+7. The worktree, ref, bundle and slot are removed, even if the job failed. One line about the job is appended to
    `<state>/jobs.jsonl`. Any `.lanq/` folder in the repository is excluded from the snapshot.
+
+### Local state
+
+lanq keeps its state on your computer, in `<state>` (`$LANQ_HOME`, else `%LOCALAPPDATA%\lanq` on Windows, else
+`$XDG_STATE_HOME/lanq` or `~/.local/state/lanq`). Nothing in it leaves this machine.
+
+- `jobs.jsonl`: one JSON line per finished job: `id`, `machine`, `command`, `startedUtc`, `wallSeconds`, `exitCode`
+  and `status`, and since 0.7.0 `v` (2), `key` (the command; for `--shards` its arguments with `{shard}` and
+  `{shards}`), `dir`, `shard`, `shards` and `runId` (shared by the shards of one run), and `runSeconds` (how long the
+  command itself ran, without the wait, upload, prepare, fetch or cleanup). A field that does not apply is left out.
+  At 4 MiB the file moves to `jobs.1.jsonl` (replacing the one before), so there are at most two files; lanq reads
+  both, and lanq 0.6 reads only `jobs.jsonl`. `jobs.jsonl.lock` makes two lanq processes take turns writing. A job
+  that cannot be recorded (the file is locked for long) gets a warning; its result does not change. A line lanq cannot
+  read is skipped and counted by `lanq stats`.
+- `logs/<job id>.log`: every line lanq printed for a job. After a run, at most once a day, lanq deletes its own logs
+  older than `policy.keep_logs_days` (default 30; 0 never deletes) and the oldest beyond 5,000. It never deletes a log
+  modified in the last hour, a link or any other file, and a prune that takes over 2 seconds stops and carries on
+  after the next run. `lanq doctor` and `lanq stats` show the count and size.
+- `bases.json` (which git bases each worker has) and `tmp/` (scratch for bundles and archives).
+
+`lanq stats`, `--target-minutes` and the speed factors read only these files. Do not edit or delete `jobs.jsonl` or
+`logs/` while lanq runs; to start over, delete `jobs.jsonl` and `jobs.1.jsonl` when no lanq is running.
 
 ## Transfer modes: git (default, recommended) or archive
 
@@ -756,6 +795,11 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
 - `--fail-fast` cancels the rest after the first shard that fails; `--shard-retries R` (0 to 3) re-runs only a shard
   whose machine stopped answering, never a test failure. Ctrl+C cancels every shard and cleans each one up.
 - `--dry-run` with `--shards auto` shows the N it would pick and where each shard would start, and runs nothing.
+- `--shards auto --target-minutes M` picks N from earlier completed runs of the same command, so each shard takes
+  about M minutes on the slowest machine it would go to, never more than the free slots. Without history it is plain
+  `--shards auto`. See [Choosing N from history](docs/SHARDING.md#choosing-n-from-history---target-minutes); lanq
+  picks N, and the test runner decides which tests go in each shard
+  ([recipes](docs/SHARDING.md#balancing-shards-recipes)).
 
 `lanq health` also shows each machine's cores, total RAM, free/total slots and what it is suited for (light under
 6 GB, medium 6 to under 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a `docker` capability);
@@ -818,7 +862,7 @@ lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is th
 lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
 lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
 lanq run --needs gpu --dry-run -- dotnet test                  # which machine would take it, and why not the others?
-lanq stats                                                     # wall-clock time per machine
+lanq stats                                                     # jobs, times and speed per machine and per command
 lanq doctor --remote                                           # is my setup right, and does each worker find its tools?
 lanq makeready --ssh me@old-pc.lan --os windows                # can this PC be a worker? (read-only, changes nothing)
 lanq makeready --ssh build@old-pc.lan --os windows --setup     # print its one-time setup (connects to nothing)
@@ -918,8 +962,15 @@ policy:
   min_window_minutes: 10      # no new job on a machine whose window ends sooner than this
 ```
 
-Added in 0.7.0: `keep_logs_days: 30` (0 to 3650; 0 keeps them for ever). After a run, at most once a day, lanq deletes its
-own per-job logs in the state folder's `logs/` that are older than this, and the oldest beyond 5,000.
+Added in 0.7.0:
+
+```yaml
+policy:
+  keep_logs_days: 30          # 0 to 3650; 0 keeps job logs for ever
+```
+
+After a run, at most once a day, lanq deletes its own per-job logs in the state folder's `logs/` that are older than
+this, and the oldest beyond 5,000 (see [Local state](#local-state)).
 
 A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing a machine with the people who use it").
 
