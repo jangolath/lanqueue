@@ -9,14 +9,14 @@ Every command block starts with a comment saying **where it runs**: *PowerShell 
 opened with "Run as administrator"; *PowerShell* means a normal one; *bash* means a Linux (or macOS, or Git Bash)
 shell. The Windows commands are Windows PowerShell 5.1 commands, as shipped with Windows 10 and 11.
 
-Throughout, the example addresses are `10.20.30.x`, the LAN is `10.20.30.0/24` and the build user is `lanqbuild`. Use
+Throughout, the example addresses are `10.20.30.x`, the LAN is `10.20.30.0/24` and the build user is `build`. Use
 your own.
 
 1. [Install lanq on the orchestrator](#1-install-lanq-on-the-orchestrator)
 2. [Create a key and a starter machines.yml](#2-create-a-key-and-a-starter-machinesyml)
 3. [Set up each worker](#3-set-up-each-worker) ([Windows 10/11](#windows-1011-worker), [Linux](#linux-worker))
-4. [Connect once and run lanq makeready on each worker](#4-connect-once-and-run-lanq-makeready-on-each-worker)
-5. [Fill in machines.yml](#5-fill-in-machinesyml)
+4. [Connect once and add each worker](#4-connect-once-and-add-each-worker)
+5. [Check machines.yml](#5-check-machinesyml)
 6. [Check everything with lanq doctor --remote](#6-check-everything-with-lanq-doctor---remote)
 7. [Run a first job](#7-run-a-first-job)
 8. [Sizing micro PCs](#8-sizing-micro-pcs)
@@ -111,12 +111,30 @@ toolchain your jobs use (for example the .NET 10 SDK). The full checklist is [WO
 **dedicated, non-admin build user** on every worker: it is simpler (see the Windows trap below) and a job can then
 touch only that user's files.
 
-Your public key is the one line in `lanq_ed25519.pub` next to the key on the orchestrator (`Get-Content
-$HOME\.ssh\lanq_ed25519.pub` in PowerShell, `cat ~/.ssh/lanq_ed25519.pub` in bash).
+lanq prints each worker's setup for you, with your public key filled in. It connects to nothing:
+
+```bash
+# PowerShell or bash, on the orchestrator
+lanq makeready --ssh build@10.20.30.21 --os windows --setup
+lanq makeready --ssh build@10.20.30.31 --os linux --setup
+```
+
+`build` is the build user the setup creates (`root` and `administrator` are refused); `10.20.30.21` is the worker's
+address. The public key is the first one `ssh-add -L` lists (the key you loaded in section 2), else
+`~/.ssh/lanq_ed25519.pub`, else `~/.ssh/id_ed25519.pub`; with `--key-env LANQ_KEY` it is the `.pub` file beside the key
+that `LANQ_KEY` names. lanq reads only `.pub` files. If it finds no key, the commands hold a placeholder and the output
+says how to make one.
+
+The output has eight numbered steps. Steps 1 to 6 run on the worker, step 7 on the orchestrator
+([section 4](#4-connect-once-and-add-each-worker)), and step 8 on the worker again, only after step 7 worked. Send the
+worker part to the PC's owner, or run it yourself if the PC is yours. The commands below are exactly what `--setup`
+prints for `build@10.20.30.21` and `build@10.20.30.31`, except that your key stands where they show
+`ssh-ed25519 AAAA...your key... lanq`.
 
 ### Windows 10/11 worker
 
-All of this runs on the worker, in **PowerShell (as admin)**.
+All of this runs on the worker, in **PowerShell (as admin)**, in one window for steps 1 to 6 (steps 4 and 5 use `$p`
+and `$sid` from step 3).
 
 **1. OpenSSH Server**, started now and at every boot ([Microsoft Learn: Get started with OpenSSH Server](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)):
 
@@ -144,46 +162,57 @@ Change it in Settings (Network & Internet, the connection, Network profile: Priv
 `Set-NetConnectionProfile -InterfaceAlias '<name>' -NetworkCategory Private`.
 
 **3. A non-admin build user, and its profile.** sshd reads the key from the user's profile folder, and Windows creates
-that folder only at the user's first logon. **Do not create `C:\Users\lanqbuild` (or its `.ssh`) by hand first**:
-Windows would then put the real profile somewhere like `C:\Users\lanqbuild.PCNAME`, and sshd would never see the key.
+that folder only at the user's first logon. **Do not create `C:\Users\build` (or its `.ssh`) by hand first**:
+Windows would then put the real profile somewhere like `C:\Users\build.PCNAME`, and sshd would never see the key.
 
 ```powershell
 # PowerShell (as admin), on the worker
-New-LocalUser -Name lanqbuild -Password (Read-Host -AsSecureString -Prompt 'Password for lanqbuild') -PasswordNeverExpires
-Add-LocalGroupMember -SID S-1-5-32-545 -Member lanqbuild     # the built-in Users group, by SID (any Windows language)
-runas /user:lanqbuild "cmd /c exit"                          # type the password: logs on once, which creates the profile
-$p = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq (Get-LocalUser lanqbuild).SID.Value).LocalPath
-$p                                                           # the profile folder, normally C:\Users\lanqbuild
-Test-Path "$p\NTUSER.DAT"                                    # must print True
+New-LocalUser -Name build -Password (Read-Host -AsSecureString -Prompt 'Password for build') -PasswordNeverExpires
+Add-LocalGroupMember -SID S-1-5-32-545 -Member build     # the built-in Users group, by SID (any Windows language)
+runas /user:build "cmd /c exit"                          # type the password: logs on once, which creates the profile
+$sid = (Get-LocalUser build).SID.Value
+$p = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid).LocalPath
+$p                                                       # the profile folder, normally C:\Users\build
+Test-Path "$p\NTUSER.DAT"                                 # must print True; if not, check the password and run the runas line again
 ```
 
-If `$p` is empty or `Test-Path` prints `False`, the logon did not happen: check the password, that `lanqbuild` is in
+If `$p` is empty or `Test-Path` prints `False`, the logon did not happen: check the password, that `build` is in
 the Users group (`Get-LocalGroupMember -SID S-1-5-32-545`), and that the Secondary Logon service can start
 (`Get-Service seclogon`), then run the `runas` line again. Use `$p` in the next step, whatever folder it names.
 
 **4. Your public key for that user**, readable only by the user, SYSTEM (`*S-1-5-18`) and Administrators
-(`*S-1-5-32-544`). SIDs keep `icacls` working on a Windows in any language ([Microsoft Learn: key-based
-authentication](https://learn.microsoft.com/windows-server/administration/openssh/openssh_keymanagement)):
+(`*S-1-5-32-544`). Every grant is by SID (`*${sid}` is the build user's), so `icacls` works on a Windows in any
+language ([Microsoft Learn: key-based authentication](https://learn.microsoft.com/windows-server/administration/openssh/openssh_keymanagement)):
 
 ```powershell
-# PowerShell (as admin), on the worker, in the same window as step 3 ($p)
+# PowerShell (as admin), on the worker, in the same window as step 3 ($p and $sid)
 New-Item -ItemType Directory -Force "$p\.ssh" | Out-Null
 Set-Content -Path "$p\.ssh\authorized_keys" -Value 'ssh-ed25519 AAAA...your key... lanq' -Encoding ascii
-icacls "$p\.ssh\authorized_keys" /inheritance:r /grant 'lanqbuild:F' /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
+icacls "$p\.ssh\authorized_keys" /inheritance:r /grant "*${sid}:F" /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
 ```
 
-**5. A work folder the build user can write:**
+**5. The work folder** (`work_root` `C:/lq`), writable only by the build user, SYSTEM and Administrators. A new folder
+on `C:\` inherits the drive's permissions, which let every signed-in user (Authenticated Users) change it;
+`/inheritance:r` cuts that, and the grants are by SID again. If `lanq makeready` later suggests another drive (for
+example `D:/lq`), make that folder the same way.
+
+```powershell
+# PowerShell (as admin), on the worker, in the same window as step 3 ($sid)
+New-Item -ItemType Directory -Force C:\lq | Out-Null
+icacls C:\lq /inheritance:r /grant "*${sid}:(OI)(CI)M" /grant '*S-1-5-18:(OI)(CI)F' /grant '*S-1-5-32-544:(OI)(CI)F'
+```
+
+**6. The host key fingerprint.** The owner reads it and tells it to you; you compare it in step 7:
 
 ```powershell
 # PowerShell (as admin), on the worker
-New-Item -ItemType Directory -Force C:\lanq | Out-Null
-icacls C:\lanq /grant 'lanqbuild:(OI)(CI)M'
+ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub
 ```
 
-**6. Passwords off**, only **after** the key login works from the orchestrator (the `ssh -o
-PasswordAuthentication=no ...` test in [step 4](#4-connect-once-and-run-lanq-makeready-on-each-worker)). This puts
-`PasswordAuthentication no` at the top of `C:\ProgramData\ssh\sshd_config` (the first value sshd reads wins, so it
-also beats any later line), checks the file, and restarts sshd:
+**8. Passwords off**, only **after** the key login works from the orchestrator (step 7, in
+[section 4](#4-connect-once-and-add-each-worker)). This puts `PasswordAuthentication no` at the top of
+`C:\ProgramData\ssh\sshd_config` (the first value sshd reads wins, so it also beats any later line), checks the file,
+and restarts sshd:
 
 ```powershell
 # PowerShell (as admin), on the worker, after the key login worked
@@ -209,75 +238,106 @@ without git.
 
 ### Linux worker
 
-Debian/Ubuntu shown (Debian 11+, Ubuntu 20.04+); use your distribution's package manager elsewhere.
+Debian/Ubuntu shown (Debian 11+, Ubuntu 20.04+); use your distribution's package manager elsewhere. Steps 1 to 6, on
+the worker:
 
 ```bash
 # bash, on the worker
+# 1. OpenSSH server, started now and at every boot (git is optional with transfer: archive)
 sudo apt update
-sudo apt install openssh-server git              # git is optional with transfer: archive
+sudo apt install openssh-server git
 sudo systemctl enable --now ssh
-sudo useradd -m -s /bin/bash lanqbuild           # a dedicated build user, no sudo, no password (so no password login)
-sudo install -d -m 700 -o lanqbuild -g lanqbuild /home/lanqbuild/.ssh
-echo 'ssh-ed25519 AAAA...your key... lanq' | sudo tee /home/lanqbuild/.ssh/authorized_keys >/dev/null
-sudo chown lanqbuild:lanqbuild /home/lanqbuild/.ssh/authorized_keys
-sudo chmod 600 /home/lanqbuild/.ssh/authorized_keys
-sudo install -d -o lanqbuild -g lanqbuild /srv/lanq   # the work_root
-sudo ufw allow from 10.20.30.0/24 to any port 22 proto tcp   # only if ufw is active (sudo ufw status)
+
+# 2. The build user build: no sudo, and no password (so no password login)
+sudo useradd -m -s /bin/bash build
+
+# 3. The public key: .ssh 700 and authorized_keys 600, owned by build
+sudo install -d -m 700 -o build -g build /home/build/.ssh
+echo 'ssh-ed25519 AAAA...your key... lanq' | sudo tee /home/build/.ssh/authorized_keys >/dev/null
+sudo chown build:build /home/build/.ssh/authorized_keys
+sudo chmod 600 /home/build/.ssh/authorized_keys
+
+# 4. The work folder (work_root /srv/lq), owned by build
+sudo install -d -o build -g build /srv/lq
+
+# 5. The firewall: ssh only from your LAN. Only if ufw is active (sudo ufw status); remove any wider rule for port 22 it lists
+sudo ufw allow from 10.20.30.0/24 to any port 22 proto tcp
+
+# 6. The host key fingerprint: tell it to the developer, who compares it in step 7
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ```
 
-`useradd` without `-p` leaves the account without a usable password, so nobody can log in as `lanqbuild` with one. To
-turn password logins off for every account, once the key login works:
+`useradd` without `-p` leaves the account without a usable password, so nobody can log in as `build` with one.
+
+**The ufw rule in step 5 limits nothing on its own.** ufw allows a connection when any rule allows it, so a wider rule
+that is already there (`22/tcp ALLOW Anywhere` or `OpenSSH ALLOW Anywhere` in `sudo ufw status`) still lets everyone
+in: delete it (`sudo ufw delete allow 22/tcp`, `sudo ufw delete allow OpenSSH`). And when `sudo ufw status` says
+`inactive`, ufw filters nothing at all; turning it on is the PC owner's choice. `--setup` uses the worker's own `/24`
+(`10.20.30.0/24` for `10.20.30.31`); use your LAN's range if it differs.
+
+Step 8, to turn password and keyboard-interactive logins off for every account, once the key login works (step 7):
 
 ```bash
 # bash, on the worker, after the key login worked
-echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/10-lanq.conf
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' | sudo tee /etc/ssh/sshd_config.d/10-lanq.conf >/dev/null
 sudo sshd -t && sudo systemctl restart ssh
 ```
 
-The file sorts first in `sshd_config.d`, and the first value sshd reads wins.
+The file sorts first in `sshd_config.d`, and the first value sshd reads wins. `KbdInteractiveAuthentication no`
+closes the other way a password can be asked for (PAM's keyboard-interactive prompt).
 
 Install the toolchain. A tool installed per user (for example .NET with `dotnet-install.sh` into `~/.dotnet`, or
 nvm) is not on the PATH of a non-login ssh session: list its folder under `path_prepend:` for that machine.
 
-## 4. Connect once and run lanq makeready on each worker
+## 4. Connect once and add each worker
 
 lanq connects only to hosts already in your `known_hosts` (`StrictHostKeyChecking=yes`), so connect once by hand,
-key only, and check the fingerprint with the PC's owner:
-
-```powershell
-# PowerShell, on the orchestrator
-ssh -o PasswordAuthentication=no -i $HOME\.ssh\lanq_ed25519 lanqbuild@10.20.30.21 exit
-```
+key only. This is step 7 of the `--setup` output (with `-i` and the key's path when the key is not in ssh-agent):
 
 ```bash
-# bash, on the orchestrator
-ssh -o PasswordAuthentication=no -i ~/.ssh/lanq_ed25519 lanqbuild@10.20.30.21 exit
+# PowerShell or bash, on the orchestrator, with the key in ssh-agent (section 2)
+ssh -o PasswordAuthentication=no build@10.20.30.21 exit
 ```
 
-Answer `yes` after checking the fingerprint. The command returns without a prompt when the key works; `Permission
-denied (publickey)` means it does not (see [troubleshooting 3](#10-troubleshooting-the-ten-errors-you-are-most-likely-to-see)).
-The owner reads the fingerprint on the worker with `ssh-keygen -lf C:\ProgramData\ssh\ssh_host_ed25519_key.pub`
-(PowerShell) or `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` (bash).
+ssh shows the worker's host key fingerprint. **Compare it with the one the owner read in step 6** before you answer
+`yes`; if it differs, answer `no` and ask the owner. The command returns without a prompt when the key works;
+`Permission denied (publickey)` means it does not (see
+[troubleshooting 3](#10-troubleshooting-the-ten-errors-you-are-most-likely-to-see)). Then the owner does step 8.
 
-Then run the read-only readiness check from the orchestrator. The script is built into lanq and goes over ssh stdin;
-nothing is written to the worker:
+Now check each worker and add it to `machines.yml`. The readiness check is built into lanq, goes over ssh stdin and
+writes nothing to the worker:
 
 ```bash
 # PowerShell or bash, on the orchestrator
-lanq makeready --ssh lanqbuild@10.20.30.21 --os windows
-lanq makeready --ssh lanqbuild@10.20.30.31 --os linux
+lanq makeready --ssh build@10.20.30.21 --os windows --add --name micro-01
+lanq makeready --ssh build@10.20.30.31 --os linux --add --name micro-02
 ```
 
-It prints verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), every WARN or FAIL check with
-advice for the PC's owner, and a suggested `machines.yml` entry. Exit `0` means at least one transfer mode works.
+Each one prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), the script's
+`VERDICT:` line and its numbered next steps for the PC's owner. Then:
 
-## 5. Fill in machines.yml
+- **NOT READY** (no transfer mode works): nothing is written, exit `1`. The owner fixes the steps marked as blockers on
+  that PC; run the same command again.
+- **READY** (or READY WITH WARNINGS): it shows the lines it would add after the last machine in `machines.yml`, sized
+  from the PC's RAM and CPUs (`max_jobs`, `min_free_mem_gb`), and asks. Answer `y`. It then probes the new machine once
+  (read-only) and prints it as a `lanq health` line, warns while `lanq init`'s `example-01` is still in the file, and
+  ends with `Next: lanq doctor --remote`.
 
-Paste each suggested entry under `machines:`, delete `example-01`, and confirm every value: a unique `name`, `os`,
-`ssh`, `work_root` (Windows: a drive path with forward slashes such as `C:/lanq`), `capabilities` (the tags jobs ask
-for with `--needs`, such as `dotnet`, `node`, `windows`, `linux`), `max_jobs`, and `transfer`. Add the commands your
-team runs to `policy.allowed_commands` (a job's command must start with one of them) and the folders to
-`policy.allowed_directories`. Every key is explained in [machines.example.yml](../machines.example.yml).
+`--name` is the machine's name in `machines.yml` (unique, ignoring case); a second entry for the same host is refused.
+With a key file instead of ssh-agent, add `--key-env LANQ_KEY` (the scan uses that key and the entry gets
+`key_env: LANQ_KEY`). Without a terminal it needs `--yes`. If it will not edit your file by itself (flow style
+`machines: [...]`, tabs, several YAML documents, a link), it says why, prints the entry and writes nothing: paste the
+entry under `machines:` by hand. To only look, run the same command without `--add --name ...`: it prints the report
+and a suggested entry.
+
+## 5. Check machines.yml
+
+Delete `example-01`, the placeholder from `lanq init` (it never answers, so it shows DOWN everywhere). Then look over
+each added entry: a unique `name`, `os`, `ssh`, `work_root` (`C:/lq` or `/srv/lq`; on another drive such as `D:/lq`,
+make that folder as in step 5), `capabilities` (the tags jobs ask for with `--needs`, such as `dotnet`, `node`,
+`windows`, `linux`), `max_jobs`, and `transfer`. Add the commands your team runs to `policy.allowed_commands` (a job's
+command must start with one of them) and the folders to `policy.allowed_directories`. Every key is explained in
+[machines.example.yml](../machines.example.yml).
 
 ## 6. Check everything with lanq doctor --remote
 
@@ -293,6 +353,7 @@ environment**. Every line is `OK`, `WARN`, `FAIL`, `SKIP` or `HOLD`; exit `0` wh
 ```bash
 # PowerShell or bash, on the orchestrator
 lanq health                 # which machines are free right now
+lanq health --needs dotnet  # which of them could take a dotnet job now, and why not the others
 lanq makeready --all        # the readiness table for the whole pool (add --json for scripts)
 ```
 
@@ -323,8 +384,10 @@ lanq run --needs dotnet --wait 120 -- dotnet test -m:1
 
 lanq picks the least loaded machine that has every `--needs` capability, ships your current git state (uncommitted
 changes included) to a throw-away folder, runs the command, streams the log back and cleans up. The exit code is the
-job's own; `2` means refused by policy or bad arguments, `70` an infrastructure error, `75` no eligible machine and
-`124` a timeout or the end of the machine's hours. Useful flags: `--dir tests` (where the command runs), `--mem 2` (only
+job's own; `2` means refused by policy or bad arguments, `70` an infrastructure error, `75` no eligible machine (now,
+or ever: see [troubleshooting 9](#10-troubleshooting-the-ten-errors-you-are-most-likely-to-see)) and `124` a timeout or
+the end of the machine's hours. `--dry-run` shows which machine would take the job, and why the others would not,
+without running anything. Useful flags: `--dir tests` (where the command runs), `--mem 2` (only
 machines with 2 GB available), `--timeout 60` (minutes), `--fetch 'TestResults/**/*.trx'` (bring results back),
 `--json` (one result object for scripts and coding agents). `lanq stats` sums the time each machine spent on jobs.
 
@@ -373,7 +436,7 @@ A PC someone uses during the day can still work at night:
 - **`allowed_hours`**, on the worker's own clock, by day: `["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]`. lanq
   starts nothing when fewer than `policy.min_window_minutes` (default 10) are left and stops a job
   `policy.window_grace_minutes` (default 15) after the window ends (exit `124`, `[lanq] WindowClosed`).
-- **A `PAUSE` file** in its `work_root` (PowerShell: `New-Item C:\lanq\PAUSE`; Command Prompt: `type nul > C:\lanq\PAUSE`; bash: `touch /srv/lanq/PAUSE`)
+- **A `PAUSE` file** in its `work_root` (PowerShell: `New-Item C:\lq\PAUSE`; Command Prompt: `type nul > C:\lq\PAUSE`; bash: `touch /srv/lq/PAUSE`)
   holds the machine until someone deletes it. A job already running is not affected.
 - **Wake-on-LAN**, for a PC that sleeps: give it `wake: {mac: "aa:bb:cc:dd:ee:ff"}` (optional `broadcast:` such as
   `10.20.30.255` and `wait_seconds:`). `lanq wake <machine> --wait` wakes it on request; `lanq run --wait 300` wakes
@@ -392,14 +455,15 @@ The messages below are what lanq prints (`<...>` is filled in). `lanq doctor --r
    to the per-user path. `Config file not found: <path>. Check the path, or write a starter file with: lanq init --config <path>`
    means the path you gave does not exist.
 2. **`<host> is not in your known_hosts yet, and lanq only connects to known hosts (StrictHostKeyChecking=yes). Run ssh <user@host> once in a terminal, check the fingerprint with the machine's owner, answer yes, then try again (ssh: Host key verification failed.)`**
-   Do exactly that ([step 4](#4-connect-once-and-run-lanq-makeready-on-each-worker)). `lanq doctor` says the same as
+   Do exactly that ([section 4](#4-connect-once-and-add-each-worker)). `lanq doctor` says the same as
    `no known_hosts entry for <host>: connect once with ssh <user@host>, check the fingerprint with the machine's owner, then accept it`.
    If instead it says **`the host key of <host> has CHANGED since it was saved in known_hosts`**, the PC was
    reinstalled or something is impersonating it: confirm with its owner before `ssh-keygen -R <host>`.
 3. **`<user@host> refused your key. Check that your key is loaded (ssh-add -l; add it with ssh-add) or that key_env names it, and that its public key is in that user's .ssh/authorized_keys on the worker (for a Windows administrator account: C:\ProgramData\ssh\administrators_authorized_keys instead). Test with: ssh -o BatchMode=yes <user@host> true (ssh: <user@host>: Permission denied (publickey).)`**
    The key is not loaded, or the public key is in the wrong file or has loose permissions on the worker (see the
    [administrators trap](#windows-1011-worker), and the profile check in step 3 of the Windows worker; on Linux `.ssh`
-   must be `700` and `authorized_keys` `600`).
+   must be `700` and `authorized_keys` `600`). `lanq makeready --ssh` says the same and suggests
+   `lanq makeready --ssh <user@host> --os <os> --setup`: give the PC's owner its steps 3 and 4 again.
 4. **`Machine '<name>': key_env names the environment variable <VAR>, but <VAR> is not set. ...`** or
    **`Machine '<name>': key_env <VAR> points to <path>, which does not exist. ...`**
    Set the variable in the shell you run lanq from (PowerShell: `$env:LANQ_KEY = "$HOME\.ssh\lanq_ed25519"`; bash:
@@ -413,15 +477,21 @@ The messages below are what lanq prints (`<...>` is filled in). `lanq doctor --r
    with a `wake:` setting can be woken with `lanq wake <machine> --wait`. **`the host name <host> could not be resolved`**
    means the name in `ssh:` does not resolve; use the IP address.
 7. **`Invalid config: ...`**, **`No machines configured.`** or a line starting **`Machine '<name>':`** (for example
-   `a Windows work_root must be a drive path like D:/lanq (forward slashes, no spaces, no '..').`). The config is
+   `a Windows work_root must be a drive path like D:/lq (forward slashes, no spaces, no '..').`). The config is
    checked strictly when it loads, and an unknown key is an error too; the message names the key and the line.
 8. **`[lanq] Rejected: Command '<cmd>' is not on policy.allowed_commands.`** (exit `2`), or `Directory '<dir>' is not
    on policy.allowed_directories.` Add the command (for example `dotnet test`) or folder to the policy.
 9. **`[lanq] NoCapacity: No eligible machine. <machine>: <reason>; ...`** (exit `75`). Each machine says why:
-   `lacks <capability>` (no machine has every `--needs` tag), `busy (slots 1/1)`, `low memory (0.8 GB free)`,
-   `outside allowed hours`, `paused on the machine`, `window closing (5 min left)`, or its ssh error. Add `--wait 300`
-   to wait for a free machine. A `--shards` run says the same for each machine (and `avoided` for one where an earlier
-   attempt of the shard lost the connection and may still be running).
+   `busy (slots 1/1)`, `low memory (0.8 GB free)`, `outside allowed hours`, `paused on the machine`,
+   `window closing (5 min left)`, or its ssh error. These pass by themselves (`retryable: true` in `--json`): add
+   `--wait 300` to wait for a free machine. A `--shards` run says the same for each machine (and `avoided` for one where
+   an earlier attempt of the shard lost the connection and may still be running).
+   **`[lanq] NoCapacity: No eligible machine, and no machine can ever take this job as configured (waiting will not help). ...`**
+   is the permanent kind (`retryable: false`): every machine is ruled out for good, for example `lacks <capability>`
+   (no machine has every `--needs` tag), `--mem` above its total RAM, a Windows machine for arguments cmd.exe would
+   re-parse, or git or tar missing. lanq ends at once and `--wait` would not help: tag a machine with the capability
+   in `machines.yml`, add a machine that has it, or change `--needs` or `--mem`. `lanq health --needs <caps> [--mem N]`
+   shows how each machine is judged, and `lanq run ... --dry-run` shows what a run would do, without running it.
 10. **`<tool>: '<tool> --version' failed in the job environment (...). If the tool is installed, a non-login ssh session does not see it: add its folder to path_prepend for this machine`**
     (from `lanq doctor --remote`), or **`git is not installed on the machine (transfer: git needs git; install it or set transfer: archive)`**
     (from `lanq health`). Add the tool's folder under `path_prepend:`, or install git, or set `transfer: archive`.

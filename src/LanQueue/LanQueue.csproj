@@ -23,6 +23,13 @@
     <IsAotCompatible>true</IsAotCompatible>
     <PackageTags>dotnet-tool;ssh;build;ci;lan;distributed;homelab;ai-agents;claude-code;test-runner</PackageTags>
   </PropertyGroup>
+  <!--
+    The release's pack passes -p:LanqReleaseNotesFile=<file> (written from CHANGELOG.md by scripts/release-notes.sh), so the package's
+    release notes are that file's text; read from a file because multi-line text does not survive -p:. Otherwise the link above stays.
+  -->
+  <PropertyGroup Condition="'$(LanqReleaseNotesFile)' != '' And Exists('$(LanqReleaseNotesFile)')">
+    <PackageReleaseNotes>$([System.IO.File]::ReadAllText('$(LanqReleaseNotesFile)'))</PackageReleaseNotes>
+  </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <!-- Generates the YAML StaticContext at compile time (no reflection), so the same code path works in the tool and the NativeAOT binary. -->

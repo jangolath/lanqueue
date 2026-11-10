@@ -37,6 +37,26 @@ public sealed class InitTests : IDisposable
         Assert.Contains("--config " + path, o, StringComparison.Ordinal);
     }
 
+    /// <summary>The steps show the one-time setup first, then adding a ready worker with --add --name (lanq writes it; no pasting).</summary>
+    [Fact]
+    public async Task InitStepsShowAddAndSetup()
+    {
+        var (code, o, e) = await Init();
+        Assert.Equal(0, code);
+        var path = Path.Combine(_dir, "machines.yml");
+        var setup = o.IndexOf("lanq makeready --ssh user@host --os windows|linux --setup", StringComparison.Ordinal);
+        var add = o.IndexOf($"lanq makeready --ssh user@host --os windows|linux --add --name NAME --config {path}", StringComparison.Ordinal);
+        Assert.True(setup >= 0, o);
+        Assert.True(add > setup, o);
+        Assert.Contains($"Delete example-01 from {path}.", o, StringComparison.Ordinal);
+        Assert.DoesNotContain("Paste the entries", o, StringComparison.Ordinal);
+        Assert.True(o.IndexOf("lanq doctor --remote", StringComparison.Ordinal) > add);
+
+        // The JSON next step says the same, and the starter's own comment points at --add.
+        Assert.Contains("--setup", e, StringComparison.Ordinal);
+        Assert.Contains("--add --name NAME", Cli.StarterConfig, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TheGeneratedFileLoadsAsWritten()
     {

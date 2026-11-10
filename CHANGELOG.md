@@ -1,12 +1,74 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-11-09)
 
-- Docs: [docs/JSON.md](docs/JSON.md), the `--json` contract (every field, status and exit code, with jq and
-  PowerShell examples); a tool-agnostic [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt) at the repository root;
-  [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md) and an `AGENTS.md` snippet for using lanq from AI coding agents. The
-  Claude Code skill and `CLAUDE.md` snippet now list the `Cancelled` status and the current `health --json` fields,
-  write each run's log to its own file, and show PowerShell too.
+### Agents and scripts
+
+- `nextSteps` in every `--json` object: each run, dry run, `lanq health` row, init, wake, `makeready --all` and `--add`
+  object and every error object. Each step is `{action, reason, command?, argv?, safeToRunUnattended}`. `action` is
+  one of `proceed`, `retry`, `wait`, `fix_code`, `fix_command`, `ask_developer`, `run_doctor`, `run_health`, `none`
+  (treat an unknown one as `ask_developer`). `argv` is authoritative; `command` is the same as one line for bash and
+  PowerShell when that is safe. A suggestion never does more than the command it follows and is never `unlock`,
+  `init`, `wake`, `--force`, `--yes` or `--add`. The single `lanq makeready <machine> --json` report is unchanged and
+  has none.
+- `retryable` and `excluded` on `NoCapacity` (exit 75): `retryable` is false when no machine can ever take the job as
+  configured; `excluded` lists each machine with a `reason` code (`missing_capability`, `busy`, ...), `why` and
+  `permanent`.
+- `lanq run --dry-run`: what `lanq run` would do now (the same checks, snapshot scan, probe and choice: the machine,
+  every excluded machine and why, `--shards` N and placement, the machine it would wake) without claiming a slot,
+  sending, logging or waking anything. Exit 0 would start, 75 no machine now, 2 refused. `--json` prints one object
+  with status `WouldRun`.
+- `lanq health --needs a,b [--mem N]`: judges every machine for such a job as `lanq run` does
+  (`-> eligible (2 slots)` or `-> not eligible: lacks gpu ...`); JSON rows add `eligible`, `why`, `reason`,
+  `permanent` and `jobSlots`. Exit 0 when a machine is eligible, 75 when none is.
+- `logPath` in every `lanq run --json` object (the job's local log; null when no job started) and `--log-tail N`
+  (1 to 200, `--json` only) for its last N lines as `logTail`. Agents no longer need to redirect stderr to a file.
+- A run cancelled with Ctrl+C after its job started now reports that job's `logPath`.
+
+### Adding a machine
+
+Every write is local; lanq still never changes a worker.
+
+- `lanq makeready --ssh user@host --os windows|linux --setup` prints the PC's full one-time setup and connects to
+  nothing: the build user, your public key in its `authorized_keys` (Windows: every grant by SID), the work folder
+  (`C:/lq`, `/srv/lq`), firewall scoping, the host key fingerprint check, the first connection, then password logins
+  off. Only `.pub` files are read.
+- `lanq makeready --ssh user@host --os X --add --name NAME [--yes]` scans the PC and adds it to `machines.yml` only when
+  it is READY: as text after the last machine, every other byte kept, checked before an atomic replace, never through
+  a link. It asks first (`--yes` without a terminal and with `--json`), then probes the new machine once.
+- `--key-env VAR` with `lanq makeready --ssh`: scan with that key and write `key_env: VAR` into the entry.
+- `lanq makeready --ssh` that fails because the key was refused or the host key is unknown now suggests `--setup`.
+- `lanq init`'s next steps now show `--setup`, then `--add --name`, then deleting `example-01`.
+
+### Behaviour changes
+
+- Fail fast on exit 75: when no machine can ever take the job (none has every `--needs` capability, `--mem` above
+  every machine's RAM, git or tar missing, ...), `lanq run` ends at once with `retryable: false` instead of waiting
+  out `--wait`, and never wakes a machine. The message starts `No eligible machine, and no machine can ever take this
+  job as configured (waiting will not help).` The exit code is still 75.
+- The `NoCapacity` message gives the reason waiting cannot cure first: a machine that is down and lacks a capability
+  says `lacks gpu (...)` instead of its ssh error.
+- `Next: ...` lines on stderr for people (`[lanq] Next: ...` in `lanq run`), before the `[lanq] log: <path>` line and
+  the final `[lanq] <Status>: ...` line, which stays last. stdout is unchanged in text mode.
+- `lanq health --json` rows gain `nextSteps`; nothing else in a plain `health` row changes.
+- `lanq init`'s starter `machines.yml` uses `work_root: /srv/lq` (and `C:/lq` in its Windows example), the same
+  folder `makeready` and `--setup` suggest.
+
+### Releases
+
+- Release notes from CHANGELOG.md now appear on nuget.org and on the GitHub release.
+
+### Docs
+
+- New: https://github.com/jangolath/lanqueue/blob/main/docs/JSON.md (the `--json` contract: every field, status,
+  reason code and the `nextSteps` rules), a tool-agnostic https://github.com/jangolath/lanqueue/blob/main/AGENTS.md,
+  https://github.com/jangolath/lanqueue/blob/main/llms.txt and
+  https://github.com/jangolath/lanqueue/blob/main/docs/AGENTS-GUIDE.md with snippets for agent instruction files.
+- Agent docs use `--log-tail` and `logPath`, a dry run before heavy work, `retryable`, and only `nextSteps` that are
+  safe unattended.
+- https://github.com/jangolath/lanqueue/blob/main/docs/TEAM-QUICKSTART.md follows `--setup` and `--add`, uses
+  `C:\lq` and `/srv/lq`, grants by SID, cuts the work folder's inherited ACL, turns off keyboard-interactive logins on
+  Linux and explains when a ufw LAN rule does nothing.
 
 ## 0.5.1 (2026-11-09)
 

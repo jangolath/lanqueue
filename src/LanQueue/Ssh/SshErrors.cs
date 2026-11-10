@@ -26,6 +26,21 @@ internal static partial class SshErrors
     public static string FirstLine(string output) =>
         output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "no output";
 
+    /// <summary>
+    /// True when ssh failed because the worker refused the key or its host key is not in known_hosts yet: what the one-time setup (lanq
+    /// makeready --ssh ... --setup) covers. A CHANGED host key is never one of them (that is for the machine's owner to explain first).
+    /// </summary>
+    public static bool SetupWouldHelp(string output)
+    {
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Any(l => l.StartsWith('@') && l.Contains("REMOTE HOST IDENTIFICATION HAS CHANGED", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        return lines.Any(l => l == "Host key verification failed." || UnknownHostKeyRegex().IsMatch(l) || PermissionDeniedRegex().IsMatch(l));
+    }
+
     public static string Explain(string output, string target)
     {
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

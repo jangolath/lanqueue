@@ -1,8 +1,12 @@
 #!/bin/sh
 # The two GitHub steps of the release's publish job (needs gh with GH_TOKEN and GH_REPO):
-#   draft <tag> <prerelease> <assets dir>  create a DRAFT release with every asset. On a re-run it reuses its own draft only when that
+#   draft <tag> <prerelease> <assets dir> [<notes file>]
+#                                          create a DRAFT release with every asset. On a re-run it reuses its own draft only when that
 #                                          draft is empty or holds the same SHA256SUMS as these assets; a published release, or a draft
-#                                          from another build, is refused.
+#                                          from another build, is refused. With a notes file (scripts/release-notes.sh) the body is that
+#                                          file's text followed by GitHub's generated notes (the compare link); a reused draft whose
+#                                          body lacks the notes' first line gets the notes (gh release edit cannot regenerate the link,
+#                                          so a draft that already has them keeps its body). Without one the body is the generated notes.
 #   publish <tag> <prerelease>             make the draft public. It is marked latest only when it is a stable release newer than every
 #                                          stable release already published: a prerelease or a backport (v0.4.1 after v0.5.0) never
 #                                          moves releases/latest, so the Scoop latest URL only ever serves the newest stable release.
@@ -13,9 +17,10 @@ mode=${1:-}
 tag=${2:-}
 prerelease=${3:-}
 assets=${4:-}
+notes=${5:-}
 
 usage() {
-  echo "usage: scripts/release-draft.sh draft <tag> <prerelease> <assets dir> | publish <tag> <prerelease>" >&2
+  echo "usage: scripts/release-draft.sh draft <tag> <prerelease> <assets dir> [<notes file>] | publish <tag> <prerelease>" >&2
   exit 2
 }
 
@@ -61,6 +66,13 @@ latest_flag() {
 case "$mode" in
   draft)
     [ -f "$assets/SHA256SUMS" ] || usage
+    if [ -n "$notes" ]; then
+      [ -s "$notes" ] || usage
+      # gh prepends --notes-file text to the notes --generate-notes asks GitHub for.
+      set -- --notes-file "$notes"
+    else
+      set --
+    fi
     if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
       if [ "$draft" != true ]; then
         echo "release $tag is already published; nothing to do" >&2
@@ -75,10 +87,17 @@ case "$mode" in
         fi
       fi
       gh release upload "$tag" "$assets"/* --clobber
+      if [ -n "$notes" ]; then
+        first=$(sed -n '/[^[:space:]]/{p;q;}' "$notes")
+        body=$(gh release view "$tag" --json body --jq .body)
+        if ! printf '%s\n' "$body" | grep -q -F -- "$first"; then
+          gh release edit "$tag" --notes-file "$notes"
+        fi
+      fi
     elif [ "$prerelease" = true ]; then
-      gh release create "$tag" "$assets"/* --draft --prerelease --latest=false --title "$tag" --generate-notes --verify-tag
+      gh release create "$tag" "$assets"/* --draft --prerelease --latest=false --title "$tag" --generate-notes --verify-tag "$@"
     else
-      gh release create "$tag" "$assets"/* --draft --title "$tag" --generate-notes --verify-tag
+      gh release create "$tag" "$assets"/* --draft --title "$tag" --generate-notes --verify-tag "$@"
     fi
     ;;
   publish)

@@ -31,6 +31,81 @@ public sealed class JobLog(string folder)
         }
     }
 
+    /// <summary>The most bytes <see cref="Tail"/> reads from the end of a log, whatever it is asked for.</summary>
+    public const int TailMaxBytes = 256 * 1024;
+
+    /// <summary>The longest line <see cref="Tail"/> returns; longer lines are cut.</summary>
+    public const int TailMaxLineChars = 4000;
+
+    /// <summary>
+    /// The last <paramref name="lines"/> lines of a job log (lanq run --log-tail), read backwards from the end in blocks and never more than
+    /// <see cref="TailMaxBytes"/>, so a huge log costs no more than a small one; when the bound cuts a line, that partial line is left out and
+    /// fewer lines come back. Each line is cut to <see cref="TailMaxLineChars"/> and sanitised again (it may be read back by an agent or a
+    /// terminal). A missing or unreadable log gives an empty list.
+    /// </summary>
+    public static IReadOnlyList<string> Tail(string path, int lines)
+    {
+        if (lines < 1)
+        {
+            return [];
+        }
+
+        byte[] buffer;
+        int from;
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var length = fs.Length;
+            var start = Math.Max(0, length - TailMaxBytes);
+            buffer = new byte[length - start];
+            const int Block = 16 * 1024;
+            var pos = length;
+            var breaks = 0;
+
+            // lines + 1 line breaks found: the lines after the first of them are whole (the last break may only end the file).
+            while (pos > start && breaks <= lines)
+            {
+                var blockStart = Math.Max(start, pos - Block);
+                fs.Seek(blockStart, SeekOrigin.Begin);
+                fs.ReadExactly(buffer, (int)(blockStart - start), (int)(pos - blockStart));
+                for (var i = pos - 1; i >= blockStart; i--)
+                {
+                    if (buffer[i - start] == (byte)'\n')
+                    {
+                        breaks++;
+                    }
+                }
+
+                pos = blockStart;
+            }
+
+            from = (int)(pos - start);
+            if (pos > 0)
+            {
+                // Started inside a line: skip to the first line break (also skips a UTF-8 sequence cut in two).
+                var nl = Array.IndexOf(buffer, (byte)'\n', from);
+                from = nl < 0 ? buffer.Length : nl + 1;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
+
+        var text = System.Text.Encoding.UTF8.GetString(buffer, from, buffer.Length - from);
+        if (text.Length == 0)
+        {
+            return [];
+        }
+
+        var all = text.Split('\n');
+        var count = text.EndsWith('\n') ? all.Length - 1 : all.Length;
+        return [.. all[..count].Skip(Math.Max(0, count - lines)).Select(l => JobRunner.SafeLine(Cap(l.TrimEnd('\r'))))];
+
+        static string Cap(string line) =>
+            line.Length <= TailMaxLineChars ? line : line[..(char.IsHighSurrogate(line[TailMaxLineChars - 1]) ? TailMaxLineChars - 1 : TailMaxLineChars)];
+    }
+
     public IReadOnlyList<JobRecord> ReadAll()
     {
         if (!File.Exists(FilePath))

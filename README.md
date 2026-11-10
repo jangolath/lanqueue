@@ -204,16 +204,27 @@ the grace period, and was stopped. A job that itself exits with `124` gives the 
 them apart (`[lanq] TimedOut: timed out after N min`, `[lanq] WindowClosed: stopped after N min: ...` versus
 `[lanq] Failed: exit 124`).
 
+`75` covers two cases, and `--json` tells them apart with `retryable`. `true`: machines are busy, held, asleep or
+unreachable, so waiting may help. `false`: no machine can ever take the job as configured (none has every `--needs`
+capability, `--mem` is above every machine's total RAM, ...). Then lanq ends at once, without waiting out `--wait` or
+waking anything, and the message starts `No eligible machine, and no machine can ever take this job as configured
+(waiting will not help).` To see the choice before a run, use `lanq run --dry-run` or `lanq health --needs a,b`.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, cores, RAM, disk, memory, free slots, what it is suited for, holds, and what to fix when ssh fails. `--wake` also wakes machines that look asleep. |
+| `lanq health --needs a,b [--mem GB] [--json]` | Also judges every machine for such a job by the rules `lanq run` uses: `-> eligible (2 slots)` or `-> not eligible: lacks gpu (...)`. Exit `0` when at least one machine could take it now, `75` when none could. |
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
+| `lanq run ... --json --log-tail N -- CMD...` | Adds the last N lines (1 to 200) of the job's log to the JSON object as `logTail`; `logPath` is always there. |
+| `lanq run ... --dry-run [--json] -- CMD...` | Says what `lanq run` would do now (the checks, the snapshot scan, the machine, every excluded machine and why, `--shards` N and placement) and does none of it. |
 | `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
 | `lanq stats` | Wall-clock time per machine, from your local job log. |
 | `lanq doctor [--remote [--force]]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. |
-| `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. |
+| `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--key-env VAR] [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. `--key-env VAR` scans with the key file whose path is in `VAR`. |
+| `lanq makeready --ssh user@host --os windows\|linux --setup [--key-env VAR]` | Prints the PC's full one-time setup (build user, your public key, work folder, firewall, password logins off, the fingerprint check) and connects to nothing. |
+| `lanq makeready --ssh user@host --os windows\|linux --add --name NAME [--key-env VAR] [--yes] [--json]` | Scans the PC and, only when it is READY, adds it to your `machines.yml` (it shows the lines and asks first; `--yes` without a terminal). |
 | `lanq makeready --all [--json] [--force]` | The same check on every configured machine, four at a time, as one summary table. |
 | `lanq init [--json]` | Writes a commented starter `machines.yml` (in the current folder, or at `--config FILE`); never overwrites a file. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
@@ -272,7 +283,9 @@ Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: 
   (exit `75`); `--force` scans anyway.
 - `lanq makeready --ssh user@old-pc.lan --os windows` for a PC that is not in `machines.yml` yet, once key-based
   SSH works and its host key is in your `known_hosts` (same key-only, strict-host-key ssh options as every other call;
-  your agent or default key is used).
+  your agent or default key is used). `--key-env VAR` uses the key file whose path is in `VAR` instead, as `key_env:`
+  does, and the suggested entry then carries `key_env: VAR`. When the worker refuses the key or its host key is not in
+  `known_hosts` yet, lanq also suggests `--setup` (below).
 
 It prints the verdicts (`worker_git`, `worker_archive`, `dotnet10`, `docker`, `overnight`), then the script's own
 `VERDICT:` line (`READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`) and its numbered next steps, blockers
@@ -322,6 +335,41 @@ one object, `{"status":"Ok|Failing|InfraError|Held","exitCode":...,"machines":[.
 `lanq-makeready/v1` report exactly as `lanq makeready <machine> --json` prints it (absent without one). A bad argument
 or config prints the usual `{"status":"Rejected","exitCode":2,"message":...}` object instead.
 
+#### Adding a machine: --setup and --add
+
+Two steps add a new PC. Both write only on your computer; lanq still never changes a worker.
+
+`lanq makeready --ssh build@10.20.30.21 --os windows --setup` (or `--os linux`) prints the PC's full one-time setup and
+connects to nothing: the build user (the `build` of `build@...`, not an administrator; `root` and `administrator` are
+refused), your public key in its `authorized_keys` (Windows: `icacls` with every grant by SID and inheritance cut;
+Linux: `.ssh` 700 and `authorized_keys` 600), the work folder (`C:/lq` or `/srv/lq`, the `work_root` lanq makeready
+suggests), firewall scoping, the command that shows the host key fingerprint, the first connection from your computer
+(compare the fingerprint before answering yes), and password logins off once the key works. The PC's owner runs the
+worker part. The key is the first one `ssh-add -L` lists, else `~/.ssh/lanq_ed25519.pub`, else `~/.ssh/id_ed25519.pub`;
+with `--key-env VAR`, only the `.pub` beside the key `VAR` names. lanq reads only `.pub` files and checks each key
+line; without a usable key the commands hold a placeholder and the output says how to make one. Text only (`--json` is
+refused), exit `0`. [docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md#3-set-up-each-worker) explains every step.
+
+`lanq makeready --ssh build@10.20.30.21 --os windows --add --name micro-01` then scans the PC as `lanq makeready --ssh`
+does and, only when it is READY (with or without warnings), adds its entry to your `machines.yml` (found as for every
+command, or `--config FILE`):
+
+- Before the scan it checks the arguments, that the config loads, that no machine has that name (ignoring case) or
+  that host, and that it can edit the file by itself: one YAML document, one block-style top-level `machines:`, no
+  tabs, not a link. Otherwise it refuses (exit `2`) and you paste the entry by hand.
+- The entry goes in as text after the last machine (before `lanq init`'s commented examples), lined up with the file's
+  own items. Every other byte, CRLF or LF and a BOM are kept. The lines it shows are the lines it writes.
+- It checks the result before writing (it loads, holds exactly one machine more, the others are unchanged), then
+  replaces the file atomically (keeping its Unix mode, or its ACL on Windows), never through a link and never over a
+  file that changed meanwhile.
+- It asks first on a terminal. Without one, and always with `--json`, it needs `--yes`.
+- Then one read-only probe of the new machine (never a wake), printed as a `lanq health` line, a warning when
+  `lanq init`'s `example-01` is still there, and `Next: lanq doctor --remote`.
+
+Exit `0` added; `1` NOT READY or declined (nothing written); `2` bad arguments, config, a duplicate or a file it does not
+edit; `70` ssh failed, the report was unusable or the file could not be written. `--json` prints one object (see
+[docs/JSON.md](docs/JSON.md#lanq-makeready---add---json)).
+
 ### lanq init
 
 `lanq init` writes a commented, minimal `machines.yml` to the current folder (or to `--config FILE`, creating its
@@ -329,12 +377,12 @@ folder). It never overwrites a file and never writes through a link: an existing
 pointing nowhere) at that path is refused (exit `2`). The file loads as written: a policy memory floor suited to
 small PCs (`min_free_mem_gb: 1.5`), one live example machine to replace (`max_jobs: 1`, set per machine), and commented examples of a
 Windows micro PC (`key_env`, a memory floor, heap caps) and a Linux family PC (`allowed_hours`, `wake:`). It then
-prints the next steps: set up OpenSSH on each worker ([docs/WORKERS.md](docs/WORKERS.md)), connect once with `ssh`,
-run `lanq makeready --ssh user@host --os windows|linux` on each, paste the suggested entries, then
-`lanq doctor --remote`. Remember that lanq never reads `./machines.yml` by itself: the steps include `--config` with
-the file's path unless you wrote it to the per-user path. `--json` prints one object
-(`{"status":"Created","exitCode":0,"path":...,"message":...}`; `Rejected` 2 when the file exists, `InfraError` 70 when
-it could not be written) and sends the next steps to stderr.
+prints the next steps: `lanq makeready --ssh user@host --os windows|linux --setup` for each worker's one-time setup
+(see [Adding a machine](#adding-a-machine---setup-and---add)), `lanq makeready --ssh user@host --os windows|linux --add
+--name NAME` to add each one once it is ready, delete `example-01`, then `lanq doctor --remote`. Remember that lanq
+never reads `./machines.yml` by itself: the steps include `--config` with the file's path unless you wrote it to the
+per-user path. `--json` prints one object (`{"status":"Created","exitCode":0,"path":...,"message":...,"nextSteps":[...]}`;
+`Rejected` 2 when the file exists, `InfraError` 70 when it could not be written) and sends the next steps to stderr.
 
 ### lanq unlock
 
@@ -404,19 +452,29 @@ Scripts and coding agents should prefer `--json`; [docs/JSON.md](docs/JSON.md) i
 `lanq health --json` prints one array, in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
- {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"freeSlots":1,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds","nextSteps":[{"action":"none","reason":"build-01 can take work","safeToRunUnattended":false}]},
+ {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"freeSlots":1,"size":"unknown","suitedFor":"unknown: the machine did not report its memory","nextSteps":[{"action":"wait","reason":"build-02 is outside allowed hours; it takes jobs again in its next window (allowed hours: Mon-Fri 22:00-07:00)","safeToRunUnattended":false}]}]
 ```
 
 `state` is `ok`, `hold` or `down`; `reasons` is empty when `ok`; `memFreeGb` and `localTime` (the worker's own clock)
 are `null` when the worker does not report them; so are `cores` and `memTotalGb` (then `size` is `unknown`).
 `freeSlots` is `maxJobs` minus `slotsUsed` (0 for a machine that is down), and `size` is `light`, `medium`, `heavy`
-or `unknown`. `lanq run --json` streams the job's output to **stderr** and prints
-one object on stdout when it is over:
+or `unknown`. With `--needs a,b` and/or `--mem GB`, each row also has `eligible`, `why` and `reason` (null when
+eligible), `permanent` (waiting can never change it) and `jobSlots` (how many copies or shards of such a job it could
+take now, `--mem` counted per copy); without them the rows are exactly as above.
+
+`lanq run --json` streams the job's output to **stderr** and prints one object on stdout when it is over:
 
 ```json
-{"status":"Completed","exitCode":0,"machine":"build-02","jobId":"20261109-221503-a1b2c3","durationSeconds":84.2,"message":"exit 0"}
+{"status":"Completed","exitCode":0,"machine":"build-02","jobId":"20261109-221503-a1b2c3","durationSeconds":84.2,"message":"exit 0","logPath":"/home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log","nextSteps":[{"action":"none","reason":"the job completed","safeToRunUnattended":false}]}
 ```
+
+`logPath` is always there: the full path of the job's local log (every line lanq printed for the job), `null` when no
+job started. `--log-tail N` (1 to 200, `--json` only) adds `logTail`, the log's last N lines (sanitised, empty when no
+job started), so a script or agent needs no stderr redirect to see why a job failed. In text mode lanq prints
+`[lanq] log: <path>` on stderr just before the status line. On `NoCapacity` the object adds `retryable` (`false` when no
+machine can ever take the job, so waiting will not help) and `excluded`, one `{machine, reason, why, permanent}` per
+machine; `reason` is a code such as `missing_capability` or `busy` ([the table](docs/JSON.md#reason-codes)).
 
 With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","bytes":1363148,"sha256":"..."}]`) and
 `fetchSkipped` (`[{"path":"TestResults/latest.trx","reason":"..."}]`), both present and possibly empty on every path
@@ -428,10 +486,23 @@ Without `--fetch` none of these keys appear.
 `exitCode` is `lanq`'s own exit code; `machine` is `null` when no machine took the job. Stdout always carries exactly
 one such object, also when the job never started: bad arguments or a config error (`Rejected`, `2`, `jobId` `null`),
 Ctrl+C (`Cancelled`, `130`) or an unexpected error (`InfraError`, `70`). `lanq health --json` with a bad argument or
-config prints `{"status":"Rejected","exitCode":2,"message":...}` instead of its array, and `Cancelled` (`130`) or
-`InfraError` (`70`) objects of the same shape when interrupted or broken. The `[lanq] ...` status line
+config prints `{"status":"Rejected","exitCode":2,"message":...,"nextSteps":[...]}` instead of its array, and `Cancelled`
+(`130`) or `InfraError` (`70`) objects of the same shape when interrupted or broken. The `[lanq] ...` status line
 and error messages still go to stderr, and so does the usage text after an unknown command (`lanq --help` prints it
-on stdout).
+on stdout). `lanq run --dry-run --json` prints one object with `status` `WouldRun` (exit `0`) or the status the run
+would end with, the machine, every machine as judged for the job and, with `--shards`, N and the placement.
+
+**`nextSteps`.** Every `--json` object (each `lanq health` row, the run, dry-run, init, wake, `makeready --all` and
+`--add` objects and every error object) carries `nextSteps`, at least one entry:
+`{"action","reason","command"?,"argv"?,"safeToRunUnattended"}`. `action` is `proceed`, `retry`, `wait`, `fix_code`,
+`fix_command`, `ask_developer`, `run_doctor`, `run_health` or `none`; treat one you do not know as `ask_developer`.
+`argv` is the exact command and is authoritative; `command` is the same as one line for bash and PowerShell, left out
+when an argument cannot be written safely for both. A suggestion never does more than the command that produced it,
+and only `safeToRunUnattended: true` steps are for a script or agent to run by itself. The one exception is the single
+`lanq makeready <machine> --json` report, which stays the lanq-makeready script's own report with no `nextSteps` (its
+error objects have them). For people, the same steps are printed as `Next: ...` lines on stderr (`[lanq] Next: ...`
+inside `lanq run`), before the status line, which stays last. The full contract is in
+[docs/JSON.md](docs/JSON.md#nextsteps).
 
 ## How it works
 
@@ -540,10 +611,10 @@ settings keep `lanq` a polite guest there (a full example is the "family PC" ent
   status `[lanq] WindowClosed`.
 - **A PAUSE switch anyone can use.** If a file named `PAUSE` exists in the machine's `work_root`, `lanq` holds the
   machine ("paused on the machine") and starts nothing there. No lanq knowledge needed:
-  - Windows: in a Command Prompt, `type nul > D:\lanq\PAUSE` (use your `work_root`), and `del D:\lanq\PAUSE` to
+  - Windows: in a Command Prompt, `type nul > C:\lq\PAUSE` (use your `work_root`), and `del C:\lq\PAUSE` to
     resume. Friendlier: put two desktop shortcuts on that PC, "Pause builds" with the target
-    `cmd /c type nul > D:\lanq\PAUSE` and "Resume builds" with the target `cmd /c del D:\lanq\PAUSE`.
-  - Linux: `touch /srv/lanq/PAUSE` to pause, `rm /srv/lanq/PAUSE` to resume.
+    `cmd /c type nul > C:\lq\PAUSE` and "Resume builds" with the target `cmd /c del C:\lq\PAUSE`.
+  - Linux: `touch /srv/lq/PAUSE` to pause, `rm /srv/lq/PAUSE` to resume.
 
   The person needs write access to the `work_root` folder (grant it once, or make the shortcuts for an account that
   has it). Only the file's existence counts; its content is ignored. On Linux the name is `PAUSE` or `pause` (those two
@@ -684,6 +755,7 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
   otherwise the failing shard's own code, else 2, 124, 70 or 75. `--json` prints one object with a `shards` array.
 - `--fail-fast` cancels the rest after the first shard that fails; `--shard-retries R` (0 to 3) re-runs only a shard
   whose machine stopped answering, never a test failure. Ctrl+C cancels every shard and cleans each one up.
+- `--dry-run` with `--shards auto` shows the N it would pick and where each shard would start, and runs nothing.
 
 `lanq health` also shows each machine's cores, total RAM, free/total slots and what it is suited for (light under
 6 GB, medium 6 to under 16 GB, heavy 16 GB or more with 4+ cores, "+ container builds" with a `docker` capability);
@@ -745,12 +817,15 @@ lanq health                                                    # who is awake an
 lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is the job's exit code
 lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
 lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
+lanq run --needs gpu --dry-run -- dotnet test                  # which machine would take it, and why not the others?
 lanq stats                                                     # wall-clock time per machine
 lanq doctor --remote                                           # is my setup right, and does each worker find its tools?
 lanq makeready --ssh me@old-pc.lan --os windows                # can this PC be a worker? (read-only, changes nothing)
+lanq makeready --ssh build@old-pc.lan --os windows --setup     # print its one-time setup (connects to nothing)
+lanq makeready --ssh build@old-pc.lan --os windows --add --name old-pc   # add it to machines.yml once it is READY
 ```
 
-You own `machines.yml` and the allowlists. Edit them yourself; nothing else should.
+You own `machines.yml` and the allowlists. Edit them yourself (or with `lanq makeready --add`); nothing else should.
 
 ### With a coding agent such as Claude Code (scripts-first)
 
@@ -770,16 +845,22 @@ On Windows PowerShell:
 $log = Join-Path $env:TEMP 'lanq-last.log'; lanq run --needs dotnet -- dotnet test -c Release *> $log; "exit=$LASTEXITCODE"; Get-Content $log -Tail 40
 ```
 
-Better for agents, `--json` keeps the result apart from the log: the job's output goes to stderr (the file) and
-stdout carries one JSON object (see [JSON output](#json-output)):
+Better for agents, `--json --log-tail 60` puts the result and the log's last 60 lines in one JSON object on stdout
+(see [JSON output](#json-output)). The job's output still streams to stderr, so drop it; lanq keeps every line in the
+job's own log, whose full path is `logPath`:
 
 ```bash
-lanq run --json --needs dotnet -- dotnet test -c Release 2> "${TMPDIR:-/tmp}/lanq-last.log"; echo "exit=$?"; tail -n 40 "${TMPDIR:-/tmp}/lanq-last.log"
+lanq run --json --log-tail 60 --no-wake --needs dotnet -- dotnet test -c Release 2>/dev/null; echo "exit=$?"
 ```
 
-The agent keeps the exit code and a short tail, and opens more of the log file only when the tail is not
-enough. The log lives in the temp folder, not in your repository; lanq also keeps full per-job logs in its own state
-folder (`$LANQ_HOME`, else a per-user folder). (A `.lanq/` folder in the repository is excluded from the snapshot.)
+```powershell
+lanq run --json --log-tail 60 --no-wake --needs dotnet -- dotnet test -c Release 2>$null; "exit=$LASTEXITCODE"
+```
+
+The agent keeps the exit code, `status`, `logTail` and `nextSteps`, and opens more of the file at `logPath` only when
+the tail is not enough. Per-job logs live in lanq's own state folder (`$LANQ_HOME`, else a per-user folder), not in your
+repository. (A `.lanq/` folder in the repository is excluded from the snapshot.) Before a heavy run, `lanq run
+--dry-run --json ...` or `lanq health --needs dotnet --json` shows which machine would take it, without running it.
 
 **Using lanq with AI agents.** [AGENTS.md](AGENTS.md) is the short, tool-agnostic rule set an agent reads;
 [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md) covers setup, instruction-file snippets and a failure playbook; and
@@ -810,7 +891,7 @@ machines:
     os: linux                 # linux | windows
     ssh: user@host            # no leading "-"
     key_env: ENV_VAR_NAME     # optional. Omit to use ssh-agent (no -i is passed). Else the NAME of an env var holding a key file path
-    work_root: /srv/lanq      # Linux: absolute path. Windows: a drive path such as D:/lanq. Forward slashes, no spaces, no ".."
+    work_root: /srv/lq        # Linux: absolute path. Windows: a drive path such as D:/lq. Forward slashes, no spaces, no ".."
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files
     transfer: git             # optional: git (default, recommended; worker needs git) | archive (worker needs only tar)

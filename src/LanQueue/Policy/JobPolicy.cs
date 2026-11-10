@@ -85,13 +85,19 @@ public static class JobPolicy
 
     /// <summary>An allowlist entry like "dotnet test" matches argv whose leading tokens equal the entry's tokens.</summary>
     public static bool CommandAllowed(PolicyConfig policy, IReadOnlyList<string> argv) =>
-        policy.AllowedCommands.Any(entry =>
-        {
-            var tokens = entry.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            return tokens.Length > 0
-                && argv.Count >= tokens.Length
-                && tokens.Zip(argv).All(p => string.Equals(p.First, p.Second, StringComparison.Ordinal));
-        });
+        policy.AllowedCommands.Any(entry => Matches(entry, argv));
+
+    /// <summary>The allowlist entry that lets <paramref name="argv"/> run (the longest, when several match), or null when none does.</summary>
+    public static string? AllowedBy(PolicyConfig policy, IReadOnlyList<string> argv) =>
+        policy.AllowedCommands.Where(entry => Matches(entry, argv)).MaxBy(entry => entry.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length);
+
+    private static bool Matches(string entry, IReadOnlyList<string> argv)
+    {
+        var tokens = entry.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return tokens.Length > 0
+            && argv.Count >= tokens.Length
+            && tokens.Zip(argv).All(p => string.Equals(p.First, p.Second, StringComparison.Ordinal));
+    }
 
     public static bool DirectoryAllowed(PolicyConfig policy, string directory)
     {

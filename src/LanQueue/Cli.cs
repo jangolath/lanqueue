@@ -7,6 +7,7 @@ using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Output;
 using LanQueue.Payload;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 
 namespace LanQueue;
@@ -14,6 +15,9 @@ namespace LanQueue;
 public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyList<string> Needs, string Directory, int WaitSeconds, IReadOnlyList<string> Argv)
 {
     public const int DefaultTimeoutMinutes = 240;
+
+    /// <summary>The most lines --log-tail may ask for.</summary>
+    public const int MaxLogTail = 200;
 
     /// <summary>How long the job itself may run (lanq run --timeout, in minutes).</summary>
     public int TimeoutMinutes { get; init; } = DefaultTimeoutMinutes;
@@ -42,6 +46,18 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>makeready --os windows|linux, with --ssh.</summary>
     public MachineOs? Os { get; init; }
 
+    /// <summary>makeready --key-env VAR, with --ssh: the NAME of an environment variable holding the private key file's path (as key_env).</summary>
+    public string? KeyEnv { get; init; }
+
+    /// <summary>makeready --ssh ... --setup: print the worker's one-time setup and connect to nothing (see Cli.MakereadySetup.cs).</summary>
+    public bool Setup { get; init; }
+
+    /// <summary>makeready --ssh ... --add: add the worker to the local machines.yml when it is ready (see Cli.MakereadyAdd.cs).</summary>
+    public bool Add { get; init; }
+
+    /// <summary>makeready --add --name NAME: the new machine's name.</summary>
+    public string? Name { get; init; }
+
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
@@ -66,18 +82,30 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
     public bool NoWake { get; init; }
 
+    /// <summary>lanq run --log-tail N (1 to 200, --json only): the last N lines of the job's log in the JSON object; null without it.</summary>
+    public int? LogTail { get; init; }
+
+    /// <summary>lanq run --dry-run: say what the run would do now (see Cli.DryRun.cs), and send, claim, log and wake nothing.</summary>
+    public bool DryRun { get; init; }
+
     /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
     public ShardOptions? Shards { get; init; }
+
+    /// <summary>
+    /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
+    /// (see <see cref="Output.SuggestedCommand.Rerun"/>), so the user's own options and job arguments survive unchanged.
+    /// </summary>
+    public IReadOnlyList<string> Raw { get; init; } = [];
 
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
-        ["health"] = ["--json", "--wake"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast"],
+        ["health"] = ["--json", "--wake", "--needs", "--mem"],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail", "--dry-run"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
@@ -106,14 +134,20 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var waitForSsh = false;
         var wakeSleepers = false;
         var noWake = false;
+        var dryRun = false;
         var force = false;
         string? sshTarget = null;
         MachineOs? os = null;
+        string? keyEnv = null;
+        var setup = false;
+        var add = false;
+        string? name = null;
         string? target = null;
         var fetch = new List<string>();
         string? fetchDir = null;
         long? fetchMax = null;
         int? fetchMaxFiles = null;
+        int? logTail = null;
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -182,6 +216,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
                     fetchMaxFiles = files;
                     break;
+                case "--log-tail" when i + 1 < own.Length:
+                    if (!int.TryParse(own[++i], NumberStyles.None, CultureInfo.InvariantCulture, out var tail) || tail is < 1 or > MaxLogTail)
+                    {
+                        throw new ArgumentException($"--log-tail must be a whole number of lines from 1 to {MaxLogTail}.");
+                    }
+
+                    logTail = tail;
+                    break;
                 case "--shards" or "--shard-retries" when i + 1 < own.Length:
                     shards.Set(own[i], own[++i]);
                     break;
@@ -200,6 +242,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--no-wake":
                     noWake = true;
                     break;
+                case "--dry-run":
+                    dryRun = true;
+                    break;
                 case "--remote":
                     remote = true;
                     break;
@@ -208,6 +253,23 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--ssh" when i + 1 < own.Length:
                     sshTarget = own[++i];
+                    break;
+                case "--key-env" when i + 1 < own.Length:
+                    keyEnv = own[++i];
+                    if (!ConfigLoader.IsValidEnvName(keyEnv))
+                    {
+                        throw new ArgumentException("--key-env must be the NAME of an environment variable holding your key file's path (letters, digits and _), for example --key-env LANQ_KEY.");
+                    }
+
+                    break;
+                case "--setup":
+                    setup = true;
+                    break;
+                case "--add":
+                    add = true;
+                    break;
+                case "--name" when i + 1 < own.Length:
+                    name = own[++i];
                     break;
                 case "--os" when i + 1 < own.Length:
                     os = own[++i] switch
@@ -233,9 +295,24 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take {bad}.");
         }
 
+        if (command == "health" && seen.Contains("--needs") && needs.Count == 0)
+        {
+            throw new ArgumentException("--needs must name at least one capability (for example --needs dotnet,linux).");
+        }
+
+        if (logTail is not null && !json)
+        {
+            throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
+        }
+
         if (fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
         {
             throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
+        }
+
+        if (command == "makeready")
+        {
+            CheckMakereadyOptions(seen, json, setup, add);
         }
 
         if (split >= 0 && command != "run")
@@ -255,15 +332,45 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitForSsh = waitForSsh,
             WakeSleepers = wakeSleepers,
             NoWake = noWake,
+            DryRun = dryRun,
             Force = force,
             SshTarget = sshTarget,
             Os = os,
+            KeyEnv = keyEnv,
+            Setup = setup,
+            Add = add,
+            Name = name,
             Fetch = FetchPatterns.Validate(fetch),
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
             Shards = shards.Build(),
+            LogTail = logTail,
+            Raw = [.. args],
         };
+    }
+
+    /// <summary>
+    /// The makeready options that only make sense together: --key-env only with --ssh; --setup only prints text (no --json, --add, --all or
+    /// --force); --name and --yes only with --add. Whether --ssh, --os and --name are all there is checked by the command itself, so that
+    /// lanq makeready --add --json still answers with its own object.
+    /// </summary>
+    private static void CheckMakereadyOptions(List<string> seen, bool json, bool setup, bool add)
+    {
+        if (seen.Contains("--key-env") && !seen.Contains("--ssh"))
+        {
+            throw new ArgumentException("--key-env goes with --ssh user@host (a configured machine uses its key_env from machines.yml).");
+        }
+
+        if (setup && (json || add || seen.Contains("--all") || seen.Contains("--force")))
+        {
+            throw new ArgumentException("--setup only prints the one-time setup for people; it takes no --json, --add, --all or --force.");
+        }
+
+        if (!add && (seen.Contains("--name") || seen.Contains("--yes")))
+        {
+            throw new ArgumentException("--name and --yes go with --add (lanq makeready --ssh user@host --os windows|linux --add --name NAME).");
+        }
     }
 
     /// <summary>--fetch-max: a size in bytes with an optional K, M or G suffix (powers of 1024, an optional trailing B), from 1 KB to 2 GB.</summary>
@@ -295,14 +402,19 @@ public static partial class Cli
         lanq - headless job runner for your own LAN machines
 
           lanq health [--json] [--wake] [--config FILE]
+          lanq health --needs dotnet,linux [--mem 4] [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
           lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
+          lanq run ... --json [--log-tail 60] -- dotnet test
+          lanq run ... --dry-run [--json] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
-          lanq makeready --ssh user@host --os windows|linux [--json]
+          lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
+          lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]
+          lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]
           lanq makeready --all [--json] [--force] [--config FILE]
           lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
@@ -320,11 +432,24 @@ public static partial class Cli
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
-        probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C.
+        probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
+        such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
+        and jobSlots); exit 0 when at least one machine could take it now, 75 when none could.
         makeready runs the read-only lanq-makeready check on a worker (sent on ssh stdin, nothing is written to its disk) and prints the verdicts,
         the script's VERDICT line and numbered next steps (0.1 reports: the WARN/FAIL checks with advice), what the PC is suited for, the
         capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 2 bad arguments, 70 ssh failed or the report was
         unusable, 75 the machine is paused or outside its allowed hours (--force scans anyway), 130 Ctrl+C. lanq never changes a worker.
+        makeready --ssh user@host scans a PC that is not in the config yet, with the keys in ssh-agent or, with --key-env VAR, the key file
+        whose path is in $VAR (the NAME of the variable, as key_env). --setup prints that PC's full one-time setup and connects to nothing: the
+        build user (from user@host), your public key in its authorized_keys (Windows: icacls by SID; Linux: chmod 700/600), the work folder,
+        firewall scoping, password logins off, the host key fingerprint to compare and the first connection; only .pub files are read (the
+        first key ssh-agent lists; with --key-env the .pub beside that key; else ~/.ssh/lanq_ed25519.pub or ~/.ssh/id_ed25519.pub). Text only,
+        exit 0. --add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml (found as for every command) as text
+        after its last machine, every other line kept byte for byte; it shows the lines and asks first (without a terminal, and with --json,
+        --yes instead), never writes through a link, then probes the new machine once (read-only, never a wake). Exit 0 added, 1 NOT READY or
+        declined (nothing written), 2 bad arguments, config, a duplicate name or host, or a file lanq does not edit by itself (paste the entry
+        by hand), 70 ssh failed, the report was unusable or the file could not be written; --json prints one object (status Added, NotAdded,
+        Rejected, InfraError or Cancelled, exitCode, path, machine, entry, afterLine, health, report, message, nextSteps).
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
@@ -333,13 +458,28 @@ public static partial class Cli
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
         inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
+        Every job's output is also kept in a log in the state folder: run prints "[lanq] log: PATH" just before its status line (--shards: for
+        each shard that did not complete); run --json always carries logPath (null when no job started), and --log-tail N (1 to 200, --json
+        only) adds logTail, the log's last N lines (each shard its own with --shards).
+        run --dry-run says what lanq run would do now and does none of it: the same command-line checks, snapshot and secret scan, one probe
+        of every machine and the same choice (machine, --shards N or auto and placement, every excluded machine and why, the sleeper it would
+        wake); it claims no slot, sends, logs, fetches and wakes nothing (the snapshot's git objects are written as for a run). Every run option
+        is accepted. Exit 0 would start now, 75 no machine could take it now, 2 refused, 70 the snapshot failed, 130 Ctrl+C; --json prints one
+        object with status WouldRun (or the status run would end with), machine, ranked, machines, placement, wouldWake and retryable.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
+        Next steps: every --json object (each health row, each makeready --all row; not the single makeready report) carries nextSteps, at
+        least one {action, reason, argv, command, safeToRunUnattended}; action is proceed, retry, wait, fix_code, fix_command, ask_developer,
+        run_doctor, run_health or none (more may be added: treat an unknown one as ask_developer). argv (the exact arguments) is there when a
+        command is suggested; command is the same line for bash and PowerShell, left out when an argument cannot be quoted safely for both.
+        A suggestion is only lanq run, health, doctor or makeready (never unlock, init, wake, --wake, --force or --yes), keeps --config, and
+        never does more than the command it follows (--no-wake when that could not wake a machine; --wait 120 at most once). For people the
+        same steps are "Next: ..." lines on stderr ("[lanq] Next: ..." in run), never for none, always before the final status line.
         --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
         in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
         started shard is cleaned up).
-        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine; 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
+        Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
     /// <summary>
@@ -368,14 +508,18 @@ public static partial class Cli
         {
             // The message can quote what was typed: sanitised. With --json (run or health) stdout still gets its one object.
             var message = JobRunner.SafeLine(ex.Message);
+            var steps = NextSteps.ArgumentsError(message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
-                await (own[0] == "run" && own.Contains("--shards")
-                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
-                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"))).ConfigureAwait(false);
+                await (own[0] == "run" && own.Contains("--dry-run")
+                    ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"), steps)
+                    : own[0] == "run" && own.Contains("--shards")
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
+                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, steps, fetch: own.Contains("--fetch"), logTail: own.Contains("--log-tail") ? 1 : null)).ConfigureAwait(false);
             }
 
             return 2;
@@ -416,8 +560,9 @@ public static partial class Cli
 
         if (p.Command == "makeready")
         {
+            // No waker: makeready (and the one probe of --add) never wakes a machine. --setup connects to nothing at all.
             var client = new ProcessSshClient(Environment.GetEnvironmentVariable);
-            return await Makeready(p, LoadConfig, client, new HealthProbe(client, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
+            return await Makeready(p, LoadConfig, client, new HealthProbe(client, TimeProvider.System), stdout, stderr, ct, MakereadyHost.Real(stderr)).ConfigureAwait(false);
         }
 
         FleetConfig config;
@@ -428,12 +573,16 @@ public static partial class Cli
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             var message = JobRunner.SafeLine(ex.Message);
+            var steps = NextSteps.ConfigError(p.ConfigPath, message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
-                await (p.Shards is not null
-                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
-                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0)).ConfigureAwait(false);
+                await (p.DryRun
+                    ? WritePlanJsonError("Rejected", 2, message, stdout, p.LogTail is not null, steps)
+                    : p.Shards is not null
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
+                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, steps, fetch: p.Fetch.Count > 0, logTail: p.LogTail)).ConfigureAwait(false);
             }
 
             return 2;
@@ -454,7 +603,9 @@ public static partial class Cli
         var probe = new HealthProbe(ssh, TimeProvider.System, waker);
         if (p.Command == "health")
         {
-            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers).ConfigureAwait(false);
+            // --needs / --mem: judge each machine for such a job exactly as lanq run does (Windows-safe arguments assumed).
+            var needs = p.Needs.Count > 0 || p.MemGb is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) : null;
+            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs, p.ConfigPath).ConfigureAwait(false);
         }
 
         return await Run(p, config, ssh, new GitPayloadBuilder(), probe, log, home, Directory.GetCurrentDirectory(), stdout, stderr, ct).ConfigureAwait(false);
@@ -465,6 +616,12 @@ public static partial class Cli
         ParsedArgs p, FleetConfig config, ISshClient ssh, IPayloadBuilder payloads, HealthProbe probe, JobLog log, string home, string repoDir,
         TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
+        if (p.DryRun)
+        {
+            // Before anything below: FetchRoot creates the .lanq folder, and the runner here would use bases.json.
+            return await DryRun(p, config, ssh, payloads, log, home, repoDir, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
         var jobOutput = p.Json ? stderr : stdout;
         FetchRequest? fetch = null;
         if (p.Fetch.Count > 0)
@@ -490,24 +647,44 @@ public static partial class Cli
         }
         catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
         {
-            // Ctrl+C: an agent reading --json still gets its one object.
+            // Ctrl+C: an agent reading --json still gets its one object, with the log of a job that had already started.
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
-            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed, fetch is not null).ConfigureAwait(false);
+            await WriteJsonError(
+                "run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, NextSteps.Nothing("cancelled (Ctrl+C)"), started.Elapsed,
+                fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
             var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
+            var steps = NextSteps.ForRun(p, new NextSteps.RunOutcome("InfraError", 70, message, null, InfraKind.Unexpected, false, null, null, null, runner.StartedLogPath));
+            await NextSteps.WriteAsync(stderr, steps, "[lanq] ").ConfigureAwait(false);
             await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
-            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed, fetch is not null).ConfigureAwait(false);
+            await WriteJsonError("run", "InfraError", 70, message, stdout, steps, started.Elapsed, fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
             return 70;
+        }
+
+        // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
+        var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
+        if (!p.Json && result.LogPath is { } logPath)
+        {
+            await stderr.WriteLineAsync("[lanq] log: " + JobRunner.SafeLine(logPath)).ConfigureAwait(false);
         }
 
         await stderr.WriteLineAsync(StatusLine(result)).ConfigureAwait(false);
         if (p.Json)
         {
             var json = WithFetch(
-                new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message)),
+                WithLog(
+                    new RunJson(result.Status.ToString(), result.CliExitCode, result.Machine, result.JobId, Math.Round(started.Elapsed.TotalSeconds, 1), JobRunner.SafeLine(result.Message))
+                    {
+                        Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
+                        Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
+                        NextSteps = next,
+                    },
+                    result.LogPath,
+                    p.LogTail),
                 fetch is not null,
                 result.Fetch);
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.RunJson)).ConfigureAwait(false);
@@ -520,13 +697,32 @@ public static partial class Cli
     /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
-    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false) =>
+    /// <param name="logPath">run only: the log of a job that had started (Ctrl+C or an unexpected error after it held a slot), or null.</param>
+    private static Task WriteJsonError(
+        string command, string status, int exitCode, string message, TextWriter stdout, IReadOnlyList<NextStepJson> steps, TimeSpan? elapsed = null, bool fetch = false,
+        int? logTail = null, string? logPath = null) =>
         stdout.WriteLineAsync(command switch
         {
-            "run" => JsonSerializer.Serialize(WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message), fetch, null), LanqJson.Default.RunJson),
-            "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message), LanqJson.Default.InitJson),
-            _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson),
+            "run" => JsonSerializer.Serialize(
+                WithFetch(WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps }, logPath, logTail), fetch, null),
+                LanqJson.Default.RunJson),
+            "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
+            _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message) { NextSteps = steps }, LanqJson.Default.ErrorJson),
         });
+
+    /// <summary>The excluded list of a NoCapacity object (empty when the result named no machine), sanitised.</summary>
+    internal static List<ExcludedJson> ExcludedJsons(IReadOnlyList<ExcludedMachine>? excluded) =>
+        [.. (excluded ?? []).Select(x => new ExcludedJson(JobRunner.SafeLine(x.Machine), x.Reason, JobRunner.SafeLine(x.Why), x.Permanent))];
+
+    /// <summary>
+    /// logPath (always; null when no job started) and, with --log-tail N, logTail: the log's last N lines (<see cref="JobLog.Tail"/>), empty when
+    /// no job started.
+    /// </summary>
+    internal static RunJson WithLog(RunJson json, string? logPath, int? tail) => json with
+    {
+        LogPath = logPath is null ? null : JobRunner.SafeLine(logPath),
+        LogTail = tail is { } n ? logPath is null ? [] : JobLog.Tail(logPath, n) : null,
+    };
 
     /// <summary>
     /// With --fetch the run object always carries fetched and fetchSkipped (empty when nothing was fetched or the job never ran), plus fetchDir
@@ -658,8 +854,23 @@ public static partial class Cli
     private static string HomeDir(Func<string, string?> env) =>
         env("HOME") is { Length: > 0 } h ? h : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
-    internal static async Task<int> Health(FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false)
+    /// <summary>
+    /// lanq health. With <paramref name="needs"/> (--needs / --mem) each machine is also judged for such a job by <see cref="Scheduler.Assess"/>,
+    /// the same rules lanq run uses: JSON rows gain eligible, why, reason, permanent and jobSlots, text lines gain "  -> ...", and the exit code is
+    /// 0 when at least one machine could take the job now, 75 when none could. Without it the output and exit code are exactly as before.
+    /// </summary>
+    internal static async Task<int> Health(
+        FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false, JobNeeds? needs = null,
+        string? configPath = null)
     {
+        async Task<int> Error(string status, int code, string message)
+        {
+            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+            await WriteJsonError("health", status, code, message, stdout, steps).ConfigureAwait(false);
+            return code;
+        }
+
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
             await stderr.WriteLineAsync(w).ConfigureAwait(false);
@@ -673,34 +884,62 @@ public static partial class Cli
         }
         catch (OperationCanceledException) when (json && ct.IsCancellationRequested)
         {
-            await WriteJsonError("health", "Cancelled", 130, "cancelled (Ctrl+C) before every machine answered", stdout).ConfigureAwait(false);
-            return 130;
+            return await Error("Cancelled", 130, "cancelled (Ctrl+C) before every machine answered").ConfigureAwait(false);
         }
         catch (Exception ex) when (json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
-            await WriteJsonError("health", "InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), stdout).ConfigureAwait(false);
-            return 70;
+            return await Error("InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}")).ConfigureAwait(false);
         }
+
+        var assessed = needs is null ? null : Scheduler.Assess(config.Machines.Zip(results), needs);
+        var exitCode = assessed is null || assessed.Any(a => a.Eligible) ? 0 : 75;
+
+        // What to do about each machine: in every JSON row, and for people one "Next:" line per step on stderr (stdout is unchanged).
+        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath)).ToList();
+        await NextSteps.WriteAsync(stderr, next.SelectMany(s => s)).ConfigureAwait(false);
         if (json)
         {
-            var rows = config.Machines.Zip(results).Select(x => HealthRow(x.First, x.Second)).ToList();
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)).ConfigureAwait(false);
-            return 0;
+            var rows = config.Machines.Zip(results).Select((x, i) => HealthRow(x.First, x.Second) with { NextSteps = next[i] }).ToList();
+            await stdout.WriteLineAsync(assessed is null
+                ? JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)
+                : JsonSerializer.Serialize([.. rows.Zip(assessed, HealthNeedsRow)], LanqJson.Default.ListHealthNeedsJson)).ConfigureAwait(false);
+            return exitCode;
         }
 
-        foreach (var (m, h) in config.Machines.Zip(results))
+        foreach (var (i, (m, h)) in config.Machines.Zip(results).Index())
         {
-            var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
-            var detail = h.Reachable
-                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
-                    + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
-                    + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
-                : h.Error ?? "";
-            await stdout.WriteLineAsync($"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd()).ConfigureAwait(false);
+            var line = HealthLine(m, h);
+            await stdout.WriteLineAsync(assessed is null ? line : line + "  -> " + Verdict(assessed[i])).ConfigureAwait(false);
         }
 
-        return 0;
+        return exitCode;
+
+        static string Verdict(Assessment a) => a.Eligible
+            ? string.Create(CultureInfo.InvariantCulture, $"eligible ({a.JobSlots} slot{(a.JobSlots == 1 ? "" : "s")})")
+            : "not eligible: " + JobRunner.SafeLine(a.Why ?? a.Code ?? "?");
     }
+
+    /// <summary>One machine's lanq health line (also printed by lanq makeready --add for the machine it added).</summary>
+    internal static string HealthLine(Machine m, MachineHealth h)
+    {
+        var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
+        var detail = h.Reachable
+            ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
+                + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
+                + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
+            : h.Error ?? "";
+        return $"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd();
+    }
+
+    /// <summary>A health row with how the machine was judged for the --needs / --mem job (<paramref name="a"/> from <see cref="Scheduler.Assess"/>).</summary>
+    internal static HealthNeedsJson HealthNeedsRow(HealthJson row, Assessment a) => new(row)
+    {
+        Eligible = a.Eligible,
+        Why = a.Why is { } why ? JobRunner.SafeLine(why) : null,
+        Reason = a.Code,
+        Permanent = a.Permanent,
+        JobSlots = a.JobSlots,
+    };
 
     internal static HealthJson HealthRow(Machine m, MachineHealth h)
     {

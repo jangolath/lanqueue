@@ -78,6 +78,9 @@ public static partial class ConfigLoader
     /// <summary>The same rule a machine's ssh: must follow (user@host, no leading '-', no spaces).</summary>
     internal static bool IsValidSshTarget(string target) => SshTargetRegex().IsMatch(target);
 
+    /// <summary>A valid key_env (the NAME of an environment variable).</summary>
+    internal static bool IsValidEnvName(string name) => EnvNameRegex().IsMatch(name);
+
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]*\z", RegexOptions.None, 1000)]
     private static partial Regex NameRegex();
 
@@ -309,8 +312,8 @@ public static partial class ConfigLoader
             if (!rootOk || m.WorkRoot.Contains("..", StringComparison.Ordinal))
             {
                 throw new ConfigException(m.Os == MachineOs.Windows
-                    ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lanq (forward slashes, no spaces, no '..')."
-                    : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
+                    ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lq (forward slashes, no spaces, no '..')."
+                    : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lq (no spaces, no '..').");
             }
 
             if (!Enum.IsDefined(m.Os))

@@ -293,6 +293,106 @@ public sealed class RunnerTests : IDisposable
         Assert.Empty(log.ReadAll());
     }
 
+    /// <summary>A runner whose waits are counted (and last a few milliseconds), over <see cref="T.Config"/> without allowed hours.</summary>
+    private (JobRunner Runner, FakeSsh Ssh, List<TimeSpan> Delays) Counted(Func<Config.Machine, string, SshResult> handler)
+    {
+        var config = T.Config();
+        config.Machines[1].AllowedHours = null;
+        var ssh = new FakeSsh { Handler = handler };
+        var delays = new List<TimeSpan>();
+        var runner = new JobRunner(
+            config, ssh, new FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"), _output.Add,
+            (d, ct) =>
+            {
+                lock (delays)
+                {
+                    delays.Add(d);
+                }
+
+                return Task.Delay(TimeSpan.FromMilliseconds(5), ct);
+            },
+            bases: _bases);
+        return (runner, ssh, delays);
+    }
+
+    private JobRequest Waiting(TimeSpan wait, params string[] needs) => new(needs, ["dotnet", "test"], ".", _dir, wait);
+
+    [Fact]
+    public async Task NoMachineWithTheCapabilityEndsAtOnceWithoutAnySshOrWait()
+    {
+        var (runner, ssh, delays) = Counted(HealthyFleet);
+
+        var r = await runner.RunAsync(Waiting(TimeSpan.FromSeconds(600), "dotnet", "gpu"), CancellationToken.None);
+
+        Assert.Equal((JobStatus.NoCapacity, 75), (r.Status, r.CliExitCode));
+        Assert.False(r.Retryable);
+        Assert.StartsWith("No eligible machine, and no machine can ever take this job as configured (waiting will not help). ", r.Message, StringComparison.Ordinal);
+        Assert.Contains("build-01: lacks gpu (capabilities: dotnet, node)", r.Message, StringComparison.Ordinal);
+        Assert.Equal(["build-01", "build-02"], r.Excluded!.Select(x => x.Machine));
+        Assert.All(r.Excluded!, x => Assert.Equal(("missing_capability", true), (x.Reason, x.Permanent)));
+        Assert.Empty(ssh.Calls);
+        Assert.Empty(delays);
+    }
+
+    [Fact]
+    public async Task MemAboveEveryMachinesRamEndsAfterOneProbe()
+    {
+        var (runner, ssh, delays) = Counted((m, cmd) =>
+            DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(0.1) + "\nmem_free_gb=3\nmem_total_gb=" + (m.Name == "build-01" ? "15.6" : "7.6"))
+            : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(Waiting(TimeSpan.FromSeconds(600), "dotnet") with { MinMemGb = 32 }, CancellationToken.None);
+
+        Assert.Equal((JobStatus.NoCapacity, 75), (r.Status, r.CliExitCode));
+        Assert.False(r.Retryable);
+        Assert.StartsWith("No eligible machine, and no machine can ever take this job as configured", r.Message, StringComparison.Ordinal);
+        Assert.Contains("build-01: 15.6 GB total memory, --mem needs 32.0 GB", r.Message, StringComparison.Ordinal);
+        Assert.All(r.Excluded!, x => Assert.Equal("mem_exceeds_total", x.Reason));
+        Assert.Equal(2, ssh.Calls.Count); // one probe of each machine, nothing else
+        Assert.Empty(delays);
+    }
+
+    [Fact]
+    public async Task BusyFleetIsRetryableAndStillWaits()
+    {
+        var (runner, _, delays) = Counted((m, cmd) =>
+            DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=2\ntool=ok") : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(Waiting(TimeSpan.FromMilliseconds(200), "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.True(r.Retryable);
+        Assert.StartsWith("No eligible machine. ", r.Message, StringComparison.Ordinal);
+        Assert.All(r.Excluded!, x => Assert.Equal(("busy", false), (x.Reason, x.Permanent)));
+        Assert.NotEmpty(delays);
+    }
+
+    [Fact]
+    public async Task OneUnreachableMachineKeepsTheRunRetryable()
+    {
+        // build-02 lacks node for good; build-01 has it but does not answer now.
+        var (runner, _, delays) = Counted((m, cmd) => m.Name == "build-01" ? new SshResult(255, "ssh: connect to host 10.20.30.11 port 22: Connection refused") : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(Waiting(TimeSpan.FromMilliseconds(200), "node") with { Argv = ["npm", "test"] }, CancellationToken.None);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.True(r.Retryable);
+        Assert.Equal([("build-01", "unreachable", false), ("build-02", "missing_capability", true)], r.Excluded!.Select(x => (x.Machine, x.Reason, x.Permanent)));
+        Assert.NotEmpty(delays);
+    }
+
+    [Fact]
+    public async Task TheWindowsArgumentRefusalStillComesBeforeTheCapabilityCheck()
+    {
+        // Arguments unsafe for Windows, and no machine has gpu at all: still the old Rejected (2), not NoCapacity.
+        var (runner, ssh, _) = Counted(HealthyFleet);
+        var r = await runner.RunAsync(Waiting(TimeSpan.Zero, "gpu") with { Argv = ["npm", "test", "&calc"] }, CancellationToken.None);
+
+        Assert.Equal((JobStatus.Rejected, 2), (r.Status, r.CliExitCode));
+        Assert.Null(r.Retryable);
+        Assert.Empty(ssh.Calls);
+    }
+
     [Fact]
     public async Task NoCapacityShowsWhatToFixOnAMachineThatRefusesTheKey()
     {

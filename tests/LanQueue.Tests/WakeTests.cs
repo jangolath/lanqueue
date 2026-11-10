@@ -525,7 +525,7 @@ public sealed class WakeTests
 
     /// <summary>Runs one job over a fleet where only the machines in <paramref name="awake"/> answer ssh; a packet to a machine's MAC wakes it.</summary>
     private static async Task<(JobResult Result, FakeSender Sender, List<string> Lines, HashSet<string> Awake)> RunFleet(
-        List<Machine> machines, IEnumerable<string> awake, TimeSpan wait, bool noWake = false, DateTimeOffset? at = null, string[]? argv = null, bool bootOnWake = true)
+        List<Machine> machines, IEnumerable<string> awake, TimeSpan wait, bool noWake = false, DateTimeOffset? at = null, string[]? argv = null, bool bootOnWake = true, double? memGb = null)
     {
         var dir = Path.Combine(Path.GetTempPath(), "lanq-wake-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -565,7 +565,7 @@ public sealed class WakeTests
             var probe = new HealthProbe(ssh, clock, new WakeService(sender, clock));
             var runner = new JobRunner(
                 config, ssh, new RunnerTests.FakePayloads(""), probe, new JobLog(Path.Combine(dir, ".lanq")), Path.Combine(dir, "tmp"), lines.Add, (_, _) => Task.CompletedTask, clock);
-            var result = await runner.RunAsync(new JobRequest(["dotnet"], argv ?? ["dotnet", "test"], ".", dir, wait) { NoWake = noWake }, CancellationToken.None);
+            var result = await runner.RunAsync(new JobRequest(["dotnet"], argv ?? ["dotnet", "test"], ".", dir, wait, MinMemGb: memGb) { NoWake = noWake }, CancellationToken.None);
             return (result, sender, lines, up);
         }
         finally
@@ -644,6 +644,34 @@ public sealed class WakeTests
         var (r, sender, _, _) = await RunFleet(fleet, [], TimeSpan.FromMilliseconds(150), at: Noon);
 
         Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Empty(sender.Sent);
+    }
+
+    /// <summary>No machine can ever take the job (here: none has the capability): the run ends at once with a long --wait, and no sleeper is woken.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task APermanentNoCapacityNeverWakesASleeper()
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        List<Machine> fleet = [Box("sleep-1", caps: ["node"]), Box("sleep-2", MachineOs.Windows, caps: ["node"])];
+
+        var (r, sender, _, _) = await RunFleet(fleet, [], LongWait);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.False(r.Retryable);
+        Assert.Empty(sender.Sent);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), "took " + watch.Elapsed);
+    }
+
+    /// <summary>The only awake machine never reports memory for --mem and the sleeper is Windows for Windows-unsafe arguments: no packet.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AFleetRuledOutAfterTheProbeNeverWakesASleeper()
+    {
+        List<Machine> fleet = [Box("lin-1", wake: false), Box("win-1", MachineOs.Windows)];
+
+        var (r, sender, _, _) = await RunFleet(fleet, ["lin-1"], LongWait, argv: ["dotnet", "test", "--filter", "a&b"], memGb: 64);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.False(r.Retryable);
         Assert.Empty(sender.Sent);
     }
 

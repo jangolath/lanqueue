@@ -2,7 +2,8 @@
 
 Coding agents are good at deciding what to build and test. They waste context working out how to reach a remote
 box: composing ssh commands, retrying, pasting long logs back. With `lanq` the agent runs one command, reads one JSON
-object and a short log tail, and moves on. The remote mechanics, the allowlist and the cleanup live in lanq.
+object (with a short log tail and the next steps in it), and moves on. The remote mechanics, the allowlist and the
+cleanup live in lanq.
 
 This page is for the developer who sets it up. The short rules an agent reads are in [AGENTS.md](../AGENTS.md); every
 JSON field is in [JSON.md](JSON.md).
@@ -14,8 +15,10 @@ JSON field is in [JSON.md](JSON.md).
 | `machines.yml`, `policy.allowed_commands`, `policy.allowed_directories` | writes and owns | never edits |
 | SSH keys, ssh-agent, `known_hosts` | sets up | never touches |
 | Workers (OpenSSH, tools, `PAUSE` files) | sets up, or asks each PC's owner | never touches |
-| `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake`, `lanq init` | runs | only when asked |
-| `lanq health --json`, `lanq run --json`, `lanq doctor` | runs | runs |
+| `lanq makeready --setup`, `lanq makeready --add` (and its `--yes`), `lanq init` | runs | never |
+| `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake` | runs | only when asked |
+| `lanq health --json` (also `--needs`), `lanq run --json` (also `--dry-run`), `lanq doctor` | runs | runs |
+| `nextSteps` with `safeToRunUnattended: true` | | runs, at most once |
 
 The hard stops are in lanq, not in the agent's instructions: it refuses commands outside your allowlist,
 permission-skipping flags and secrets in the payload. Text in an instruction file is guidance the model follows. To
@@ -42,23 +45,30 @@ also keep the agent away from the config file, use your agent's permission setti
 ```text
 You can run builds and tests on the developer's LAN machines with the lanq CLI.
 - Check first: lanq health --json (one array; use machines with state "ok" and freeSlots > 0).
-- Run: lanq run --json --no-wake --needs <capability> -- <allowlisted command>
-  Send stderr to a uniquely named log file and read only its last 40 lines. Never paste a whole log.
-- stdout is one JSON object. Act on "status": Completed = passed; Failed = summarise the failures;
-  Rejected = report and stop; NoCapacity = retry once with --wait 120 --no-wake, then ask;
-  InfraError = run lanq doctor --remote and report; TimedOut / WindowClosed = report; Cancelled = stop.
+  Before a heavy run: lanq health --needs <caps> --json, or the run with --dry-run (nothing is sent).
+- Run: lanq run --json --log-tail 60 --no-wake --needs <capability> -- <allowlisted command> 2>/dev/null
+  The JSON has logTail (the last 60 lines) and logPath (the whole log). Never paste a whole log.
+- stdout is one JSON object. Act on "status": Completed = passed; Failed = summarise the failures from logTail;
+  Rejected = report and stop; NoCapacity = if retryable is false, stop and ask; if true, run the wait step once,
+  then ask; InfraError = run lanq doctor --remote and report; TimedOut / WindowClosed = report; Cancelled = stop.
+- nextSteps: run a step's argv only if safeToRunUnattended is true, at most once. Otherwise report its reason.
+  An unknown action means ask the developer.
 - Never edit lanq's machines.yml, allowlists or SSH keys. Never pass permission-skipping flags.
-- Do not run lanq wake, lanq health --wake, lanq makeready, lanq unlock or lanq init unless asked.
+- Never run lanq makeready --setup, lanq makeready --add, any --yes, or lanq init.
+- Do not run lanq wake, lanq health --wake, lanq makeready, lanq unlock unless asked.
 - Never shard a command that is not idempotent. Retry at most once.
 ```
 
 ## The standard loop
 
 1. `lanq health --json`. Pick capabilities and, for a heavy job, a `size` that suits it (`--needs bigmem` if you tag
-   machines that way, or `--mem GB`).
-2. `lanq run --json --no-wake --needs <caps> [--dir D] [--fetch PATTERN] -- <command>`, stderr to a unique log file.
-   A long suite that splits: `--shards auto` (see [SHARDING.md](SHARDING.md)).
-3. Read the exit code, then `status`. Read the log tail only to explain a failure.
+   machines that way, or `--mem GB`). `lanq health --needs <caps> [--mem GB] --json` says per machine whether it
+   could take such a job now (`eligible`, `why`, `jobSlots`); `lanq run ... --dry-run --json` says which machine the
+   run would take, and why the others are out, without sending anything.
+2. `lanq run --json --log-tail 60 --no-wake --needs <caps> [--dir D] [--fetch PATTERN] -- <command>`, with stderr
+   dropped (the log is in `logTail` and at `logPath`). A long suite that splits: `--shards auto` (see
+   [SHARDING.md](SHARDING.md)).
+3. Read the exit code, then `status`, then `nextSteps`. Read `logTail` only to explain a failure.
 4. Report in a line or two: status, machine, and the failing tests or the message.
 
 ## Failure playbook
@@ -67,7 +77,8 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | --- | --- | --- | --- | --- |
 | `Failed` | job's code | The tests or build failed. | Summarise the failures from the tail; fix the code if that is the task. | Nothing, unless the failure looks environmental (a missing tool, a full disk). |
 | `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload, a config error. | Report the message. Stop. | Whether to allowlist the command or fix the config. |
-| `NoCapacity` | 75 | Every machine busy, held (hours, pause, memory, load) or lacking a `--needs` tag. | Retry once with `--wait 120 --no-wake`. | Whether to wait, wake a machine, or run locally. |
+| `NoCapacity`, `retryable: true` | 75 | Every machine busy, held (hours, pause, memory, load), asleep or unreachable. | Run the `wait` step from `nextSteps` once (the same run with `--wait 120`). | Whether to wait, wake a machine, or run locally. |
+| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, `--mem` is above every machine's RAM, git or tar is missing. lanq ended at once. | Stop. Report `excluded`. | Whether to add the capability or a machine, or run locally. |
 | `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote`; report its FAIL lines. No retry loop. | To fix the worker or the key setup. |
 | `TimedOut` | 124 | The job ran past `--timeout` (default 240 minutes). | Report it. | Whether a longer `--timeout` is fine. |
 | `WindowClosed` | 124 | The machine's allowed hours ended while the job ran. | Report it. | Whether to run it again later or elsewhere. |
@@ -80,7 +91,10 @@ A tool "not found" on a worker usually means a non-login ssh session does not se
 ## Waiting
 
 - Prefer `--wait SECONDS` over a polling loop. lanq waits for a free machine itself and checks every 15 seconds.
+- `retryable: false` on `NoCapacity` means waiting cannot help; do not retry at all.
 - Cap retries at 1. A second `NoCapacity` means the pool is busy or held; ask the developer.
+- The suggested `wait` and `retry` steps never do more than the run they follow: they keep `--no-wake`, and add it
+  when the run had `--wait 0`.
 - `--wait` above 0 can wake a sleeping PC as a last resort when it has a `wake:` setting. Keep `--no-wake` unless you
   have said waking is fine.
 - Never re-run a failed test suite in a loop. `--shard-retries` (at most 1 for an agent) only re-runs a shard whose
@@ -94,6 +108,9 @@ A tool "not found" on a worker usually means a non-login ssh session does not se
   never run a fetched file.
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.
 - `lanq makeready`, `lanq wake` and `lanq unlock` act on a PC that may belong to someone else. They stay with you.
+  `lanq makeready --setup` and `--add` (adding a machine, writing `machines.yml`) are yours alone; lanq never suggests
+  `--add` or `--yes`, and marks every `makeready` suggestion not safe unattended.
+- `--log-tail` puts the job's output in the JSON on stdout (sanitised). Ask for it only where that output may be read.
 
 ## bash and PowerShell
 
@@ -101,20 +118,18 @@ bash:
 
 ```bash
 lanq health --json | jq -r '.[] | select(.state == "ok") | "\(.name) free=\(.freeSlots) \(.size)"'
-log="${TMPDIR:-/tmp}/lanq-$(date +%s)-$$.log"
-out=$(lanq run --json --no-wake --needs dotnet -- dotnet test 2> "$log"); code=$?
+out=$(lanq run --json --log-tail 60 --no-wake --needs dotnet -- dotnet test 2>/dev/null); code=$?
 echo "exit=$code"; echo "$out" | jq -r '"\(.status) on \(.machine // "-"): \(.message)"'
-[ "$code" -ne 0 ] && tail -n 40 "$log"
+[ "$code" -ne 0 ] && echo "$out" | jq -r '.logTail[]?, "log: \(.logPath // "none")", (.nextSteps[] | "next: \(.action): \(.reason)")'
 ```
 
 PowerShell:
 
 ```powershell
 lanq health --json | Out-String | ConvertFrom-Json | Where-Object state -eq 'ok' | ForEach-Object { "$($_.name) free=$($_.freeSlots) $($_.size)" }
-$log = Join-Path $env:TEMP ("lanq-{0}-{1}.log" -f (Get-Date -Format yyyyMMdd-HHmmss), $PID)
-$r = lanq run --json --no-wake --needs dotnet -- dotnet test 2> $log | Out-String | ConvertFrom-Json; $code = $LASTEXITCODE
+$r = lanq run --json --log-tail 60 --no-wake --needs dotnet -- dotnet test 2>$null | Out-String | ConvertFrom-Json; $code = $LASTEXITCODE
 "exit=$code"; "$($r.status) on $($r.machine): $($r.message)"
-if ($code -ne 0) { Get-Content $log -Tail 40 }
+if ($code -ne 0) { $r.logTail; "log: $($r.logPath)"; $r.nextSteps | ForEach-Object { "next: $($_.action): $($_.reason)" } }
 ```
 
 More parsing examples (shards, `--fetch`, `makeready --all`) are in [JSON.md](JSON.md#parsing-tips).

@@ -23,6 +23,47 @@ public enum JobStatus
     WindowClosed,
 }
 
+/// <summary>Why a run was refused (Rejected, exit 2): what the caller can do about it differs (see Output/NextSteps.cs).</summary>
+public enum RejectKind
+{
+    /// <summary>Not on policy.allowed_commands or allowed_directories, or a permission-skipping flag: for the developer, never worked around.</summary>
+    Policy,
+
+    /// <summary>Possible secrets in the command line or the uncommitted changes (nothing was sent).</summary>
+    Secret,
+
+    /// <summary>Arguments cmd.exe shims would re-parse, and only Windows machines have the capabilities.</summary>
+    WindowsArgs,
+
+    /// <summary>The command line itself is unusable (no command, control characters, bad lanq options, a command the machine cannot run).</summary>
+    Arguments,
+
+    /// <summary>The config could not be found or loaded.</summary>
+    Config,
+}
+
+/// <summary>Where an InfraError (exit 70) came from.</summary>
+public enum InfraKind
+{
+    /// <summary>The repository could not be snapshotted (local git).</summary>
+    Snapshot,
+
+    /// <summary>A git bundle could not be built (local git).</summary>
+    Bundle,
+
+    /// <summary>The tar.gz archive could not be built (for example a path Windows cannot store) and no git machine can ever take the job.</summary>
+    Archive,
+
+    /// <summary>Upload or prepare on the worker failed (not a lost connection).</summary>
+    Prepare,
+
+    /// <summary>The worker stopped answering ssh during upload, prepare or the job (see <see cref="JobResult.MayStillRun"/>).</summary>
+    Connection,
+
+    /// <summary>Anything else (an unexpected exception).</summary>
+    Unexpected,
+}
+
 /// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
 /// <param name="MinMemGb">lanq run --mem: only machines that report at least this much available memory (GB).</param>
 /// <param name="Fetch">lanq run --fetch: files to bring back from the job's working folder after the job, or null.</param>
@@ -64,6 +105,24 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>True when the cleanup after the job finished on the worker (its process stopped, folder and slot removed).</summary>
     public bool CleanedUp { get; init; }
 
+    /// <summary>
+    /// NoCapacity only: false when every machine has a reason waiting cannot cure (see <see cref="Eligibility.IsPermanent"/>), true when
+    /// waiting or retrying may help (a busy, held or merely unreachable machine). Null for every other status.
+    /// </summary>
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: every machine that did not take the job and why, in config order. Null for every other status.</summary>
+    public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>The full path of the job's local log (see <see cref="JobLog.LogPathFor"/>), set once the job held a slot and the log was created; null otherwise.</summary>
+    public string? LogPath { get; init; }
+
+    /// <summary>Rejected only: why the run was refused. Null for every other status.</summary>
+    public RejectKind? RejectKind { get; init; }
+
+    /// <summary>InfraError only: where the error came from. Null for every other status.</summary>
+    public InfraKind? InfraKind { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -74,6 +133,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
         _ => 70,
     };
 }
+
+/// <summary>One machine that did not take a job: its name, the reason code (missing_capability, busy, ...), the reason for people, and whether waiting can never help.</summary>
+public sealed record ExcludedMachine(string Machine, string Reason, string Why, bool Permanent);
 
 public sealed partial class JobRunner(
     FleetConfig config,
@@ -92,6 +154,14 @@ public sealed partial class JobRunner(
 
     /// <summary>Last commit each git worker has fetched, per repository: the base for incremental bundles (in memory unless given a file).</summary>
     private readonly BaseStore bases = bases ?? new BaseStore(null);
+
+    private volatile string? _startedLogPath;
+
+    /// <summary>
+    /// The full path of the log of the job this runner started last (set as soon as the log file exists), or null when none was started:
+    /// a single run that was cancelled or broke after its job held a slot still has a log to point at.
+    /// </summary>
+    public string? StartedLogPath { get => _startedLogPath; private set => _startedLogPath = value; }
 
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
@@ -119,7 +189,8 @@ public sealed partial class JobRunner(
         var policy = JobPolicy.Validate(config.Policy, req.Argv, req.Directory);
         if (!policy.Ok)
         {
-            return new JobResult(jobId, JobStatus.Rejected, 2, null, policy.Reason!);
+            var badArguments = req.Argv.Count == 0 || req.Argv.Any(a => a.Any(char.IsControl));
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, policy.Reason!) { RejectKind = badArguments ? Jobs.RejectKind.Arguments : Jobs.RejectKind.Policy };
         }
 
         var commandFindings = SecretScanner.ScanText(string.Join(' ', req.Argv), "command line");
@@ -131,10 +202,43 @@ public sealed partial class JobRunner(
         // Arguments that cmd.exe shims would re-parse can still run on a Linux worker; refuse only when no non-Windows machine has
         // the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
-        return !windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs))
-            ? new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!)
-            : null;
+        if (!windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        {
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!) { RejectKind = Jobs.RejectKind.WindowsArgs };
+        }
+
+        // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
+        return NeverByConfig(req) is { } never ? NoCapacity(jobId, never, "") : null;
     }
+
+    /// <summary>
+    /// When no machine in the config has every capability the job needs: each machine judged from the config alone (never probed), all
+    /// permanently ruled out. Null when at least one machine has them.
+    /// </summary>
+    private List<Assessment>? NeverByConfig(JobRequest req) =>
+        config.Machines.Any(m => HasCapabilities(m, req.Needs))
+            ? null
+            : [.. config.Machines.Select(m => new Assessment(m, Unprobed(m), Exclusion.MissingCapability, Eligibility.Lacks(m, Eligibility.Missing(m, req.Needs)), true, 0, 0))];
+
+    /// <summary>
+    /// The per-shard command-line checks of lanq run --shards (<see cref="Precheck"/> on each shard's substituted arguments, in index order):
+    /// the first refusal with its message ("shard i/N: ..."), or null when every shard may run.
+    /// </summary>
+    private (string Message, JobResult Refused)? PrecheckShards(JobRequest template, IReadOnlyList<ShardInfo> shards)
+    {
+        foreach (var s in shards)
+        {
+            if (Precheck("shard", template with { Argv = s.Substitute(template.Argv), Shard = s }) is { } refused)
+            {
+                return ($"shard {s}: {refused.Message}", refused);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
+    private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
 
     /// <summary>
     /// Snapshots the repository once (under <paramref name="payloadId"/>) and scans it for secrets. Every job given the result shares its
@@ -142,25 +246,41 @@ public sealed partial class JobRunner(
     /// </summary>
     private async Task<(PreparedPayload? Prepared, JobResult? Failed)> PrepareAsync(string payloadId, JobRequest req, Action<string> emit, CancellationToken ct)
     {
-        JobPayload payload;
-        try
+        // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
+        var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
+        var (payload, failed) = await SnapshotAndScanAsync(payloadId, req, kinds, ct).ConfigureAwait(false);
+        if (payload is null)
         {
-            // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
-            var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
-            payload = await payloads.BuildAsync(payloadId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message));
+            return (null, failed);
         }
 
         var builds = new SemaphoreSlim(1, 1);
-        var prepared = new PreparedPayload(
+        return (new PreparedPayload(
             payloadId,
             payload,
             new LazyArchive(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, emit, builds),
             new LazyBundles(payloads, payloadId, req.RepoDir, scratchDir, payload.Sha, builds),
-            builds);
+            builds), null);
+    }
+
+    /// <summary>
+    /// Snapshots the repository (under <paramref name="payloadId"/>, through a throw-away index: the user's index, branches and working tree
+    /// are never touched, though git writes the snapshot's objects to the repository's object store) and scans the uncommitted changes, the
+    /// changed and committed file names and the package-manager configs for secrets. Builds no bundle, and an archive only when
+    /// <paramref name="kinds"/> asks for one up front. The payload, or the InfraError (70) or Rejected (2) result; nothing is left behind on a refusal.
+    /// </summary>
+    private async Task<(JobPayload? Payload, JobResult? Failed)> SnapshotAndScanAsync(string payloadId, JobRequest req, PayloadKinds kinds, CancellationToken ct)
+    {
+        JobPayload payload;
+        try
+        {
+            payload = await payloads.BuildAsync(payloadId, req.RepoDir, scratchDir, kinds, ct).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message) { InfraKind = Jobs.InfraKind.Snapshot });
+        }
+
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
@@ -168,11 +288,11 @@ public sealed partial class JobRunner(
             .ToList();
         if (findings.Count > 0)
         {
-            await prepared.DisposeAsync().ConfigureAwait(false);
+            TryDelete(payload.ArchivePath);
             return (null, Rejected(payloadId, findings));
         }
 
-        return (prepared, null);
+        return (payload, null);
     }
 
     /// <summary>A snapshot shared by the jobs of one lanq run (one job, or every shard): deleting it removes the snapshot files and every bundle and archive built.</summary>
@@ -196,7 +316,7 @@ public sealed partial class JobRunner(
         }
     }
 
-    internal const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
+    internal const string WindowsUnsafeHold = Scheduler.WindowsUnsafeHold;
 
     /// <summary>The worker enforces the job limit itself (timeout on Linux, a deadline wait on Windows) this long after lanq would stop it.</summary>
     internal static readonly TimeSpan WorkerDeadlineMargin = TimeSpan.FromMinutes(1);
@@ -235,78 +355,68 @@ public sealed partial class JobRunner(
             : (line, null);
     }
 
-    /// <summary>lanq run --mem: a machine must report at least that much available memory; one that cannot report it is not trusted.</summary>
-    private static MachineHealth WithMemRequirement(MachineHealth h, double? needGb) =>
-        needGb is not { } need || !h.Reachable || h.Hold is not null || h.MemFreeGb >= need
-            ? h
-            : h with
-            {
-                HoldKind = HoldKind.Job,
-                Hold = h.MemFreeGb is { } free
-                    ? string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, --mem needs {need:0.0} GB")
-                    : "free memory unknown (--mem needs the machine to report it)",
-            };
-
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
 
     /// <summary>Why a machine did not take the job, for the NoCapacity message: its hold or ssh error, a missing capability, or no free slot.</summary>
-    internal static string WhyNot(Machine m, MachineHealth h, IReadOnlyCollection<string> needs)
+    internal static string WhyNot(Assessment a) => a.Why ?? "no free slot when the job tried to start (busy, or ssh failed)";
+
+    /// <summary>The start of the NoCapacity message when no machine can ever take the job (every machine has a permanent reason).</summary>
+    internal const string NeverMessage = "No eligible machine, and no machine can ever take this job as configured (waiting will not help).";
+
+    /// <summary>
+    /// The NoCapacity result after the last look at the machines: retryable unless every machine has a permanent reason (then the message
+    /// starts with <see cref="NeverMessage"/>), and every machine listed (one that was eligible but whose slot was taken first counts as busy).
+    /// </summary>
+    private static JobResult NoCapacity(string jobId, IReadOnlyList<Assessment> assessed, string note)
     {
-        if (!h.Reachable)
+        var never = assessed.All(a => a.Permanent);
+        var held = string.Join("; ", assessed.Select(a => $"{a.Machine.Name}: {WhyNot(a)}"));
+        return new JobResult(jobId, JobStatus.NoCapacity, 75, null, (never ? NeverMessage : "No eligible machine.") + " " + held + note)
         {
-            // The ssh error says what to fix (host key, key, sshd); the bare hold would only say "unreachable".
-            return "unreachable: " + (h.Error ?? h.Hold ?? "no answer");
-        }
-
-        if (h.Hold is { } hold)
-        {
-            return hold;
-        }
-
-        var missing = needs.Where(n => !m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
-        if (missing.Count > 0)
-        {
-            return $"lacks {string.Join(", ", missing)} (capabilities: {string.Join(", ", m.Capabilities)})";
-        }
-
-        return h.SlotsUsed >= m.MaxJobs
-            ? string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs})")
-            : "no free slot when the job tried to start (busy, or ssh failed)";
+            Retryable = !never,
+            Excluded = Excluded(assessed),
+        };
     }
+
+    internal static List<ExcludedMachine> Excluded(IEnumerable<Assessment> assessed) =>
+        [.. assessed.Select(a => new ExcludedMachine(a.Machine.Name, a.Code ?? Eligibility.Code(Exclusion.Busy)!, WhyNot(a), a.Permanent))];
 
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct)
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
-        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var needs = new JobNeeds(req.Needs, req.MinMemGb, !JobPolicy.ValidateForWindows(req.Argv).Ok);
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
         while (true)
         {
-            var (probes, health) = await ProbeForJobAsync(req, windowsUnsafe, ct).ConfigureAwait(false);
-            var ranked = Scheduler.Rank(health, req.Needs).ToList();
-            foreach (var machine in ranked)
+            var (probes, assessed) = await ProbeForJobAsync(needs, ct).ConfigureAwait(false);
+            var ranked = Scheduler.Rank(assessed);
+            foreach (var a in ranked)
             {
-                var windowEnds = health.First(h => ReferenceEquals(h.Item1, machine)).Item2.WindowEndsUtc;
-                var result = await TryOnMachine(jobId, req, prepared, machine, windowEnds, gitCanEverTakeIt, output, ct).ConfigureAwait(false);
+                var result = await TryOnMachine(jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, output, ct).ConfigureAwait(false);
                 if (result is not null)
                 {
                     return result;
                 }
             }
 
+            // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now.
+            if (assessed.All(a => a.Permanent))
+            {
+                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
+            }
+
             // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
             // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
             if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
             {
-                await WakeBestSleeperAsync(req, probes, health, windowsUnsafe, archive, ct).ConfigureAwait(false);
+                await WakeBestSleeperAsync(needs, probes, assessed, archive, ct).ConfigureAwait(false);
             }
 
             if (deadline.Elapsed >= req.Wait)
             {
-                var held = string.Join("; ", health.Select(h => $"{h.Item1.Name}: {WhyNot(h.Item1, h.Item2, req.Needs)}"));
-                var archiveNote = archive.Failure is null ? "" : " Archive build failed: " + archive.Failure;
-                return new JobResult(jobId, JobStatus.NoCapacity, 75, null, "No eligible machine. " + held + archiveNote);
+                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
             }
 
             output("[lanq] no eligible machine; waiting 15s");
@@ -319,32 +429,35 @@ public sealed partial class JobRunner(
         config.Machines.Any(m => m.Transfer == TransferMode.Git && HasCapabilities(m, req.Needs));
 
     /// <summary>
-    /// Probes every machine at once (WhenAll keeps the config order whatever order the answers arrive in), then holds the machines this job
-    /// cannot use now: Windows ones for arguments unsafe there, and ones short of --mem.
+    /// Probes every machine at once (WhenAll keeps the config order whatever order the answers arrive in), then judges each one for this job
+    /// (<see cref="Scheduler.Assess"/>): the raw probe results, and the assessments in config order.
     /// </summary>
-    private async Task<(MachineHealth[] Probes, List<(Machine, MachineHealth)> Health)> ProbeForJobAsync(JobRequest req, bool windowsUnsafe, CancellationToken ct)
+    private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(JobNeeds needs, CancellationToken ct)
     {
         var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
-        var health = config.Machines.Zip(probes)
-            .Select(h => windowsUnsafe && h.First.Os == MachineOs.Windows ? (h.First, h.Second with { Hold = WindowsUnsafeHold, HoldKind = HoldKind.Job }) : h)
-            .Select(h => (h.First, WithMemRequirement(h.Item2, req.MinMemGb)))
-            .ToList();
-        return (probes, health);
+        return (probes, Scheduler.Assess(config.Machines.Zip(probes), needs));
     }
 
     /// <summary>
-    /// Wakes at most one machine: the first by name among those that look asleep, have a wake: setting, are inside their hours and could take
-    /// the job by everything knowable without a probe (capabilities, Windows-safe arguments, archive build). A sleeper's memory and load are
-    /// unknown, so they are not judged. The decision uses the raw probe results (not the job-adjusted holds in <paramref name="health"/>).
+    /// Whether a machine that looks asleep is worth waking for a job, by everything knowable without a probe: it has a wake: setting, the
+    /// capabilities, is not Windows for arguments unsafe there, and is not an archive machine when the archive could not be built. A sleeper's
+    /// memory and load are unknown, so they are not judged. <paramref name="raw"/> is the probe result as returned (no job holds).
     /// </summary>
-    private async Task WakeBestSleeperAsync(
-        JobRequest req, MachineHealth[] probes, List<(Machine, MachineHealth)> health, bool windowsUnsafe, LazyArchive archive, CancellationToken ct)
+    internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
+        m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
+        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+
+    /// <summary>
+    /// Wakes at most one machine: the first by name among those <see cref="CouldWakeFor"/> allows that are inside their hours. The decision uses
+    /// the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the new result in <paramref name="probes"/>
+    /// and is judged again in <paramref name="assessed"/>.
+    /// </summary>
+    private async Task WakeBestSleeperAsync(JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, CancellationToken ct)
     {
-        foreach (var i in Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal))
+        foreach (var i in WakeOrder())
         {
             var m = config.Machines[i];
-            if (m.Wake is null || !probes[i].LooksAsleep || !HasCapabilities(m, req.Needs)
-                || (windowsUnsafe && m.Os == MachineOs.Windows) || (m.Transfer == TransferMode.Archive && archive.Failure is not null))
+            if (!CouldWakeFor(m, probes[i], needs, archive.Failure is not null))
             {
                 continue;
             }
@@ -355,14 +468,18 @@ public sealed partial class JobRunner(
                 continue; // not allowed now (outside its hours, already woken)
             }
 
-            health[i] = (m, after);
+            probes[i] = after;
+            assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
             if (probe.Waker!.AnyPending)
             {
-                output($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
+                output($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
                 return;
             }
         }
     }
+
+    /// <summary>The order sleepers are considered for a wake: the indexes of the config's machines, by name (ordinal).</summary>
+    private IEnumerable<int> WakeOrder() => Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal);
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
     /// <param name="emit">Where this job's lines go (lanq's own and the job's output, already sanitised).</param>
@@ -389,7 +506,7 @@ public sealed partial class JobRunner(
                 // does the archive failure end the job (70) instead of waiting for a machine that cannot help.
                 if (!gitCanEverTakeIt)
                 {
-                    return new JobResult(jobId, JobStatus.InfraError, 70, null, message);
+                    return new JobResult(jobId, JobStatus.InfraError, 70, null, message) { InfraKind = Jobs.InfraKind.Archive };
                 }
 
                 if (archive.MarkReported())
@@ -419,6 +536,7 @@ public sealed partial class JobRunner(
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         var logFile = new StreamWriter(logPath, append: false);
+        StartedLogPath = Path.GetFullPath(logPath);
         var logGate = new object();
         var logOpen = true;
         void OnLine(string line)
@@ -463,7 +581,7 @@ public sealed partial class JobRunner(
             }
 
             log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
-            return result with { CleanedUp = cleanedUp };
+            return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
         finally
         {
@@ -488,7 +606,7 @@ public sealed partial class JobRunner(
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
-            return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message);
+            return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message) { RejectKind = Jobs.RejectKind.Arguments };
         }
 
         // One upload-and-prepare at a time per machine within this lanq: shards landing on one worker would otherwise race on its repository
@@ -511,6 +629,7 @@ public sealed partial class JobRunner(
                 "Could not prepare the job on the machine." + (step.TimedOut ? " (timed out)" : ""))
             {
                 ConnectionLost = step.IsSshFailure && !step.TimedOut,
+                InfraKind = step.IsSshFailure && !step.TimedOut ? Jobs.InfraKind.Connection : Jobs.InfraKind.Prepare,
             };
         }
 
@@ -523,9 +642,14 @@ public sealed partial class JobRunner(
         if (windowLimit is { } left && (left <= TimeSpan.Zero || left < TimeSpan.FromMinutes(config.Policy.MinWindowMinutes)))
         {
             // Upload and prepare used up the window: hold like a closing window (cleanup runs in the caller), never a job stopped after a second.
-            return new JobResult(jobId, JobStatus.NoCapacity, 75, machine.Name, string.Create(
+            var why = string.Create(
                 CultureInfo.InvariantCulture,
-                $"{machine.Name}: window closing ({Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left of its allowed hours plus grace after upload and prepare); the job was not started"));
+                $"window closing ({Math.Max(0, Math.Ceiling(left.TotalMinutes)):0} min left of its allowed hours plus grace after upload and prepare); the job was not started");
+            return new JobResult(jobId, JobStatus.NoCapacity, 75, machine.Name, $"{machine.Name}: {why}")
+            {
+                Retryable = true,
+                Excluded = [new ExcludedMachine(machine.Name, Eligibility.Code(Exclusion.WindowClosing)!, why, false)],
+            };
         }
 
         if (byWindow)
@@ -593,7 +717,12 @@ public sealed partial class JobRunner(
         }
         else if (sshFailed)
         {
-            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.") { ConnectionLost = true, MayStillRun = true };
+            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.")
+            {
+                ConnectionLost = true,
+                MayStillRun = true,
+                InfraKind = Jobs.InfraKind.Connection,
+            };
         }
         else
         {
@@ -649,14 +778,14 @@ public sealed partial class JobRunner(
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
-                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message));
+                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message) { InfraKind = Jobs.InfraKind.Bundle });
             }
         }
 
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         if (step.Ok && local is null)
         {
-            return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine."));
+            return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine.") { InfraKind = Jobs.InfraKind.Prepare });
         }
 
         if (step.Ok)
@@ -674,7 +803,7 @@ public sealed partial class JobRunner(
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
-                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message));
+                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message) { InfraKind = Jobs.InfraKind.Bundle });
             }
 
             step = await UploadAndPrepare(jobId, prepared, machine, local, onLine, ct).ConfigureAwait(false);
@@ -895,7 +1024,7 @@ public sealed partial class JobRunner(
         var hint = findings.Any(f => f.Rule == SecretScanner.CommittedFileRule)
             ? " Committed files named like secrets are refused because the bundle or archive would carry them; rename samples to *.example or keep them under a fixtures/ or testdata/ folder."
             : "";
-        return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.");
+        return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.") { RejectKind = Jobs.RejectKind.Secret };
     }
 
     /// <summary>

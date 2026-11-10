@@ -97,6 +97,13 @@ public sealed class UdpMagicPacketSender : IMagicPacketSender
     }
 }
 
+/// <summary>A sender that never sends: lanq run --dry-run only asks the wake rules (<see cref="WakeService.Evaluate"/>), and a packet would be a bug.</summary>
+public sealed class RefusingMagicPacketSender : IMagicPacketSender
+{
+    public Task SendAsync(byte[] packet, IPAddress broadcast, int port, CancellationToken ct) =>
+        throw new InvalidOperationException("A dry run never sends a Wake-on-LAN packet.");
+}
+
 public enum WakeDecision
 {
     Wake,

@@ -39,11 +39,11 @@ public static partial class Cli
             - tests
 
         machines:
-          # Replace this example with a real worker: `lanq makeready --ssh user@host --os linux` prints an entry to paste.
+          # Replace this example with real workers: `lanq makeready --ssh user@host --os linux --add --name NAME` adds a ready one below.
           - name: example-01
             os: linux
             ssh: build@10.20.30.11     # user@host
-            work_root: /srv/lanq       # absolute, forward slashes, no spaces
+            work_root: /srv/lq         # absolute, forward slashes, no spaces
             capabilities: [dotnet, linux]
             max_jobs: 1                # 1 under 6 GB of RAM, 2 under 12 GB; lanq makeready suggests it
             transfer: git              # git (default) needs git on the worker; archive needs only tar
@@ -53,7 +53,7 @@ public static partial class Cli
           #   os: windows
           #   ssh: build@10.20.30.21
           #   key_env: LANQ_KEY          # NAME of an environment variable holding your key file's path
-          #   work_root: C:/lanq
+          #   work_root: C:/lq
           #   capabilities: [dotnet, windows]
           #   max_jobs: 1
           #   transfer: archive          # the built-in tar.exe is enough; use git if git is installed
@@ -65,7 +65,7 @@ public static partial class Cli
           # - name: family-linux
           #   os: linux
           #   ssh: build@10.20.30.31
-          #   work_root: /srv/lanq
+          #   work_root: /srv/lq
           #   capabilities: [dotnet, node, linux]
           #   max_jobs: 1
           #   allowed_hours:             # the worker's own clock; a window may cross midnight
@@ -87,6 +87,7 @@ public static partial class Cli
         ParsedArgs p, string currentDir, Func<string, string?> env, bool windows, TextWriter stdout, TextWriter stderr, Action? beforeWrite = null)
     {
         var path = Path.GetFullPath(p.ConfigPath ?? "machines.yml", currentDir);
+        var exists = $"{path} already exists; lanq init never overwrites a file. Edit it, or pass --config with a new path.";
         async Task<int> Done(string status, int code, string message, IEnumerable<string>? steps = null)
         {
             var people = p.Json || code != 0 ? stderr : stdout;
@@ -96,16 +97,18 @@ public static partial class Cli
                 await people.WriteLineAsync(line).ConfigureAwait(false);
             }
 
+            // A regular file already there: check it with lanq doctor --config (a link or folder needs another --config path).
+            var next = NextSteps.ForInit(status, path, JobRunner.SafeLine(message), fileExists: message == exists && File.Exists(path) && LinkTarget(path) is null);
+            await NextSteps.WriteAsync(stderr, next).ConfigureAwait(false);
             if (p.Json)
             {
-                await stdout.WriteLineAsync(JsonSerializer.Serialize(new InitJson(status, code, path, JobRunner.SafeLine(message)), LanqJson.Default.InitJson))
+                await stdout.WriteLineAsync(JsonSerializer.Serialize(new InitJson(status, code, path, JobRunner.SafeLine(message)) { NextSteps = next }, LanqJson.Default.InitJson))
                     .ConfigureAwait(false);
             }
 
             return code;
         }
 
-        var exists = $"{path} already exists; lanq init never overwrites a file. Edit it, or pass --config with a new path.";
         // A link counts as taken even when its target is missing: writing through it would create a file wherever it points.
         if (LinkTarget(path) is { } target)
         {
@@ -170,14 +173,16 @@ public static partial class Cli
         var config = isDefault ? "" : " --config " + (path.Contains(' ', StringComparison.Ordinal) ? "\"" + path + "\"" : path);
         yield return "";
         yield return "Next steps:";
-        yield return "  1. On each worker, install and start the OpenSSH server, create a build user and add your public key:";
-        yield return "     docs/WORKERS.md (https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md); a team walk-through is in";
-        yield return "     docs/TEAM-QUICKSTART.md.";
-        yield return "  2. Connect once to each worker so its host key is in known_hosts: ssh user@host";
-        yield return "  3. Check each worker and get its machines.yml entry: lanq makeready --ssh user@host --os windows|linux";
-        yield return $"  4. Paste the entries under machines: in {path}, replacing example-01.";
-        yield return $"  5. Check your setup and every worker: lanq doctor --remote{config}";
-        yield return $"  6. Check them all at once later: lanq makeready --all{config}";
+        yield return "  1. For each worker, print its one-time setup (the build user, your public key, the work folder, the firewall, password";
+        yield return "     logins off and the first connection with its fingerprint check); lanq connects to nothing:";
+        yield return "       lanq makeready --ssh user@host --os windows|linux --setup";
+        yield return "     The PC's owner runs the worker part on that PC. Every step is explained in docs/WORKERS.md and docs/TEAM-QUICKSTART.md";
+        yield return "     (https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md).";
+        yield return $"  2. Check each worker and, once it is ready, add it to {path} (it shows the lines and asks first):";
+        yield return $"       lanq makeready --ssh user@host --os windows|linux --add --name NAME{config}";
+        yield return $"  3. Delete example-01 from {path}.";
+        yield return $"  4. Check your setup and every worker: lanq doctor --remote{config}";
+        yield return $"  5. Check them all at once later: lanq makeready --all{config}";
         if (!isDefault)
         {
             yield return "";

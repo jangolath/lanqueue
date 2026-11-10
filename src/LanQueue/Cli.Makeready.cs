@@ -54,14 +54,34 @@ public static partial class Cli
     /// every configured machine) and reads its report. One machine: exit 0 worker-ready, 1 not ready, 2 bad arguments, 70 ssh or an unusable
     /// report, 75 machine paused or outside its allowed hours (unless --force). --all: see <see cref="MakereadyAll"/>.
     /// </summary>
+    /// <param name="host">This computer's environment, ssh-agent and terminal for --setup and --add (tests replace it); null: the real one.</param>
     internal static async Task<int> Makeready(
-        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct,
+        MakereadyHost? host = null)
     {
+        if (p.Setup)
+        {
+            return await MakereadySetup(p, host ?? MakereadyHost.Real(stderr), stdout, stderr).ConfigureAwait(false);
+        }
+
+        if (p.Add)
+        {
+            return await MakereadyAdd(p, host ?? MakereadyHost.Real(stderr), ssh, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
+        var failed = new MakereadyFailed();
+        var again = SuggestedCommand.Makeready(p.Target, p.ConfigPath, p.SshTarget, p.Os, p.KeyEnv);
         if (!p.Json)
         {
-            return p.All
-                ? await MakereadyAll(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false)
-                : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false);
+            var result = p.All
+                ? await MakereadyAll(p, loadConfig, ssh, probe, stdout, stderr, ct, failed).ConfigureAwait(false)
+                : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct, failed).ConfigureAwait(false);
+            if (failed.Kind is { } kind)
+            {
+                await NextSteps.WriteAsync(stderr, NextSteps.ForMakereadyError(kind, failed.Message, again, p.ConfigPath, SetupStep(p, failed))).ConfigureAwait(false);
+            }
+
+            return result;
         }
 
         // --json: stdout is exactly one object on every path: the validated report (exit 0 or 1), the --all summary, or
@@ -72,20 +92,22 @@ public static partial class Cli
         try
         {
             code = p.All
-                ? await MakereadyAll(p, loadConfig, ssh, probe, body, errors, ct).ConfigureAwait(false)
-                : await MakereadyCore(p, loadConfig, ssh, probe, body, errors, ct).ConfigureAwait(false);
+                ? await MakereadyAll(p, loadConfig, ssh, probe, body, errors, ct, failed).ConfigureAwait(false)
+                : await MakereadyCore(p, loadConfig, ssh, probe, body, errors, ct, failed).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             errors.WriteLine("cancelled (Ctrl+C)");
             body.GetStringBuilder().Clear();
             code = 130;
+            failed.Set(NextSteps.MakereadyFailure.Cancelled);
         }
         catch (Exception ex)
         {
             errors.WriteLine(JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
             body.GetStringBuilder().Clear();
             code = 70;
+            failed.Set(NextSteps.MakereadyFailure.Unexpected);
         }
 
         var text = errors.ToString();
@@ -96,12 +118,46 @@ public static partial class Cli
         }
         else
         {
-            var message = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
+            // The single machine's report stays the script's lanq-makeready/v1 report exactly; only this error object carries nextSteps.
+            var message = LastLine(text);
             var status = code switch { 2 => "Rejected", 75 => "Held", 130 => "Cancelled", _ => "InfraError" };
-            await WriteJsonError("makeready", status, code, message, stdout).ConfigureAwait(false);
+            var kind = failed.Kind ?? code switch
+            {
+                2 => NextSteps.MakereadyFailure.Arguments,
+                75 => NextSteps.MakereadyFailure.Held,
+                130 => NextSteps.MakereadyFailure.Cancelled,
+                _ => NextSteps.MakereadyFailure.Unexpected,
+            };
+            var steps = NextSteps.ForMakereadyError(kind, message, again, p.ConfigPath, SetupStep(p, failed));
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+            await WriteJsonError("makeready", status, code, message, stdout, steps).ConfigureAwait(false);
         }
 
         return code;
+
+        static string LastLine(string text) => text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
+    }
+
+    /// <summary>lanq makeready --ssh ... --setup as a next step, when the worker refused the key or its host key is unknown (never for a configured machine).</summary>
+    private static SuggestedCommand? SetupStep(ParsedArgs p, MakereadyFailed failed) =>
+        failed.SetupWouldHelp && p.SshTarget is { } target && p.Os is { } os ? SuggestedCommand.Setup(target, os, p.KeyEnv) : null;
+
+    /// <summary>Why lanq makeready ended without a report (set where that happens; null when there was a report or the --all table).</summary>
+    private sealed class MakereadyFailed
+    {
+        public NextSteps.MakereadyFailure? Kind { get; private set; }
+
+        /// <summary>ssh failed because the key was refused or the host key is unknown (see <see cref="SshErrors.SetupWouldHelp"/>).</summary>
+        public bool SetupWouldHelp { get; set; }
+
+        /// <summary>The line lanq printed about it (sanitised).</summary>
+        public string Message { get; private set; } = "";
+
+        public void Set(NextSteps.MakereadyFailure kind, string? message = null)
+        {
+            Kind = kind;
+            Message = JobRunner.SafeLine(message ?? "");
+        }
     }
 
     /// <summary>
@@ -109,7 +165,7 @@ public static partial class Cli
     /// 70 unreachable or unusable report, 75 held), <paramref name="Message"/> the line it prints on stderr when there is no report, and
     /// <paramref name="Reason"/> the same without the machine's name (for the --all table).
     /// </summary>
-    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false);
+    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false, bool SetupWouldHelp = false);
 
     /// <summary>
     /// Scans one machine. With <paramref name="policy"/> (a configured machine) and without <paramref name="force"/>, a health probe first:
@@ -155,7 +211,7 @@ public static partial class Cli
             var why = JobRunner.SafeLine(r.TimedOut
                 ? "timed out after " + ProcessSshClient.Describe(MakereadyTimeout)
                 : "ssh failed: " + SshErrors.Explain(r.ErrorOutput, machine.Ssh));
-            return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why);
+            return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why, SetupWouldHelp: !r.TimedOut && SshErrors.SetupWouldHelp(r.ErrorOutput));
         }
 
         try
@@ -174,7 +230,7 @@ public static partial class Cli
     }
 
     private static async Task<int> MakereadyCore(
-        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, MakereadyFailed failed)
     {
         Machine machine;
         Machine? configured = null;
@@ -182,6 +238,7 @@ public static partial class Cli
         if ((p.Target is null) == (p.SshTarget is null) || (p.SshTarget is null) != (p.Os is null))
         {
             await stderr.WriteLineAsync(MakereadyUsage).ConfigureAwait(false);
+            failed.Set(NextSteps.MakereadyFailure.Arguments, MakereadyUsage);
             return 2;
         }
 
@@ -189,11 +246,13 @@ public static partial class Cli
         {
             if (!ConfigLoader.IsValidSshTarget(target))
             {
-                await stderr.WriteLineAsync("--ssh must be user@host (no leading '-', no spaces).").ConfigureAwait(false);
+                const string BadTarget = "--ssh must be user@host (no leading '-', no spaces).";
+                await stderr.WriteLineAsync(BadTarget).ConfigureAwait(false);
+                failed.Set(NextSteps.MakereadyFailure.Arguments, BadTarget);
                 return 2;
             }
 
-            machine = new Machine { Name = target, Os = p.Os!.Value, Ssh = target, WorkRoot = p.Os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
+            machine = AdHocMachine(target, p.Os!.Value, p.KeyEnv);
         }
         else
         {
@@ -205,11 +264,13 @@ public static partial class Cli
             catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
             {
                 await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+                failed.Set(NextSteps.MakereadyFailure.Config, ex.Message);
                 return 2;
             }
 
             if (FindMachine(config, p.Target, "makeready", stderr) is not { } m)
             {
+                failed.Set(NextSteps.MakereadyFailure.Arguments, "name a machine in the config: " + string.Join(", ", config.Machines.Select(x => x.Name)));
                 return 2;
             }
 
@@ -222,6 +283,10 @@ public static partial class Cli
         if (scan.Report is not { } report)
         {
             await stderr.WriteLineAsync(scan.Message).ConfigureAwait(false);
+            failed.Set(
+                scan.Code == 75 ? NextSteps.MakereadyFailure.Held : scan.Unusable ? NextSteps.MakereadyFailure.Unusable : NextSteps.MakereadyFailure.Unreachable,
+                scan.Message);
+            failed.SetupWouldHelp = scan.SetupWouldHelp;
             return scan.Code;
         }
 
@@ -231,7 +296,7 @@ public static partial class Cli
         }
         else
         {
-            foreach (var line in MakereadyText(report, name, configured, p.SshTarget))
+            foreach (var line in MakereadyText(report, name, configured, p.SshTarget, keyEnv: p.KeyEnv))
             {
                 await stdout.WriteLineAsync(JobRunner.SafeLine(line)).ConfigureAwait(false);
             }
@@ -240,8 +305,13 @@ public static partial class Cli
         return scan.Code;
     }
 
+    /// <summary>A PC that is not in the config yet (lanq makeready --ssh): its key from ssh-agent, or from --key-env (as key_env).</summary>
+    private static Machine AdHocMachine(string target, MachineOs os, string? keyEnv) =>
+        new() { Name = target, Os = os, Ssh = target, KeyEnv = keyEnv, WorkRoot = os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
+
     private const string MakereadyUsage =
-        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux | lanq makeready --all [--json] [--force]";
+        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--setup | --add --name NAME [--yes]] "
+        + "| lanq makeready --all [--json] [--force]";
 
     /// <summary>How many machines lanq makeready --all scans at once.</summary>
     internal const int MakereadyParallelism = 4;
@@ -255,12 +325,13 @@ public static partial class Cli
     /// Exit codes: see <see cref="MakereadyAllExitCode"/>; 2 bad arguments or config; 130 Ctrl+C.
     /// </summary>
     private static async Task<int> MakereadyAll(
-        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, MakereadyFailed failed)
     {
         if (p.Target is not null || p.SshTarget is not null || p.Os is not null)
         {
-            await stderr.WriteLineAsync("lanq makeready --all checks every machine in the config; it takes no machine name and no --ssh or --os.")
-                .ConfigureAwait(false);
+            const string AllTakesNoMachine = "lanq makeready --all checks every machine in the config; it takes no machine name and no --ssh or --os.";
+            await stderr.WriteLineAsync(AllTakesNoMachine).ConfigureAwait(false);
+            failed.Set(NextSteps.MakereadyFailure.Arguments, AllTakesNoMachine);
             return 2;
         }
 
@@ -272,6 +343,7 @@ public static partial class Cli
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            failed.Set(NextSteps.MakereadyFailure.Config, ex.Message);
             return 2;
         }
 
@@ -291,11 +363,14 @@ public static partial class Cli
 
         var scans = await Task.WhenAll(config.Machines.Select(Scanned)).ConfigureAwait(false);
         var rows = config.Machines.Zip(scans).Select(x => MakereadyRow(x.First, x.Second)).ToList();
+        rows = [.. rows.Select(r => r with { NextSteps = NextSteps.ForMakereadyRow(r.Machine, r.Verdict, r.Problem, p.ConfigPath) })];
         var code = MakereadyAllExitCode(rows);
+        var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
+        var next = NextSteps.ForMakereadyAll(status, rows, p.ConfigPath);
+        await NextSteps.WriteAsync(stderr, next).ConfigureAwait(false);
         if (p.Json)
         {
-            var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(new MakereadyAllJson(status, code, rows), MakereadyAllJsonContext.Default.MakereadyAllJson))
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(new MakereadyAllJson(status, code, rows) { NextSteps = next }, MakereadyAllJsonContext.Default.MakereadyAllJson))
                 .ConfigureAwait(false);
             return code;
         }
@@ -399,7 +474,11 @@ public static partial class Cli
     }
 
     /// <summary>The human report. Every string from the worker is sanitised by the caller, line by line; nothing from it is executed.</summary>
-    private static IEnumerable<string> MakereadyText(MakereadyReport report, string name, Machine? configured, string? sshTarget)
+    /// <param name="entryName">The entry's name (lanq makeready --add --name); null: the configured name, else the report's suggestion.</param>
+    /// <param name="keyEnv">--key-env, written into the entry as key_env.</param>
+    /// <param name="withEntry">False for --add, which shows the exact lines it writes instead.</param>
+    private static IEnumerable<string> MakereadyText(
+        MakereadyReport report, string name, Machine? configured, string? sshTarget, string? entryName = null, string? keyEnv = null, bool withEntry = true)
     {
         var v = report.Verdicts!;
         yield return $"lanq makeready {name} (lanq-makeready {report.Tool?.Version ?? "?"}, read-only; host {report.Host?.Os} {report.Host?.Arch})";
@@ -470,11 +549,14 @@ public static partial class Cli
             yield return "  configured, not checked by lanq-makeready: " + List(mine.Where(c => !MakereadyKnownCapabilities.Contains(c)));
         }
 
-        yield return "";
-        yield return "Suggested machines.yml entry (confirm every value):";
-        foreach (var line in SuggestedEntry(report.SuggestedMachine!, configured, sshTarget))
+        if (withEntry)
         {
-            yield return line;
+            yield return "";
+            yield return "Suggested machines.yml entry (confirm every value):";
+            foreach (var line in SuggestedEntry(report.SuggestedMachine!, configured, sshTarget, entryName, keyEnv))
+            {
+                yield return line;
+            }
         }
 
         yield return "";
@@ -486,45 +568,60 @@ public static partial class Cli
 
     private static string List(IEnumerable<string> items) => string.Join(", ", items) is { Length: > 0 } s ? s : "none";
 
-    /// <summary>A machines.yml entry built from the report's suggestion; values that do not look right are left as placeholders.</summary>
-    private static IEnumerable<string> SuggestedEntry(MakereadySuggestion s, Machine? configured, string? sshTarget)
+    /// <summary>A machines.yml entry built from the report's suggestion: the <c>machines:</c> header, then <see cref="SuggestedItem"/>.</summary>
+    private static IEnumerable<string> SuggestedEntry(MakereadySuggestion s, Machine? configured, string? sshTarget, string? entryName = null, string? keyEnv = null) =>
+        SuggestedItem(s, configured, sshTarget, entryName, keyEnv) is { } item
+            ? ["machines:", .. item]
+            : ["# This OS cannot be a lanq worker (workers are Windows or Linux)."];
+
+    /// <summary>
+    /// One machine's lines (the dash at column 2, its keys at column 4), or null when the report's OS cannot be a worker. Values that do not
+    /// look right are left as placeholders. lanq makeready --add writes exactly these lines (re-indented to the file's own items).
+    /// </summary>
+    private static List<string>? SuggestedItem(MakereadySuggestion s, Machine? configured, string? sshTarget, string? entryName, string? keyEnv)
     {
         if (s.Os is not ("windows" or "linux"))
         {
-            yield return "# This OS cannot be a lanq worker (workers are Windows or Linux).";
-            yield break;
+            return null;
         }
 
         var caps = (s.Capabilities ?? []).Where(c => c is not null && CapabilityNameRegex().IsMatch(c)).Distinct(StringComparer.Ordinal);
-        var name = configured?.Name ?? (s.Name is { } n && MachineNameRegex().IsMatch(n) ? n : "old-pc");
+        var name = entryName ?? configured?.Name ?? (s.Name is { } n && MachineNameRegex().IsMatch(n) ? n : "old-pc");
         var ssh = configured?.Ssh ?? sshTarget;
-        yield return "machines:";
-        yield return $"  - name: {Yaml(name)}";
-        yield return $"    os: {s.Os}";
-        yield return ssh is not null ? $"    ssh: {Yaml(ssh)}" : $"    ssh: {Yaml(s.Ssh ?? "user@host.lan")}   # placeholder: confirm user and host name";
-        yield return $"    work_root: {Yaml(configured?.WorkRoot ?? s.WorkRoot ?? "")}";
-        yield return $"    capabilities: [{string.Join(", ", caps)}]";
-        yield return $"    max_jobs: {Math.Clamp(s.MaxJobs, 1, 64).ToString(CultureInfo.InvariantCulture)}";
-        if (s.MinFreeMemGb is { } minFree && double.IsFinite(minFree) && minFree is >= 0 and <= 1024)
+        List<string> lines = [];
+        lines.Add($"  - name: {Yaml(name)}");
+        lines.Add($"    os: {s.Os}");
+        lines.Add(ssh is not null ? $"    ssh: {Yaml(ssh)}" : $"    ssh: {Yaml(s.Ssh ?? "user@host.lan")}   # placeholder: confirm user and host name");
+        if (keyEnv is not null)
         {
-            yield return $"    min_free_mem_gb: {minFree.ToString("0.##", CultureInfo.InvariantCulture)}   # LanQueue starts no new job while less memory than this is free";
+            lines.Add($"    key_env: {keyEnv}   # NAME of the environment variable holding your key file's path");
         }
 
-        yield return s.Transfer is "git" or "archive" ? $"    transfer: {s.Transfer}" : "    # transfer: no transfer mode works yet (needs git, or tar for archive)";
+        lines.Add($"    work_root: {Yaml(configured?.WorkRoot ?? s.WorkRoot ?? "")}");
+        lines.Add($"    capabilities: [{string.Join(", ", caps)}]");
+        lines.Add($"    max_jobs: {Math.Clamp(s.MaxJobs, 1, 64).ToString(CultureInfo.InvariantCulture)}");
+        if (s.MinFreeMemGb is { } minFree && double.IsFinite(minFree) && minFree is >= 0 and <= 1024)
+        {
+            lines.Add($"    min_free_mem_gb: {minFree.ToString("0.##", CultureInfo.InvariantCulture)}   # LanQueue starts no new job while less memory than this is free");
+        }
+
+        lines.Add(s.Transfer is "git" or "archive" ? $"    transfer: {s.Transfer}" : "    # transfer: no transfer mode works yet (needs git, or tar for archive)");
         if (s.AllowedHours is { } hours && HoursRegex().IsMatch(hours))
         {
-            yield return $"    allowed_hours: {Yaml(hours)}";
+            lines.Add($"    allowed_hours: {Yaml(hours)}");
         }
 
         // Only when the script's Wake-on-LAN check passed; commented, so waking stays the owner's choice. A redacted MAC stays "<mac>",
         // which ConfigLoader refuses until the real one is filled in.
         if (s.Wake is { } wake)
         {
-            yield return $"    # wake:   # Wake-on-LAN looks ready; uncomment to let lanq wake this PC (test: lanq wake {name} --wait)";
-            yield return MagicPacket.TryParseMac(wake.Mac, out _)
+            lines.Add($"    # wake:   # Wake-on-LAN looks ready; uncomment to let lanq wake this PC (test: lanq wake {name} --wait)");
+            lines.Add(MagicPacket.TryParseMac(wake.Mac, out _)
                 ? $"    #   mac: {Yaml(wake.Mac!)}"
-                : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address";
+                : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address");
         }
+
+        return lines;
     }
 
     private static string Yaml(string value) =>
