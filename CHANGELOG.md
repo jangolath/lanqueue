@@ -11,7 +11,7 @@
 ### Tests
 
 - Two tests that failed now and then on GitHub's Windows runner are now deterministic. The `--mem` placement test's
-  fake machine now reports less free memory as its jobs run. The newline-free flood test now measures the reader's
+  fake machine now reports less free memory once a shard's upload is done, as a real job would use it. The newline-free flood test now measures the reader's
   memory on one thread, not process-wide, where work left by earlier tests counted too.
 
 ## 0.8.1 (2026-11-10)

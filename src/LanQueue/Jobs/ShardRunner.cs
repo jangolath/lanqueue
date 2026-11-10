@@ -483,7 +483,8 @@ public sealed partial class JobRunner
                     MachineHealth[] probes;
 
                     // Which of this run's shards are not running yet, counted before the probe looks: a shard that starts while the probe is out
-                    // was not running when the machine answered, so its memory is not in that answer either.
+                    // was not running when the machine answered, so its memory is not in that answer either. (If its memory did show already, it
+                    // counts twice for this one round: one shard too few, placed on the next look, never one too many.)
                     var notRunning = running.Values.Where(r => !r.Started).CountBy(r => r.Machine, StringComparer.Ordinal).ToDictionary(StringComparer.Ordinal);
                     try
                     {

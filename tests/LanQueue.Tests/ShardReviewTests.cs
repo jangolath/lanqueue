@@ -557,23 +557,34 @@ public sealed class ShardReviewTests : IDisposable
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var tinyRan = false;
+        var uploadingToBig = 0;
         var ssh = new PoolSsh
         {
             OnUpload = async (m, ct) =>
             {
                 if (m.Name == "big-01")
                 {
-                    await release.Task.WaitAsync(ct);
+                    Interlocked.Increment(ref uploadingToBig);
+                    try
+                    {
+                        await release.Task.WaitAsync(ct);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref uploadingToBig);
+                    }
                 }
 
                 return new SshResult(0, "");
             },
         };
 
-        // big-01 has 9 GB free less 4 GB for each slot taken there, as a machine whose jobs use their memory: a constant 9 GB would let a
-        // correct scheduler place a third shard once the first two run (their memory never showing), and the peak would read 3.
+        // big-01 has 9 GB free less 4 GB for each slot taken there whose upload is done: a shard still uploading uses no memory yet (so the
+        // probe cannot see it, and only counting it as placed keeps a third shard off), one past its upload uses its 4 GB until its slot is
+        // given back. A constant 9 GB would let a correct scheduler place a third shard once the first two run, and the peak would read 3.
         ssh.ProbeExtra = m => m.Name == "big-01"
-            ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"mem_free_gb={9 - (4 * ssh.Used("big-01"))}")
+            ? string.Create(
+                System.Globalization.CultureInfo.InvariantCulture, $"mem_free_gb={9 - (4 * (ssh.Used("big-01") - Volatile.Read(ref uploadingToBig)))}")
             : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5";
         ssh.RefuseSlot = m =>
         {
