@@ -468,6 +468,35 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains(Lines(o, "OK"), l => l.Contains("node", StringComparison.Ordinal) && l.Contains("v22.1.0", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// The dotnet on PATH has runtimes only (a job's build would fail): doctor says so, searches the worker's install folders and suggests the
+    /// path_prepend: line (and DOTNET_ROOT) for the folder with the highest SDK. It never edits the config.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeOnlyDotnetIsMissingAndDoctorFixSuggestsPathPrepend()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        config.Machines[0].Capabilities = ["dotnet"];
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe)
+                : cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+                    ? new SshResult(0, "runtime.dotnet=6.0.11\nfound.dotnet=/usr/share/dotnet|8.0.404\nfound.dotnet=/srv/build/dotnet|10.0.102\n")
+                    : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=145|The command could not be loaded, possibly because:\n"),
+        };
+        var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, json: true);
+        Assert.Equal(1, code);
+        var dotnet = Checks(OneObject(o)).Single(c => Str(c, "name") == "capability");
+        Assert.Equal("fail", Str(dotnet, "level"));
+        Assert.Contains("dotnet 6.0.11 runtime only, no SDK", Str(dotnet, "detail"), StringComparison.Ordinal);
+        Assert.Contains(".NET SDK 10.0.102 is installed in /srv/build/dotnet", Str(dotnet, "detail"), StringComparison.Ordinal);
+        Assert.Equal(
+            "add `path_prepend: [/srv/build/dotnet]` to build-01 in machines.yml (found .NET SDK 10.0.102 there), and `DOTNET_ROOT: /srv/build/dotnet` under its env: so the SDK's tools find the runtimes next to it",
+            Str(dotnet, "fix"));
+        Assert.Equal(2, ssh.Calls.Count(c => !IsProbe(c.Command))); // the checks, then one search; nothing else ran on the worker
+    }
+
     /// <summary>A Windows build account denied WMI is a WARN with what the owner could grant; lanq works without it. Linux is never asked.</summary>
     [Fact]
     public async Task WmiDeniedIsAWarnWithAFix()
@@ -482,6 +511,89 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains("Access denied", Str(wmi, "detail"), StringComparison.Ordinal);
         Assert.Equal(Cli.WmiFix, Str(wmi, "fix"));
         Assert.Contains("wmimgmt.msc", Cli.WmiFix, StringComparison.Ordinal);
+    }
+
+    /// <summary>Nothing found: the plain failure stays, with the usual path_prepend advice.</summary>
+    [Fact]
+    public async Task AMissingToolNotFoundAnywhereKeepsThePlainFailure()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        config.Machines[0].Capabilities = ["dotnet"];
+        var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n") };
+        var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
+        Assert.Equal(1, code);
+        Assert.Contains(Lines(o, "FAIL"), l => l.Contains("'dotnet --version' failed in the job environment (sh: 1: dotnet: not found)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PicksTheHighestSdkAndIgnoresGarbage()
+    {
+        var found = RemoteScripts.ParseFound(
+            "found.dotnet=C:/Program Files/dotnet|8.0.404\nfound.dotnet=D:/build/dotnet|10.0.102\nfound.dotnet=E:/x|not-a-version\nfound.node=/x|22.0.0\nnoise\nfound.dotnet=F:/y|10.0.100-rc.2\n",
+            "dotnet");
+        Assert.Equal([("D:/build/dotnet", "10.0.102"), ("F:/y", "10.0.100-rc.2"), ("C:/Program Files/dotnet", "8.0.404")], found);
+    }
+
+    /// <summary>The search is read-only and bounded: fixed places, one level below each fixed drive (64 folders at most), about five seconds.</summary>
+    [Fact]
+    public void SearchIsBoundedAndTimesOut()
+    {
+        var windows = RemoteScripts.FindToolchain(T.Windows(), "dotnet");
+        Assert.Contains("++$n -gt 64", windows, StringComparison.Ordinal);
+        Assert.Contains("$sw.Elapsed.TotalSeconds -gt 5", windows, StringComparison.Ordinal);
+        Assert.Contains("InstalledVersions", windows, StringComparison.Ordinal);
+        Assert.Contains(@"$env:LOCALAPPDATA\Microsoft\dotnet", windows, StringComparison.Ordinal);
+        Assert.DoesNotContain("-Recurse", windows, StringComparison.Ordinal);
+        var linux = RemoteScripts.FindToolchain(T.Linux(), "dotnet");
+        Assert.Contains("/etc/dotnet/install_location", linux, StringComparison.Ordinal);
+        Assert.Contains("end=$(( $(date +%s) + 5 ))", linux, StringComparison.Ordinal);
+        foreach (var script in new[] { windows, linux })
+        {
+            foreach (var write in new[] { "Set-Content", "New-Item", "Remove-Item", "rm ", "mkdir", "> /" })
+            {
+                Assert.DoesNotContain(write, script, StringComparison.Ordinal);
+            }
+        }
+
+        Assert.Throws<ArgumentException>(() => RemoteScripts.FindToolchain(T.Linux(), "gpu"));
+    }
+
+    /// <summary>A real search on this host finds an SDK in a private folder named by DOTNET_ROOT (no SDK is run; the folders are fake).</summary>
+    [Fact]
+    public void FindsSdkInAPrivateFolder()
+    {
+        var shell = OperatingSystem.IsWindows() ? "windows" : "linux";
+        if (shell == "linux" && Shells.Sh is null)
+        {
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "lanq-find-" + Guid.NewGuid().ToString("N"));
+        var dotnet = Path.Combine(root, "build", "dotnet");
+        Directory.CreateDirectory(Path.Combine(dotnet, "sdk", "10.0.102"));
+        Directory.CreateDirectory(Path.Combine(dotnet, "sdk", "9.0.300"));
+        Directory.CreateDirectory(Path.Combine(dotnet, "sdk", "11.0.100")); // no dotnet.dll: not an SDK
+        File.WriteAllText(Path.Combine(dotnet, "sdk", "10.0.102", "dotnet.dll"), "");
+        File.WriteAllText(Path.Combine(dotnet, "sdk", "9.0.300", "dotnet.dll"), "");
+        var exe = Path.Combine(dotnet, shell == "windows" ? "dotnet.exe" : "dotnet");
+        File.WriteAllText(exe, "");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        try
+        {
+            var m = shell == "windows" ? T.Windows() : T.Linux();
+            var (code, output) = Shells.Run(shell, RemoteScripts.FindToolchain(m, "dotnet"), new Dictionary<string, string> { ["DOTNET_ROOT"] = dotnet });
+            Assert.True(code == 0, output);
+            Assert.Contains((dotnet.Replace('\\', '/'), "10.0.102"), RemoteScripts.ParseFound(output, "dotnet"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     /// <summary>If the whole ssh call runs out of time, what did arrive is still reported, and the rest says it did not finish.</summary>

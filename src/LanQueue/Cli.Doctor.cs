@@ -496,6 +496,25 @@ public static partial class Cli
             var bar = raw?.IndexOf('|', StringComparison.Ordinal) ?? -1;
             var code = bar < 0 ? "?" : raw![..bar];
             var text = bar < 0 ? (partial ? "did not finish before the ssh call timed out" : "no answer") : raw![(bar + 1)..];
+            if (code is not ("0" or "timeout" or "?") && RemoteScripts.FindableTools.Contains(cap)
+                && await FindToolchain(m, ssh, cap, ct).ConfigureAwait(false) is { } search)
+            {
+                // A dotnet with runtimes only fails dotnet --version ("No .NET SDKs were found"): say so in plain words.
+                var failed = search.Runtime is { } runtime ? $"dotnet {runtime} runtime only, no SDK" : text.Length > 0 ? text : "exit " + code;
+                if (search.Found is { } found)
+                {
+                    lines.Add(Check(
+                        "capability",
+                        "fail",
+                        $"{cap}: '{command}' failed in the job environment ({failed}), but {found.What} is installed in {found.Dir}, a folder the ssh session's PATH does not reach",
+                        found.Fix,
+                        cap));
+                    continue;
+                }
+
+                text = failed;
+            }
+
             lines.Add(code == "0"
                 ? Check("capability", "ok", $"{cap}: {text}", capability: cap)
                 : code == "timeout"
@@ -511,6 +530,39 @@ public static partial class Cli
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// After a failed tool check: searches the worker's usual and private install folders (<see cref="RemoteScripts.FindToolchain"/>, one more
+    /// read-only ssh call). Found is the best folder (highest version) with the path_prepend: line to suggest, or null; Runtime the version of a
+    /// runtime-only dotnet on PATH, or null. Null when the search could not run. lanq never edits the config itself.
+    /// </summary>
+    internal static async Task<((string Dir, string What, string Fix)? Found, string? Runtime)?> FindToolchain(Machine m, ISshClient ssh, string tool, CancellationToken ct)
+    {
+        SshResult r;
+        try
+        {
+            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.FindToolchain(m, tool)), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+
+        var runtime = HealthProbe.Parse(r.Output).GetValueOrDefault("runtime." + tool.ToLowerInvariant()) is { Length: > 0 and <= 40 } v && System.Version.TryParse(v.Split('-')[0], out _)
+            ? JobRunner.SafeLine(v)
+            : null;
+        if (RemoteScripts.ParseFound(r.Output, tool) is not [var best, ..])
+        {
+            return (null, runtime);
+        }
+
+        var dir = JobRunner.SafeLine(best.Dir);
+        var version = JobRunner.SafeLine(best.Version);
+        var what = tool.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? $".NET SDK {version}" : $"{tool} {version}";
+        var fix = $"add `path_prepend: [{dir}]` to {m.Name} in machines.yml (found {what} there)"
+            + (tool.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? $", and `DOTNET_ROOT: {dir}` under its env: so the SDK's tools find the runtimes next to it" : "");
+        return ((dir, what, fix), runtime);
     }
 
     /// <summary>Why the Windows ssh user may not use WMI/CIM (one more small ssh call), or null when it may (or the check did not answer).</summary>
