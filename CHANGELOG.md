@@ -10,6 +10,14 @@
   machine). Status `Ok` (0), `Warnings` (1), `Failing` (1, a config that does not load included), `Rejected` (2),
   `InfraError` (70) or `Cancelled` (130), with an object on every path. The text lines go to stderr. Without
   `--json` doctor prints exactly what it printed before.
+- `lanq stats --json`: one object `{status, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
+  newestUtc, logs, machines, commands, nextSteps}`. Each machine has `jobs`, `completed`, `failed`, `other`,
+  `wallMinutes`, `medianSeconds` and `p90Seconds` (of completed jobs, nearest rank) and `lastRunUtc`. Each command
+  (key and dir; a line from before 0.7.0 by its recorded command, `dir` null) has `runs` (all shards of one
+  `--shards` run are one run), `jobs` (each shard is one job), the same counts and times, and `lastShards`. `logs`
+  is `{files, megabytes, keepDays}`. `speedFactor`, `speedSamples` and `timing` are present and null for now. Status
+  `Ok` (0, also with no job log), `Rejected` (2), `InfraError` (70, the job log could not be read) or `Cancelled`
+  (130). Times are UTC. stats never suggests a command.
 
 ### Behaviour changes
 
@@ -22,7 +30,11 @@
   the job's own command ran, without upload, prepare or fetch). A field that does not apply is left out, so older
   readers are unaffected.
 - `jobs.jsonl` moves to `jobs.1.jsonl` at 4 MiB (two files at most); lanq reads both.
-- A torn or unreadable line in `jobs.jsonl` is skipped instead of making `lanq stats` fail.
+- A torn or unreadable line in `jobs.jsonl` is skipped instead of making `lanq stats` fail; stats prints one warning
+  with the count on stderr.
+- `lanq stats` prints more after its unchanged totals and per-machine lines: a machine table (median and p90 of
+  completed jobs, last run, in local time), the newest 20 commands with their runs, jobs, results and times, and a
+  `logs:` line with the count and size of the job logs. It exits 70 when `jobs.jsonl` cannot be read.
 - A `jobs.jsonl` that another program holds open no longer turns a finished job into `InfraError`: the append is
   retried briefly, then skipped with a warning. Concurrent lanq processes no longer collide on it.
 - Per-job logs in the state folder's `logs/` are pruned after a run, at most once a day: lanq's own logs older than
