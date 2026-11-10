@@ -16,7 +16,7 @@
   line ends `-> eligible (2 slots)` or `-> not eligible: lacks gpu (capabilities: dotnet, linux)`; `--json` rows add
   `eligible`, `why`, `reason` (the codes above), `permanent` and `jobSlots` (how many copies, or shards, it could take
   now, `--mem` counted per copy). Exit `0` when at least one machine is eligible, `75` when none is. Plain
-  `lanq health` (text and `--json`) is unchanged and still exits `0`.
+  `lanq health` is unchanged (its `--json` rows add only `nextSteps`, below) and still exits `0`.
 
 - **`logPath` and `--log-tail N` on `lanq run`.** `lanq run --json` always carries `logPath`, the full path of the
   job's local log (null when no job started); with `--shards` each entry of `shards` carries its own. `--log-tail N`
@@ -41,7 +41,33 @@
   freeSlots, jobSlots}` per machine), `wouldWake` and `retryable`, also for bad arguments or config. It cannot foresee
   an archive that fails to build or a slot taken between the probe and a real start.
 
+- **`nextSteps` in every `--json` object**: `lanq run` (with `--shards`, at the top level only), `run --dry-run`,
+  every `lanq health` row (with or without `--needs`), the error objects of `health`, `makeready` and `wake`,
+  `lanq init`, `lanq wake`, and `makeready --all` (the whole check and each row). The single `lanq makeready <machine>
+  --json` report stays the script's `lanq-makeready/v1` report exactly; only its error objects carry `nextSteps`. Each
+  entry is `{action, reason, command?, argv?, safeToRunUnattended}`, at least one per object (`none` when there is
+  nothing to do). `action` is `proceed`, `retry`, `wait`, `fix_code`, `fix_command`, `ask_developer`, `run_doctor`,
+  `run_health` or `none`; values may be added, so treat an unknown one as `ask_developer`. `argv` (the exact arguments,
+  no shell) is present exactly when a command is suggested and is authoritative; `command` is the same as one line for
+  bash and PowerShell (plain words bare, others single-quoted), left out when an argument holds a quote, a control
+  character, is empty or is PowerShell's `--%`. `safeToRunUnattended` is true only for a suggested command an agent may
+  run without asking. A suggestion is only ever `lanq run`, `health`, `doctor` or `makeready` (`makeready` is never safe
+  unattended), never `unlock`, `init`, `wake`, `health --wake`, `--force`, `--yes`, `--add` or `--setup`, keeps
+  `--config`, and never does more than the command it follows: a re-run edits your own command line (job arguments,
+  `--dir`, `--mem`, `--fetch` untouched), adds `--no-wake` when the original could not wake a machine (`--wait 0`),
+  never drops `--no-wake`, suggests `--wait 120` only when the run waited less, doubles `--timeout` after `TimedOut`
+  (at most 10080) and sets `--shard-retries 1` after a lost connection only when no shard may still be running.
+  A dry run that would start proceeds with the same command without `--dry-run`.
+
+- A `lanq run --json` cancelled with Ctrl+C after its job had started now reports that job's `logPath` (and, with
+  `--log-tail`, its `logTail`), as the shards of `--shards` already did; it was `null`.
+
 ### Behaviour changes
+
+- **`Next: ...` lines on stderr.** Every command that reaches a result prints its next steps for people, one line per
+  step, on stderr (`[lanq] Next: ...` inside `lanq run`): `Next: <reason>: <command>`, `(for the developer)` before a
+  command that is not safe to run unattended, never for `none`. In `lanq run` they come before the `[lanq] log: ...`
+  line and the final `[lanq] <Status>: ...` line, which stays last. stdout is unchanged in every text mode.
 
 - **`lanq run` ends at once when no machine can ever take the job** (exit `75`, `retryable: false`), instead of
   waiting out `--wait`: when no machine in `machines.yml` has every `--needs` capability (before any snapshot, ssh,
