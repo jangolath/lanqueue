@@ -3,6 +3,7 @@ using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
 using LanQueue.Jobs;
+using LanQueue.Makeready;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -36,7 +37,12 @@ public sealed class MakereadyAddTests : IDisposable
         MakereadyTests.Report().Replace("\"os\": \"linux\"", "\"os\": \"windows\"", StringComparison.Ordinal).Replace("/srv/lq", "C:/lq", StringComparison.Ordinal)
             .Replace("\"linux\"]", "\"windows\"]", StringComparison.Ordinal);
 
-    private sealed record Result(int Code, string Out, string Err, FakeSsh Ssh, int Asked);
+    private sealed record Result(int Code, string Out, string Err, FakeSsh Ssh, int Asked)
+    {
+        public bool Searched => Ssh.InputRuns.Any(r => IsSearch(r.Input));
+    }
+
+    private static bool IsSearch(byte[] input) => Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal);
 
     private async Task<Result> Add(
         string[] args, string? report = null, bool? answer = null, Action? beforeWrite = null, SshResult? scan = null, Dictionary<string, string>? env = null,
@@ -44,8 +50,8 @@ public sealed class MakereadyAddTests : IDisposable
     {
         var ssh = new FakeSsh
         {
-            Handler = (_, cmd) => found is not null && cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal) ? new SshResult(0, found) : new SshResult(0, Healthy),
-            InputHandler = (_, _, _) => scan ?? new SshResult(0, report ?? Report()),
+            Handler = (_, _) => new SshResult(0, Healthy),
+            InputHandler = (_, _, input) => IsSearch(input) ? new SshResult(0, found ?? "") : scan ?? new SshResult(0, report ?? Report()),
         };
         var asked = 0;
         var host = new MakereadyHost(
@@ -401,14 +407,120 @@ public sealed class MakereadyAddTests : IDisposable
         var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
         Assert.Equal(["/srv/build/dotnet"], added.PathPrepend);
         Assert.Equal("/srv/build/dotnet", added.Env["DOTNET_ROOT"]);
-        Assert.Contains(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+        Assert.True(r.Searched);
 
         // When the scan already lists dotnet, nothing is searched and the entry stays as the report suggests.
         await File.WriteAllTextAsync(ConfigPath, Cli.StarterConfig);
         r = await Add(AddArgs(more: "--yes"), found: "found.dotnet=/srv/build/dotnet|10.0.102\n");
         Assert.Equal(0, r.Code);
         Assert.DoesNotContain("path_prepend", Config(), StringComparison.Ordinal);
-        Assert.DoesNotContain(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+        Assert.False(r.Searched);
+    }
+
+    private static string WithDotnetDir(string dir, string? root = null) =>
+        MakereadyTests.Report().Replace(
+            "\"allowed_hours\": \"00:00-07:00\"",
+            $"\"allowed_hours\": \"00:00-07:00\", \"path_prepend\": [\"{dir}\"], \"env\": {{ \"DOTNET_ROOT\": \"{root ?? dir}\" }}",
+            StringComparison.Ordinal);
+
+    /// <summary>
+    /// lanq-makeready 0.3.0+ finds the SDK outside PATH itself: its folder goes into the entry as is (one path_prepend:, one env:, the
+    /// capability once), lanq runs no search of its own, and the entry loads.
+    /// </summary>
+    [Fact]
+    public async Task TheScriptsDotnetFolderIsUsedWithoutASecondSearch()
+    {
+        var r = await Add(AddArgs(more: "--yes"), WithDotnetDir("/opt/build/dotnet"), found: "found.dotnet=/srv/other/dotnet|10.0.102\n");
+        Assert.Equal(0, r.Code);
+        var text = Config();
+        Assert.Single(text.Split('\n'), l => l.StartsWith("    path_prepend:", StringComparison.Ordinal));
+        Assert.Single(text.Split('\n'), l => l.TrimEnd('\r') == "    env:");
+        Assert.Contains("    capabilities: [dotnet, java, linux]", text, StringComparison.Ordinal);
+        Assert.False(r.Searched);
+        var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
+        Assert.Equal(["/opt/build/dotnet"], added.PathPrepend);
+        Assert.Equal("/opt/build/dotnet", added.Env["DOTNET_ROOT"]);
+    }
+
+    /// <summary>
+    /// A redacted folder (under the user's home) is not usable: lanq looks the SDK up itself and writes the real folder, once, with the
+    /// capability listed once.
+    /// </summary>
+    [Fact]
+    public async Task ARedactedDotnetFolderIsLookedUpByLanq()
+    {
+        var r = await Add(AddArgs(more: "--yes"), WithDotnetDir("<redacted>/.dotnet"), found: "found.dotnet=/home/me/.dotnet|10.0.102\n");
+        Assert.Equal(0, r.Code);
+        Assert.True(r.Searched);
+        var text = Config();
+        Assert.DoesNotContain("<redacted>", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("a folder the report hides", text, StringComparison.Ordinal); // the comment goes once the folder is known
+        Assert.Contains("    capabilities: [dotnet, java, linux]", text, StringComparison.Ordinal);
+        var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
+        Assert.Equal(["/home/me/.dotnet"], added.PathPrepend);
+        Assert.Equal("/home/me/.dotnet", added.Env["DOTNET_ROOT"]);
+    }
+
+    /// <summary>lanq's own search finds the SDK only in a folder other local users can write: nothing is proposed, and a note says why.</summary>
+    [Fact]
+    public async Task AnOpenFolderFromTheSearchIsNotProposed()
+    {
+        var r = await Add(AddArgs(more: "--yes"), MakereadyTests.Report(caps: "\"java\""), found: "open.dotnet=/srv/shared/dotnet|10.0.102\n");
+        Assert.Equal(0, r.Code);
+        Assert.DoesNotContain("path_prepend", Config(), StringComparison.Ordinal);
+        Assert.Contains("note: a .NET SDK in /srv/shared/dotnet is not proposed for path_prepend: other local users can write there.", r.Err, StringComparison.Ordinal);
+    }
+
+    /// <summary>The folder comes from the worker: only exactly one absolute, clean folder with DOTNET_ROOT set to it is taken.</summary>
+    [Theory]
+    [InlineData("linux", "/opt/build/dotnet", "/opt/build/dotnet", true)]
+    [InlineData("windows", "D:/build/dotnet", "D:/build/dotnet", true)]
+    [InlineData("windows", "D:/Program Files/dotnet", "D:/Program Files/dotnet", true)]
+    [InlineData("linux", "/opt/build/dotnet", "/opt/other", false)] // DOTNET_ROOT differs
+    [InlineData("linux", "opt/build/dotnet", "opt/build/dotnet", false)] // relative
+    [InlineData("linux", "D:/build/dotnet", "D:/build/dotnet", false)] // a Windows folder on Linux
+    [InlineData("windows", "/opt/build/dotnet", "/opt/build/dotnet", false)]
+    [InlineData("windows", @"D:\build\dotnet", @"D:\build\dotnet", false)] // backslashes
+    [InlineData("linux", "<redacted>/.dotnet", "<redacted>/.dotnet", false)]
+    [InlineData("linux", "/opt/a\"b", "/opt/a\"b", false)]
+    [InlineData("linux", "/opt/a\nb", "/opt/a\nb", false)]
+    [InlineData("linux", "/opt/a\u007fb", "/opt/a\u007fb", false)]
+    [InlineData("linux", "/opt/a/\n", "/opt/a/\n", false)] // \z, not $
+    [InlineData("windows", "D:/a;b", "D:/a;b", false)] // ConfigLoader refuses ';' on Windows
+    [InlineData("windows", "D:/a:b", "D:/a:b", false)]
+    [InlineData("linux", "/opt/a:b", "/opt/a:b", false)] // and ':' on Linux
+    [InlineData("linux", "/opt/a?b", "/opt/a?b", false)] // what json_esc makes of a non-ASCII byte
+    [InlineData("linux", "/opt/caf\u00e9", "/opt/caf\u00e9", false)] // ASCII only
+    [InlineData("linux", "/opt/a\u2028b", "/opt/a\u2028b", false)] // line separator
+    [InlineData("linux", "/opt/a\u202eb", "/opt/a\u202eb", false)] // bidi override
+    public void OnlyACleanSuggestedDotnetFolderIsTaken(string os, string dir, string root, bool taken)
+    {
+        var s = new MakereadySuggestion("old-pc", os, null, "/srv/lq", ["dotnet"], 1, null, "git", null, null, [dir], new() { ["DOTNET_ROOT"] = root });
+        Assert.Equal(taken ? dir : null, Cli.SuggestedDotnetDir(s));
+        Assert.Null(Cli.SuggestedDotnetDir(s with { PathPrepend = [dir, "/opt/x"] }));
+        Assert.Null(Cli.SuggestedDotnetDir(s with { Env = new() { ["DOTNET_ROOT"] = root, ["PATH"] = "/evil" } }));
+        Assert.Null(Cli.SuggestedDotnetDir(s with { Env = null }));
+        Assert.Null(Cli.SuggestedDotnetDir(s with { PathPrepend = [new string('a', 300).Insert(0, "/")], Env = new() { ["DOTNET_ROOT"] = "/" + new string('a', 300) } }));
+    }
+
+    [Fact]
+    public void ALoneSurrogateInTheFolderIsRefused()
+    {
+        var dir = "D:/a" + (char)0xD800 + "b";
+        var s = new MakereadySuggestion("old-pc", "windows", null, "C:/lq", ["dotnet"], 1, null, "git", null, null, [dir], new() { ["DOTNET_ROOT"] = dir });
+        Assert.Null(Cli.SuggestedDotnetDir(s));
+    }
+
+    /// <summary>Plain lanq makeready shows the folder in the suggested entry, or a comment when the report hides it.</summary>
+    [Fact]
+    public async Task TheSuggestedEntryShowsTheDotnetFolder()
+    {
+        var r = await Add(["--ssh", Target, "--os", "linux"], WithDotnetDir("/opt/build/dotnet"));
+        Assert.Contains("    path_prepend: [\"/opt/build/dotnet\"]   # the newest .NET SDK is here, not on PATH", r.Out, StringComparison.Ordinal);
+        Assert.Contains("    env:\n      DOTNET_ROOT: \"/opt/build/dotnet\"", r.Out.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        r = await Add(["--ssh", Target, "--os", "linux"], WithDotnetDir("<redacted>/.dotnet"));
+        Assert.Contains("    # path_prepend: the newest .NET SDK is outside PATH, in a folder the report hides", r.Out, StringComparison.Ordinal);
+        Assert.DoesNotContain("<redacted>/.dotnet", r.Out, StringComparison.Ordinal);
     }
 
     [Fact]

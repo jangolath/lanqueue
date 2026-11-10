@@ -13,7 +13,7 @@ namespace LanQueue;
 public static partial class Cli
 {
     /// <summary>The lanq-makeready release embedded in this build (see scripts/sync-makeready.sh).</summary>
-    internal const string MakereadyVersion = "0.2.0";
+    internal const string MakereadyVersion = "0.3.0";
 
     internal static readonly TimeSpan MakereadyTimeout = TimeSpan.FromSeconds(120);
 
@@ -33,6 +33,14 @@ public static partial class Cli
 
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex MachineNameRegex();
+
+    // A toolchain folder the script reports (0.3.0+): absolute, forward slashes, printable ASCII only (no Unicode line or bidi characters),
+    // and none of the characters ConfigLoader refuses in path_prepend or that would mark a redacted value: quote, backslash, < > | ? * ; :.
+    [GeneratedRegex(@"^[A-Za-z]:/[\x20-\x7e-[""<>|?*;:\\]]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex WindowsToolDirRegex();
+
+    [GeneratedRegex(@"^/[\x20-\x7e-[""<>|?*;:\\]]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex LinuxToolDirRegex();
 
     /// <summary>The embedded script, byte for byte as released (pinned by a test).</summary>
     internal static byte[] MakereadyScript(MachineOs os)
@@ -621,8 +629,32 @@ public static partial class Cli
                 : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address");
         }
 
+        // The newest .NET SDK sits outside the PATH (a private folder such as D:/build/dotnet): only exactly one well-formed folder with
+        // DOTNET_ROOT set to the same folder is taken. A redacted folder (one under the user's home) is not usable, so it is left out and
+        // lanq makeready --add looks for the SDK itself.
+        if (SuggestedDotnetDir(s) is { } dotnetDir)
+        {
+            lines.Add($"    path_prepend: [{Yaml(dotnetDir)}]   # the newest .NET SDK is here, not on PATH");
+            lines.Add("    env:");
+            lines.Add($"      DOTNET_ROOT: {Yaml(dotnetDir)}");
+        }
+        else if (s.PathPrepend is not null)
+        {
+            lines.Add(RedactedDotnetComment);
+        }
+
         return lines;
     }
+
+    internal const string RedactedDotnetComment =
+        "    # path_prepend: the newest .NET SDK is outside PATH, in a folder the report hides or lanq cannot use as written; lanq makeready --add looks it up";
+
+    /// <summary>The script's suggested .NET SDK folder when it is usable as written (see <see cref="SuggestedItem"/>), else null.</summary>
+    internal static string? SuggestedDotnetDir(MakereadySuggestion s) =>
+        s.PathPrepend is [{ } dir] && s.Env is { Count: 1 } env && env.TryGetValue("DOTNET_ROOT", out var root) && root == dir
+        && (s.Os == "windows" ? WindowsToolDirRegex() : LinuxToolDirRegex()).IsMatch(dir)
+            ? dir
+            : null;
 
     private static string Yaml(string value) =>
         "\"" + value.Replace(Backslash, Backslash + Backslash, StringComparison.Ordinal).Replace("\"", Backslash + "\"", StringComparison.Ordinal) + "\"";

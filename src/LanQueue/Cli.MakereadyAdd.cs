@@ -199,10 +199,21 @@ public static partial class Cli
 
         // A .NET SDK the scan did not see because it sits outside the ssh session's PATH (a private folder such as D:/build/dotnet): one more
         // read-only search, and the entry proposes the capability with path_prepend: and DOTNET_ROOT for it, shown and confirmed like the rest.
-        if (!(report.SuggestedMachine.Capabilities ?? []).Contains("dotnet", StringComparer.OrdinalIgnoreCase)
-            && await FindToolchain(AdHocMachine(target, os, p.KeyEnv), ssh, "dotnet", ct).ConfigureAwait(false) is { Found: { } dotnet })
+        // lanq-makeready 0.3.0+ finds such a folder itself; its folder is used as is unless it was redacted (under the user's home), and
+        // then this search names the real one.
+        var scriptDir = SuggestedDotnetDir(report.SuggestedMachine);
+        if (scriptDir is null
+            && (!(report.SuggestedMachine.Capabilities ?? []).Contains("dotnet", StringComparer.OrdinalIgnoreCase) || report.SuggestedMachine.PathPrepend is not null)
+            && await FindToolchain(AdHocMachine(target, os, p.KeyEnv), ssh, "dotnet", ct).ConfigureAwait(false) is { } search)
         {
-            WithToolchain(item, "dotnet", dotnet.Dir, dotnet.What);
+            if (search.Found is { } dotnet)
+            {
+                WithToolchain(item, "dotnet", dotnet.Dir, dotnet.What);
+            }
+            else if (search.Open is { } open)
+            {
+                await stderr.WriteLineAsync($"note: a .NET SDK in {open} is not proposed for path_prepend: other local users can write there.").ConfigureAwait(false);
+            }
         }
 
         // The report comes from the worker: a value with a line break or another control character is never written to machines.yml.
@@ -285,8 +296,19 @@ public static partial class Cli
             return;
         }
 
+        item.Remove(RedactedDotnetComment); // the folder is known now
+        i = item.FindIndex(l => l.StartsWith(Caps, StringComparison.Ordinal) && l.EndsWith(']'));
         var listed = item[i][Caps.Length..^1];
-        item[i] = Caps + (listed.Length == 0 ? capability : capability + ", " + listed) + "]";
+        if (!listed.Split(", ").Contains(capability, StringComparer.Ordinal))
+        {
+            item[i] = Caps + (listed.Length == 0 ? capability : capability + ", " + listed) + "]";
+        }
+
+        if (item.Any(l => l.StartsWith("    path_prepend:", StringComparison.Ordinal) || l == "    env:"))
+        {
+            return; // never a second path_prepend: or env: key
+        }
+
         item.Add($"    path_prepend: [{Yaml(dir)}]   # {what} found here, outside the ssh session's PATH");
         if (capability == "dotnet")
         {

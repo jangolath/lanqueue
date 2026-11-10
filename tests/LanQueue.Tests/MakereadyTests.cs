@@ -11,10 +11,10 @@ namespace LanQueue.Tests;
 /// <summary>lanq makeready: the embedded scripts, how they are sent, and how their (untrusted) report is read.</summary>
 public class MakereadyTests
 {
-    /// <summary>From SHA256SUMS of the lanq-makeready v0.2.0 GitHub release (build-provenance attested). Change only via scripts/sync-makeready.sh.</summary>
-    private const string Ps1Sha256 = "d49bf9503e17b3a3ee7a01af0c88cc40544de34e873da6e428fc05e72b0d59e0";
+    /// <summary>From SHA256SUMS of the lanq-makeready v0.3.0 GitHub release (build-provenance attested). Change only via scripts/sync-makeready.sh.</summary>
+    private const string Ps1Sha256 = "ce5476fa3deb5da7f382c10457b17ef78ae04474ab025f3ffadefb31cd31ee9e";
 
-    private const string ShSha256 = "fc4aae07bb57c60c629b643d1f645554bac9aba3e8f4201a7d71db0044733c23";
+    private const string ShSha256 = "229e34ed8c602336f043cfafe00e44e65f96df5f5386cfa25d0471dd9bb236df";
 
     private const char Esc = (char)27;
 

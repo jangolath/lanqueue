@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
@@ -481,9 +482,10 @@ public sealed class DoctorTests : IDisposable
         var ssh = new FakeSsh
         {
             Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe)
-                : cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
-                    ? new SshResult(0, "runtime.dotnet=6.0.11\nfound.dotnet=/usr/share/dotnet|8.0.404\nfound.dotnet=/srv/build/dotnet|10.0.102\n")
-                    : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=145|The command could not be loaded, possibly because:\n"),
+                : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=145|The command could not be loaded, possibly because:\n"),
+            InputHandler = (_, cmd, input) => cmd == RemoteScripts.FindToolchainCommand(MachineOs.Linux) && Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+                ? new SshResult(0, "runtime.dotnet=6.0.11\nfound.dotnet=/usr/share/dotnet|8.0.404\nfound.dotnet=/srv/build/dotnet|10.0.102\n")
+                : new SshResult(1, ""),
         };
         var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, json: true);
         Assert.Equal(1, code);
@@ -494,7 +496,8 @@ public sealed class DoctorTests : IDisposable
         Assert.Equal(
             "add `path_prepend: [/srv/build/dotnet]` to build-01 in machines.yml (found .NET SDK 10.0.102 there), and `DOTNET_ROOT: /srv/build/dotnet` under its env: so the SDK's tools find the runtimes next to it",
             Str(dotnet, "fix"));
-        Assert.Equal(2, ssh.Calls.Count(c => !IsProbe(c.Command))); // the checks, then one search; nothing else ran on the worker
+        Assert.Equal(1, ssh.Calls.Count(c => !IsProbe(c.Command))); // the checks, then one search on stdin; nothing else ran on the worker
+        Assert.Single(ssh.InputRuns);
     }
 
     /// <summary>A Windows build account denied WMI is a WARN with what the owner could grant; lanq works without it. Linux is never asked.</summary>
@@ -511,6 +514,28 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains("Access denied", Str(wmi, "detail"), StringComparison.Ordinal);
         Assert.Equal(Cli.WmiFix, Str(wmi, "fix"));
         Assert.Contains("wmimgmt.msc", Cli.WmiFix, StringComparison.Ordinal);
+    }
+
+    /// <summary>The only SDK found is in a folder other local users can write: no path_prepend is proposed, and the failure says why.</summary>
+    [Fact]
+    public async Task AnSdkInAFolderOthersCanWriteIsNamedButNotProposed()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        config.Machines[0].Capabilities = ["dotnet"];
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n"),
+            InputHandler = (_, cmd, input) => cmd == RemoteScripts.FindToolchainCommand(MachineOs.Linux) && Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+                ? new SshResult(0, "open.dotnet=/srv/shared/dotnet|10.0.102\n")
+                : new SshResult(1, ""),
+        };
+        var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, json: true);
+        Assert.Equal(1, code);
+        var dotnet = Checks(OneObject(o)).Single(c => Str(c, "name") == "capability");
+        Assert.Equal("fail", Str(dotnet, "level"));
+        Assert.Contains("a dotnet in /srv/shared/dotnet is not proposed: other local users can write there", Str(dotnet, "detail"), StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend: [/srv/shared", o, StringComparison.Ordinal);
     }
 
     /// <summary>Nothing found: the plain failure stays, with the usual path_prepend advice.</summary>
@@ -548,12 +573,16 @@ public sealed class DoctorTests : IDisposable
         var linux = RemoteScripts.FindToolchain(T.Linux(), "dotnet");
         Assert.Contains("/etc/dotnet/install_location", linux, StringComparison.Ordinal);
         Assert.Contains("end=$(( $(date +%s) + 5 ))", linux, StringComparison.Ordinal);
+        Assert.Equal("sh -s", RemoteScripts.FindToolchainCommand(MachineOs.Linux));
+        Assert.Contains("[Console]::In.ReadToEnd()", RemoteScripts.FindToolchainCommand(MachineOs.Windows), StringComparison.Ordinal);
         foreach (var script in new[] { windows, linux })
         {
-            foreach (var write in new[] { "Set-Content", "New-Item", "Remove-Item", "rm ", "mkdir", "> /" })
+            foreach (var write in new[] { "Set-Content", "New-Item", "Remove-Item", "mkdir", "> /", "Set-Acl", "chmod", "icacls" })
             {
                 Assert.DoesNotContain(write, script, StringComparison.Ordinal);
             }
+
+            Assert.DoesNotMatch(@"(^|[\s;|&(])rm\s", script); // rm as a command (not the "rm " inside find's -perm)
         }
 
         Assert.Throws<ArgumentException>(() => RemoteScripts.FindToolchain(T.Linux(), "gpu"));
@@ -588,13 +617,83 @@ public sealed class DoctorTests : IDisposable
             var m = shell == "windows" ? T.Windows() : T.Linux();
             var (code, output) = Shells.Run(shell, RemoteScripts.FindToolchain(m, "dotnet"), new Dictionary<string, string> { ["DOTNET_ROOT"] = dotnet });
             Assert.True(code == 0, output);
-            Assert.Contains((dotnet.Replace('\\', '/'), "10.0.102"), RemoteScripts.ParseFound(output, "dotnet"));
+
+            // Found, or open when this host's temp folder lets other accounts write (GitHub's Windows runner, a PC with sandbox accounts):
+            // which one is the folder rule's call, tested on exact security descriptors elsewhere; this test is about finding the folder.
+            var dir = dotnet.Replace('\\', '/');
+            Assert.True(
+                RemoteScripts.ParseFound(output, "dotnet").Contains((dir, "10.0.102")) || RemoteScripts.ParseFound(output, "dotnet", "open").Contains((dir, "10.0.102")),
+                output);
         }
         finally
         {
             Directory.Delete(root, recursive: true);
         }
     }
+
+    /// <summary>
+    /// A folder other local users can write to (Everyone may modify it on Windows, world-writable on Linux) could hold a planted dotnet:
+    /// the search reports it as open.dotnet, which ParseFound never proposes for path_prepend.
+    /// </summary>
+    [Fact]
+    public void AFolderOtherUsersCanWriteIsNeverProposed()
+    {
+        var shell = OperatingSystem.IsWindows() ? "windows" : "linux";
+        if (shell == "linux" && Shells.Sh is null)
+        {
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "lanq-open-" + Guid.NewGuid().ToString("N"));
+        var dotnet = Path.Combine(root, "dotnet");
+        Directory.CreateDirectory(Path.Combine(dotnet, "sdk", "10.0.102"));
+        File.WriteAllText(Path.Combine(dotnet, "sdk", "10.0.102", "dotnet.dll"), "");
+        var exe = Path.Combine(dotnet, shell == "windows" ? "dotnet.exe" : "dotnet");
+        File.WriteAllText(exe, "");
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("icacls.exe", [dotnet, "/grant", "*S-1-1-0:(OI)(CI)(M)"]) { RedirectStandardOutput = true, UseShellExecute = false })!;
+                p.StandardOutput.ReadToEnd();
+                p.WaitForExit();
+                Assert.Equal(0, p.ExitCode);
+            }
+            else
+            {
+                File.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                File.SetUnixFileMode(dotnet, (UnixFileMode)0b111_111_111); // 0777
+            }
+
+            var m = shell == "windows" ? T.Windows() : T.Linux();
+            var (code, output) = Shells.Run(shell, RemoteScripts.FindToolchain(m, "dotnet"), new Dictionary<string, string> { ["DOTNET_ROOT"] = dotnet });
+            Assert.True(code == 0, output);
+            Assert.Contains("open.dotnet=" + dotnet.Replace('\\', '/') + "|10.0.102", output, StringComparison.Ordinal);
+            Assert.DoesNotContain(RemoteScripts.ParseFound(output, "dotnet"), f => f.Dir == dotnet.Replace('\\', '/'));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>A Windows worker gets the PowerShell search on stdin through the command that runs it from memory.</summary>
+    [Fact]
+    public async Task TheWindowsSearchGoesOnStdinToPowerShell()
+    {
+        var ssh = new FakeSsh { InputHandler = (_, _, _) => new SshResult(0, "found.dotnet=D:/build/dotnet|10.0.102\n") };
+        var search = await Cli.FindToolchain(T.Windows(), ssh, "dotnet", CancellationToken.None);
+        Assert.Equal("D:/build/dotnet", search!.Value.Found!.Value.Dir);
+        var run = Assert.Single(ssh.InputRuns);
+        Assert.Equal(RemoteScripts.FindToolchainCommand(MachineOs.Windows), run.Command);
+        Assert.StartsWith(RemoteScripts.FindToolchainMarker + " dotnet", Encoding.UTF8.GetString(run.Input), StringComparison.Ordinal);
+        Assert.Contains("Test-SafeFolder", Encoding.UTF8.GetString(run.Input), StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+    }
+
+    [Fact]
+    public void OpenFoldersAreNotParsedAsFound() =>
+        Assert.Equal([("D:/build/dotnet", "10.0.102")], RemoteScripts.ParseFound("open.dotnet=C:/tools/dotnet|11.0.100\nfound.dotnet=D:/build/dotnet|10.0.102\n", "dotnet"));
 
     /// <summary>If the whole ssh call runs out of time, what did arrive is still reported, and the rest says it did not finish.</summary>
     [Fact]
