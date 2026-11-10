@@ -52,6 +52,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>makeready --ssh ... --setup: print the worker's one-time setup and connect to nothing (see Cli.MakereadySetup.cs).</summary>
     public bool Setup { get; init; }
 
+    /// <summary>makeready --ssh ... --add: add the worker to the local machines.yml when it is ready (see Cli.MakereadyAdd.cs).</summary>
+    public bool Add { get; init; }
+
+    /// <summary>makeready --add --name NAME: the new machine's name.</summary>
+    public string? Name { get; init; }
+
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
@@ -99,7 +105,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
@@ -134,6 +140,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         MachineOs? os = null;
         string? keyEnv = null;
         var setup = false;
+        var add = false;
+        string? name = null;
         string? target = null;
         var fetch = new List<string>();
         string? fetchDir = null;
@@ -257,6 +265,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--setup":
                     setup = true;
                     break;
+                case "--add":
+                    add = true;
+                    break;
+                case "--name" when i + 1 < own.Length:
+                    name = own[++i];
+                    break;
                 case "--os" when i + 1 < own.Length:
                     os = own[++i] switch
                     {
@@ -298,7 +312,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
         if (command == "makeready")
         {
-            CheckMakereadyOptions(seen, json, setup);
+            CheckMakereadyOptions(seen, json, setup, add);
         }
 
         if (split >= 0 && command != "run")
@@ -324,6 +338,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             Os = os,
             KeyEnv = keyEnv,
             Setup = setup,
+            Add = add,
+            Name = name,
             Fetch = FetchPatterns.Validate(fetch),
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
@@ -335,19 +351,25 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     }
 
     /// <summary>
-    /// The makeready options that only make sense together: --key-env only with --ssh; --setup only prints text (no --json, --all or
-    /// --force).
+    /// The makeready options that only make sense together: --key-env only with --ssh; --setup only prints text (no --json, --add, --all or
+    /// --force); --name and --yes only with --add. Whether --ssh, --os and --name are all there is checked by the command itself, so that
+    /// lanq makeready --add --json still answers with its own object.
     /// </summary>
-    private static void CheckMakereadyOptions(List<string> seen, bool json, bool setup)
+    private static void CheckMakereadyOptions(List<string> seen, bool json, bool setup, bool add)
     {
         if (seen.Contains("--key-env") && !seen.Contains("--ssh"))
         {
             throw new ArgumentException("--key-env goes with --ssh user@host (a configured machine uses its key_env from machines.yml).");
         }
 
-        if (setup && (json || seen.Contains("--all") || seen.Contains("--force")))
+        if (setup && (json || add || seen.Contains("--all") || seen.Contains("--force")))
         {
-            throw new ArgumentException("--setup only prints the one-time setup for people; it takes no --json, --all or --force.");
+            throw new ArgumentException("--setup only prints the one-time setup for people; it takes no --json, --add, --all or --force.");
+        }
+
+        if (!add && (seen.Contains("--name") || seen.Contains("--yes")))
+        {
+            throw new ArgumentException("--name and --yes go with --add (lanq makeready --ssh user@host --os windows|linux --add --name NAME).");
         }
     }
 
@@ -392,6 +414,7 @@ public static partial class Cli
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
           lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]
+          lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]
           lanq makeready --all [--json] [--force] [--config FILE]
           lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
@@ -421,7 +444,12 @@ public static partial class Cli
         build user (from user@host), your public key in its authorized_keys (Windows: icacls by SID; Linux: chmod 700/600), the work folder,
         firewall scoping, password logins off, the host key fingerprint to compare and the first connection; only .pub files are read (the
         first key ssh-agent lists; with --key-env the .pub beside that key; else ~/.ssh/lanq_ed25519.pub or ~/.ssh/id_ed25519.pub). Text only,
-        exit 0.
+        exit 0. --add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml (found as for every command) as text
+        after its last machine, every other line kept byte for byte; it shows the lines and asks first (without a terminal, and with --json,
+        --yes instead), never writes through a link, then probes the new machine once (read-only, never a wake). Exit 0 added, 1 NOT READY or
+        declined (nothing written), 2 bad arguments, config, a duplicate name or host, or a file lanq does not edit by itself (paste the entry
+        by hand), 70 ssh failed, the report was unusable or the file could not be written; --json prints one object (status Added, NotAdded,
+        Rejected, InfraError or Cancelled, exitCode, path, machine, entry, afterLine, health, report, message, nextSteps).
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
@@ -532,7 +560,7 @@ public static partial class Cli
 
         if (p.Command == "makeready")
         {
-            // No waker: makeready never wakes a machine. --setup connects to nothing at all.
+            // No waker: makeready (and the one probe of --add) never wakes a machine. --setup connects to nothing at all.
             var client = new ProcessSshClient(Environment.GetEnvironmentVariable);
             return await Makeready(p, LoadConfig, client, new HealthProbe(client, TimeProvider.System), stdout, stderr, ct, MakereadyHost.Real(stderr)).ConfigureAwait(false);
         }
@@ -880,13 +908,7 @@ public static partial class Cli
 
         foreach (var (i, (m, h)) in config.Machines.Zip(results).Index())
         {
-            var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
-            var detail = h.Reachable
-                ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
-                    + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
-                    + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
-                : h.Error ?? "";
-            var line = $"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd();
+            var line = HealthLine(m, h);
             await stdout.WriteLineAsync(assessed is null ? line : line + "  -> " + Verdict(assessed[i])).ConfigureAwait(false);
         }
 
@@ -895,6 +917,18 @@ public static partial class Cli
         static string Verdict(Assessment a) => a.Eligible
             ? string.Create(CultureInfo.InvariantCulture, $"eligible ({a.JobSlots} slot{(a.JobSlots == 1 ? "" : "s")})")
             : "not eligible: " + JobRunner.SafeLine(a.Why ?? a.Code ?? "?");
+    }
+
+    /// <summary>One machine's lanq health line (also printed by lanq makeready --add for the machine it added).</summary>
+    internal static string HealthLine(Machine m, MachineHealth h)
+    {
+        var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
+        var detail = h.Reachable
+            ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
+                + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
+                + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores)
+            : h.Error ?? "";
+        return $"{m.Name,-14} {state,-5} {detail} {(h.Hold is not null && h.Reachable ? "(" + h.Hold + ")" : "")}".TrimEnd();
     }
 
     /// <summary>A health row with how the machine was judged for the --needs / --mem job (<paramref name="a"/> from <see cref="Scheduler.Assess"/>).</summary>

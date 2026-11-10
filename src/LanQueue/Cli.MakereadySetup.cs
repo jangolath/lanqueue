@@ -8,12 +8,12 @@ using LanQueue.Jobs;
 
 namespace LanQueue;
 
-/// <summary>What lanq makeready --setup uses from this computer; tests replace each part.</summary>
+/// <summary>What lanq makeready --setup and --add use from this computer; tests replace each part.</summary>
 /// <param name="Env">Environment variables (HOME, the --key-env variable, LANQ_CONFIG, APPDATA, ...).</param>
 /// <param name="Windows">True on Windows (the per-user config path).</param>
 /// <param name="AgentKeys">The output of <c>ssh-add -L</c> (public keys only), or null when there is no agent or it failed.</param>
-/// <param name="Confirm">Asks a yes/no question on the terminal; null when stdin is not a terminal.</param>
-/// <param name="BeforeWrite">Tests: runs just before a write.</param>
+/// <param name="Confirm">Asks a yes/no question on the terminal; null when stdin is not a terminal (then --add needs --yes).</param>
+/// <param name="BeforeWrite">Tests: runs just before lanq makeready --add replaces the file.</param>
 internal sealed record MakereadyHost(Func<string, string?> Env, bool Windows, Func<string?> AgentKeys, Func<string, bool>? Confirm, Action? BeforeWrite = null)
 {
     /// <summary>This computer: the real environment, ssh-add -L, and a prompt on stderr only when stdin is a terminal.</summary>
@@ -221,7 +221,7 @@ public static partial class Cli
         }
 
         var key = FindSetupKey(p.KeyEnv, host);
-        foreach (var line in SetupText(target, user, hostName, os, key, p.KeyEnv))
+        foreach (var line in SetupText(target, user, hostName, os, key, p.KeyEnv, p.ConfigPath))
         {
             await stdout.WriteLineAsync(line).ConfigureAwait(false);
         }
@@ -230,11 +230,12 @@ public static partial class Cli
     }
 
     /// <summary>The setup text. Every value in it is validated: the user and host by their patterns, the key by <see cref="PublicKeyLine"/>.</summary>
-    private static IEnumerable<string> SetupText(string target, string user, string hostName, MachineOs os, SetupKey key, string? keyEnv)
+    private static IEnumerable<string> SetupText(string target, string user, string hostName, MachineOs os, SetupKey key, string? keyEnv, string? config)
     {
         var windows = os == MachineOs.Windows;
         var keyLine = key.Line ?? "<your public key: the one line of lanq_ed25519.pub>";
         var keyEnvArg = keyEnv is null ? "" : " --key-env " + keyEnv;
+        var configArg = config is null ? "" : " --config " + (config.Contains(' ', StringComparison.Ordinal) ? "\"" + config + "\"" : config);
         yield return $"lanq makeready --ssh {target} --os {(windows ? "windows" : "linux")} --setup: the one-time setup of a new {(windows ? "Windows 10/11" : "Linux")} worker.";
         yield return "Nothing was sent: lanq connected to nothing. lanq never changes a worker: the PC's owner runs the worker part on that PC.";
         yield return "";
@@ -291,8 +292,8 @@ public static partial class Cli
         }
 
         yield return "";
-        yield return "Then, on this computer: check the worker and get its machines.yml entry:";
-        yield return $"  lanq makeready --ssh {target} --os {(windows ? "windows" : "linux")}{keyEnvArg}";
+        yield return "Then, on this computer: check the worker and add it to machines.yml once it is ready (it asks before writing):";
+        yield return $"  lanq makeready --ssh {target} --os {(windows ? "windows" : "linux")} --add --name NAME{keyEnvArg}{configArg}";
         yield return "Every step is explained in docs/TEAM-QUICKSTART.md, section 3 (https://github.com/jangolath/lanqueue).";
     }
 

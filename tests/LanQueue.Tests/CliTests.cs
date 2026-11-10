@@ -45,7 +45,9 @@ public class CliTests
     [InlineData("lanq makeready <machine>")]
     [InlineData("lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]")]
     [InlineData("lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]")]
+    [InlineData("lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]")]
     [InlineData("--setup prints that PC's full one-time setup and connects to nothing")]
+    [InlineData("--add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml")]
     [InlineData("lanq unlock <machine>")]
     [InlineData("lanq doctor [--remote")]
     public async Task UsageListsEveryCommandAndOption(string text)

@@ -557,6 +557,66 @@ internal static class NextSteps
         _ => [Step(NextAction.AskDeveloper, message)],
     };
 
+    /// <summary>How lanq makeready --ssh ... --add ended (its status is Added, NotAdded, Rejected, InfraError or Cancelled).</summary>
+    internal enum AddOutcome
+    {
+        Added,
+        NotReady,
+        Declined,
+        Arguments,
+        Config,
+        Duplicate,
+        Unsafe,
+        Unreachable,
+        Unusable,
+        WriteFailed,
+        Cancelled,
+        Unexpected,
+    }
+
+    /// <summary>
+    /// lanq makeready --add. Added: lanq doctor --remote (read-only, safe), and the developer deletes init's example-01 when it is still there.
+    /// NOT READY: for the PC's owner, with the rescan (never --add or --yes). The rest as lanq makeready's error object.
+    /// </summary>
+    /// <param name="rescan">lanq makeready --ssh ... --os ... [--key-env V] (never safe unattended).</param>
+    /// <param name="setup">The --setup step when the worker refused the key or its host key is unknown (see <see cref="ForMakereadyError"/>).</param>
+    /// <param name="placeholder">init's example-01 is still in the file.</param>
+    public static List<NextStepJson> ForMakereadyAdd(
+        AddOutcome outcome, string message, string? config, SuggestedCommand? rescan, SuggestedCommand? setup, bool placeholder = false)
+    {
+        switch (outcome)
+        {
+            case AddOutcome.Added:
+                List<NextStepJson> steps = [Step(NextAction.RunDoctor, "check the new machine and this computer's setup", SuggestedCommand.Doctor(remote: true, config))];
+                if (placeholder)
+                {
+                    steps.Add(Step(NextAction.AskDeveloper, "example-01, the example from lanq init, is still in machines.yml; delete it (it never answers, so it shows DOWN everywhere)"));
+                }
+
+                return steps;
+            case AddOutcome.NotReady:
+                return [Step(NextAction.AskDeveloper, "the PC is NOT READY and was not added (" + message + "); its owner must fix the MUST FIX steps on that PC, then add it again; details", rescan)];
+            case AddOutcome.Declined:
+                return Nothing("not added: nothing was written");
+            case AddOutcome.Arguments:
+                return ArgumentsError(message);
+            case AddOutcome.Config:
+                return ConfigError(config, message);
+            case AddOutcome.Duplicate:
+                return [Step(NextAction.FixCommand, message)];
+            case AddOutcome.Unsafe or AddOutcome.WriteFailed:
+                return [Step(NextAction.AskDeveloper, message)];
+            case AddOutcome.Unreachable:
+                return ForMakereadyError(MakereadyFailure.Unreachable, message, rescan, config, setup);
+            case AddOutcome.Unusable:
+                return ForMakereadyError(MakereadyFailure.Unusable, message, rescan, config);
+            case AddOutcome.Cancelled:
+                return Nothing("cancelled (Ctrl+C); nothing was written");
+            default:
+                return ForMakereadyError(MakereadyFailure.Unexpected, message, rescan, config);
+        }
+    }
+
     /// <summary>One lanq makeready --all row: OK and WARN none, FAIL for the PC's owner (with lanq makeready MACHINE for the details), else as the error object.</summary>
     public static List<NextStepJson> ForMakereadyRow(string machine, string verdict, string? problem, string? config) => verdict switch
     {

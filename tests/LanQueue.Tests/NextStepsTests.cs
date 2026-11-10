@@ -167,6 +167,11 @@ public sealed class NextStepsTests : IDisposable
         var setup = SuggestedCommand.Setup("build@10.20.30.40", MachineOs.Linux, "LANQ_KEY");
         yield return ("makeready --ssh key refused", NextSteps.ForMakereadyError(
             NextSteps.MakereadyFailure.Unreachable, "message", SuggestedCommand.Makeready(null, null, "build@10.20.30.40", MachineOs.Linux), null, setup));
+        foreach (var outcome in Enum.GetValues<NextSteps.AddOutcome>())
+        {
+            var rescan = SuggestedCommand.Makeready(null, null, "build@10.20.30.40", MachineOs.Linux, "LANQ_KEY");
+            yield return ($"makeready --add {outcome}", NextSteps.ForMakereadyAdd(outcome, "message", "fleet.yml", rescan, setup, placeholder: true));
+        }
 
         foreach (var verdict in new[] { "OK", "WARN", "FAIL", "held", "unreachable", "error" })
         {

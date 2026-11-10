@@ -71,13 +71,14 @@ public sealed class MakereadySetupTests : IDisposable
         Assert.Equal(1, asked); // ssh-add -L once, a local agent question: nothing goes to the worker
         Assert.Contains("lanq connected to nothing", o, StringComparison.Ordinal);
         Assert.Contains(key, o, StringComparison.Ordinal);
-        Assert.Contains("  lanq makeready --ssh build@10.20.30.21 --os windows", o, StringComparison.Ordinal);
+        Assert.Contains("lanq makeready --ssh build@10.20.30.21 --os windows --add --name NAME", o, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task SetupIsTextOnlyAndRefusesJsonAndOtherModes()
     {
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "--ssh", "build@10.20.30.21", "--os", "linux", "--setup", "--json"]));
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "--ssh", "build@10.20.30.21", "--os", "linux", "--setup", "--add", "--name", "b"]));
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "--all", "--setup"]));
 
         // Through the whole CLI, --json still gets its one object on stdout.
@@ -120,7 +121,7 @@ public sealed class MakereadySetupTests : IDisposable
         Assert.DoesNotContain(agentKey, o, StringComparison.Ordinal);
         Assert.Contains("-i \"$env:LANQ_KEY\" build@10.20.30.31 exit", o, StringComparison.Ordinal);
         Assert.Contains("-i \"$LANQ_KEY\" build@10.20.30.31 exit", o, StringComparison.Ordinal);
-        Assert.Contains("  lanq makeready --ssh build@10.20.30.31 --os windows --key-env LANQ_KEY", o, StringComparison.Ordinal);
+        Assert.Contains("--add --name NAME --key-env LANQ_KEY", o, StringComparison.Ordinal);
         Assert.DoesNotContain("PRIVATE KEY", o, StringComparison.Ordinal);
 
         // A key file without a .pub: a placeholder, never the private key.

@@ -7,13 +7,24 @@ namespace LanQueue.Output;
 /// <param name="Reasons">Why the machine is held or down; empty when ok.</param>
 /// <param name="MemFreeGb">Null when the machine did not report memory.</param>
 /// <param name="LocalTime">The worker's own clock (yyyy-MM-ddTHH:mm:ss), or null when it did not report one.</param>
+/// <remarks>Its null members are always written (also inside the --add object, whose context leaves out the report's null members).</remarks>
 internal record HealthJson(
-    string Name, string State, IReadOnlyList<string> Reasons, double Load, double DiskFreeGb, double? MemFreeGb, int SlotsUsed, int MaxJobs, string? LocalTime)
+    string Name,
+    string State,
+    IReadOnlyList<string> Reasons,
+    double Load,
+    double DiskFreeGb,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] double? MemFreeGb,
+    int SlotsUsed,
+    int MaxJobs,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? LocalTime)
 {
     /// <summary>Logical processors, or null when the machine did not report them (down, or an older probe).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     public int? Cores { get; init; }
 
     /// <summary>Total memory in GB, or null when not reported.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     public double? MemTotalGb { get; init; }
 
     /// <summary>max_jobs minus the slots in use (0 for a machine that is down).</summary>
@@ -279,10 +290,38 @@ internal sealed record InitJson(string Status, int ExitCode, string? Path, strin
 }
 
 /// <summary>
-/// Source-generated serialization for <c>lanq makeready --all --json</c>. Null members are left out, as in the single-machine report, so
-/// each embedded report keeps exactly the fields it has there (the report records carry their own JSON names).
+/// The one object <c>lanq makeready --ssh ... --add --json</c> prints on every path: Added (0), NotAdded (1: NOT READY, or declined),
+/// Rejected (2: arguments, config, a duplicate, or a file lanq does not edit by itself), InfraError (70: ssh, an unusable report, or the
+/// write failed) or Cancelled (130). Every member is always written; the embedded report keeps exactly the fields it has in lanq makeready --json.
+/// </summary>
+/// <param name="Path">The full path of machines.yml, or null before it was found.</param>
+/// <param name="Machine">The new machine's name (--name), or null when the arguments were refused.</param>
+/// <param name="Entry">The lines written (Added) or that would have been written, exactly; null before there was an entry.</param>
+/// <param name="AfterLine">The 1-based line of machines.yml the entry follows; null without an entry.</param>
+/// <param name="Health">One read-only probe of the added machine (as a lanq health --json row); null unless Added.</param>
+/// <param name="Report">The validated lanq-makeready/v1 report; null when there was none.</param>
+internal sealed record MakereadyAddJson(
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string Status,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int ExitCode,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Path,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Machine,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] IReadOnlyList<string>? Entry,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? AfterLine,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] HealthJson? Health,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] Makeready.MakereadyReport? Report,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string Message)
+{
+    /// <summary>What to do next (see <see cref="NextStepJson"/>): Added suggests lanq doctor --remote; never --add or --yes.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>
+/// Source-generated serialization for <c>lanq makeready --all --json</c> and <c>--add --json</c>. Null members are left out (except where a
+/// member says otherwise), as in the single-machine report, so each embedded report keeps exactly the fields it has there (the report records
+/// carry their own JSON names).
 /// </summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, MaxDepth = 16)]
 [JsonSerializable(typeof(MakereadyAllJson))]
+[JsonSerializable(typeof(MakereadyAddJson))]
 [JsonSerializable(typeof(NextStepJson))]
 internal sealed partial class MakereadyAllJsonContext : JsonSerializerContext;

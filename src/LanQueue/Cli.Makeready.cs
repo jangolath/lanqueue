@@ -54,7 +54,7 @@ public static partial class Cli
     /// every configured machine) and reads its report. One machine: exit 0 worker-ready, 1 not ready, 2 bad arguments, 70 ssh or an unusable
     /// report, 75 machine paused or outside its allowed hours (unless --force). --all: see <see cref="MakereadyAll"/>.
     /// </summary>
-    /// <param name="host">This computer's environment and ssh-agent for --setup (tests replace it); null: the real one.</param>
+    /// <param name="host">This computer's environment, ssh-agent and terminal for --setup and --add (tests replace it); null: the real one.</param>
     internal static async Task<int> Makeready(
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct,
         MakereadyHost? host = null)
@@ -62,6 +62,11 @@ public static partial class Cli
         if (p.Setup)
         {
             return await MakereadySetup(p, host ?? MakereadyHost.Real(stderr), stdout, stderr).ConfigureAwait(false);
+        }
+
+        if (p.Add)
+        {
+            return await MakereadyAdd(p, host ?? MakereadyHost.Real(stderr), ssh, stdout, stderr, ct).ConfigureAwait(false);
         }
 
         var failed = new MakereadyFailed();
@@ -305,7 +310,7 @@ public static partial class Cli
         new() { Name = target, Os = os, Ssh = target, KeyEnv = keyEnv, WorkRoot = os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
 
     private const string MakereadyUsage =
-        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--setup] "
+        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--setup | --add --name NAME [--yes]] "
         + "| lanq makeready --all [--json] [--force]";
 
     /// <summary>How many machines lanq makeready --all scans at once.</summary>
@@ -469,8 +474,11 @@ public static partial class Cli
     }
 
     /// <summary>The human report. Every string from the worker is sanitised by the caller, line by line; nothing from it is executed.</summary>
+    /// <param name="entryName">The entry's name (lanq makeready --add --name); null: the configured name, else the report's suggestion.</param>
     /// <param name="keyEnv">--key-env, written into the entry as key_env.</param>
-    private static IEnumerable<string> MakereadyText(MakereadyReport report, string name, Machine? configured, string? sshTarget, string? keyEnv = null)
+    /// <param name="withEntry">False for --add, which shows the exact lines it writes instead.</param>
+    private static IEnumerable<string> MakereadyText(
+        MakereadyReport report, string name, Machine? configured, string? sshTarget, string? entryName = null, string? keyEnv = null, bool withEntry = true)
     {
         var v = report.Verdicts!;
         yield return $"lanq makeready {name} (lanq-makeready {report.Tool?.Version ?? "?"}, read-only; host {report.Host?.Os} {report.Host?.Arch})";
@@ -541,11 +549,14 @@ public static partial class Cli
             yield return "  configured, not checked by lanq-makeready: " + List(mine.Where(c => !MakereadyKnownCapabilities.Contains(c)));
         }
 
-        yield return "";
-        yield return "Suggested machines.yml entry (confirm every value):";
-        foreach (var line in SuggestedEntry(report.SuggestedMachine!, configured, sshTarget, keyEnv))
+        if (withEntry)
         {
-            yield return line;
+            yield return "";
+            yield return "Suggested machines.yml entry (confirm every value):";
+            foreach (var line in SuggestedEntry(report.SuggestedMachine!, configured, sshTarget, entryName, keyEnv))
+            {
+                yield return line;
+            }
         }
 
         yield return "";
@@ -558,16 +569,16 @@ public static partial class Cli
     private static string List(IEnumerable<string> items) => string.Join(", ", items) is { Length: > 0 } s ? s : "none";
 
     /// <summary>A machines.yml entry built from the report's suggestion: the <c>machines:</c> header, then <see cref="SuggestedItem"/>.</summary>
-    private static IEnumerable<string> SuggestedEntry(MakereadySuggestion s, Machine? configured, string? sshTarget, string? keyEnv = null) =>
-        SuggestedItem(s, configured, sshTarget, keyEnv) is { } item
+    private static IEnumerable<string> SuggestedEntry(MakereadySuggestion s, Machine? configured, string? sshTarget, string? entryName = null, string? keyEnv = null) =>
+        SuggestedItem(s, configured, sshTarget, entryName, keyEnv) is { } item
             ? ["machines:", .. item]
             : ["# This OS cannot be a lanq worker (workers are Windows or Linux)."];
 
     /// <summary>
     /// One machine's lines (the dash at column 2, its keys at column 4), or null when the report's OS cannot be a worker. Values that do not
-    /// look right are left as placeholders.
+    /// look right are left as placeholders. lanq makeready --add writes exactly these lines (re-indented to the file's own items).
     /// </summary>
-    private static List<string>? SuggestedItem(MakereadySuggestion s, Machine? configured, string? sshTarget, string? keyEnv)
+    private static List<string>? SuggestedItem(MakereadySuggestion s, Machine? configured, string? sshTarget, string? entryName, string? keyEnv)
     {
         if (s.Os is not ("windows" or "linux"))
         {
@@ -575,7 +586,7 @@ public static partial class Cli
         }
 
         var caps = (s.Capabilities ?? []).Where(c => c is not null && CapabilityNameRegex().IsMatch(c)).Distinct(StringComparer.Ordinal);
-        var name = configured?.Name ?? (s.Name is { } n && MachineNameRegex().IsMatch(n) ? n : "old-pc");
+        var name = entryName ?? configured?.Name ?? (s.Name is { } n && MachineNameRegex().IsMatch(n) ? n : "old-pc");
         var ssh = configured?.Ssh ?? sshTarget;
         List<string> lines = [];
         lines.Add($"  - name: {Yaml(name)}");
