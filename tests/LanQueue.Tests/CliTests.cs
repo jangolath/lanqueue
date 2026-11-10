@@ -43,6 +43,7 @@ public class CliTests
     [InlineData("lanq wake <machine> [--wait] [--json]")]
     [InlineData("lanq --version")]
     [InlineData("lanq makeready <machine>")]
+    [InlineData("lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]")]
     [InlineData("lanq unlock <machine>")]
     [InlineData("lanq doctor [--remote")]
     public async Task UsageListsEveryCommandAndOption(string text)

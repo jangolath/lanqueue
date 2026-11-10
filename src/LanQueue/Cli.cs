@@ -46,6 +46,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>makeready --os windows|linux, with --ssh.</summary>
     public MachineOs? Os { get; init; }
 
+    /// <summary>makeready --key-env VAR, with --ssh: the NAME of an environment variable holding the private key file's path (as key_env).</summary>
+    public string? KeyEnv { get; init; }
+
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
@@ -93,7 +96,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
@@ -126,6 +129,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var force = false;
         string? sshTarget = null;
         MachineOs? os = null;
+        string? keyEnv = null;
         string? target = null;
         var fetch = new List<string>();
         string? fetchDir = null;
@@ -238,6 +242,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--ssh" when i + 1 < own.Length:
                     sshTarget = own[++i];
                     break;
+                case "--key-env" when i + 1 < own.Length:
+                    keyEnv = own[++i];
+                    if (!ConfigLoader.IsValidEnvName(keyEnv))
+                    {
+                        throw new ArgumentException("--key-env must be the NAME of an environment variable holding your key file's path (letters, digits and _), for example --key-env LANQ_KEY.");
+                    }
+
+                    break;
                 case "--os" when i + 1 < own.Length:
                     os = own[++i] switch
                     {
@@ -277,6 +289,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
         }
 
+        if (command == "makeready")
+        {
+            CheckMakereadyOptions(seen);
+        }
+
         if (split >= 0 && command != "run")
         {
             throw new ArgumentException($"lanq {command} does not take a command after --; only lanq run does.");
@@ -298,6 +315,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             Force = force,
             SshTarget = sshTarget,
             Os = os,
+            KeyEnv = keyEnv,
             Fetch = FetchPatterns.Validate(fetch),
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
@@ -306,6 +324,17 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             LogTail = logTail,
             Raw = [.. args],
         };
+    }
+
+    /// <summary>
+    /// The makeready options that only make sense together: --key-env only with --ssh.
+    /// </summary>
+    private static void CheckMakereadyOptions(List<string> seen)
+    {
+        if (seen.Contains("--key-env") && !seen.Contains("--ssh"))
+        {
+            throw new ArgumentException("--key-env goes with --ssh user@host (a configured machine uses its key_env from machines.yml).");
+        }
     }
 
     /// <summary>--fetch-max: a size in bytes with an optional K, M or G suffix (powers of 1024, an optional trailing B), from 1 KB to 2 GB.</summary>
@@ -347,7 +376,7 @@ public static partial class Cli
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
-          lanq makeready --ssh user@host --os windows|linux [--json]
+          lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
           lanq makeready --all [--json] [--force] [--config FILE]
           lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
@@ -372,6 +401,8 @@ public static partial class Cli
         the script's VERDICT line and numbered next steps (0.1 reports: the WARN/FAIL checks with advice), what the PC is suited for, the
         capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 2 bad arguments, 70 ssh failed or the report was
         unusable, 75 the machine is paused or outside its allowed hours (--force scans anyway), 130 Ctrl+C. lanq never changes a worker.
+        makeready --ssh user@host scans a PC that is not in the config yet, with the keys in ssh-agent or, with --key-env VAR, the key file
+        whose path is in $VAR (the NAME of the variable, as key_env).
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.

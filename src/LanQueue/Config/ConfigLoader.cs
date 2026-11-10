@@ -78,6 +78,9 @@ public static partial class ConfigLoader
     /// <summary>The same rule a machine's ssh: must follow (user@host, no leading '-', no spaces).</summary>
     internal static bool IsValidSshTarget(string target) => SshTargetRegex().IsMatch(target);
 
+    /// <summary>A valid key_env (the NAME of an environment variable).</summary>
+    internal static bool IsValidEnvName(string name) => EnvNameRegex().IsMatch(name);
+
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]*\z", RegexOptions.None, 1000)]
     private static partial Regex NameRegex();
 

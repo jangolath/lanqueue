@@ -129,6 +129,23 @@ public class MakereadyTests
         Assert.Contains("StrictHostKeyChecking=yes", SshArgs.Ssh(run.Machine, null, run.Command), StringComparer.Ordinal);
     }
 
+    /// <summary>--key-env VAR (with --ssh): the scan uses the key file whose path is in VAR (as key_env), and the suggested entry carries it.</summary>
+    [Fact]
+    public async Task KeyEnvNamesTheKeyForAnUnconfiguredPc()
+    {
+        var (code, o, _, ssh) = await Run(Report(), ["--ssh", "me@new-pc.lan", "--os", "linux", "--key-env", "LANQ_KEY_NEW"]);
+        Assert.Equal(0, code);
+        var run = Assert.Single(ssh.InputRuns);
+        Assert.Equal("LANQ_KEY_NEW", run.Machine.KeyEnv);
+        Assert.Contains("IdentitiesOnly=yes", SshArgs.Ssh(run.Machine, "/keys/k", run.Command), StringComparer.Ordinal);
+        Assert.Contains("    key_env: LANQ_KEY_NEW", o, StringComparison.Ordinal);
+
+        // A variable NAME, and only with --ssh.
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "--ssh", "me@new-pc.lan", "--os", "linux", "--key-env", "~/.ssh/id_ed25519"]));
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "build-01", "--key-env", "LANQ_KEY"]));
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["makeready", "--all", "--key-env", "LANQ_KEY"]));
+    }
+
     [Theory]
     [InlineData("--ssh", "me@new-pc.lan")] // no --os
     [InlineData("--os", "linux")] // --os without --ssh

@@ -58,7 +58,7 @@ public static partial class Cli
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
         var failed = new MakereadyFailed();
-        var again = SuggestedCommand.Makeready(p.Target, p.ConfigPath, p.SshTarget, p.Os);
+        var again = SuggestedCommand.Makeready(p.Target, p.ConfigPath, p.SshTarget, p.Os, p.KeyEnv);
         if (!p.Json)
         {
             var result = p.All
@@ -233,7 +233,7 @@ public static partial class Cli
                 return 2;
             }
 
-            machine = new Machine { Name = target, Os = p.Os!.Value, Ssh = target, WorkRoot = p.Os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
+            machine = AdHocMachine(target, p.Os!.Value, p.KeyEnv);
         }
         else
         {
@@ -276,7 +276,7 @@ public static partial class Cli
         }
         else
         {
-            foreach (var line in MakereadyText(report, name, configured, p.SshTarget))
+            foreach (var line in MakereadyText(report, name, configured, p.SshTarget, keyEnv: p.KeyEnv))
             {
                 await stdout.WriteLineAsync(JobRunner.SafeLine(line)).ConfigureAwait(false);
             }
@@ -285,8 +285,13 @@ public static partial class Cli
         return scan.Code;
     }
 
+    /// <summary>A PC that is not in the config yet (lanq makeready --ssh): its key from ssh-agent, or from --key-env (as key_env).</summary>
+    private static Machine AdHocMachine(string target, MachineOs os, string? keyEnv) =>
+        new() { Name = target, Os = os, Ssh = target, KeyEnv = keyEnv, WorkRoot = os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
+
     private const string MakereadyUsage =
-        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux | lanq makeready --all [--json] [--force]";
+        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] "
+        + "| lanq makeready --all [--json] [--force]";
 
     /// <summary>How many machines lanq makeready --all scans at once.</summary>
     internal const int MakereadyParallelism = 4;
@@ -449,7 +454,8 @@ public static partial class Cli
     }
 
     /// <summary>The human report. Every string from the worker is sanitised by the caller, line by line; nothing from it is executed.</summary>
-    private static IEnumerable<string> MakereadyText(MakereadyReport report, string name, Machine? configured, string? sshTarget)
+    /// <param name="keyEnv">--key-env, written into the entry as key_env.</param>
+    private static IEnumerable<string> MakereadyText(MakereadyReport report, string name, Machine? configured, string? sshTarget, string? keyEnv = null)
     {
         var v = report.Verdicts!;
         yield return $"lanq makeready {name} (lanq-makeready {report.Tool?.Version ?? "?"}, read-only; host {report.Host?.Os} {report.Host?.Arch})";
@@ -522,7 +528,7 @@ public static partial class Cli
 
         yield return "";
         yield return "Suggested machines.yml entry (confirm every value):";
-        foreach (var line in SuggestedEntry(report.SuggestedMachine!, configured, sshTarget))
+        foreach (var line in SuggestedEntry(report.SuggestedMachine!, configured, sshTarget, keyEnv))
         {
             yield return line;
         }
@@ -536,45 +542,60 @@ public static partial class Cli
 
     private static string List(IEnumerable<string> items) => string.Join(", ", items) is { Length: > 0 } s ? s : "none";
 
-    /// <summary>A machines.yml entry built from the report's suggestion; values that do not look right are left as placeholders.</summary>
-    private static IEnumerable<string> SuggestedEntry(MakereadySuggestion s, Machine? configured, string? sshTarget)
+    /// <summary>A machines.yml entry built from the report's suggestion: the <c>machines:</c> header, then <see cref="SuggestedItem"/>.</summary>
+    private static IEnumerable<string> SuggestedEntry(MakereadySuggestion s, Machine? configured, string? sshTarget, string? keyEnv = null) =>
+        SuggestedItem(s, configured, sshTarget, keyEnv) is { } item
+            ? ["machines:", .. item]
+            : ["# This OS cannot be a lanq worker (workers are Windows or Linux)."];
+
+    /// <summary>
+    /// One machine's lines (the dash at column 2, its keys at column 4), or null when the report's OS cannot be a worker. Values that do not
+    /// look right are left as placeholders.
+    /// </summary>
+    private static List<string>? SuggestedItem(MakereadySuggestion s, Machine? configured, string? sshTarget, string? keyEnv)
     {
         if (s.Os is not ("windows" or "linux"))
         {
-            yield return "# This OS cannot be a lanq worker (workers are Windows or Linux).";
-            yield break;
+            return null;
         }
 
         var caps = (s.Capabilities ?? []).Where(c => c is not null && CapabilityNameRegex().IsMatch(c)).Distinct(StringComparer.Ordinal);
         var name = configured?.Name ?? (s.Name is { } n && MachineNameRegex().IsMatch(n) ? n : "old-pc");
         var ssh = configured?.Ssh ?? sshTarget;
-        yield return "machines:";
-        yield return $"  - name: {Yaml(name)}";
-        yield return $"    os: {s.Os}";
-        yield return ssh is not null ? $"    ssh: {Yaml(ssh)}" : $"    ssh: {Yaml(s.Ssh ?? "user@host.lan")}   # placeholder: confirm user and host name";
-        yield return $"    work_root: {Yaml(configured?.WorkRoot ?? s.WorkRoot ?? "")}";
-        yield return $"    capabilities: [{string.Join(", ", caps)}]";
-        yield return $"    max_jobs: {Math.Clamp(s.MaxJobs, 1, 64).ToString(CultureInfo.InvariantCulture)}";
-        if (s.MinFreeMemGb is { } minFree && double.IsFinite(minFree) && minFree is >= 0 and <= 1024)
+        List<string> lines = [];
+        lines.Add($"  - name: {Yaml(name)}");
+        lines.Add($"    os: {s.Os}");
+        lines.Add(ssh is not null ? $"    ssh: {Yaml(ssh)}" : $"    ssh: {Yaml(s.Ssh ?? "user@host.lan")}   # placeholder: confirm user and host name");
+        if (keyEnv is not null)
         {
-            yield return $"    min_free_mem_gb: {minFree.ToString("0.##", CultureInfo.InvariantCulture)}   # LanQueue starts no new job while less memory than this is free";
+            lines.Add($"    key_env: {keyEnv}   # NAME of the environment variable holding your key file's path");
         }
 
-        yield return s.Transfer is "git" or "archive" ? $"    transfer: {s.Transfer}" : "    # transfer: no transfer mode works yet (needs git, or tar for archive)";
+        lines.Add($"    work_root: {Yaml(configured?.WorkRoot ?? s.WorkRoot ?? "")}");
+        lines.Add($"    capabilities: [{string.Join(", ", caps)}]");
+        lines.Add($"    max_jobs: {Math.Clamp(s.MaxJobs, 1, 64).ToString(CultureInfo.InvariantCulture)}");
+        if (s.MinFreeMemGb is { } minFree && double.IsFinite(minFree) && minFree is >= 0 and <= 1024)
+        {
+            lines.Add($"    min_free_mem_gb: {minFree.ToString("0.##", CultureInfo.InvariantCulture)}   # LanQueue starts no new job while less memory than this is free");
+        }
+
+        lines.Add(s.Transfer is "git" or "archive" ? $"    transfer: {s.Transfer}" : "    # transfer: no transfer mode works yet (needs git, or tar for archive)");
         if (s.AllowedHours is { } hours && HoursRegex().IsMatch(hours))
         {
-            yield return $"    allowed_hours: {Yaml(hours)}";
+            lines.Add($"    allowed_hours: {Yaml(hours)}");
         }
 
         // Only when the script's Wake-on-LAN check passed; commented, so waking stays the owner's choice. A redacted MAC stays "<mac>",
         // which ConfigLoader refuses until the real one is filled in.
         if (s.Wake is { } wake)
         {
-            yield return $"    # wake:   # Wake-on-LAN looks ready; uncomment to let lanq wake this PC (test: lanq wake {name} --wait)";
-            yield return MagicPacket.TryParseMac(wake.Mac, out _)
+            lines.Add($"    # wake:   # Wake-on-LAN looks ready; uncomment to let lanq wake this PC (test: lanq wake {name} --wait)");
+            lines.Add(MagicPacket.TryParseMac(wake.Mac, out _)
                 ? $"    #   mac: {Yaml(wake.Mac!)}"
-                : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address";
+                : "    #   mac: \"<mac>\"   # placeholder: this PC's wired MAC address");
         }
+
+        return lines;
     }
 
     private static string Yaml(string value) =>

@@ -129,15 +129,30 @@ internal sealed class SuggestedCommand
     public static SuggestedCommand? Doctor(bool remote, string? config) =>
         Make(WithConfig(remote ? ["lanq", "doctor", "--remote"] : ["lanq", "doctor"], config), safe: true);
 
-    /// <summary>lanq makeready MACHINE [--config FILE] (or --ssh user@host --os X): it runs a script on someone else's PC, so never safe unattended.</summary>
-    public static SuggestedCommand? Makeready(string? machine, string? config, string? sshTarget = null, MachineOs? os = null)
+    /// <summary>
+    /// lanq makeready MACHINE [--config FILE] (or --ssh user@host --os X [--key-env VAR]): it runs a script on someone else's PC, so never safe
+    /// unattended.
+    /// </summary>
+    public static SuggestedCommand? Makeready(string? machine, string? config, string? sshTarget = null, MachineOs? os = null, string? keyEnv = null)
     {
         if (sshTarget is not null && os is { } o)
         {
-            return Make(["lanq", "makeready", "--ssh", sshTarget, "--os", o == MachineOs.Windows ? "windows" : "linux"], safe: false);
+            return Make(WithKeyEnv(["lanq", "makeready", "--ssh", sshTarget, "--os", OsWord(o)], keyEnv), safe: false);
         }
 
         return machine is null ? null : Make(WithConfig(["lanq", "makeready", machine], config), safe: false);
+    }
+
+    private static string OsWord(MachineOs os) => os == MachineOs.Windows ? "windows" : "linux";
+
+    private static List<string> WithKeyEnv(List<string> argv, string? keyEnv)
+    {
+        if (keyEnv is not null)
+        {
+            argv.AddRange(["--key-env", keyEnv]);
+        }
+
+        return argv;
     }
 
     private static List<string> WithConfig(List<string> argv, string? config)
