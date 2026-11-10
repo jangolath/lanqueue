@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using LanQueue.Output;
 using LanQueue.Policy;
@@ -38,7 +37,7 @@ public static class JobHistory
             return key;
         }
 
-        var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..16];
+        var hash = Convert.ToHexStringLower(Util.Sha256.Hash(Encoding.UTF8.GetBytes(key)))[..16];
         var cut = char.IsHighSurrogate(key[LongKeyPrefixChars - 1]) ? LongKeyPrefixChars - 1 : LongKeyPrefixChars;
         return key[..cut] + "#" + hash;
     }

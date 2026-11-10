@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Security.Cryptography;
 using System.Text;
 using LanQueue.Config;
 using LanQueue.Policy;
@@ -94,7 +93,7 @@ public static partial class RemoteScripts
     /// <summary>The same SHA-256 in base64 (shorter than hex under the command-line cap): the only content a worker script will run.</summary>
     internal static string WindowsJobHelperBase64 => Convert.ToBase64String(WindowsJobHelperDigest);
 
-    private static byte[] WindowsJobHelperDigest => SHA256.HashData(Encoding.UTF8.GetBytes(WindowsJobHelper));
+    private static byte[] WindowsJobHelperDigest => Util.Sha256.Hash(Encoding.UTF8.GetBytes(WindowsJobHelper));
 
     /// <summary>
     /// PowerShell: true when the file at <paramref name="variable"/> holds exactly <see cref="WindowsJobHelper"/>; its bytes are left in
