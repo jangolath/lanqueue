@@ -545,7 +545,7 @@ public static partial class Cli
           lanq wake <machine> [--wait] [--json] [--config FILE]
           lanq --version
 
-        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
+        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory); lanq init writes there too.
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.

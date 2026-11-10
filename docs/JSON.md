@@ -469,7 +469,7 @@ prints one object on every path. Every key is always there, `null` when it has n
 | --- | --- | --- |
 | `status` | string | `Created`, `Rejected` or `InfraError`. |
 | `exitCode` | number | 0, 2 or 70. |
-| `path` | string or null | Full path of the config file; `null` only when the arguments were refused. |
+| `path` | string or null | Full path of the config file (the per-user config file unless `--config` or `LANQ_CONFIG` named another); `null` only when the arguments were refused. |
 | `message` | string | One line. The next steps for people go to stderr. |
 | `nextSteps` | array | `Created`: replace `example-01` (for the developer) and `lanq doctor --json --config <path>`. |
 
