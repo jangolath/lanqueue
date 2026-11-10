@@ -62,7 +62,8 @@ public static partial class Cli
     /// duration) goes where the job output went, and the status line to stderr. With --json stdout carries exactly one <see cref="ShardRunJson"/>.
     /// </summary>
     internal static async Task<int> RunShards(
-        ParsedArgs p, ShardOptions options, JobRunner runner, string repoDir, FetchRequest? fetch, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, ShardOptions options, JobRunner runner, string repoDir, FetchRequest? fetch, TextWriter stdout, TextWriter stderr, CancellationToken ct,
+        Action? finished = null)
     {
         var jobOutput = p.Json ? stderr : stdout;
         var started = System.Diagnostics.Stopwatch.StartNew();
@@ -91,6 +92,8 @@ public static partial class Cli
             return 70;
         }
 
+        // After the result is decided, before the Next and status lines (see Cli.PruneLogs).
+        finished?.Invoke();
         if (result.Shards.Count > 0)
         {
             await jobOutput.WriteAsync(ShardTable(result)).ConfigureAwait(false);

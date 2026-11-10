@@ -290,6 +290,11 @@ public static partial class ConfigLoader
             throw new ConfigException("policy.min_window_minutes must be from 0 to 1440.");
         }
 
+        if (config.Policy.KeepLogsDays is < 0 or > 3650)
+        {
+            throw new ConfigException("policy.keep_logs_days must be from 0 to 3650 (days to keep each job's log in the state folder's logs/; 0 keeps them for ever).");
+        }
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in config.Machines)
         {

@@ -18,6 +18,7 @@ public sealed class StaticYamlTests
           max_mem_pressure: 30
           window_grace_minutes: 20
           min_window_minutes: 5
+          keep_logs_days: 45
           allowed_commands:
             - dotnet build
             - dotnet test
@@ -66,6 +67,7 @@ public sealed class StaticYamlTests
         Assert.Equal(30, c.Policy.MaxMemPressure);
         Assert.Equal(20, c.Policy.WindowGraceMinutes);
         Assert.Equal(5, c.Policy.MinWindowMinutes);
+        Assert.Equal(45, c.Policy.KeepLogsDays);
         Assert.Equal(["dotnet build", "dotnet test"], c.Policy.AllowedCommands);
         Assert.Equal([".", "src"], c.Policy.AllowedDirectories);
 

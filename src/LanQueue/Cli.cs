@@ -537,7 +537,7 @@ public static partial class Cli
         }
 
         var home = ResolveHome(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
-        var log = new JobLog(home);
+        var log = new JobLog(home, line => stderr.WriteLine(line));
         if (p.Command == "stats")
         {
             return Stats(log, stdout);
@@ -634,7 +634,7 @@ public static partial class Cli
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
         if (p.Shards is { } shards)
         {
-            return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct).ConfigureAwait(false);
+            return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct, () => PruneLogs(log, config, stderr)).ConfigureAwait(false);
         }
 
         var started = System.Diagnostics.Stopwatch.StartNew();
@@ -664,6 +664,8 @@ public static partial class Cli
             return 70;
         }
 
+        PruneLogs(log, config, stderr);
+
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
         var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
@@ -692,6 +694,13 @@ public static partial class Cli
 
         return result.CliExitCode;
     }
+
+    /// <summary>
+    /// After a run's result is decided and before its Next and status lines (the status line stays the last stderr line): deletes old job logs
+    /// (<see cref="LogPrune"/>, policy.keep_logs_days). Never throws and never changes the result; a problem is one warning line.
+    /// </summary>
+    internal static void PruneLogs(JobLog log, FleetConfig config, TextWriter stderr) =>
+        LogPrune.AfterRun(log.LogsFolder, config.Policy.KeepLogsDays, line => stderr.WriteLine(line));
 
     /// <summary>
     /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
