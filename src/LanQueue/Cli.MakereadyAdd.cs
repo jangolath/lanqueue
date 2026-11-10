@@ -16,7 +16,7 @@ public static partial class Cli
     private const string AddUsage = "Usage: lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]";
 
     /// <summary>init's live example machine (see <see cref="StarterConfig"/>): name, ssh and work_root together.</summary>
-    private static bool IsInitPlaceholder(Machine m) => m.Name == "example-01" && m.Ssh == "build@10.20.30.11" && m.WorkRoot == "/srv/lanq";
+    private static bool IsInitPlaceholder(Machine m) => m.Name == "example-01" && m.Ssh == "build@10.20.30.11" && m.WorkRoot is "/srv/lq" or "/srv/lanq"; // /srv/lanq: a starter written by 0.5.x
 
     /// <summary>
     /// lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]: scans the PC

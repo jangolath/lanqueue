@@ -614,7 +614,7 @@ settings keep `lanq` a polite guest there (a full example is the "family PC" ent
   - Windows: in a Command Prompt, `type nul > D:\lanq\PAUSE` (use your `work_root`), and `del D:\lanq\PAUSE` to
     resume. Friendlier: put two desktop shortcuts on that PC, "Pause builds" with the target
     `cmd /c type nul > D:\lanq\PAUSE` and "Resume builds" with the target `cmd /c del D:\lanq\PAUSE`.
-  - Linux: `touch /srv/lanq/PAUSE` to pause, `rm /srv/lanq/PAUSE` to resume.
+  - Linux: `touch /srv/lq/PAUSE` to pause, `rm /srv/lq/PAUSE` to resume.
 
   The person needs write access to the `work_root` folder (grant it once, or make the shortcuts for an account that
   has it). Only the file's existence counts; its content is ignored. On Linux the name is `PAUSE` or `pause` (those two
@@ -891,7 +891,7 @@ machines:
     os: linux                 # linux | windows
     ssh: user@host            # no leading "-"
     key_env: ENV_VAR_NAME     # optional. Omit to use ssh-agent (no -i is passed). Else the NAME of an env var holding a key file path
-    work_root: /srv/lanq      # Linux: absolute path. Windows: a drive path such as D:/lanq. Forward slashes, no spaces, no ".."
+    work_root: /srv/lq        # Linux: absolute path. Windows: a drive path such as D:/lq. Forward slashes, no spaces, no ".."
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files
     transfer: git             # optional: git (default, recommended; worker needs git) | archive (worker needs only tar)

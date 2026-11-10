@@ -43,7 +43,7 @@ public static partial class Cli
           - name: example-01
             os: linux
             ssh: build@10.20.30.11     # user@host
-            work_root: /srv/lanq       # absolute, forward slashes, no spaces
+            work_root: /srv/lq         # absolute, forward slashes, no spaces
             capabilities: [dotnet, linux]
             max_jobs: 1                # 1 under 6 GB of RAM, 2 under 12 GB; lanq makeready suggests it
             transfer: git              # git (default) needs git on the worker; archive needs only tar
@@ -53,7 +53,7 @@ public static partial class Cli
           #   os: windows
           #   ssh: build@10.20.30.21
           #   key_env: LANQ_KEY          # NAME of an environment variable holding your key file's path
-          #   work_root: C:/lanq
+          #   work_root: C:/lq
           #   capabilities: [dotnet, windows]
           #   max_jobs: 1
           #   transfer: archive          # the built-in tar.exe is enough; use git if git is installed
@@ -65,7 +65,7 @@ public static partial class Cli
           # - name: family-linux
           #   os: linux
           #   ssh: build@10.20.30.31
-          #   work_root: /srv/lanq
+          #   work_root: /srv/lq
           #   capabilities: [dotnet, node, linux]
           #   max_jobs: 1
           #   allowed_hours:             # the worker's own clock; a window may cross midnight

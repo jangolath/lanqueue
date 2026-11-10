@@ -312,8 +312,8 @@ public static partial class ConfigLoader
             if (!rootOk || m.WorkRoot.Contains("..", StringComparison.Ordinal))
             {
                 throw new ConfigException(m.Os == MachineOs.Windows
-                    ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lanq (forward slashes, no spaces, no '..')."
-                    : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lanq (no spaces, no '..').");
+                    ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lq (forward slashes, no spaces, no '..')."
+                    : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lq (no spaces, no '..').");
             }
 
             if (!Enum.IsDefined(m.Os))

@@ -477,7 +477,7 @@ The messages below are what lanq prints (`<...>` is filled in). `lanq doctor --r
    with a `wake:` setting can be woken with `lanq wake <machine> --wait`. **`the host name <host> could not be resolved`**
    means the name in `ssh:` does not resolve; use the IP address.
 7. **`Invalid config: ...`**, **`No machines configured.`** or a line starting **`Machine '<name>':`** (for example
-   `a Windows work_root must be a drive path like D:/lanq (forward slashes, no spaces, no '..').`). The config is
+   `a Windows work_root must be a drive path like D:/lq (forward slashes, no spaces, no '..').`). The config is
    checked strictly when it loads, and an unknown key is an error too; the message names the key and the line.
 8. **`[lanq] Rejected: Command '<cmd>' is not on policy.allowed_commands.`** (exit `2`), or `Directory '<dir>' is not
    on policy.allowed_directories.` Add the command (for example `dotnet test`) or folder to the policy.

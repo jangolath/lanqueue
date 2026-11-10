@@ -375,6 +375,18 @@ public sealed class MakereadyAddTests : IDisposable
     }
 
     [Fact]
+    public async Task AddAlsoWarnsAboutAStarterWrittenByOlderLanq()
+    {
+        // lanq init 0.5.x wrote work_root /srv/lanq for example-01; it is still the placeholder.
+        await File.WriteAllTextAsync(ConfigPath, Cli.StarterConfig.Replace("work_root: /srv/lq ", "work_root: /srv/lanq", StringComparison.Ordinal));
+        Assert.Equal("/srv/lanq", ConfigLoader.Load(ConfigPath).Machines[0].WorkRoot);
+
+        var r = await Add(AddArgs(more: "--yes"));
+        Assert.Equal(0, r.Code);
+        Assert.Contains("warning: example-01, the example machine from lanq init, is still in", r.Err, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task AddProbesTheNewMachineOnceAndNeverWakes()
     {
         // The report suggests Wake-on-LAN: the entry keeps it commented, and the one probe never sends a packet (there is no waker at all).
