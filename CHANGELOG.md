@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0 (2026-11-09)
 
 ### Agents and scripts
 
@@ -51,6 +51,8 @@ Every write is local; lanq still never changes a worker.
 - `Next: ...` lines on stderr for people (`[lanq] Next: ...` in `lanq run`), before the `[lanq] log: <path>` line and
   the final `[lanq] <Status>: ...` line, which stays last. stdout is unchanged in text mode.
 - `lanq health --json` rows gain `nextSteps`; nothing else in a plain `health` row changes.
+- `lanq init`'s starter `machines.yml` uses `work_root: /srv/lq` (and `C:/lq` in its Windows example), the same
+  folder `makeready` and `--setup` suggest.
 
 ### Releases
 
