@@ -253,7 +253,7 @@ other checks still run. On a git machine a worker git older than 2.32 is a `WARN
 
 | Capability | Command run |
 | --- | --- |
-| `dotnet` / `node` / `npm` | `dotnet --version` / `node --version` / `npm --version` |
+| `dotnet` / `node` / `npm` | `dotnet --version` (fails without an SDK) / `node --version` / `npm --version` |
 | `python` | `python3 --version`, falling back to `python --version` |
 | `go` | `go version` with `GOTOOLCHAIN=local` (never downloads a toolchain) |
 | `rust` / `java` | `cargo --version` with `RUSTUP_AUTO_INSTALL=0` (never installs a toolchain) / `java -version` |
@@ -261,8 +261,13 @@ other checks still run. On a git machine a worker git older than 2.32 is a `WARN
 
 Other capability names are listed as `SKIP ... not checked`. This is how you find the classic "npm works when I log
 in, but `npm: not found` in a lanq job" problem: a non-login SSH session does not run your shell profile, so add the
-tool's folder to `path_prepend:`. Output is one `OK`, `WARN`, `FAIL` or `SKIP` line per check; the exit code is `0`
-when nothing is `WARN` or `FAIL`, otherwise `1`.
+tool's folder to `path_prepend:`. When the `dotnet` check fails, doctor also searches the worker's install folders
+(read-only, a few seconds; [docs/WORKERS.md](docs/WORKERS.md#toolchain-in-a-non-standard-place)) and, when it finds an
+SDK somewhere the job's `PATH` does not reach (say `D:/build/dotnet`), the fix names the exact `path_prepend:` and
+`DOTNET_ROOT` lines to add. On a Windows worker whose build account is denied WMI, a `wmi` line is a `WARN` with what
+the owner could grant; lanq works without it ([docs/WORKERS.md](docs/WORKERS.md#windows-workers-where-wmi-is-denied)).
+Output is one `OK`, `WARN`, `FAIL` or `SKIP` line per check; the exit code is `0` when nothing is `WARN` or `FAIL`,
+otherwise `1`.
 
 ```
 $ lanq doctor --remote
@@ -764,6 +769,10 @@ path_prepend:
   - /home/build/.nvm/versions/node/v22.11.0/bin
   - /home/build/.cargo/bin
 ```
+
+The same goes for a toolchain in a private folder, for example a .NET SDK in `D:/build/dotnet` on a Windows worker
+whose `PATH` only has a runtime-only dotnet: `path_prepend: [D:/build/dotnet]` plus `DOTNET_ROOT: D:/build/dotnet`
+under `env:`. `lanq doctor --remote` finds such a folder and prints these lines; lanq never edits `machines.yml` itself.
 
 `env:` names must be letters, digits and `_`; values may not be empty (Windows PowerShell 5.1 cannot set an empty
 variable, so an empty value is refused everywhere: leave the variable out) or contain control characters. As a

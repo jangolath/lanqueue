@@ -42,7 +42,15 @@ deserializer (no reflection), validated against the `lanq-makeready/v1` schema, 
 executed. `lanq doctor --remote` writes and removes one empty temporary file in `work_root` and runs version
 commands (`go` with `GOTOOLCHAIN=local`, `cargo` with `RUSTUP_AUTO_INSTALL=0`, each stopped after 20 seconds) in the job
 environment, and, like `makeready`, skips a machine that is paused or outside its allowed hours unless `--force`; `lanq doctor` without `--remote` makes no network
-connection.
+connection. When a capability's tool is missing there, doctor also lists a few install folders and asks the dotnet on `PATH`
+for its SDKs and runtimes (read-only, about five seconds) to suggest a `path_prepend:` line; it never changes the config or the worker.
+
+On a Windows worker lanq writes one helper script to `work_root/bin/lanq-<hash>.ps1` before each job (if it is not there
+yet); the job wrapper, stop, cleanup, slot reclaim and doctor scripts dot-source it to run the job in a Windows job
+object and to stop process trees without WMI. Like everything in `work_root`, it is only as safe as the build account:
+a job runs as that account and could replace the file, and so change what lanq's later scripts on that worker do. This
+adds no power a job does not already have there (it can already leave programs running or change that account's
+files), but it is one more reason to give the build account nothing but its work folder.
 
 Wake-on-LAN is opt-in per machine (`wake:` in the config). The magic packet is a plain, unauthenticated UDP broadcast
 that only works inside the LAN: anyone on the LAN who knows a machine's MAC address can send the same packet, so
