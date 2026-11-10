@@ -1,8 +1,8 @@
 using System.Text.Json;
 using LanQueue.Health;
 using LanQueue.Jobs;
-using LanQueue.Ssh;
 using LanQueue.Scheduling;
+using LanQueue.Ssh;
 using Xunit;
 
 namespace LanQueue.Tests;
