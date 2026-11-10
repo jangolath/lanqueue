@@ -57,7 +57,8 @@ code=0
 cat "$work/health.json"
 [ "$code" = 2 ] || fail "health --json exited $code, expected 2"
 [ "$(wc -l < "$work/health.json" | tr -d ' ')" = 1 ] || fail "health --json did not print exactly one line"
-grep -q -E '^[{]"status":"Rejected","exitCode":2,"message":"No machines configured[.]"[}]' "$work/health.json" || fail "unexpected health --json object"
+grep -q -E '^[{]"status":"Rejected","exitCode":2,"message":"No machines configured[.]",' "$work/health.json" || fail "unexpected health --json object"
+grep -q -E '"nextSteps":\[[{]"action":"[a-z_]+"' "$work/health.json" || fail "health --json error object has no nextSteps"
 
 echo "== lanq run --json with a bad option"
 code=0
