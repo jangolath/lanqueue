@@ -588,9 +588,17 @@ public sealed class ShardReviewTests : IDisposable
 
             return Task.FromResult(e.Exit(0));
         };
+        // Release the uploads only once both big-01 shards hold their slot: releasing at the first empty round could let shard 1 finish
+        // before shard 3 has claimed its slot (a fast tiny-01 makes that round early), and the peak would read 1 on a correct scheduler.
+        // The cap ends the wait on a scheduler that under-places, so it fails on the assertion below instead of hanging.
+        var emptyRounds = 0;
         var runner = Runner(ssh, new RunnerTests.FakePayloads(""), delay: (_, ct) =>
         {
-            release.TrySetResult();
+            if ((ssh.Peak.TryGetValue("big-01", out var placed) && placed >= 2) || Interlocked.Increment(ref emptyRounds) > 500)
+            {
+                release.TrySetResult();
+            }
+
             return Task.Delay(TimeSpan.FromMilliseconds(10), ct);
         });
 
