@@ -57,11 +57,19 @@ public static partial class Cli
     internal static async Task<int> Makeready(
         ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
+        var failed = new MakereadyFailed();
+        var again = SuggestedCommand.Makeready(p.Target, p.ConfigPath, p.SshTarget, p.Os);
         if (!p.Json)
         {
-            return p.All
-                ? await MakereadyAll(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false)
-                : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct).ConfigureAwait(false);
+            var result = p.All
+                ? await MakereadyAll(p, loadConfig, ssh, probe, stdout, stderr, ct, failed).ConfigureAwait(false)
+                : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct, failed).ConfigureAwait(false);
+            if (failed.Kind is { } kind)
+            {
+                await NextSteps.WriteAsync(stderr, NextSteps.ForMakereadyError(kind, failed.Message, again, p.ConfigPath)).ConfigureAwait(false);
+            }
+
+            return result;
         }
 
         // --json: stdout is exactly one object on every path: the validated report (exit 0 or 1), the --all summary, or
@@ -72,20 +80,22 @@ public static partial class Cli
         try
         {
             code = p.All
-                ? await MakereadyAll(p, loadConfig, ssh, probe, body, errors, ct).ConfigureAwait(false)
-                : await MakereadyCore(p, loadConfig, ssh, probe, body, errors, ct).ConfigureAwait(false);
+                ? await MakereadyAll(p, loadConfig, ssh, probe, body, errors, ct, failed).ConfigureAwait(false)
+                : await MakereadyCore(p, loadConfig, ssh, probe, body, errors, ct, failed).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             errors.WriteLine("cancelled (Ctrl+C)");
             body.GetStringBuilder().Clear();
             code = 130;
+            failed.Set(NextSteps.MakereadyFailure.Cancelled);
         }
         catch (Exception ex)
         {
             errors.WriteLine(JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
             body.GetStringBuilder().Clear();
             code = 70;
+            failed.Set(NextSteps.MakereadyFailure.Unexpected);
         }
 
         var text = errors.ToString();
@@ -96,12 +106,39 @@ public static partial class Cli
         }
         else
         {
-            var message = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
+            // The single machine's report stays the script's lanq-makeready/v1 report exactly; only this error object carries nextSteps.
+            var message = LastLine(text);
             var status = code switch { 2 => "Rejected", 75 => "Held", 130 => "Cancelled", _ => "InfraError" };
-            await WriteJsonError("makeready", status, code, message, stdout).ConfigureAwait(false);
+            var kind = failed.Kind ?? code switch
+            {
+                2 => NextSteps.MakereadyFailure.Arguments,
+                75 => NextSteps.MakereadyFailure.Held,
+                130 => NextSteps.MakereadyFailure.Cancelled,
+                _ => NextSteps.MakereadyFailure.Unexpected,
+            };
+            var steps = NextSteps.ForMakereadyError(kind, message, again, p.ConfigPath);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+            await WriteJsonError("makeready", status, code, message, stdout, steps).ConfigureAwait(false);
         }
 
         return code;
+
+        static string LastLine(string text) => text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "failed";
+    }
+
+    /// <summary>Why lanq makeready ended without a report (set where that happens; null when there was a report or the --all table).</summary>
+    private sealed class MakereadyFailed
+    {
+        public NextSteps.MakereadyFailure? Kind { get; private set; }
+
+        /// <summary>The line lanq printed about it (sanitised).</summary>
+        public string Message { get; private set; } = "";
+
+        public void Set(NextSteps.MakereadyFailure kind, string? message = null)
+        {
+            Kind = kind;
+            Message = JobRunner.SafeLine(message ?? "");
+        }
     }
 
     /// <summary>
@@ -174,7 +211,7 @@ public static partial class Cli
     }
 
     private static async Task<int> MakereadyCore(
-        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, MakereadyFailed failed)
     {
         Machine machine;
         Machine? configured = null;
@@ -182,6 +219,7 @@ public static partial class Cli
         if ((p.Target is null) == (p.SshTarget is null) || (p.SshTarget is null) != (p.Os is null))
         {
             await stderr.WriteLineAsync(MakereadyUsage).ConfigureAwait(false);
+            failed.Set(NextSteps.MakereadyFailure.Arguments, MakereadyUsage);
             return 2;
         }
 
@@ -189,7 +227,9 @@ public static partial class Cli
         {
             if (!ConfigLoader.IsValidSshTarget(target))
             {
-                await stderr.WriteLineAsync("--ssh must be user@host (no leading '-', no spaces).").ConfigureAwait(false);
+                const string BadTarget = "--ssh must be user@host (no leading '-', no spaces).";
+                await stderr.WriteLineAsync(BadTarget).ConfigureAwait(false);
+                failed.Set(NextSteps.MakereadyFailure.Arguments, BadTarget);
                 return 2;
             }
 
@@ -205,11 +245,13 @@ public static partial class Cli
             catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
             {
                 await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+                failed.Set(NextSteps.MakereadyFailure.Config, ex.Message);
                 return 2;
             }
 
             if (FindMachine(config, p.Target, "makeready", stderr) is not { } m)
             {
+                failed.Set(NextSteps.MakereadyFailure.Arguments, "name a machine in the config: " + string.Join(", ", config.Machines.Select(x => x.Name)));
                 return 2;
             }
 
@@ -222,6 +264,9 @@ public static partial class Cli
         if (scan.Report is not { } report)
         {
             await stderr.WriteLineAsync(scan.Message).ConfigureAwait(false);
+            failed.Set(
+                scan.Code == 75 ? NextSteps.MakereadyFailure.Held : scan.Unusable ? NextSteps.MakereadyFailure.Unusable : NextSteps.MakereadyFailure.Unreachable,
+                scan.Message);
             return scan.Code;
         }
 
@@ -255,12 +300,13 @@ public static partial class Cli
     /// Exit codes: see <see cref="MakereadyAllExitCode"/>; 2 bad arguments or config; 130 Ctrl+C.
     /// </summary>
     private static async Task<int> MakereadyAll(
-        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, MakereadyFailed failed)
     {
         if (p.Target is not null || p.SshTarget is not null || p.Os is not null)
         {
-            await stderr.WriteLineAsync("lanq makeready --all checks every machine in the config; it takes no machine name and no --ssh or --os.")
-                .ConfigureAwait(false);
+            const string AllTakesNoMachine = "lanq makeready --all checks every machine in the config; it takes no machine name and no --ssh or --os.";
+            await stderr.WriteLineAsync(AllTakesNoMachine).ConfigureAwait(false);
+            failed.Set(NextSteps.MakereadyFailure.Arguments, AllTakesNoMachine);
             return 2;
         }
 
@@ -272,6 +318,7 @@ public static partial class Cli
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             await stderr.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            failed.Set(NextSteps.MakereadyFailure.Config, ex.Message);
             return 2;
         }
 
@@ -291,11 +338,14 @@ public static partial class Cli
 
         var scans = await Task.WhenAll(config.Machines.Select(Scanned)).ConfigureAwait(false);
         var rows = config.Machines.Zip(scans).Select(x => MakereadyRow(x.First, x.Second)).ToList();
+        rows = [.. rows.Select(r => r with { NextSteps = NextSteps.ForMakereadyRow(r.Machine, r.Verdict, r.Problem, p.ConfigPath) })];
         var code = MakereadyAllExitCode(rows);
+        var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
+        var next = NextSteps.ForMakereadyAll(status, rows, p.ConfigPath);
+        await NextSteps.WriteAsync(stderr, next).ConfigureAwait(false);
         if (p.Json)
         {
-            var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(new MakereadyAllJson(status, code, rows), MakereadyAllJsonContext.Default.MakereadyAllJson))
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(new MakereadyAllJson(status, code, rows) { NextSteps = next }, MakereadyAllJsonContext.Default.MakereadyAllJson))
                 .ConfigureAwait(false);
             return code;
         }

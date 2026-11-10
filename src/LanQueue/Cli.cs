@@ -391,6 +391,13 @@ public static partial class Cli
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
+        Next steps: every --json object (each health row, each makeready --all row; not the single makeready report) carries nextSteps, at
+        least one {action, reason, argv, command, safeToRunUnattended}; action is proceed, retry, wait, fix_code, fix_command, ask_developer,
+        run_doctor, run_health or none (more may be added: treat an unknown one as ask_developer). argv (the exact arguments) is there when a
+        command is suggested; command is the same line for bash and PowerShell, left out when an argument cannot be quoted safely for both.
+        A suggestion is only lanq run, health, doctor or makeready (never unlock, init, wake, --wake, --force or --yes), keeps --config, and
+        never does more than the command it follows (--no-wake when that could not wake a machine; --wait 120 at most once). For people the
+        same steps are "Next: ..." lines on stderr ("[lanq] Next: ..." in run), never for none, always before the final status line.
         --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
         in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
         started shard is cleaned up).
@@ -423,16 +430,18 @@ public static partial class Cli
         {
             // The message can quote what was typed: sanitised. With --json (run or health) stdout still gets its one object.
             var message = JobRunner.SafeLine(ex.Message);
+            var steps = NextSteps.ArgumentsError(message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && own.Contains("--dry-run")
-                    ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"))
+                    ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"), steps)
                     : own[0] == "run" && own.Contains("--shards")
-                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
-                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, fetch: own.Contains("--fetch"), logTail: own.Contains("--log-tail"))).ConfigureAwait(false);
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
+                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, steps, fetch: own.Contains("--fetch"), logTail: own.Contains("--log-tail") ? 1 : null)).ConfigureAwait(false);
             }
 
             return 2;
@@ -485,14 +494,16 @@ public static partial class Cli
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             var message = JobRunner.SafeLine(ex.Message);
+            var steps = NextSteps.ConfigError(p.ConfigPath, message);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
                 await (p.DryRun
-                    ? WritePlanJsonError("Rejected", 2, message, stdout, p.LogTail is not null)
+                    ? WritePlanJsonError("Rejected", 2, message, stdout, p.LogTail is not null, steps)
                     : p.Shards is not null
-                    ? WriteShardsJsonError("Rejected", 2, message, stdout)
-                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, fetch: p.Fetch.Count > 0, logTail: p.LogTail is not null)).ConfigureAwait(false);
+                    ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
+                    : WriteJsonError(p.Command, "Rejected", 2, message, stdout, steps, fetch: p.Fetch.Count > 0, logTail: p.LogTail)).ConfigureAwait(false);
             }
 
             return 2;
@@ -515,7 +526,7 @@ public static partial class Cli
         {
             // --needs / --mem: judge each machine for such a job exactly as lanq run does (Windows-safe arguments assumed).
             var needs = p.Needs.Count > 0 || p.MemGb is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) : null;
-            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs).ConfigureAwait(false);
+            return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs, p.ConfigPath).ConfigureAwait(false);
         }
 
         return await Run(p, config, ssh, new GitPayloadBuilder(), probe, log, home, Directory.GetCurrentDirectory(), stdout, stderr, ct).ConfigureAwait(false);
@@ -557,20 +568,26 @@ public static partial class Cli
         }
         catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
         {
-            // Ctrl+C: an agent reading --json still gets its one object.
+            // Ctrl+C: an agent reading --json still gets its one object, with the log of a job that had already started.
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
-            await WriteJsonError("run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, started.Elapsed, fetch is not null, p.LogTail is not null).ConfigureAwait(false);
+            await WriteJsonError(
+                "run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, NextSteps.Nothing("cancelled (Ctrl+C)"), started.Elapsed,
+                fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
             var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
+            var steps = NextSteps.ForRun(p, new NextSteps.RunOutcome("InfraError", 70, message, null, InfraKind.Unexpected, false, null, null, null, runner.StartedLogPath));
+            await NextSteps.WriteAsync(stderr, steps, "[lanq] ").ConfigureAwait(false);
             await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
-            await WriteJsonError("run", "InfraError", 70, message, stdout, started.Elapsed, fetch is not null, p.LogTail is not null).ConfigureAwait(false);
+            await WriteJsonError("run", "InfraError", 70, message, stdout, steps, started.Elapsed, fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
             return 70;
         }
 
-        // Where the whole log is, for people (--json carries it as logPath); always before the status line, which stays last.
+        // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
+        var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json && result.LogPath is { } logPath)
         {
             await stderr.WriteLineAsync("[lanq] log: " + JobRunner.SafeLine(logPath)).ConfigureAwait(false);
@@ -585,6 +602,7 @@ public static partial class Cli
                     {
                         Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
+                        NextSteps = next,
                     },
                     result.LogPath,
                     p.LogTail),
@@ -600,14 +618,17 @@ public static partial class Cli
     /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
-    private static Task WriteJsonError(string command, string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null, bool fetch = false, bool logTail = false) =>
+    /// <param name="logPath">run only: the log of a job that had started (Ctrl+C or an unexpected error after it held a slot), or null.</param>
+    private static Task WriteJsonError(
+        string command, string status, int exitCode, string message, TextWriter stdout, IReadOnlyList<NextStepJson> steps, TimeSpan? elapsed = null, bool fetch = false,
+        int? logTail = null, string? logPath = null) =>
         stdout.WriteLineAsync(command switch
         {
             "run" => JsonSerializer.Serialize(
-                WithFetch(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { LogTail = logTail ? [] : null }, fetch, null),
+                WithFetch(WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps }, logPath, logTail), fetch, null),
                 LanqJson.Default.RunJson),
-            "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message), LanqJson.Default.InitJson),
-            _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message), LanqJson.Default.ErrorJson),
+            "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
+            _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message) { NextSteps = steps }, LanqJson.Default.ErrorJson),
         });
 
     /// <summary>The excluded list of a NoCapacity object (empty when the result named no machine), sanitised.</summary>
@@ -760,8 +781,17 @@ public static partial class Cli
     /// 0 when at least one machine could take the job now, 75 when none could. Without it the output and exit code are exactly as before.
     /// </summary>
     internal static async Task<int> Health(
-        FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false, JobNeeds? needs = null)
+        FleetConfig config, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct, bool json = false, bool wake = false, JobNeeds? needs = null,
+        string? configPath = null)
     {
+        async Task<int> Error(string status, int code, string message)
+        {
+            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+            await WriteJsonError("health", status, code, message, stdout, steps).ConfigureAwait(false);
+            return code;
+        }
+
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
             await stderr.WriteLineAsync(w).ConfigureAwait(false);
@@ -775,20 +805,22 @@ public static partial class Cli
         }
         catch (OperationCanceledException) when (json && ct.IsCancellationRequested)
         {
-            await WriteJsonError("health", "Cancelled", 130, "cancelled (Ctrl+C) before every machine answered", stdout).ConfigureAwait(false);
-            return 130;
+            return await Error("Cancelled", 130, "cancelled (Ctrl+C) before every machine answered").ConfigureAwait(false);
         }
         catch (Exception ex) when (json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
-            await WriteJsonError("health", "InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), stdout).ConfigureAwait(false);
-            return 70;
+            return await Error("InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}")).ConfigureAwait(false);
         }
 
         var assessed = needs is null ? null : Scheduler.Assess(config.Machines.Zip(results), needs);
         var exitCode = assessed is null || assessed.Any(a => a.Eligible) ? 0 : 75;
+
+        // What to do about each machine: in every JSON row, and for people one "Next:" line per step on stderr (stdout is unchanged).
+        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath)).ToList();
+        await NextSteps.WriteAsync(stderr, next.SelectMany(s => s)).ConfigureAwait(false);
         if (json)
         {
-            var rows = config.Machines.Zip(results).Select(x => HealthRow(x.First, x.Second)).ToList();
+            var rows = config.Machines.Zip(results).Select((x, i) => HealthRow(x.First, x.Second) with { NextSteps = next[i] }).ToList();
             await stdout.WriteLineAsync(assessed is null
                 ? JsonSerializer.Serialize(rows, LanqJson.Default.ListHealthJson)
                 : JsonSerializer.Serialize([.. rows.Zip(assessed, HealthNeedsRow)], LanqJson.Default.ListHealthNeedsJson)).ConfigureAwait(false);

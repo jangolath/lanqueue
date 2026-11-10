@@ -87,6 +87,7 @@ public static partial class Cli
         ParsedArgs p, string currentDir, Func<string, string?> env, bool windows, TextWriter stdout, TextWriter stderr, Action? beforeWrite = null)
     {
         var path = Path.GetFullPath(p.ConfigPath ?? "machines.yml", currentDir);
+        var exists = $"{path} already exists; lanq init never overwrites a file. Edit it, or pass --config with a new path.";
         async Task<int> Done(string status, int code, string message, IEnumerable<string>? steps = null)
         {
             var people = p.Json || code != 0 ? stderr : stdout;
@@ -96,16 +97,18 @@ public static partial class Cli
                 await people.WriteLineAsync(line).ConfigureAwait(false);
             }
 
+            // A regular file already there: check it with lanq doctor --config (a link or folder needs another --config path).
+            var next = NextSteps.ForInit(status, path, JobRunner.SafeLine(message), fileExists: message == exists && File.Exists(path) && LinkTarget(path) is null);
+            await NextSteps.WriteAsync(stderr, next).ConfigureAwait(false);
             if (p.Json)
             {
-                await stdout.WriteLineAsync(JsonSerializer.Serialize(new InitJson(status, code, path, JobRunner.SafeLine(message)), LanqJson.Default.InitJson))
+                await stdout.WriteLineAsync(JsonSerializer.Serialize(new InitJson(status, code, path, JobRunner.SafeLine(message)) { NextSteps = next }, LanqJson.Default.InitJson))
                     .ConfigureAwait(false);
             }
 
             return code;
         }
 
-        var exists = $"{path} already exists; lanq init never overwrites a file. Edit it, or pass --config with a new path.";
         // A link counts as taken even when its target is missing: writing through it would create a file wherever it points.
         if (LinkTarget(path) is { } target)
         {

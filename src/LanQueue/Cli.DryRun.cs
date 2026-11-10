@@ -51,14 +51,16 @@ public static partial class Cli
         }
         catch (Exception ex)
         {
-            plan = new JobPlan(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
+            plan = new JobPlan(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}")) { InfraKind = InfraKind.Unexpected };
         }
 
         await (p.Json ? stderr : stdout).WriteAsync(PlanText(p, plan)).ConfigureAwait(false);
+        var next = NextSteps.ForPlan(p, plan);
+        await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {plan.Status}: {JobRunner.SafeLine(plan.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail), LanqJson.Default.PlanJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
         return plan.ExitCode;
@@ -180,6 +182,6 @@ public static partial class Cli
     };
 
     /// <summary>The one --dry-run --json object when no plan exists (bad arguments or config).</summary>
-    private static Task WritePlanJsonError(string status, int exitCode, string message, TextWriter stdout, bool logTail) =>
-        stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(new JobPlan(status, exitCode, message), logTail ? 1 : null), LanqJson.Default.PlanJson));
+    private static Task WritePlanJsonError(string status, int exitCode, string message, TextWriter stdout, bool logTail, IReadOnlyList<NextStepJson> steps) =>
+        stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(new JobPlan(status, exitCode, message), logTail ? 1 : null) with { NextSteps = steps }, LanqJson.Default.PlanJson));
 }

@@ -77,6 +77,35 @@ public sealed class LogOutputTests : IDisposable
         Assert.False(Directory.Exists(Path.Combine(_dir, "state", "logs")));
     }
 
+    [Fact(Timeout = TestTimeout)]
+    public async Task ACancelledRunStillReportsTheLogOfItsStartedJob()
+    {
+        // Ctrl+C while the job runs: the log exists, so logPath (and --log-tail) point at it, as a sharded run's cancelled shards do.
+        using var cts = new CancellationTokenSource();
+        var ssh = new PoolSsh
+        {
+            OnExecute = async (_, ct) =>
+            {
+                await cts.CancelAsync();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return new SshResult(0, "");
+            },
+        };
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--log-tail", "5", "--needs", "node", "--", "npx", "jest"]), ConfigLoader.Parse(ShardTests.PoolYaml), ssh, new RunnerTests.FakePayloads(""),
+            new HealthProbe(ssh, TimeProvider.System), Log, _dir, _dir, o, new StringWriter(), cts.Token);
+
+        Assert.Equal(130, code);
+        var r = Json(o.ToString());
+        Assert.Equal("Cancelled", r.GetProperty("status").GetString());
+        var jobId = Assert.Single(ssh.Executes).JobId;
+        Assert.Equal(Path.GetFullPath(Log.LogPathFor(jobId)), r.GetProperty("logPath").GetString());
+        Assert.True(File.Exists(r.GetProperty("logPath").GetString()));
+        Assert.Equal(JsonValueKind.Array, r.GetProperty("logTail").ValueKind);
+        Assert.Equal("none", r.GetProperty("nextSteps")[0].GetProperty("action").GetString());
+    }
+
     [Theory]
     [InlineData("--log-tail", "0", "--json")]
     [InlineData("--log-tail", "201", "--json")]

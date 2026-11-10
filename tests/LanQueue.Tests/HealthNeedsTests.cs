@@ -94,8 +94,9 @@ public sealed class HealthNeedsTests : IDisposable
         using var doc = JsonDocument.Parse(plainJson);
         foreach (var row in doc.RootElement.EnumerateArray())
         {
+            // Plain rows keep every field they had; 0.6.0 adds only nextSteps to every row (none of the --needs fields).
             Assert.Equal(
-                ["name", "state", "reasons", "load", "diskFreeGb", "memFreeGb", "slotsUsed", "maxJobs", "localTime", "cores", "memTotalGb", "freeSlots", "size", "suitedFor"],
+                ["name", "state", "reasons", "load", "diskFreeGb", "memFreeGb", "slotsUsed", "maxJobs", "localTime", "cores", "memTotalGb", "freeSlots", "size", "suitedFor", "nextSteps"],
                 row.EnumerateObject().Select(p => p.Name));
         }
 

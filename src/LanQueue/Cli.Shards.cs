@@ -77,14 +77,17 @@ public static partial class Cli
         catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
         {
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
-            await WriteShardsJsonError(JobRunner.Cancelled, 130, "cancelled (Ctrl+C) before any shard started", stdout, started.Elapsed).ConfigureAwait(false);
+            await WriteShardsJsonError(JobRunner.Cancelled, 130, "cancelled (Ctrl+C) before any shard started", stdout, NextSteps.Nothing("cancelled (Ctrl+C)"), started.Elapsed)
+                .ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
         {
             var message = JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}");
+            var steps = NextSteps.ForRun(p, new NextSteps.RunOutcome("InfraError", 70, message, null, InfraKind.Unexpected, false, null, null, null, null));
+            await NextSteps.WriteAsync(stderr, steps, "[lanq] ").ConfigureAwait(false);
             await stderr.WriteLineAsync("[lanq] InfraError: " + message).ConfigureAwait(false);
-            await WriteShardsJsonError("InfraError", 70, message, stdout, started.Elapsed).ConfigureAwait(false);
+            await WriteShardsJsonError("InfraError", 70, message, stdout, steps, started.Elapsed).ConfigureAwait(false);
             return 70;
         }
 
@@ -93,7 +96,10 @@ public static partial class Cli
             await jobOutput.WriteAsync(ShardTable(result)).ConfigureAwait(false);
         }
 
-        // The logs of the shards that did not complete, for people (--json carries every shard's logPath); before the status line, which stays last.
+        // What to do next, then the logs of the shards that did not complete (--json carries every shard's logPath); all before the status
+        // line, which stays last.
+        var next = NextSteps.ForShards(p, result);
+        await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json)
         {
             foreach (var s in result.Shards.Where(s => s.Status != nameof(JobStatus.Completed) && s.LogPath is not null))
@@ -105,13 +111,13 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail), LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next), LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
         }
 
         return result.ExitCode;
     }
 
-    internal static ShardRunJson ShardJson(ShardRunResult result, TimeSpan elapsed, bool fetch, int? logTail = null) => new(
+    internal static ShardRunJson ShardJson(ShardRunResult result, TimeSpan elapsed, bool fetch, int? logTail = null, IReadOnlyList<NextStepJson>? nextSteps = null) => new(
         result.Status,
         result.ExitCode,
         result.Count,
@@ -127,6 +133,7 @@ public static partial class Cli
     {
         Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
         Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+        NextSteps = nextSteps ?? [],
     };
 
     /// <summary>The summary table: one line per shard, in index order.</summary>
@@ -145,7 +152,7 @@ public static partial class Cli
     }
 
     /// <summary>The one --shards --json object when no shard result exists (bad arguments, config, cancelled before the start, unexpected error).</summary>
-    private static Task WriteShardsJsonError(string status, int exitCode, string message, TextWriter stdout, TimeSpan? elapsed = null) =>
+    private static Task WriteShardsJsonError(string status, int exitCode, string message, TextWriter stdout, IReadOnlyList<NextStepJson> steps, TimeSpan? elapsed = null) =>
         stdout.WriteLineAsync(JsonSerializer.Serialize(
-            new ShardRunJson(status, exitCode, 0, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message, []), LanqJson.Default.ShardRunJson));
+            new ShardRunJson(status, exitCode, 0, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message, []) { NextSteps = steps }, LanqJson.Default.ShardRunJson));
 }

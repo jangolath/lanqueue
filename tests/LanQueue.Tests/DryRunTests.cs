@@ -347,7 +347,11 @@ public sealed class DryRunTests : IDisposable
         }
 
         Assert.False(r.TryGetProperty("logTail", out _));
-        Assert.False(r.TryGetProperty("nextSteps", out _)); // a later step
+        // WouldRun: one step, the same command without --dry-run (--no-wake added: with --wait 0 it could never wake a machine).
+        var step = Assert.Single(r.GetProperty("nextSteps").EnumerateArray());
+        Assert.Equal("proceed", step.GetProperty("action").GetString());
+        Assert.Equal("lanq run --json --needs dotnet,linux --no-wake -- dotnet test", step.GetProperty("command").GetString());
+        Assert.True(step.GetProperty("safeToRunUnattended").GetBoolean());
         var errLines = Lines(jsonErr);
         Assert.Equal(LanQueue.Cli.DryRunHeader, errLines[0]);
         Assert.Equal("[lanq] WouldRun: would run on build-01", errLines[^1]);

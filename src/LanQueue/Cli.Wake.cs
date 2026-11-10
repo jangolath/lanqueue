@@ -20,16 +20,29 @@ public static partial class Cli
         var info = p.Json ? stderr : stdout;
         var started = System.Diagnostics.Stopwatch.StartNew();
 
-        async Task<int> Fail(string status, int code, string message)
+        async Task<int> Fail(string status, int code, string message, bool badArguments = false)
         {
             message = JobRunner.SafeLine(message);
+            var steps = badArguments ? NextSteps.ArgumentsError(message) : NextSteps.ForWake(status, message, p.ConfigPath);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
-                await stdout.WriteLineAsync(JsonSerializer.Serialize(new ErrorJson(status, code, message), LanqJson.Default.ErrorJson)).ConfigureAwait(false);
+                await stdout.WriteLineAsync(JsonSerializer.Serialize(new ErrorJson(status, code, message) { NextSteps = steps }, LanqJson.Default.ErrorJson)).ConfigureAwait(false);
             }
 
             return code;
+        }
+
+        // What to do after the packet: lanq health (read-only), never another wake.
+        async Task Done(WakeJson json)
+        {
+            var steps = NextSteps.ForWake(json.Status, json.Message, p.ConfigPath);
+            await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+            if (p.Json)
+            {
+                await stdout.WriteLineAsync(JsonSerializer.Serialize(json with { NextSteps = steps }, LanqJson.Default.WakeJson)).ConfigureAwait(false);
+            }
         }
 
         var machine = config.Machines.FirstOrDefault(x => string.Equals(x.Name, p.Target, StringComparison.Ordinal));
@@ -38,7 +51,8 @@ public static partial class Cli
             return await Fail(
                 "Rejected",
                 2,
-                (p.Target is null ? "lanq wake needs a machine name." : $"No machine named '{p.Target}' in the config.") + " Configured: " + string.Join(", ", config.Machines.Select(x => x.Name))).ConfigureAwait(false);
+                (p.Target is null ? "lanq wake needs a machine name." : $"No machine named '{p.Target}' in the config.") + " Configured: " + string.Join(", ", config.Machines.Select(x => x.Name)),
+                badArguments: true).ConfigureAwait(false);
         }
 
         if (machine.Wake is not { } wake)
@@ -66,11 +80,7 @@ public static partial class Cli
         {
             var sent = $"{machine.Name}: magic packet sent. It only helps if Wake-on-LAN is enabled in the BIOS/UEFI and the network card driver (usually wired Ethernet only); add --wait to wait for ssh.";
             await info.WriteLineAsync("[lanq] " + sent).ConfigureAwait(false);
-            if (p.Json)
-            {
-                await stdout.WriteLineAsync(JsonSerializer.Serialize(new WakeJson("Sent", 0, machine.Name, true, null, Math.Round(started.Elapsed.TotalSeconds, 1), sent), LanqJson.Default.WakeJson)).ConfigureAwait(false);
-            }
-
+            await Done(new WakeJson("Sent", 0, machine.Name, true, null, Math.Round(started.Elapsed.TotalSeconds, 1), sent)).ConfigureAwait(false);
             return 0;
         }
 
@@ -93,12 +103,7 @@ public static partial class Cli
             ? $"{machine.Name}: answering ssh"
             : $"{machine.Name}: no ssh answer within {wake.WaitSeconds} s. Check that Wake-on-LAN is enabled in the BIOS/UEFI and the network card driver, and that the machine is on wired Ethernet (docs/WORKERS.md)";
         await (up ? info : stderr).WriteLineAsync("[lanq] " + message).ConfigureAwait(false);
-        if (p.Json)
-        {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(
-                new WakeJson(up ? "Awake" : "NoAnswer", up ? 0 : 1, machine.Name, true, up, Math.Round(started.Elapsed.TotalSeconds, 1), message), LanqJson.Default.WakeJson)).ConfigureAwait(false);
-        }
-
+        await Done(new WakeJson(up ? "Awake" : "NoAnswer", up ? 0 : 1, machine.Name, true, up, Math.Round(started.Elapsed.TotalSeconds, 1), message)).ConfigureAwait(false);
         return up ? 0 : 1;
     }
 }
