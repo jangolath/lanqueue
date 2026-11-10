@@ -351,8 +351,8 @@ public sealed class PlanFileLoaderTests : IDisposable
     [InlineData("- version: 1\n", "must be a mapping with version: and jobs: keys (line 1)")]
     [InlineData("version: 1\njobs:\n  a:\n    command: !!binary aGk=\n", "the YAML tag 'tag:yaml.org,2002:binary' is not supported (line 4)")]
     [InlineData("version: 1\njobs:\n  a:\n    command: !shell dotnet build\n", "is not supported")]
-    [InlineData("version: 1\njobs:\n  a: &x\n    command: dotnet build\n    after: *x\n", "refers to itself through a YAML alias")]
-    [InlineData("version: 1\njobs:\n  a:\n    command: &c [dotnet, *c]\n", "refers to itself through a YAML alias")]
+    [InlineData("version: 1\njobs:\n  a: &x\n    command: dotnet build\n    after: *x\n", "line 3: anchors and aliases (&name, *name) are not allowed; use defaults: to share values")]
+    [InlineData("version: 1\njobs:\n  a:\n    command: &c [dotnet, *c]\n", "line 4: anchors and aliases")]
     [InlineData("version: 1\njobs:\n  a:\n    command:\n", "'jobs.a.command' has no value")]
     [InlineData("version: 1\njobs:\n  a:\n    command: [dotnet, ~]\n", "has an empty entry")]
     [InlineData("version: 1\njobs:\n  a:\n    command: dotnet build\n  <<: {b: {command: dotnet test}}\n", "merge keys (<<) are not supported")]
@@ -361,11 +361,31 @@ public sealed class PlanFileLoaderTests : IDisposable
     public void OneDocumentOnlyAndTagsAndAliasesAsConfig(string yaml, string expected) => Refused(yaml, expected);
 
     [Fact]
-    public void AnchorsAndStandardTagsStillWork()
+    public void StandardTagsStillWorkButAnchorsAreRefused()
     {
-        var plan = PlanFileLoader.Parse("version: !!int 1\njobs:\n  a:\n    command: &cmd [dotnet, test]\n    needs: !!str dotnet\n  b:\n    command: *cmd\n    dir: src\n");
-        Assert.Equal(["dotnet", "test"], plan.Job("b")!.Args.Argv);
+        var plan = PlanFileLoader.Parse("version: !!int 1\njobs:\n  a:\n    command: [dotnet, test]\n    needs: !!str dotnet\n");
         Assert.Equal(["dotnet"], plan.Job("a")!.Args.Needs);
+        var ex = Refused("version: 1\njobs:\n  a:\n    command: &cmd [dotnet, test]\n  b:\n    command: *cmd\n");
+        Assert.Equal("lanq.yml: line 4: anchors and aliases (&name, *name) are not allowed; use defaults: to share values.", ex.Message);
+        Refused("version: 1\ndefaults: &d\n  needs: [dotnet]\njobs:\n  a:\n    command: dotnet test\n", "line 2: anchors and aliases");
+        Refused("version: 1\njobs:\n  a:\n    <<: *d\n    command: dotnet test\n", "line 4: anchors and aliases"); // a merge key's alias
+    }
+
+    /// <summary>A "billion laughs" file: each alias list doubles the one before, so a walk of the node tree would visit 2^30 nodes. Refused at once.</summary>
+    [Fact(Timeout = 10_000)]
+    public async Task AnAliasBombIsRefusedFast()
+    {
+        var yaml = new System.Text.StringBuilder("version: 1\nl0: &l0 [x, x]\n");
+        for (var i = 1; i <= 30; i++)
+        {
+            yaml.Append(System.Globalization.CultureInfo.InvariantCulture, $"l{i}: &l{i} [*l{i - 1}, *l{i - 1}]\n");
+        }
+
+        yaml.Append("jobs:\n  a:\n    command: dotnet test\n    needs: *l30\n");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var ex = await Task.Run(() => Refused(yaml.ToString(), "line 2: anchors and aliases"));
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), "took " + watch.Elapsed);
+        Assert.StartsWith("lanq.yml: line 2:", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

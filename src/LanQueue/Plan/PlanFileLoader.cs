@@ -5,6 +5,7 @@ using LanQueue.Config;
 using LanQueue.Jobs;
 using LanQueue.Output;
 using YamlDotNet.Core;
+using YamlDotNet.Core.Events;
 using YamlDotNet.RepresentationModel;
 
 namespace LanQueue.Plan;
@@ -18,7 +19,7 @@ namespace LanQueue.Plan;
 /// </summary>
 /// <remarks>
 /// Read with YamlDotNet's RepresentationModel (no reflection, as <see cref="ConfigLoader"/>), through <see cref="StandardTagParser"/> (only
-/// the standard tags) and <see cref="YamlShape.Check"/> (no empty values or entries, no alias cycles, no deep nesting). At most
+/// the standard tags), with no anchors or aliases (<see cref="RefuseAnchors"/>), and <see cref="YamlShape.Check"/> (no empty values or entries, no deep nesting). At most
 /// <see cref="MaxBytes"/> and one document; a mapping with <c>version: 1</c> (required), optional <c>defaults:</c> and <c>jobs:</c> (1 to
 /// <see cref="MaxJobs"/>). A job's own value REPLACES the default (lists are not merged; size and min_size are one setting).
 /// </remarks>
@@ -210,9 +211,35 @@ public static partial class PlanFileLoader
         return new PlanFile(path, Version, expanded, Warnings(expanded));
     }
 
+    /// <summary>
+    /// lanq.yml takes no anchors and no aliases (&amp;name, *name), checked on the parser's events before any node tree is built or walked:
+    /// an alias is a shared node, and a few lines of aliases to aliases (the "billion laughs") make a tree that every later walk would visit
+    /// exponentially many times. defaults: is how a plan shares values. A syntax error is left to the load that follows, which reports it.
+    /// </summary>
+    private static void RefuseAnchors(string yaml, string label)
+    {
+        var parser = new Parser(new StringReader(yaml));
+        try
+        {
+            while (parser.MoveNext())
+            {
+                if (parser.Current is AnchorAlias or NodeEvent { Anchor.IsEmpty: false })
+                {
+                    throw new PlanFileException(
+                        $"{label}: line {parser.Current.Start.Line}: anchors and aliases (&name, *name) are not allowed; use defaults: to share values.");
+                }
+            }
+        }
+        catch (YamlException)
+        {
+            // Not valid YAML: the real load reports it, with its line.
+        }
+    }
+
     /// <summary>The one document's root, which must be a mapping; YAML errors (and tags lanq does not take) are reported with the file's name.</summary>
     private static YamlMappingNode LoadRoot(string yaml, string label)
     {
+        RefuseAnchors(yaml, label);
         var stream = new YamlStream();
         try
         {
