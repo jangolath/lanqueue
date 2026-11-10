@@ -52,7 +52,9 @@
   bash and PowerShell (plain words bare, others single-quoted), left out when an argument holds a quote, a control
   character, is empty or is PowerShell's `--%`. `safeToRunUnattended` is true only for a suggested command an agent may
   run without asking. A suggestion is only ever `lanq run`, `health`, `doctor` or `makeready` (`makeready` is never safe
-  unattended), never `unlock`, `init`, `wake`, `health --wake`, `--force`, `--yes`, `--add` or `--setup`, keeps
+  unattended), never `unlock`, `init`, `wake`, `health --wake`, `--force`, `--yes` or `--add` (`--setup` only as
+  `lanq makeready --ssh X --os Y --setup`, never safe unattended, after the worker refused the key or its host key is
+  not in known_hosts yet), keeps
   `--config`, and never does more than the command it follows: a re-run edits your own command line (job arguments,
   `--dir`, `--mem`, `--fetch` untouched), adds `--no-wake` when the original could not wake a machine (`--wait 0`),
   never drops `--no-wake`, suggests `--wait 120` only when the run waited less, doubles `--timeout` after `TimedOut`
@@ -81,6 +83,44 @@
   `--shards auto` and Wake-on-LAN). The `NoCapacity` message now gives the reason waiting cannot cure first: a
   machine that is unreachable AND lacks a capability says `lacks gpu (capabilities: ...)` instead of its ssh error, and
   a Windows machine skipped for arguments cmd.exe would re-parse says so even when it is down.
+
+### Adding a machine
+
+Every write is local: lanq still never changes a worker.
+
+- **`lanq makeready --ssh user@host --os windows|linux --setup`** prints the PC's full one-time setup and connects to
+  nothing: the build user (the `user` of `user@host`, not an administrator), your public key in its `authorized_keys`
+  (Windows: `icacls` with every grant by SID, inheritance cut; Linux: `.ssh` 700 and `authorized_keys` 600), the work
+  folder `lanq makeready` suggests as `work_root` (`C:/lq`, `/srv/lq`), firewall scoping, password logins off (after the
+  key login works; on Linux also `KbdInteractiveAuthentication no`), the command that shows the worker's host key
+  fingerprint and the first connection from your computer (`ssh -o PasswordAuthentication=no ... exit`), with "compare
+  the fingerprint before answering yes". The key is the first one `ssh-add -L` lists, else `~/.ssh/lanq_ed25519.pub`,
+  else `~/.ssh/id_ed25519.pub`; with `--key-env VAR` only the `.pub` beside the key that `VAR` names. Only `.pub` files
+  are read, each key line is checked (`type base64 [comment]`, a known type whose blob says the same type) and a
+  comment with anything but plain characters is dropped; without a usable key the commands hold a placeholder and the
+  output says how to make one. Text only (`--json` is refused), exit `0`.
+- **`lanq makeready --ssh user@host --os X --add --name NAME [--key-env VAR] [--yes] [--config F] [--json]`** scans the
+  PC as `lanq makeready --ssh` does and adds it to your `machines.yml` only when it is READY. Before any scan it checks
+  the arguments, that the config is found and loads, that no machine has that name (case-insensitive) or host, and that
+  the file is one it edits by itself (not flow style `machines: [...]`, one YAML document, one top-level `machines:`, no
+  tabs in it, not a link). The entry goes in as text after the last machine (before `lanq init`'s commented examples),
+  lined up with the file's own items, every other byte kept, CRLF or LF and a BOM kept; the lines shown are the lines
+  written. The result is checked before writing (it loads, holds exactly one machine more, the others read the same and
+  in order, the new one is the one shown), else nothing is written and the entry is printed to paste by hand. The file
+  is replaced atomically from a new file in the same folder (its Unix mode kept; on Windows its ACL), never through a
+  link and never over a file that changed meanwhile. It asks first on a terminal; otherwise, and always with `--json`,
+  `--yes` is required. Then one read-only probe of the new machine (never a wake), printed as a `lanq health` line, a
+  warning when `lanq init`'s `example-01` is still there, and `Next: lanq doctor --remote`. Exit `0` added, `1` NOT
+  READY or declined (nothing written), `2` arguments, config, a duplicate or a file it does not edit, `70` ssh, an
+  unusable report or the write failed. `--json` prints one object: `status` (`Added`, `NotAdded`, `Rejected`,
+  `InfraError`, `Cancelled`), `exitCode`, `path`, `machine`, `entry`, `afterLine`, `health`, `report`, `message`,
+  `nextSteps`.
+- **`--key-env VAR` with `lanq makeready --ssh`**: the scan uses the key file whose path is in `VAR` (as `key_env:`),
+  and the suggested or added entry carries `key_env: VAR`.
+- `lanq makeready --ssh` that fails because the worker refused the key or its host key is not in known_hosts yet now
+  also suggests `lanq makeready --ssh X --os Y --setup` (for the developer).
+- `lanq init`'s next steps (and its starter file's comment) now show `--setup` first, then `--add --name`, then
+  deleting `example-01`.
 
 ### Releases
 
