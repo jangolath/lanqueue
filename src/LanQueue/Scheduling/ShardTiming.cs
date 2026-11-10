@@ -1,5 +1,7 @@
 using System.Globalization;
+using LanQueue.Health;
 using LanQueue.Jobs;
+using MachineClass = LanQueue.Health.SizeClass;
 
 namespace LanQueue.Scheduling;
 
@@ -252,7 +254,53 @@ public static class ShardTiming
             return new SpeedFactor(f, Measured);
         }
 
+        var me = assessed.FirstOrDefault(a => a.Machine.Name == machine);
+        var size = me is null ? MachineClass.Unknown : MachineSize.Classify(me.Health.MemTotalGb, me.Health.Cores);
+        if (size != MachineClass.Unknown)
+        {
+            List<double> peers = [.. assessed
+                .Where(a => a.Machine.Name != machine && MachineSize.Classify(a.Health.MemTotalGb, a.Health.Cores) == size)
+                .Select(a => speeds.TryGetValue(a.Machine.Name, out var s) ? s.Factor : null)
+                .OfType<double>()];
+            if (peers.Count > 0)
+            {
+                return new SpeedFactor(Math.Round(Median(peers), 2), SizeClass);
+            }
+        }
+
         return new SpeedFactor(1, Unknown);
+    }
+
+    /// <summary>
+    /// Every machine's speed from <paramref name="records"/> (the whole job log, every command): each keyed Completed job of the last
+    /// <see cref="JobHistory.HistoryDays"/> days whose own command ran at least <see cref="MinSpeedRunSeconds"/> is one sample, its ratio
+    /// (runSeconds x N) / the median of (runSeconds x N) over its command (key and dir): above 1 the machine took longer than is typical for
+    /// that command. A machine's factor is the median of its ratios once it has <see cref="MinSpeedSamples"/>, clamped to
+    /// <see cref="MinFactor"/>..<see cref="MaxFactor"/> and rounded to two decimals. The factors come from the raw run times; the work W is then
+    /// divided by them (two passes, never iterated).
+    /// </summary>
+    public static Dictionary<string, MachineSpeed> Speeds(IReadOnlyList<JobRecord> records, DateTimeOffset now)
+    {
+        var since = now.AddDays(-JobHistory.HistoryDays);
+        return records
+            .Where(r => r.Key is not null && r.Machine is not null && r.Status == nameof(JobStatus.Completed) && r.RunSeconds >= MinSpeedRunSeconds
+                && r.StartedUtc >= since)
+            .GroupBy(r => (r.Key, r.Dir))
+            .SelectMany(g =>
+            {
+                List<(string Machine, double Work)> work = [.. g.Select(r => (r.Machine!, r.RunSeconds!.Value * Math.Max(1, r.Shards ?? 1)))];
+                var typical = Median([.. work.Select(w => w.Work)]);
+                return typical > 0 ? work.Select(w => (w.Machine, Ratio: w.Work / typical)) : [];
+            })
+            .GroupBy(x => x.Machine, StringComparer.Ordinal)
+            .ToDictionary(
+                g => g.Key,
+                g =>
+                {
+                    List<double> ratios = [.. g.Select(x => x.Ratio)];
+                    return new MachineSpeed(ratios.Count >= MinSpeedSamples ? Math.Round(Math.Clamp(Median(ratios), MinFactor, MaxFactor), 2) : null, ratios.Count);
+                },
+                StringComparer.Ordinal);
     }
 
     /// <summary>The plain median (the mean of the two middle values for an even count); 0 for no values.</summary>

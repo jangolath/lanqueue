@@ -255,4 +255,66 @@ public sealed class ShardTimingTests
         Assert.Equal(Math.Round((e.OverheadSeconds + (r.SpeedFactor!.Value * e.WorkSeconds / r.Picked)) / 60, 1), r.ExpectedShardMinutes);
         Assert.Equal(("micro-01", 1.62), (r.SlowestMachine, r.SpeedFactor));
     }
+
+    /// <summary><paramref name="count"/> single runs of <paramref name="key"/> on one machine, each <paramref name="runSeconds"/> long.</summary>
+    private static IEnumerable<JobRecord> Jobs(string machine, int count, double runSeconds, string key) =>
+        Enumerable.Range(0, count).Select(i => Job(machine, runSeconds, daysAgo: 1 + i, key: key));
+
+    [Fact]
+    public void SpeedFactorNeedsFiveSamplesElseSizeClassElseOne()
+    {
+        JobRecord[] records =
+        [
+            // "npm test": build-01 six times at 100 s, micro-01 five times at 300 s: the typical run is 100 s, so micro-01 is x3.
+            .. Jobs("build-01", 6, 100, "npm test"),
+            .. Jobs("micro-01", 5, 300, "npm test"),
+
+            // micro-02 has three samples of its own; a short job, a failed one and an old one are not samples.
+            .. Jobs("micro-02", 3, 200, "npm run lint"),
+            Job("micro-02", 20, key: "npm run lint"),
+            Job("micro-02", 200, "Failed", key: "npm run lint"),
+            Job("micro-02", 200, daysAgo: 91, key: "npm run lint"),
+        ];
+        var speeds = ShardTiming.Speeds(records, Now);
+        Assert.Equal(new MachineSpeed(1, 6), speeds["build-01"]);
+        Assert.Equal(new MachineSpeed(3, 5), speeds["micro-01"]);
+        Assert.Equal(new MachineSpeed(null, 3), speeds["micro-02"]);
+
+        // micro-02 borrows the median of the measured machines of its size class (medium, from this probe); mini-01 (light) has no peer.
+        var fleet = Fleet(("build-01", 2, 0.1, 31.8, 8), ("micro-01", 1, 0.1, 7.7, 4), ("micro-02", 1, 0.1, 15.6, 2), ("mini-01", 1, 0.1, 3.8, 2));
+        Assert.Equal(new SpeedFactor(1, ShardTiming.Measured), ShardTiming.SpeedOf("build-01", speeds, fleet.Assessed));
+        Assert.Equal(new SpeedFactor(3, ShardTiming.Measured), ShardTiming.SpeedOf("micro-01", speeds, fleet.Assessed));
+        Assert.Equal(new SpeedFactor(3, ShardTiming.SizeClass), ShardTiming.SpeedOf("micro-02", speeds, fleet.Assessed));
+        Assert.Equal(new SpeedFactor(1, ShardTiming.Unknown), ShardTiming.SpeedOf("mini-01", speeds, fleet.Assessed));
+        Assert.Equal(new SpeedFactor(1, ShardTiming.Unknown), ShardTiming.SpeedOf("micro-02", speeds, []));
+        Assert.Equal(new SpeedFactor(1, ShardTiming.Unknown), ShardTiming.SpeedOf("gone-01", speeds, fleet.Assessed));
+
+        // The history carries the speeds; W divides each shard's raw run time by its machine's factor (900 s on micro-01 = 300 s of work).
+        var h = JobHistory.From([.. records, .. Run("r1", 0.5, "micro-01", 900)], Key, ".", Now);
+        Assert.Equal(new MachineSpeed(3, 6), h.Speeds["micro-01"]); // the new run is the only one of its command: ratio 1, one more sample
+        Assert.Equal(300.0, ShardTiming.Estimate(h, m => ShardTiming.SpeedOf(m, h.Speeds, fleet.Assessed).Factor)!.WorkSeconds);
+    }
+
+    [Fact]
+    public void FactorsAreClampedAndRounded()
+    {
+        JobRecord[] records =
+        [
+            .. Jobs("base-01", 6, 100, "a"), .. Jobs("crawl-01", 5, 1000, "a"), // x10 -> 4
+            .. Jobs("base-02", 6, 1000, "b"), .. Jobs("rocket-01", 5, 100, "b"), // x0.1 -> 0.25
+            .. Jobs("base-03", 6, 300, "c"), .. Jobs("odd-01", 5, 487, "c"), // x1.6233 -> 1.62
+        ];
+        var speeds = ShardTiming.Speeds(records, Now);
+        Assert.Equal(4.0, speeds["crawl-01"].Factor);
+        Assert.Equal(0.25, speeds["rocket-01"].Factor);
+        Assert.Equal(1.62, speeds["odd-01"].Factor);
+
+        // A shard's work is its run time x N: a 4-shard run's 100 s shards compare with a single run of 400 s.
+        JobRecord[] sharded =
+        [
+            .. Jobs("base-04", 6, 400, "d"),
+            .. Enumerable.Range(1, 5).Select(i => Job("quick-01", 100, runId: "q" + i, shard: 1, shards: 4, key: "d")),
+        ];
+        Assert.Equal(1.0, ShardTiming.Speeds(sharded, Now)["quick-01"].Factor);
+    }
 }

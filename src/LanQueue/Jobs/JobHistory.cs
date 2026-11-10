@@ -77,9 +77,13 @@ public static class JobHistory
     /// (oldest first, as <see cref="JobLog.Read"/> returns them): only Completed jobs with a runSeconds that started in the last
     /// <see cref="HistoryDays"/> days. Jobs are grouped by runId (a job without one is a run of its own, N = 1); within a run each shard index
     /// counts once (its last Completed attempt). A run counts when at least ceil(N/2) of its N shards completed. At most
-    /// <see cref="MaxRuns"/> runs, the newest (by their newest job).
+    /// <see cref="MaxRuns"/> runs, the newest (by their newest job). The machines' speeds come from every command (<see cref="ShardTiming.Speeds"/>).
     /// </summary>
-    public static TimingHistory From(IReadOnlyList<JobRecord> records, string key, string dir, DateTimeOffset now)
+    public static TimingHistory From(IReadOnlyList<JobRecord> records, string key, string dir, DateTimeOffset now) =>
+        From(records, key, dir, now, ShardTiming.Speeds(records, now));
+
+    /// <param name="speeds">Every machine's speed (<see cref="ShardTiming.Speeds"/> of the same records), computed once for many commands.</param>
+    public static TimingHistory From(IReadOnlyList<JobRecord> records, string key, string dir, DateTimeOffset now, IReadOnlyDictionary<string, MachineSpeed> speeds)
     {
         var since = now.AddDays(-HistoryDays);
         var runs = records
@@ -102,6 +106,6 @@ public static class JobHistory
             .OrderByDescending(r => r.LastUtc)
             .Take(MaxRuns)
             .ToList();
-        return new TimingHistory(key, dir, runs, new Dictionary<string, MachineSpeed>(StringComparer.Ordinal));
+        return new TimingHistory(key, dir, runs, speeds);
     }
 }
