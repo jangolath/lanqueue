@@ -140,6 +140,29 @@ internal sealed class SuggestedCommand
     }
 
     /// <summary>
+    /// The user's own lanq run --plan again for some of its jobs: <see cref="ParsedArgs.Raw"/> with --only set to <paramref name="only"/> (the
+    /// jobs that did not complete; --only only ever narrows, and every job named was in the run). <paramref name="waitSeconds"/> only raises
+    /// --wait, and a run that could not wake a machine (--wait 0 without --no-wake) gets --no-wake, as <see cref="Rerun"/>. Nothing else
+    /// changes. Safe (the developer already ran it, and lanq.yml is the same file).
+    /// </summary>
+    public static SuggestedCommand? RerunPlan(ParsedArgs p, IReadOnlyCollection<string> only, int? waitSeconds = null)
+    {
+        if (p.Command != "run" || !p.Plan || only.Count == 0)
+        {
+            return null;
+        }
+
+        var set = new List<(string, string)> { ("--only", string.Join(',', only)) };
+        if (waitSeconds is { } w && w > p.WaitSeconds)
+        {
+            set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: true);
+    }
+
+    /// <summary>
     /// lanq doctor [--remote] [--json] [--config FILE]: read-only (--remote reads each worker over ssh, and leaves held machines alone), safe.
     /// <paramref name="json"/> is the producing command's own --json: an agent reading JSON gets doctor's JSON too, people get the text.
     /// </summary>
@@ -389,8 +412,105 @@ internal static class NextSteps
         return ForRun(p, new RunOutcome(plan.Status, plan.ExitCode, plan.Message, plan.RejectKind, plan.InfraKind, false, null, plan.Retryable, excluded, null));
     }
 
+    /// <summary>
+    /// lanq run --plan (see docs/JSON.md): by the overall status, naming the jobs. A suggested re-run is the same command with --only set to the
+    /// jobs that did not complete (<see cref="SuggestedCommand.RerunPlan"/>); a health step judges the deciding job's machines (its needs, mem,
+    /// size and on from lanq.yml). <paramref name="jobs"/> gives each job's own lanq run arguments by name (may miss jobs).
+    /// </summary>
+    public static List<NextStepJson> ForPlanFile(ParsedArgs p, PlanRunResult r, IReadOnlyDictionary<string, ParsedArgs> jobs)
+    {
+        var again = r.Jobs.Where(j => j.Status != nameof(JobStatus.Completed)).Select(j => j.Name).ToList();
+        var decided = r.Decided is { } d && jobs.TryGetValue(d, out var a) ? a : null;
+        var health = decided is null ? SuggestedCommand.Health([], null, p.ConfigPath) : SuggestedCommand.Health(decided.Needs, decided.MemGb, p.ConfigPath, decided.On, decided.Size);
+        switch (r.Status)
+        {
+            case nameof(JobStatus.Completed):
+                return Nothing("every job completed");
+            case nameof(JobStatus.Failed):
+                var failed = r.Jobs.Where(j => j.Status == nameof(JobStatus.Failed)).Select(FailedText).ToList();
+                return [Step(NextAction.FixCode, $"{failed.Count} job(s) failed: {string.Join("; ", failed)}; read their logTail or logs and fix the code")];
+            case nameof(JobStatus.Rejected):
+                return Rejected(p, r.RejectKind, r.Message);
+            case nameof(JobStatus.NoCapacity) when r.Retryable == false:
+                return
+                [
+                    Step(NextAction.AskDeveloper, $"job '{r.Decided}' can never run on these machines as configured, so waiting will not help ({ExcludedText(r.Excluded)}); "
+                        + "a machine needs the capability, the size or the memory, or that job's needs, size, min_size, mem or on in lanq.yml must change (the developer decides)"),
+                    Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health),
+                ];
+            case nameof(JobStatus.NoCapacity):
+                return [PlanWaitStep(p, $"no machine could take job '{r.Decided}' now; machines may free up", again), Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health)];
+            case nameof(JobStatus.InfraError):
+                var lost = r.Jobs.Where(j => j.Status == nameof(JobStatus.InfraError) && (j.InfraKind == InfraKind.Connection
+                    || j.Sharded?.Shards.Any(s => s.InfraKind == InfraKind.Connection) == true)).ToList();
+                if (r.Jobs.Any(j => j.MayStillRun))
+                {
+                    var where = r.Jobs.Where(j => j.MayStillRun).Select(j => j.Machine ?? string.Join(",", j.Sharded?.Shards.Where(s => s.MayStillRun).Select(s => s.Machine ?? "?") ?? [])).Distinct(StringComparer.Ordinal);
+                    return
+                    [
+                        Step(NextAction.AskDeveloper, $"a job may still be running on {string.Join(", ", where)} (the ssh connection dropped and its cleanup did not finish); do not re-run before it has stopped"),
+                        Step(NextAction.RunHealth, "see which machines answer now", health),
+                    ];
+                }
+
+                if (lost.Count > 0)
+                {
+                    return [Step(NextAction.Retry, $"{string.Join(", ", lost.Select(j => j.Name))} lost the machine's ssh connection; run the jobs that did not complete again", SuggestedCommand.RerunPlan(p, again))];
+                }
+
+                return Infra(p, new RunOutcome(r.Status, r.ExitCode, r.Message, null, r.InfraKind, false, null, null, null, null), health);
+            case nameof(JobStatus.TimedOut):
+                var slow = r.Jobs.Where(j => j.Status == nameof(JobStatus.TimedOut)).Select(j => j.Name).ToList();
+                return [Step(NextAction.FixCode, $"{string.Join(", ", slow)} timed out; see logTail or the logs for where it hung; if a job is only slow, raise timeout: for job {slow.FirstOrDefault()} in lanq.yml")];
+            case nameof(JobStatus.WindowClosed):
+                return [PlanWaitStep(p, "a machine's allowed hours ended while a job ran; run the jobs that did not complete when a machine is free", again)];
+            case JobRunner.Cancelled:
+                return Nothing("cancelled (Ctrl+C)");
+            default:
+                return [Step(NextAction.AskDeveloper, "unexpected status " + r.Status)];
+        }
+
+        static string FailedText(PlanJobOutcome j) => j.Sharded is { } s
+            ? $"{j.Name} ({string.Join("; ", s.Shards.Where(x => x.Status == nameof(JobStatus.Failed)).Select(x => string.Create(CultureInfo.InvariantCulture, $"shard {x.Index}/{s.Count} exited {x.ExitCode}, log: {x.LogPath ?? "none"}")))})"
+            : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"})");
+    }
+
+    /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>
+    public static List<NextStepJson> ForPlanFileDry(ParsedArgs p, string status, string message, bool? retryable, RejectKind? reject, InfraKind? infra, ParsedArgs? decided)
+    {
+        var health = decided is null ? SuggestedCommand.Health([], null, p.ConfigPath) : SuggestedCommand.Health(decided.Needs, decided.MemGb, p.ConfigPath, decided.On, decided.Size);
+        return status switch
+        {
+            JobPlan.WouldRun => [Step(NextAction.Proceed, "lanq run --plan would start as shown; run it", SuggestedCommand.Rerun(p, dropDryRun: true))],
+            nameof(JobStatus.NoCapacity) when retryable != false =>
+            [
+                Step(NextAction.Wait, "no machine could take a job of the plan now; machines may free up, so check again later", SuggestedCommand.DryRun(p)),
+                Step(NextAction.RunHealth, "see how each machine is judged for that job", health),
+            ],
+            nameof(JobStatus.NoCapacity) =>
+            [
+                Step(NextAction.AskDeveloper, message + "; a machine needs the capability, the size or the memory, or that job's settings in lanq.yml must change (the developer decides)"),
+                Step(NextAction.RunHealth, "see how each machine is judged for that job", health),
+            ],
+            nameof(JobStatus.Rejected) => Rejected(p, reject, message),
+            nameof(JobStatus.InfraError) => Infra(p, new RunOutcome(status, 70, message, null, infra, false, null, null, null, null), health),
+            JobRunner.Cancelled => Nothing("cancelled (Ctrl+C)"),
+            _ => [Step(NextAction.AskDeveloper, "unexpected status " + status)],
+        };
+    }
+
+    private static string ExcludedText(IReadOnlyList<ExcludedMachine>? excluded) =>
+        excluded is { Count: > 0 } x ? string.Join("; ", x.Select(e => $"{e.Machine}: {e.Why}")) : "no machine can take it";
+
+    /// <summary>A plan's wait step: the same plan for <paramref name="only"/> with --wait 120 when it waited less (and --no-wake when it could not wake), else no command.</summary>
+    private static NextStepJson PlanWaitStep(ParsedArgs p, string why, IReadOnlyCollection<string> only) =>
+        p.WaitSeconds < SuggestedCommand.WaitSeconds && SuggestedCommand.RerunPlan(p, only, SuggestedCommand.WaitSeconds) is { } waiting
+            ? Step(NextAction.Wait, why + string.Create(CultureInfo.InvariantCulture, $"; run them again waiting up to {SuggestedCommand.WaitSeconds} s"), waiting)
+            : Step(NextAction.Wait, why + string.Create(CultureInfo.InvariantCulture, $"; it already waited {p.WaitSeconds} s, so try again later"));
+
     private static List<NextStepJson> Rejected(ParsedArgs p, RejectKind? kind, string message) => kind switch
     {
+        RejectKind.PlanFile => [Step(NextAction.FixCode, "fix lanq.yml: " + message)],
         RejectKind.Policy => [Step(NextAction.AskDeveloper, $"refused by policy, not allowlisted ({message}); do not work around it, ask the developer")],
         RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes or the command line; nothing was sent")],
         RejectKind.Config => ConfigError(p.ConfigPath, message, p.Json),

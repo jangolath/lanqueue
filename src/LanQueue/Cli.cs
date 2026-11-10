@@ -533,6 +533,7 @@ public static partial class Cli
           lanq run ... --dry-run [--json] -- dotnet test
           lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
+          lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
@@ -621,6 +622,13 @@ public static partial class Cli
         started shard is cleaned up). --target-minutes M (1 to 1440, with --shards auto only) picks N from earlier completed runs of the same
         command and --dir (the newest 10 of the last 90 days) so each shard takes about M minutes on the slowest machine it would go to,
         never more than the free slots; with no such run it is plain auto. The --shards auto line says why (--json adds shardTiming).
+        run --plan runs the jobs of lanq.yml at the repository top (or --plan-file PATH; see docs/PLANS.md): each job is the lanq run line it
+        expands to (the same checks; the dry run prints it), every job's command line is checked before anything is sent (one refusal refuses
+        the plan, exit 2; a job no machine can ever take ends it with 75), the repository is snapshotted once and jobs run side by side unless
+        after: orders them (a job whose after: job did not complete is Skipped). --only a,b runs only those jobs; --fail-fast cancels the rest
+        after the first job that does not complete; --wait counts only while no job of the plan holds a slot. Lines are prefixed [job machine];
+        a summary table, then the status line. Exit 0 only when every job completed, else the first failed job's own code, then 2, 124, 70, 75,
+        130. --json prints one object (status, exitCode, plan, durationSeconds, message, order, jobs, warnings, nextSteps).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
@@ -657,7 +665,9 @@ public static partial class Cli
             if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
-                await (own[0] == "run" && own.Contains("--dry-run")
+                await (own[0] == "run" && (own.Contains("--plan") || own.Contains("--plan-file"))
+                    ? WritePlanFileJsonError(own.Contains("--dry-run"), "Rejected", 2, message, stdout, steps, logTail: own.Contains("--log-tail"))
+                    : own[0] == "run" && own.Contains("--dry-run")
                     ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"), steps)
                     : own[0] == "run" && own.Contains("--shards")
                     ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
@@ -720,7 +730,9 @@ public static partial class Cli
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
-                await (p.DryRun
+                await (p.Plan
+                    ? WritePlanFileJsonError(p.DryRun, "Rejected", 2, message, stdout, steps, logTail: p.LogTail is not null)
+                    : p.DryRun
                     ? WritePlanJsonError("Rejected", 2, message, stdout, p.LogTail is not null, steps)
                     : p.Shards is not null
                     ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
@@ -761,17 +773,8 @@ public static partial class Cli
     {
         if (p.Plan)
         {
-            // lanq.yml is read and checked by Plan/PlanFileLoader.cs; running it arrives with the rest of 0.8.0 (this branch only).
-            const string notYet = "lanq run --plan is not available in this build yet (lanq.yml plans arrive in 0.8.0).";
-            var steps = NextSteps.ArgumentsError(notYet);
-            await NextSteps.WriteAsync(stderr, steps, "[lanq] ").ConfigureAwait(false);
-            await stderr.WriteLineAsync("[lanq] Rejected: " + notYet).ConfigureAwait(false);
-            if (p.Json)
-            {
-                await WriteJsonError("run", "Rejected", 2, notYet, stdout, steps).ConfigureAwait(false);
-            }
-
-            return 2;
+            // lanq.yml (see Cli.PlanFile.cs); its dry run too.
+            return await RunPlanFile(p, config, ssh, payloads, probe, log, home, repoDir, stdout, stderr, ct).ConfigureAwait(false);
         }
 
         if (p.DryRun)

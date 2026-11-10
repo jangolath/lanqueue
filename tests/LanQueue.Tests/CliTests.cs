@@ -61,6 +61,8 @@ public class CliTests
     [InlineData("lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]")]
     [InlineData("--min-size light|medium|heavy (that class or larger) or --size C[,C] (one of these classes)")]
     [InlineData("--on m[,m] uses only the")]
+    [InlineData("lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]")]
+    [InlineData("run --plan runs the jobs of lanq.yml at the repository top")]
     public async Task UsageListsEveryCommandAndOption(string text)
     {
         var o = new StringWriter();

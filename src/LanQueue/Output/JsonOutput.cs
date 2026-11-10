@@ -257,6 +257,143 @@ internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Re
 /// <summary>--shards --dry-run: the shards one machine would take at the start.</summary>
 internal sealed record PlacementJson(string Machine, IReadOnlyList<int> Shards);
 
+/// <summary>
+/// The one object <c>lanq run --plan --json</c> prints on stdout, on every path: the overall status and exit code, the plan file, the launch
+/// order and every selected job in that order. jobs is empty when the plan was refused or ended before anything ran (bad arguments, config,
+/// plan file, a refused command line, the snapshot), and then order may be empty too. Fields are only ever added.
+/// </summary>
+/// <param name="Status">Completed, Failed, Rejected, NoCapacity, InfraError, TimedOut, WindowClosed or Cancelled.</param>
+/// <param name="Plan">The plan file's full path, or null when it was not found.</param>
+/// <param name="Order">The launch order (job names).</param>
+internal sealed record PlanFileRunJson(
+    string Status, int ExitCode, string? Plan, double DurationSeconds, string Message, IReadOnlyList<string> Order, IReadOnlyList<PlanFileJobJson> Jobs)
+{
+    /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>, from the job that decided the status.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: as in <see cref="RunJson.Excluded"/>, from the job that decided the status.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>The plan file's static warnings (also printed on stderr).</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    /// <summary>What to do next for the whole plan (see <see cref="NextStepJson"/>); a re-run adds --only with the jobs that did not complete.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>
+/// One job of <c>lanq run --plan --json</c>. Every positional member is always written (null where it does not apply): exitCode is null only
+/// for Skipped, startedSeconds only when the job never started; machine, jobId and logPath belong to a single job (a sharded job has them per
+/// shard); shardCount and shards to a sharded job. The rest is written only where it applies, as in lanq run --json.
+/// </summary>
+/// <param name="Status">A lanq run status, Cancelled, or Skipped (never started: a job it starts after did not complete, --fail-fast, Ctrl+C).</param>
+/// <param name="After">The jobs it started after (within the selection).</param>
+/// <param name="StartedSeconds">Seconds from the plan's start to the job's start.</param>
+internal sealed record PlanFileJobJson(
+    string Name, string Status, int? ExitCode, IReadOnlyList<string> After, string? Machine, string? JobId, double? StartedSeconds, double DurationSeconds,
+    string Message, string? LogPath, int? ShardCount, IReadOnlyList<RunJson>? Shards)
+{
+    /// <summary>--log-tail N, single job only: its log's last N lines (empty when it never started).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? LogTail { get; init; }
+
+    /// <summary>NoCapacity only.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>A single job with fetch: in lanq.yml only, as in <see cref="RunJson.Fetched"/> (a sharded job has them per shard).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<FetchedJson>? Fetched { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<FetchSkipJson>? FetchSkipped { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FetchSkippedMore { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FetchDir { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FetchError { get; init; }
+
+    /// <summary>shards: auto with target_minutes only: how N was picked.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ShardTimingJson? ShardTiming { get; init; }
+}
+
+/// <summary>
+/// The one object <c>lanq run --plan --dry-run --json</c> prints on stdout, on every path. Every member is always written (null where it does
+/// not apply), except logTail (only with --log-tail, and then always empty). Fields are only ever added.
+/// </summary>
+/// <param name="Status">WouldRun (0), NoCapacity (75), Rejected (2), InfraError (70) or Cancelled (130).</param>
+internal sealed record PlanFileDryJson(string Status, int ExitCode)
+{
+    /// <summary>Always true: nothing was sent, no slot claimed, nothing woken.</summary>
+    public bool DryRun { get; init; } = true;
+
+    /// <summary>The plan file's full path, or null when it was not found.</summary>
+    public string? Plan { get; init; }
+
+    public string Message { get; init; } = "";
+
+    /// <summary>The launch order (job names).</summary>
+    public IReadOnlyList<string> Order { get; init; } = [];
+
+    /// <summary>Every selected job, in launch order (empty when the plan was refused before any machine was looked at).</summary>
+    public IReadOnlyList<PlanFileDryJobJson> Jobs { get; init; } = [];
+
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    /// <summary>NoCapacity only: false when some job can never run as configured; else null.</summary>
+    public bool? Retryable { get; init; }
+
+    /// <summary>--log-tail only: always empty (a dry run starts no job).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? LogTail { get; init; }
+
+    /// <summary>What to do next: WouldRun proceeds with the same command without --dry-run.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>One job of <c>lanq run --plan --dry-run --json</c> (every member always written, null where it does not apply).</summary>
+/// <param name="RunArgv">The equivalent lanq run command line ("lanq", "run", ...), exactly as the job expands.</param>
+/// <param name="RunCommand">The same as one line for bash and PowerShell, or null when it cannot be written safely for both.</param>
+/// <param name="Start">now (first wave), waits_for_plan (first wave, but every slot it could use is this plan's) or after (it starts after other jobs).</param>
+/// <param name="Status">WouldRun, WouldWait, Pending or NoCapacity.</param>
+internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> After, IReadOnlyList<string> RunArgv, string? RunCommand, string Start, string Status)
+{
+    public string Message { get; init; } = "";
+
+    /// <summary>The machine a single job (or shard 1) would go to, or null.</summary>
+    public string? Machine { get; init; }
+
+    public int? ShardCount { get; init; }
+
+    public bool? ShardCountAuto { get; init; }
+
+    public IReadOnlyList<PlacementJson>? Placement { get; init; }
+
+    public string? ShardCountWhy { get; init; }
+
+    public ShardTimingJson? ShardTiming { get; init; }
+
+    /// <summary>The job's expected work from jobs.jsonl (minutes, on a machine of speed factor 1), or null without history.</summary>
+    public double? ExpectedMinutes { get; init; }
+
+    /// <summary>Every candidate machine judged for the job (empty when nothing was probed).</summary>
+    public IReadOnlyList<PlanMachineJson> Machines { get; init; } = [];
+
+    /// <summary>NoCapacity only: false when the job can never run as configured.</summary>
+    public bool? Retryable { get; init; }
+}
+
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>
 internal sealed record FetchedJson(string Path, long Bytes, string Sha256);
 
@@ -370,6 +507,10 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]
 [JsonSerializable(typeof(PlanJson))]
+[JsonSerializable(typeof(PlanFileRunJson))]
+[JsonSerializable(typeof(PlanFileJobJson))]
+[JsonSerializable(typeof(PlanFileDryJson))]
+[JsonSerializable(typeof(PlanFileDryJobJson))]
 [JsonSerializable(typeof(ShardTimingJson))]
 [JsonSerializable(typeof(DoctorJson))]
 [JsonSerializable(typeof(DoctorCheckJson))]
