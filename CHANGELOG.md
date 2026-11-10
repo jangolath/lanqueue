@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+### Behaviour changes
+
+- `jobs.jsonl` lines gain optional fields: `v` (2), `key` (the command; for `--shards` the template with `{shard}`
+  and `{shards}`), `dir`, `shard`, `shards`, `runId` (shared by every shard of one run) and `runSeconds` (how long
+  the job's own command ran, without upload, prepare or fetch). A field that does not apply is left out, so older
+  readers are unaffected.
+- `jobs.jsonl` moves to `jobs.1.jsonl` at 4 MiB (two files at most); lanq reads both.
+- A torn or unreadable line in `jobs.jsonl` is skipped instead of making `lanq stats` fail.
+- A `jobs.jsonl` that another program holds open no longer turns a finished job into `InfraError`: the append is
+  retried briefly, then skipped with a warning. Concurrent lanq processes no longer collide on it.
+- Per-job logs in the state folder's `logs/` are pruned after a run, at most once a day: lanq's own logs older than
+  `policy.keep_logs_days` (new, default 30; 0 never prunes) and the oldest beyond 5,000. A log modified in the last
+  hour, any other file and any link are never deleted.
+
 ## 0.6.0 (2026-11-09)
 
 ### Agents and scripts

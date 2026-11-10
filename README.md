@@ -918,6 +918,9 @@ policy:
   min_window_minutes: 10      # no new job on a machine whose window ends sooner than this
 ```
 
+Added in 0.7.0: `keep_logs_days: 30` (0 to 3650; 0 keeps them for ever). After a run, at most once a day, lanq deletes its
+own per-job logs in the state folder's `logs/` that are older than this, and the oldest beyond 5,000.
+
 A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing a machine with the people who use it").
 
 Unknown keys are an error (so a `password:` field is refused rather than ignored), and so is a duplicate key. A key

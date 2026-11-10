@@ -19,6 +19,7 @@ policy:
   # max_mem_pressure: 20         # Linux: hold when PSI memory "some avg10" (%) is above this
   # window_grace_minutes: 15     # a running job may overrun the end of its machine's allowed_hours by this much
   # min_window_minutes: 10       # do not start a job on a machine whose window ends sooner than this
+  # keep_logs_days: 30           # delete this PC's per-job logs (state folder logs/) after this many days; 0 keeps them
   # A job's argv must start with one of these token sequences. Everything else is refused.
   allowed_commands:
     - dotnet build
