@@ -936,16 +936,7 @@ public static partial class Cli
             return (dir, dir);
         }
 
-        var top = Path.GetFullPath(repoDir);
-        for (var d = new DirectoryInfo(top); d is not null; d = d.Parent)
-        {
-            if (Directory.Exists(Path.Combine(d.FullName, ".git")) || File.Exists(Path.Combine(d.FullName, ".git")))
-            {
-                top = d.FullName;
-                break;
-            }
-        }
-
+        var top = Plan.PlanFileLoader.RepositoryTop(repoDir) ?? Path.GetFullPath(repoDir);
         var lanq = Path.Combine(top, ".lanq");
         try
         {
