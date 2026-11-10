@@ -13,6 +13,9 @@ internal static partial class CommandLine
     [GeneratedRegex(@"^[A-Za-z0-9_./:=,+@%-]+\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex BareRegex();
 
+    /// <summary>True when the token is made only of plain characters (<see cref="BareRegex"/>) and could be written without quotes.</summary>
+    public static bool IsBare(string token) => BareRegex().IsMatch(token);
+
     /// <summary>
     /// One line for bash and PowerShell, or null when some token cannot be written safely for both: tokens of plain characters bare, others in
     /// single quotes. Null for a token holding a single quote, a double quote (Windows PowerShell 5.1 mangles it on the way to a native
