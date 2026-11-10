@@ -171,6 +171,24 @@ public sealed partial class SupplyChainTests
         Assert.Contains("scripts/release-draft.sh publish", publishRuns, StringComparison.Ordinal);
     }
 
+    /// <summary>The release notes come from CHANGELOG.md, reach the package and the GitHub release, and stay out of the release assets.</summary>
+    [Fact]
+    public void ReleaseNotesComeFromTheChangelogAndReachThePackageAndTheRelease()
+    {
+        var steps = Steps(Workflow("release.yml")).ToList();
+        var packRuns = string.Join('\n', steps.Where(s => s.Job == "pack").Select(s => Scalar(s.Step, "run") ?? ""));
+        Assert.Contains("scripts/release-notes.sh \"$VERSION\" CHANGELOG.md", packRuns, StringComparison.Ordinal);
+        Assert.Contains("-p:LanqReleaseNotesFile=", packRuns, StringComparison.Ordinal);
+        Assert.Contains("unzip -p", packRuns, StringComparison.Ordinal);
+        Assert.Contains(steps, s => s.Job == "pack" && Scalar(Map(s.Step, "with"), "name") == "release-notes");
+        Assert.Contains(steps, s => s.Job == "publish" && Scalar(s.Step, "uses")?.StartsWith("actions/download-artifact@", StringComparison.Ordinal) == true
+            && Scalar(Map(s.Step, "with"), "name") == "release-notes");
+        Assert.DoesNotContain(steps, s => s.Job == "assemble" && Scalar(s.Step, "uses")?.StartsWith("actions/download-artifact@", StringComparison.Ordinal) == true
+            && Scalar(Map(s.Step, "with"), "name") == "release-notes");
+        var publishRuns = string.Join('\n', steps.Where(s => s.Job == "publish").Select(s => Scalar(s.Step, "run") ?? ""));
+        Assert.Contains("scripts/release-draft.sh draft \"v$VERSION\" \"$PRERELEASE\" release notes/release-notes.md", publishRuns, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("release.yml", "pack")]
     [InlineData("ci.yml", "aot-linux")]

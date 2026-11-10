@@ -42,18 +42,45 @@ jobs:
           sh scripts/release-version.sh "$REF_NAME" "$IS_TAG" "$RUN_NUMBER" > "$RUNNER_TEMP/version.txt"
           cat "$RUNNER_TEMP/version.txt"
           cat "$RUNNER_TEMP/version.txt" >> "$GITHUB_OUTPUT"
+      - name: Release notes from CHANGELOG.md (a stable tag needs its dated section)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if ! sh scripts/release-notes.sh "$VERSION" CHANGELOG.md > "$RUNNER_TEMP/release-notes.md" 2> "$RUNNER_TEMP/release-notes.err"; then
+            echo "::error::$(head -n 1 "$RUNNER_TEMP/release-notes.err")"
+            exit 1
+          fi
+          # Shown with a prefix, so no line of the changelog can read as a workflow command.
+          sed 's/^/| /' "$RUNNER_TEMP/release-notes.md"
       - run: dotnet restore
       - run: dotnet build -c Release --no-restore -warnaserror -p:Version="$VERSION"
         env:
           VERSION: ${{ steps.ver.outputs.version }}
       - run: dotnet test -c Release --no-build
-      - run: dotnet pack src/LanQueue -c Release --no-build -p:Version="$VERSION" -o nupkg
+      - run: dotnet pack src/LanQueue -c Release --no-build -p:Version="$VERSION" -p:LanqReleaseNotesFile="$RUNNER_TEMP/release-notes.md" -o nupkg
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+      - name: The package carries the release notes
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        # The nuspec is XML, so its text is compared after undoing the five entities.
+        run: |
+          first=$(sed -n '/[^[:space:]]/{p;q;}' "$RUNNER_TEMP/release-notes.md")
+          if ! unzip -p "nupkg/LanQueue.$VERSION.nupkg" '*.nuspec' |
+            sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g' | grep -q -F -- "$first"; then
+            echo "::error::the packed LanQueue.nuspec does not contain the first line of the release notes"
+            exit 1
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nupkg
           path: nupkg/*.nupkg
+          if-no-files-found: error
+      # A separate artifact: assemble's release assets stay exactly the package and the binaries.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
           if-no-files-found: error
   native:
     needs: pack
@@ -269,6 +296,10 @@ jobs:
         with:
           name: release-assets
           path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
       - name: Draft the GitHub release with every asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -276,7 +307,8 @@ jobs:
           VERSION: ${{ needs.pack.outputs.version }}
           PRERELEASE: ${{ needs.pack.outputs.prerelease }}
         # A re-run reuses its own draft only when that draft is empty or has this build's SHA256SUMS; a published release is never touched.
-        run: sh scripts/release-draft.sh draft "v$VERSION" "$PRERELEASE" release
+        # The body is the CHANGELOG.md notes, then GitHub's generated compare link.
+        run: sh scripts/release-draft.sh draft "v$VERSION" "$PRERELEASE" release notes/release-notes.md
       - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: login
         with:
