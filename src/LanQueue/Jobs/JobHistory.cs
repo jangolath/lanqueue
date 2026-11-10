@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using LanQueue.Output;
 using LanQueue.Policy;
+using LanQueue.Scheduling;
 
 namespace LanQueue.Jobs;
 
@@ -16,6 +17,12 @@ public static class JobHistory
 
     /// <summary>How much of a long key is kept before "#" and the hash.</summary>
     internal const int LongKeyPrefixChars = 960;
+
+    /// <summary>--target-minutes reads the jobs of the last this many days (by their start).</summary>
+    public const int HistoryDays = 90;
+
+    /// <summary>--target-minutes uses at most this many runs, the newest.</summary>
+    public const int MaxRuns = 10;
 
     /// <summary>
     /// The command's identity, from its argv (for a shard: the TEMPLATE argv, so {shard} and {shards} stay literal): each token bare when it is
@@ -47,5 +54,54 @@ public static class JobHistory
 
         d = d.TrimEnd('/');
         return d.Length == 0 ? "." : d;
+    }
+
+    /// <summary>
+    /// What --target-minutes knows about the command (<paramref name="key"/>, <paramref name="dir"/>) from jobs.jsonl (both files): see
+    /// <see cref="From"/>. A job log that cannot be read is no history (the run goes on; plain --shards auto decides).
+    /// </summary>
+    public static TimingHistory For(JobLog log, string key, string dir, DateTimeOffset now, CancellationToken ct = default)
+    {
+        try
+        {
+            return From(log.Read(ct).Records, key, dir, now);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return TimingHistory.None(key, dir);
+        }
+    }
+
+    /// <summary>
+    /// The runs of the command (<paramref name="key"/>, <paramref name="dir"/>) that timing may use, newest first, from <paramref name="records"/>
+    /// (oldest first, as <see cref="JobLog.Read"/> returns them): only Completed jobs with a runSeconds that started in the last
+    /// <see cref="HistoryDays"/> days. Jobs are grouped by runId (a job without one is a run of its own, N = 1); within a run each shard index
+    /// counts once (its last Completed attempt). A run counts when at least ceil(N/2) of its N shards completed. At most
+    /// <see cref="MaxRuns"/> runs, the newest (by their newest job).
+    /// </summary>
+    public static TimingHistory From(IReadOnlyList<JobRecord> records, string key, string dir, DateTimeOffset now)
+    {
+        var since = now.AddDays(-HistoryDays);
+        var runs = records
+            .Where(r => r.Key == key && r.Dir == dir && r.Status == nameof(JobStatus.Completed) && r.RunSeconds is not null && r.Machine is not null
+                && r.StartedUtc >= since)
+            .GroupBy(r => r.RunId is { } id ? "run:" + id : "job:" + r.Id, StringComparer.Ordinal)
+            .Select(g =>
+            {
+                var n = g.First().RunId is null ? 1 : Math.Max(1, g.Max(r => r.Shards ?? 1));
+
+                // The last Completed attempt of each index (a retried shard counts once).
+                List<TimingShard> shards = [.. g
+                    .GroupBy(r => r.RunId is null ? 1 : r.Shard ?? 1)
+                    .Select(s => s.Last())
+                    .OrderBy(r => r.RunId is null ? 1 : r.Shard ?? 1)
+                    .Select(r => new TimingShard(r.RunId is null ? 1 : r.Shard ?? 1, r.Machine!, r.RunSeconds!.Value, r.WallSeconds))];
+                return new TimingRun(n, g.Max(r => r.StartedUtc), shards);
+            })
+            .Where(r => r.Completed.Count >= (r.Shards + 1) / 2)
+            .OrderByDescending(r => r.LastUtc)
+            .Take(MaxRuns)
+            .ToList();
+        return new TimingHistory(key, dir, runs, new Dictionary<string, MachineSpeed>(StringComparer.Ordinal));
     }
 }
