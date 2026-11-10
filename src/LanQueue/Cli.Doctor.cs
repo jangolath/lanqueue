@@ -455,7 +455,9 @@ public static partial class Cli
                     m.Transfer == TransferMode.Archive
                         ? "no usable tar for transfer: archive (see docs/WORKERS.md)"
                         : "git not found in a non-login ssh session (install it, or set transfer: archive)",
-                    "install git, or set transfer: archive"),
+                    m.Transfer == TransferMode.Archive
+                        ? "make tar usable in a non-login ssh session on this machine (see docs/WORKERS.md), or set transfer: git if git is installed"
+                        : "install git, or set transfer: archive"),
         };
         if (m.Transfer == TransferMode.Git && GitVersion(values.GetValueOrDefault("git_version")) is { } git && git < new Version(2, 32))
         {

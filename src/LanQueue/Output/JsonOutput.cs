@@ -322,7 +322,7 @@ internal sealed record StatsJson(
 }
 
 /// <summary>lanq's own job logs in the state folder's logs/ (<see cref="Jobs.LogPrune.Measure"/>) and how long they are kept (0 = for ever).</summary>
-internal sealed record StatsLogsJson(int Files, double Megabytes, int KeepDays);
+internal sealed record StatsLogsJson(int Files, double Megabytes, int? KeepDays);
 
 /// <summary>One machine of <c>lanq stats --json</c>; median and p90 are wall-clock seconds of its Completed jobs (nearest rank), null when none.</summary>
 /// <param name="SpeedFactor">

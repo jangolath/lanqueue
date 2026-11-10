@@ -743,7 +743,7 @@ public static partial class Cli
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
             "doctor" => JsonSerializer.Serialize(
                 new DoctorJson(status, exitCode, message, null, new DoctorCountsJson(0, 0, 0, 0, 0), []) { NextSteps = steps }, LanqJson.Default.DoctorJson),
-            "stats" => JsonSerializer.Serialize(StatsError(status, exitCode, message, LogPrune.DefaultKeepDays, steps), LanqJson.Default.StatsJson),
+            "stats" => JsonSerializer.Serialize(StatsError(status, exitCode, message, null, steps), LanqJson.Default.StatsJson),
             _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message) { NextSteps = steps }, LanqJson.Default.ErrorJson),
         });
 

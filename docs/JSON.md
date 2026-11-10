@@ -594,7 +594,7 @@ Every key is always there except `commandsMore`.
 | `wallMinutes` | number | Their wall-clock time, one decimal. |
 | `skippedLines` | number | Lines that were not a job record (a torn line, a hand edit): skipped and counted. stderr then has `[lanq] stats: N unreadable line(s) in jobs.jsonl skipped`. |
 | `oldestUtc`, `newestUtc` | string or null | When the oldest and newest job started; `null` with no jobs. |
-| `logs` | object | `{files, megabytes, keepDays}`: lanq's own job logs in `logs/` (count, size in MB with one decimal) and `policy.keep_logs_days` (0 = kept for ever; 30 when the config does not load). |
+| `logs` | object | `{files, megabytes, keepDays}`: lanq's own job logs in `logs/` (count, size in MB with one decimal) and `policy.keep_logs_days` (0 = kept for ever; 30 when the config does not load; null in the `Rejected` object for bad arguments, where the config is never read). |
 | `machines` | array | One entry per machine, by name (`-` for jobs that never got a machine). |
 | `machines[].machine` | string | The name. |
 | `machines[].jobs`, `.completed`, `.failed`, `.other` | number | Every job, and how many were `Completed`, `Failed` or anything else (`Rejected`, `TimedOut`, `InfraError`, ...). |

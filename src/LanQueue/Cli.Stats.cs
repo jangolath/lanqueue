@@ -226,11 +226,11 @@ public static partial class Cli
     }
 
     /// <summary>The logs object of lanq stats --json: count, megabytes (one decimal) and policy.keep_logs_days.</summary>
-    private static StatsLogsJson LogsJson((int Files, long Bytes) logs, int keepDays) =>
+    private static StatsLogsJson LogsJson((int Files, long Bytes) logs, int? keepDays) =>
         new(logs.Files, Math.Round(logs.Bytes / (1024.0 * 1024), 1), keepDays);
 
     /// <summary>A lanq stats --json object without results (zeros and empty lists): Rejected, InfraError or Cancelled.</summary>
-    internal static StatsJson StatsError(string status, int exitCode, string message, int keepDays, IReadOnlyList<NextStepJson> steps) =>
+    internal static StatsJson StatsError(string status, int exitCode, string message, int? keepDays, IReadOnlyList<NextStepJson> steps) =>
         new(status, exitCode, message, [], 0, 0, 0, null, null, LogsJson((0, 0), keepDays), [], []) { NextSteps = steps };
 
     /// <summary>

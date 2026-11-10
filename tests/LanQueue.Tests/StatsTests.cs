@@ -389,6 +389,7 @@ public sealed class StatsTests : IDisposable
         Assert.Equal(2, await Cli.RunAsync(args, o, e, CancellationToken.None));
         var r = OneObject(o.ToString(), "Rejected", 2);
         Assert.Equal((0, 0), (r.GetProperty("jobs").GetInt32(), r.GetProperty("machines").GetArrayLength()));
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("logs").GetProperty("keepDays").ValueKind); // the config was never read
         Assert.Equal("fix_command", Assert.Single(r.GetProperty("nextSteps").EnumerateArray()).GetProperty("action").GetString());
         Assert.Contains("Next: fix the command line: ", e.ToString(), StringComparison.Ordinal);
     }
