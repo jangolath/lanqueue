@@ -216,8 +216,12 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | Command | What it does |
 | --- | --- |
 | `lanq health [--json] [--wake]` | Probes every machine (one ssh call each, in parallel): load, cores, RAM, disk, memory, free slots, what it is suited for, holds, and what to fix when ssh fails. `--wake` also wakes machines that look asleep. |
-| `lanq health --needs a,b [--mem GB] [--json]` | Also judges every machine for such a job by the rules `lanq run` uses: `-> eligible (2 slots)` or `-> not eligible: lacks gpu (...)`. Exit `0` when at least one machine could take it now, `75` when none could. |
+| `lanq health --needs a,b [--mem GB] [--size C[,C] \| --min-size C] [--json]` | Also judges every machine for such a job by the rules `lanq run` uses: `-> eligible (2 slots)` or `-> not eligible: lacks gpu (...)`. Exit `0` when at least one machine could take it now, `75` when none could. |
+| `lanq health --on m[,m] [--json]` | Shows only the named machines. |
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
+| `lanq run ... --size light,medium -- CMD...` or `lanq run ... --min-size heavy -- CMD...` | Only machines of that size class (`--size`: one of the listed classes; `--min-size`: that class or larger). A machine's `size:` in `machines.yml` wins over its probed size; see [Routing jobs](#routing-jobs). |
+| `lanq run ... --on m[,m] -- CMD...` | Only the named machines (an unknown name is refused before any network). Every other rule still applies. |
+| `lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--dry-run] [--json]` | Runs the jobs of the repository's `lanq.yml` side by side on one snapshot, ordered by `after:`, with one result; see [docs/PLANS.md](docs/PLANS.md). |
 | `lanq run ... --json --log-tail N -- CMD...` | Adds the last N lines (1 to 200) of the job's log to the JSON object as `logTail`; `logPath` is always there. |
 | `lanq run ... --dry-run [--json] -- CMD...` | Says what `lanq run` would do now (the checks, the snapshot scan, the machine, every excluded machine and why, `--shards` N and placement) and does none of it. |
 | `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
@@ -475,14 +479,16 @@ Scripts and coding agents should prefer `--json`; [docs/JSON.md](docs/JSON.md) i
 `lanq health --json` prints one array, in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds","nextSteps":[{"action":"none","reason":"build-01 can take work","safeToRunUnattended":false}]},
- {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"freeSlots":1,"size":"unknown","suitedFor":"unknown: the machine did not report its memory","nextSteps":[{"action":"wait","reason":"build-02 is outside allowed hours; it takes jobs again in its next window (allowed hours: Mon-Fri 22:00-07:00)","safeToRunUnattended":false}]}]
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","sizeSource":"probe","suitedFor":"heavy: full suites and large builds","nextSteps":[{"action":"none","reason":"build-01 can take work","safeToRunUnattended":false}]},
+ {"name":"build-02","state":"hold","reasons":["outside allowed hours"],"load":0.05,"diskFreeGb":90.1,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":4,"memTotalGb":null,"loadKnown":true,"freeSlots":1,"size":"unknown","sizeSource":"probe","suitedFor":"unknown: the machine did not report its memory","nextSteps":[{"action":"wait","reason":"build-02 is outside allowed hours; it takes jobs again in its next window (allowed hours: Mon-Fri 22:00-07:00)","safeToRunUnattended":false}]}]
 ```
 
 `state` is `ok`, `hold` or `down`; `reasons` is empty when `ok`; `memFreeGb` and `localTime` (the worker's own clock)
 are `null` when the worker does not report them; so are `cores` and `memTotalGb` (then `size` is `unknown`).
 `freeSlots` is `maxJobs` minus `slotsUsed` (0 for a machine that is down), and `size` is `light`, `medium`, `heavy`
-or `unknown`. With `--needs a,b` and/or `--mem GB`, each row also has `eligible`, `why` and `reason` (null when
+or `unknown`: the machine's `size:` in `machines.yml` when it has one (`sizeSource` `config`), else the probed class
+(`sizeSource` `probe`). `loadKnown` is `false` only when a Windows worker could not measure its load at all (then
+`load` means nothing). With `--needs a,b`, `--mem GB`, `--size` and/or `--min-size`, each row also has `eligible`, `why` and `reason` (null when
 eligible), `permanent` (waiting can never change it) and `jobSlots` (how many copies or shards of such a job it could
 take now, `--mem` counted per copy); without them the rows are exactly as above.
 
@@ -514,6 +520,9 @@ config prints `{"status":"Rejected","exitCode":2,"message":...,"nextSteps":[...]
 and error messages still go to stderr, and so does the usage text after an unknown command (`lanq --help` prints it
 on stdout). `lanq run --dry-run --json` prints one object with `status` `WouldRun` (exit `0`) or the status the run
 would end with, the machine, every machine as judged for the job and, with `--shards`, N and the placement.
+`lanq run --plan --json` prints one object for the whole plan with a `jobs` array (one entry per job, by name), and
+`lanq run --plan --dry-run --json` one with each job's `lanq run` line and what it would do
+([docs/JSON.md](docs/JSON.md#lanq-run---plan---json)).
 `lanq doctor --json` prints one object with every check (see [lanq doctor](#lanq-doctor)), and `lanq stats --json` one
 object with the totals, `machines`, `commands` (each with its `timing`) and `logs`.
 
@@ -587,7 +596,9 @@ lanq keeps its state on your computer, in `<state>` (`$LANQ_HOME`, else `%LOCALA
 - `jobs.jsonl`: one JSON line per finished job: `id`, `machine`, `command`, `startedUtc`, `wallSeconds`, `exitCode`
   and `status`, and since 0.7.0 `v` (2), `key` (the command; for `--shards` its arguments with `{shard}` and
   `{shards}`), `dir`, `shard`, `shards` and `runId` (shared by the shards of one run), and `runSeconds` (how long the
-  command itself ran, without the wait, upload, prepare, fetch or cleanup). A field that does not apply is left out.
+  command itself ran, without the wait, upload, prepare, fetch or cleanup), and since 0.8.0 `planJob` and `planRun`
+  for the jobs of a `lanq run --plan` (the job's name in `lanq.yml`, and an id shared by one plan run). A field that
+  does not apply is left out.
   At 4 MiB the file moves to `jobs.1.jsonl` (replacing the one before), so there are at most two files; lanq reads
   both, and lanq 0.6 reads only `jobs.jsonl`. `jobs.jsonl.lock` makes two lanq processes take turns writing. A job
   that cannot be recorded (the file is locked for long) gets a warning; its result does not change. A line lanq cannot
@@ -820,6 +831,34 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
 `max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs; setting up the pool itself is in
 [docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md).
 
+## Routing jobs
+
+Most jobs need only `--needs` (capabilities, all required). In a pool of small and big machines two more options and
+a plan file pick where a job may go; each only narrows the choice, and every other rule (capabilities, `--mem`, holds, allowed
+hours, slots, wake) still applies:
+
+- `--min-size heavy` (that class or larger) or `--size light,medium` (one of these): by machine size. A machine's size
+  is its `size:` in `machines.yml` when it has one, else the probed class (light under 6 GB; heavy 16 GB or more with
+  4+ cores; else medium; see [Sizing machines](docs/SHARDING.md#sizing-machines)). Declare `size: medium` on a 16 GB
+  laptop someone works on to keep heavy jobs off it, or a size on a machine that cannot report its memory. A machine of
+  another size can never take the job (`wrong_size`), nor can one with no declared size that does not report its
+  memory (`size_unknown`).
+- `--on big-01,build-01`: only the named machines. An unknown name is refused (exit 2) before any network. A pinned
+  machine that is busy or held makes the job wait (`NoCapacity`, retryable); one that can never take it ends the run
+  at once (`retryable: false`).
+- A plan file, `lanq.yml`, sets these per job, so `lanq run --plan` sends builds and unit tests to the small machines
+  and the integration suite to the big ones in one command: [docs/PLANS.md](docs/PLANS.md).
+
+```bash
+lanq run --needs dotnet --size light,medium -- dotnet test tests/Unit -m:1
+lanq run --needs dotnet --min-size heavy --shards 2 -- sh scripts/lanq/test-shard.sh tests/Integration
+lanq health --needs dotnet --min-size heavy        # which machines could take it, and why not the others
+lanq run --plan --dry-run                          # what lanq.yml would do now
+```
+
+`lanq health --json` shows each machine's effective `size` and where it came from (`sizeSource`: `probe` or `config`);
+for a machine with `size:` the text line adds both, for example `(size: medium in machines.yml; probe: heavy)`.
+
 ## Keeping your keys safe
 
 `lanq` never stores or sends your key; it only calls `ssh` and `scp`. The aim is that a synced folder, a stolen
@@ -874,6 +913,8 @@ lanq run --needs dotnet,linux -- dotnet test -c Release        # exit code is th
 lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 minutes for a free machine
 lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
 lanq run --needs gpu --dry-run -- dotnet test                  # which machine would take it, and why not the others?
+lanq run --needs dotnet --min-size heavy -- dotnet test        # only a heavy machine (--size light,medium, --on big-01)
+lanq run --plan                                                # every job of the repository's lanq.yml (docs/PLANS.md)
 lanq stats                                                     # jobs, times and speed per machine and per command
 lanq doctor --remote                                           # is my setup right, and does each worker find its tools?
 lanq makeready --ssh me@old-pc.lan --os windows                # can this PC be a worker? (read-only, changes nothing)
@@ -954,6 +995,7 @@ machines:
     allowed_hours: "22:00-07:00"   # optional; one "[Days ]HH:mm-HH:mm" or a list, e.g. ["Mon-Fri 22:00-07:00", "Sat,Sun 01:00-09:00"]
     priority: low             # optional: low (default; nice/ionice or BelowNormal) | normal
     min_free_mem_gb: 2        # optional; overrides policy.min_free_mem_gb for this machine
+    size: medium              # optional: light | medium | heavy for --size / --min-size; default: the probed size (see "Routing jobs")
     env:                      # optional; variables for the job process only (see "Old machines with little RAM")
       NODE_OPTIONS: "--max-old-space-size=2048"
     path_prepend: [/home/build/.cargo/bin]   # optional; absolute directories put in front of PATH for the job
@@ -1088,8 +1130,9 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   leader's start time and the boot id, every job process carries `LANQ_JOB=<job id>` in its environment, and the
   group is signalled only in the same boot and only when the leader still has that start time, or the leader is gone
   and a live member of the group carries this job's `LANQ_JOB`). If it is not, the worker stops the job itself one minute after its limit (Linux under
-  `timeout`, where that command exists and works; Windows by a deadline wait and `taskkill /T /F`). A job that
-  deliberately detaches into a new session or process group can escape both.
+  `timeout`, where that command exists and works; Windows by a deadline wait that ends the job's Windows job object,
+  which also takes down the job's whole tree if the wrapper itself dies). A job that deliberately starts work outside
+  its own tree (a new session or process group on Linux, a scheduled task or service on Windows) can escape this.
 - Windows remote commands are passed as an encoded command line limited to 8000 characters; very long argument
   lists are refused with a message giving the limit and the actual size. A Windows machine whose `env:` and
   `path_prepend:` alone would already pass that limit in the job script is refused when the config loads, with the
@@ -1102,6 +1145,10 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   is reclaimed by the next job that needs a slot (its job is killed first if it is somehow still running). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
+- Plan files (`lanq run --plan`) pass nothing between jobs: each job runs in its own throw-away folder, maybe on
+  another machine, and `after:` only orders jobs (a test job builds what it needs itself). There is no way to reserve a
+  machine for one job alone (other jobs and other people's runs share its slots up to `max_jobs`), and no per-job
+  environment variables (`env:` is per machine, in `machines.yml`).
 - Wake-on-LAN is best effort and was exercised only against fakes and a loopback UDP socket, not real hardware. `lanq`
   cannot know whether a packet woke anything beyond the machine answering ssh later. The automatic wake judges
   `allowed_hours` on your PC's clock (an asleep worker cannot report its own), so keep both in the same time zone.

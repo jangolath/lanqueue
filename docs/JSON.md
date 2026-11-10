@@ -3,7 +3,7 @@
 `--json` is how scripts and coding agents should read `lanq`. This page is the contract: what each command prints,
 which keys it has, and what each status and exit code means.
 
-These commands take `--json`: `lanq run` (also with `--shards` and `--dry-run`), `lanq health` (also with `--needs`),
+These commands take `--json`: `lanq run` (also with `--shards`, `--dry-run` and `--plan`), `lanq health` (also with `--needs`),
 `lanq makeready` (one machine, `--ssh`, `--all` or `--add`), `lanq init`, `lanq wake`, `lanq doctor` (also with
 `--remote`) and `lanq stats` (the last two since 0.7.0). `lanq unlock` and `lanq makeready --setup` have no JSON output.
 
@@ -27,8 +27,12 @@ single-machine `lanq makeready --json` report, which is the lanq-makeready scrip
   `null` (for example `machine` when no machine took the job). The exceptions are marked "conditional": they are left
   out entirely when they do not apply (`shard`, `attempts`, `retryable`, `excluded`, `logTail` and the `--fetch` keys
   on a run, `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
-  `makeready --all`, `commandsMore` in `lanq stats`). In a dry run, `shardCountWhy` and `shardTiming` are always
-  there and `null` when they do not apply. Inside a makeready report, keys without a value are left out, never `null`.
+  `makeready --all`, `commandsMore` in `lanq stats`, and in a plan run `retryable` and `excluded` at the top and
+  `logTail`, `retryable`, `excluded`, the `--fetch` keys and `shardTiming` on a job). In a dry run, `shardCountWhy` and
+  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail` is
+  always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
+  `startedSeconds`, `durationSeconds`, `message`, `logPath`, `shardCount` and `shards`, `null` where they do not apply
+  (`exitCode` is `null` only for `Skipped`). Inside a makeready report, keys without a value are left out, never `null`.
 - **Key order is not part of the contract.** Look keys up by name.
 - **Strings are sanitised.** Messages and anything that came from a worker have control, bidi and zero-width
   characters replaced by `?`. The serializer may also escape characters such as `<`, `>`, `&` and `'` as `<` and
@@ -57,6 +61,9 @@ error and do not guess the result.
 | `run --dry-run` | `WouldRun` | 0 | `lanq run` would start now. Nothing was sent. |
 | `run --dry-run` | `NoCapacity` | 75 | No machine could take the job now (`retryable` as for a run). |
 | `run --dry-run` | `Rejected`, `InfraError`, `Cancelled` | 2, 70, 130 | As for a run; `InfraError` here is a failed snapshot or an unexpected error. |
+| `run --plan` | `Completed` | 0 | Every selected job of `lanq.yml` completed. |
+| `run --plan` | any `run` status | as above | The worst job decides, earliest in launch order on a tie: `Failed` (that job's own code), `Rejected`, `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Cancelled`. A bad `lanq.yml` or a refused job is `Rejected` (2) before anything is sent; see [lanq run --plan](#lanq-run---plan---json). A job's own `status` can also be `Skipped`. |
+| `run --plan --dry-run` | `WouldRun`, `NoCapacity`, `Rejected`, `InfraError`, `Cancelled` | 0, 75, 2, 70, 130 | As for a dry run, for the whole plan. |
 | `health` | (an array) | 0 | Every machine was probed. Machines that are down or held are in the array; that is not an error. |
 | `health --needs`/`--mem` | (an array) | 0 or 75 | 0 when at least one machine could take such a job now, 75 when none could. |
 | `makeready <machine>` | (the report) | 0 or 1 | 0 worker-ready, 1 not ready. The report has no `status` key. |
@@ -175,6 +182,8 @@ added; judge an unknown one by `permanent`.
 | `windows_unsafe_args` | yes | A Windows machine, and the job's arguments hold `"` `<` `>` `^` `%`, or `&` `|` for a program that is not a native `.exe` (a `.cmd`/`.bat` shim such as `npm` would re-parse them through cmd.exe). |
 | `mem_exceeds_total` | yes | `--mem` is above the machine's total memory. |
 | `mem_unknown` | yes | With `--mem`: the machine answers but does not report its memory. |
+| `wrong_size` | yes | With `--size` or `--min-size`: the machine's size (its `size:` in `machines.yml`, else the probed class) is not one the job allows. A declared size is judged from the config alone, without ssh (0.8.0). |
+| `size_unknown` | yes | With `--size` or `--min-size`: no `size:` in `machines.yml`, and the machine answers but does not report its total memory (0.8.0). |
 | `tool_missing` | yes | git (or tar with `transfer: archive`) is missing on the machine. |
 | `unreachable` | no | ssh failed (refused, timed out, key refused, unknown host key, name not resolved). |
 | `asleep` | no | The machine looks asleep or switched off. |
@@ -324,13 +333,139 @@ explains the rule.
 | `expectedShardMinutes` | number or null | About how long each shard takes on the slowest machine: (overhead + factor x work / N) / 60, one decimal. |
 | `why` | string | The reasoning for people, starting with `--target-minutes M:`. |
 
+## lanq run --plan --json
+
+`lanq run --plan` runs the jobs of the repository's `lanq.yml` ([PLANS.md](PLANS.md)). Every job's output and lanq's
+own lines go to stderr; stdout gets one object for the whole plan, on every path (a bad argument, a config error, a
+bad `lanq.yml`, a refusal, Ctrl+C and an unexpected error included):
+
+```json
+{"status":"Failed","exitCode":1,"plan":"/home/me/src/app/lanq.yml","durationSeconds":1290.4,
+ "message":"3 of 4 job(s) completed; integration: Failed: 1 of 2 shard(s) completed; shard 2/2: Failed: exit 1",
+ "order":["integration","unit","build","serial"],
+ "jobs":[
+  {"name":"integration","status":"Failed","exitCode":1,"after":[],"machine":null,"jobId":null,"startedSeconds":0.4,"durationSeconds":1210.4,
+   "message":"1 of 2 shard(s) completed; shard 2/2: Failed: exit 1","logPath":null,"shardCount":2,
+   "shards":[{"status":"Completed","exitCode":0,"machine":"big-01","jobId":"20261109-221503-a1b2c3","durationSeconds":1104.2,"message":"exit 0","logPath":"/home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log","shard":1,"attempts":1},
+             {"status":"Failed","exitCode":1,"machine":"build-01","jobId":"20261109-221503-d4e5f6","durationSeconds":1210.4,"message":"exit 1","logPath":"/home/me/.local/state/lanq/logs/20261109-221503-d4e5f6.log","shard":2,"attempts":1}]},
+  {"name":"build","status":"Completed","exitCode":0,"after":[],"machine":"micro-01","jobId":"20261109-221505-0a1b2c","startedSeconds":4.0,"durationSeconds":84.2,
+   "message":"exit 0","logPath":"/home/me/.local/state/lanq/logs/20261109-221505-0a1b2c.log","shardCount":null,"shards":null},
+  {"name":"serial","status":"Skipped","exitCode":null,"after":["integration"],"machine":null,"jobId":null,"startedSeconds":null,"durationSeconds":0,
+   "message":"not started: integration ended Failed","logPath":null,"shardCount":null,"shards":null}],
+ "warnings":[],
+ "nextSteps":[{"action":"fix_code","reason":"1 job(s) failed: integration (shard 2/2 exited 1, log: /home/me/.local/state/lanq/logs/20261109-221503-d4e5f6.log); read their logTail or logs and fix the code","safeToRunUnattended":false}]}
+```
+
+(`jobs` shortened: the `unit` entry is left out.)
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `status` | string | `Completed` only when every selected job completed. Otherwise the worst job decides, earliest in `order` on a tie: `Failed`, then `Rejected`, `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Cancelled`. `Cancelled` on Ctrl+C. |
+| `exitCode` | number | 0, else the deciding job's code: its own exit code for `Failed`, else 2, 124, 70 or 75; 130 on Ctrl+C. |
+| `plan` | string or null | The plan file's full path; `null` when it was not found. |
+| `durationSeconds` | number | Wall-clock seconds for the whole plan. |
+| `message` | string | `N of M job(s) completed; <job>: <status>: <its message>`, or the refusal or error. A refused job is named (`job 'unit': ...`); an error in `lanq.yml` starts with the file name, then the job and the line. |
+| `order` | array of string | The launch order (job names). May be empty when the plan was refused before it was ordered. |
+| `jobs` | array | One entry per selected job, in `order` (below). Empty when the plan was refused or ended before any job ran (bad arguments, config, `lanq.yml`, a refused command line, a job that can never run, the snapshot). |
+| `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, from the job that decided it, as for [one run](#nocapacity-retryable-and-excluded). |
+| `warnings` | array of string | The plan file's warnings (two jobs with the same command and folder; `shards:` without `{shard}` or `{shards}`), also printed on stderr. |
+| `nextSteps` | array | For the whole plan. A suggested re-run is the same command with `--only` set to the jobs that did not complete. See [nextSteps](#nextsteps). |
+
+Each entry in `jobs`:
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `name` | string | The job's name in `lanq.yml`. |
+| `status` | string | A `lanq run` status, or `Skipped`: never started, because a job in its `after:` did not complete, `--fail-fast` stopped the plan, or Ctrl+C. A running job that `--fail-fast` stopped is `Cancelled`. |
+| `exitCode` | number or null | The job's `lanq run` exit code (for a sharded job, its overall one). `null` only for `Skipped`. |
+| `after` | array of string | The jobs it started after, within the selection (`--only` drops the others). |
+| `machine`, `jobId`, `logPath` | string or null | A single job's, as in [lanq run](#lanq-run---json). `null` for a sharded job (each shard has its own) and for a job that never started. |
+| `startedSeconds` | number or null | Seconds from the plan's start to the job's start; `null` when it never started. |
+| `durationSeconds` | number | The job's wall-clock seconds; 0 when skipped. |
+| `message` | string | As for its own run (`exit 1`, `3 of 4 shard(s) completed; ...`), or why it was skipped (`not started: integration ended Failed`). |
+| `shardCount` | number or null | A sharded job's N; `null` for a single job. |
+| `shards` | array or null | A sharded job's shards, each as in [lanq run --shards](#lanq-run---shards---json) (with `shard` and `attempts`); `null` for a single job. |
+| `logTail` | array of string | Conditional: with `--log-tail N`, on a single job (empty when it never started). A sharded job has it per shard. |
+| `retryable`, `excluded` | | Conditional: only on a `NoCapacity` job. |
+| `fetched`, `fetchSkipped`, `fetchDir`, `fetchError`, `fetchSkippedMore` | | Conditional: on a single job with `fetch:` in `lanq.yml`, as [with --fetch](#with---fetch-conditional). A sharded job has them per shard. |
+| `shardTiming` | object | Conditional: a job with `shards: auto` and `target_minutes:`, once N was picked ([shardTiming](#shardtiming)). |
+
+Jobs of a plan run are recorded in `jobs.jsonl` with `planJob` (the job's name) and `planRun` (one id shared by the
+plan run), and get `LANQ_PLAN_JOB=<name>` in their environment.
+
+In text mode stderr starts with `[lanq] plan lanq.yml: N job(s); order: ...`; job lines are prefixed `[job machine]`
+(`[job i/N machine]` for shards); a summary table follows, then the `[lanq] Next: ...` lines, a
+`[lanq] log: <path> (<job>)` line for each job (or shard) that did not complete, and the status line last.
+
+## lanq run --plan --dry-run --json
+
+What `lanq run --plan` would do now, and none of it: the same file checks, command-line checks and snapshot scan, one
+probe of the machines the jobs could use, and the first wave dealt on one table of free slots. Nothing is sent, no
+slot is claimed, nothing is woken, and `jobs.jsonl` is read, never written. stdout gets one object on every path:
+
+```json
+{"status":"WouldRun","exitCode":0,"dryRun":true,"plan":"/home/me/src/app/lanq.yml",
+ "message":"2 job(s) would start now (integration, unit); 1 would wait for this plan's slots; 1 start after other jobs",
+ "order":["integration","unit","build","serial"],
+ "jobs":[
+  {"name":"integration","after":[],"runArgv":["lanq","run","--needs","dotnet","--min-size","heavy","--shards","2","--timeout","90","--","sh","scripts/lanq/test-shard.sh","tests/Integration"],
+   "runCommand":"lanq run --needs dotnet --min-size heavy --shards 2 --timeout 90 -- sh scripts/lanq/test-shard.sh tests/Integration",
+   "start":"now","status":"WouldRun","message":"would run 2 shard(s): big-01 shard 1; build-01 shard 2","machine":"big-01","shardCount":2,"shardCountAuto":false,
+   "placement":[{"machine":"big-01","shards":[1]},{"machine":"build-01","shards":[2]}],"shardCountWhy":null,"shardTiming":null,"expectedMinutes":31.0,
+   "machines":[{"machine":"big-01","eligible":true,"reason":null,"why":null,"permanent":false,"freeSlots":2,"jobSlots":2},
+               {"machine":"build-01","eligible":true,"reason":null,"why":null,"permanent":false,"freeSlots":1,"jobSlots":1},
+               {"machine":"micro-01","eligible":false,"reason":"wrong_size","why":"size light (probe: 4 GB, 4 cores); --min-size heavy","permanent":true,"freeSlots":1,"jobSlots":0}],
+   "retryable":null},
+  {"name":"serial","after":["integration"],"runArgv":["lanq","run","--needs","dotnet","--min-size","heavy","--timeout","60","--","dotnet","test","tests/Integration","--filter","Category=Serial"],
+   "runCommand":"lanq run --needs dotnet --min-size heavy --timeout 60 -- dotnet test tests/Integration --filter Category=Serial",
+   "start":"after","status":"Pending","message":"pending: starts after integration","machine":null,"shardCount":null,"shardCountAuto":null,
+   "placement":null,"shardCountWhy":null,"shardTiming":null,"expectedMinutes":null,"machines":[],"retryable":null}],
+ "warnings":[],"retryable":null,
+ "nextSteps":[{"action":"proceed","reason":"lanq run --plan would start as shown; run it","command":"lanq run --plan --json --no-wake","argv":["lanq","run","--plan","--json","--no-wake"],"safeToRunUnattended":true}]}
+```
+
+(`jobs` shortened to two entries.) Every key is always there (`null` where it does not apply), except `logTail`.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `status` | string | `WouldRun` (0); `NoCapacity` (75) when a first-wave job has no machine and nothing of the plan to wait behind, or a job can never run; `Rejected` (2); `InfraError` (70: the snapshot failed, or an unexpected error); `Cancelled` (130). |
+| `exitCode` | number | The dry run's own exit code. |
+| `dryRun` | boolean | Always `true`. |
+| `plan` | string or null | The plan file's full path; `null` when it was not found. |
+| `message` | string | One line. |
+| `order` | array of string | The launch order. |
+| `jobs` | array | Every selected job, in `order` (below). Empty when the plan was refused before any machine was looked at. |
+| `warnings` | array of string | As for a run. |
+| `retryable` | boolean or null | `NoCapacity` only: `false` when some job can never run as configured. |
+| `logTail` | array | Conditional: only with `--log-tail`, and then always empty. |
+| `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. |
+
+Each entry in `jobs`:
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `name`, `after` | | As for a run. |
+| `runArgv` | array of string | The job's equivalent `lanq run` command line (`"lanq", "run", ...`), exactly as it expands and is checked. |
+| `runCommand` | string or null | The same as one line for bash and PowerShell; `null` when an argument cannot be written safely for both. |
+| `start` | string | `now` (first wave), `waits_for_plan` (first wave, but every slot it could use is taken by this plan's own jobs) or `after` (it has `after:` jobs). |
+| `status` | string | `WouldRun`, `WouldWait` (behind this plan's own jobs), `Pending` (starts after other jobs; not probed) or `NoCapacity`. |
+| `message` | string | What it would do: `would run on micro-01`, `would run 2 shard(s): ...`, `would wait for a slot this plan holds (...)`, `pending: starts after integration`, or why no machine can take it. |
+| `machine` | string or null | The machine a single job (or shard 1) would go to. |
+| `shardCount`, `shardCountAuto`, `placement`, `shardCountWhy`, `shardTiming` | | As in [the dry run](#lanq-run---dry-run---json), for a sharded job; `null` otherwise. |
+| `expectedMinutes` | number or null | The job's expected work from `jobs.jsonl` (minutes on a machine of speed factor 1); `null` without history. |
+| `machines` | array | Every machine the job could use, as judged for it ([reason codes](#reason-codes)); empty when it was not probed (`Pending`). |
+| `retryable` | boolean or null | `NoCapacity` only: `false` when the job can never run as configured. |
+
+In text mode the plan goes to stdout (each job's `lanq run` line and what it would do) and the last stderr line is
+`[lanq] WouldRun: ...` (or the other status).
+
 ## lanq health --json
 
 One array, one object per machine in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
- {"name":"micro-01","state":"down","reasons":["ssh: connect to host 10.20.30.21 port 22: Connection timed out"],"load":0,"diskFreeGb":0,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":null,"memTotalGb":null,"loadKnown":true,"freeSlots":0,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","sizeSource":"probe","suitedFor":"heavy: full suites and large builds"},
+ {"name":"micro-01","state":"down","reasons":["ssh: connect to host 10.20.30.21 port 22: Connection timed out"],"load":0,"diskFreeGb":0,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":null,"memTotalGb":null,"loadKnown":true,"freeSlots":0,"size":"unknown","sizeSource":"probe","suitedFor":"unknown: the machine did not report its memory"}]
 ```
 
 | Key | Type | Notes |
@@ -348,16 +483,17 @@ One array, one object per machine in config order:
 | `memTotalGb` | number or null | Total memory; `null` when not reported. |
 | `loadKnown` | boolean | `false` when the worker could not measure its load (a Windows account denied WMI where the fallback is refused too): `load` is then 0 and means nothing, and load alone never holds the machine. `true` otherwise, also when `down` (0.8.0). |
 | `freeSlots` | number | `maxJobs` minus `slotsUsed`, never below 0; 0 when `down`. |
-| `size` | string | `light`, `medium`, `heavy` or `unknown`. |
+| `size` | string | `light`, `medium`, `heavy` or `unknown`: the effective size, the machine's `size:` in `machines.yml` when it has one, else the probed class (since 0.8.0; without `size:` it is the probed class, as before). |
+| `sizeSource` | string | `config` (the machine's `size:`) or `probe` (its memory and cores). Always there (0.8.0). |
 | `suitedFor` | string | What the machine suits, for example `light: lint and unit-test shards`; `+ container builds` with a `docker` capability. |
 | `nextSteps` | array | Always there: what to do about this machine (`none` when it can take work). See [nextSteps](#nextsteps). |
 
 A `hold` reason is a short phrase such as `paused on the machine`, `outside allowed hours`,
 `window closing (5 min left)` or `low memory (0.8 GB free)`. A `down` reason is the ssh error. Exit 0 means every machine was probed, whatever their state.
 
-### With --needs and --mem
+### With --needs, --mem and --size
 
-`lanq health --needs a,b [--mem GB] --json` judges every machine for such a job by the rules `lanq run` uses, from
+`lanq health --needs a,b [--mem GB] [--size C[,C] | --min-size C] --json` judges every machine for such a job by the rules `lanq run` uses, from
 the same probe. Each row has the keys above plus these five, always present:
 
 | Key | Type | Notes |
@@ -369,12 +505,13 @@ the same probe. Each row has the keys above plus these five, always present:
 | `jobSlots` | number | How many copies (or shards) of the job it could take now, `--mem` counted per copy; 0 when not eligible. |
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds",
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","sizeSource":"probe","suitedFor":"heavy: full suites and large builds",
   "nextSteps":[{"action":"none","reason":"build-01 can take such a job now","safeToRunUnattended":false}],"eligible":true,"why":null,"reason":null,"permanent":false,"jobSlots":2}]
 ```
 
-Exit `0` when at least one machine is eligible, `75` when none is. Without `--needs` and `--mem` the rows are exactly
-the plain ones and the exit code is always `0`. `--wake` works here too, as without `--needs`.
+Exit `0` when at least one machine is eligible, `75` when none is. Without `--needs`, `--mem`, `--size` and
+`--min-size` the rows are exactly the plain ones and the exit code is always `0`. `--on m[,m]` only leaves out the
+other machines' rows (an unknown name is `Rejected`, 2). `--wake` works here too, as without `--needs`.
 
 When there is no array to print, stdout gets an [error object](#error-object) instead: `Rejected` (2), `InfraError`
 (70) or `Cancelled` (130). Tell the two apart by type: an array is the result, an object is an error.
@@ -700,7 +837,9 @@ What a suggestion can be, by construction:
   could not wake a machine (`--wait 0`) and never drops `--no-wake`. The `wait` step suggests `--wait 120` only when
   the run waited less, and has no command once the run waited that long. `TimedOut` suggests double the `--timeout`
   (at most 10080). A lost connection on `--shards` suggests `--shard-retries 1` only when no shard may still be running.
-  A dry run that would start proceeds with the same command without `--dry-run`.
+  A dry run that would start proceeds with the same command without `--dry-run`. A plan re-run only adds `--only`
+  (and `--wait 120` or `--no-wake` for a wait). `--on`, `--size` and `--min-size` are kept as you typed them, never
+  added or dropped.
 - `--config FILE` is carried into every suggestion.
 
 What lanq suggests, by result:
@@ -716,6 +855,8 @@ What lanq suggests, by result:
 | run `TimedOut` | `fix_code` + `retry` with double the `--timeout` |
 | run `WindowClosed` | `wait` |
 | `--shards` | by the overall status as above; `Failed` lists each failing shard and its log; lost connections: `retry` with `--shard-retries 1` |
+| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `WindowClosed`: `wait` with `--only` |
+| `--plan --dry-run` | `WouldRun`: `proceed`; otherwise as for the plan, without `--only` edits |
 | dry run `WouldRun` | `proceed` |
 | dry run `NoCapacity`, retryable | `wait` (the same dry run, later) + `run_health` |
 | health row | ok: `none`; a hold that passes by itself (paused, hours, load, memory): `wait`, no command; low disk: `ask_developer`; git or tar missing: `ask_developer` + `run_doctor` (`--remote`); unreadable: `run_doctor`; down: `ask_developer` + `run_doctor`; asleep: `ask_developer` (the reason names `lanq wake`, never as a command); with `--needs`, a permanent reason: `ask_developer`; busy for this job: `wait` |
@@ -775,6 +916,14 @@ lanq stats --json | jq -r '.machines[] | select(.speedFactor) | "\(.machine) x\(
 
 # dry run: how --target-minutes would pick N
 lanq run --dry-run --json --needs node --shards auto --target-minutes 10 -- npx jest --shard={shard}/{shards} 2>/dev/null | jq -r '.shardTiming.why // .shardCountWhy'
+
+# plan: the launch order, then each job that did not complete (and its failing shards)
+plan=$(lanq run --plan --json --no-wake 2>/dev/null); echo "exit=$?"
+echo "$plan" | jq -r '"order: \(.order | join(", "))"'
+echo "$plan" | jq -r '.jobs[] | select(.status != "Completed") | "\(.name) \(.status) exit=\(.exitCode // "-"): \(.message)", (.shards[]? | select(.status != "Completed") | "  shard \(.shard) \(.machine // "-") \(.status) log: \(.logPath // "none")")'
+
+# plan dry run: where each job would go
+lanq run --plan --dry-run --json 2>/dev/null | jq -r '.jobs[] | "\(.name) \(.status) \(.machine // "-"): \(.message)"'
 ```
 
 PowerShell (Windows PowerShell 5.1 or PowerShell 7). Join the output with `Out-String` before `ConvertFrom-Json`, so
@@ -808,6 +957,11 @@ $r.fetched | ForEach-Object path; $r.fetchSkipped | ForEach-Object { "skipped $(
 
 # stats: each command's timing
 (lanq stats --json | Out-String | ConvertFrom-Json).commands | Where-Object timing | ForEach-Object { "$($_.command): $($_.timing.workMinutes) min + $($_.timing.overheadSeconds) s/shard" }
+
+# plan: the launch order, then each job that did not complete (and its failing shards)
+$plan = lanq run --plan --json --no-wake 2>$null | Out-String | ConvertFrom-Json; "exit=$LASTEXITCODE"
+"order: $($plan.order -join ', ')"
+$plan.jobs | Where-Object status -ne 'Completed' | ForEach-Object { "$($_.name) $($_.status) exit=$($_.exitCode): $($_.message)"; $_.shards | Where-Object status -ne 'Completed' | ForEach-Object { "  shard $($_.shard) $($_.machine) $($_.status) log: $($_.logPath)" } }
 ```
 
 In Windows PowerShell 5.1, `2>` on a native command wraps stderr lines as error records, so a log file written with

@@ -82,6 +82,14 @@ one object with a `shards` array. `lanq health` shows cores, total RAM, free slo
 Recipes for .NET, Node, Python, Go and Rust:
 [docs/SHARDING.md](https://github.com/jangolath/lanqueue/blob/main/docs/SHARDING.md).
 
+## Route jobs and run a whole plan
+
+`--min-size heavy` or `--size light,medium` sends a job only to machines of that size (probed, or `size:` in
+`machines.yml`), and `--on big-01` only to named machines; every other rule still applies. A repository's `lanq.yml`
+lists its jobs (build, unit tests, integration tests, a serial tail with `after:`), each one `lanq run` line, and
+`lanq run --plan` runs them side by side on one snapshot with one result (`--only`, `--dry-run`, `--json`):
+[docs/PLANS.md](https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md).
+
 ## Safe by default
 
 - Key-only SSH with strict host-key checking; there is no password option.

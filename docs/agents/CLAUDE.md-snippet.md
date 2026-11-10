@@ -46,7 +46,8 @@
   wake a sleeping PC as a last resort; leave out `--no-wake` only if the developer has said waking is fine.
 - Never edit the lanq machines file, the allowlists or any ssh/key configuration. The developer owns them. Never run
   `lanq makeready --add`, `lanq makeready --setup` or any `--yes`: adding a machine is the developer's job. If a
-  command is refused, say so and stop; do not look for a way around it.
+  command is refused, say so and stop; do not look for a way around it, and never edit `lanq.yml` or the machines
+  file to get one through.
 - Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
@@ -54,6 +55,20 @@
 - Never put secrets, tokens or key material in files or command lines that lanq will ship; it refuses them.
 - Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder (in lanq's state folder); read them through
   `lanq stats --json` and `logPath`.
+
+## Route jobs and run a plan file
+
+- Narrow where a job may run: `--size light,medium` or `--min-size heavy` (machine size: `size:` in the machines file,
+  else probed), `--on big-01` (only those machines; holds, slots and every other rule still apply). They work on
+  `lanq run` (also `--shards`, `--dry-run`) and `lanq health`. A machine of the wrong size is excluded for good
+  (`wrong_size`, `size_unknown`).
+- When the repository has a `lanq.yml`, run its jobs with
+  `lanq run --plan --json --log-tail 60 --no-wake 2>/dev/null` (`--only build,unit` for some of them); preview with
+  `lanq run --plan --dry-run --json` (each job's `lanq run` line and what it would do). stdout is one object:
+  `status`, `exitCode`, `order`, `jobs[]` (`name`, `status`, `exitCode`, `message`, `logPath` or `shards[]`), `nextSteps`.
+  Report each job whose `status` is not `Completed` by `name`, with its `message`; a `Skipped` job never started
+  because a job before it did not complete. A suggested re-run only adds `--only`.
+- `lanq.yml` is the team's file; do not edit it (or the machines file) to get around a refusal or a `NoCapacity`.
 
 ## Shard long work across the pool (lanq run --shards)
 

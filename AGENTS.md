@@ -14,20 +14,23 @@ and returns the job's exit code. The developer sets up the pool and owns its con
    A long suite that splits cleanly: add `--shards auto` (see [docs/SHARDING.md](docs/SHARDING.md)). Once the
    command has history (`lanq stats --json` shows a `timing` for it): `--shards auto --target-minutes 10`, previewed
    with `--dry-run`.
-4. Act on `status`, the exit code and `nextSteps` (below). Report the result in a line or two.
+4. The repository has a `lanq.yml`: `lanq run --plan --json --no-wake` runs its jobs (`--only a,b` for some of them),
+   previewed with `--plan --dry-run --json`. See [docs/PLANS.md](docs/PLANS.md).
+5. Act on `status`, the exit code and `nextSteps` (below). Report the result in a line or two.
 
 ## Commands
 
-You may run: `lanq health --json` (also with `--needs`, `--mem`), `lanq run --json ...` (with `--needs`, `--dir`,
-`--wait`, `--timeout`, `--mem`, `--no-wake`, `--fetch`, `--log-tail`, `--dry-run`, `--shards`, `--shard-retries 1`,
-`--fail-fast`, `--target-minutes`), `lanq doctor --json`, `lanq doctor --remote --json`, `lanq stats --json`,
-`lanq --version`.
+You may run: `lanq health --json` (also with `--needs`, `--mem`, `--on`, `--size`, `--min-size`), `lanq run --json ...`
+(with `--needs`, `--dir`, `--wait`, `--timeout`, `--mem`, `--on`, `--size`, `--min-size`, `--no-wake`, `--fetch`,
+`--log-tail`, `--dry-run`, `--shards`, `--shard-retries 1`, `--fail-fast`, `--target-minutes`), `lanq run --plan --json
+--no-wake` (with `--only`, `--dry-run`, `--fail-fast`, `--log-tail`), `lanq doctor --json`, `lanq doctor --remote
+--json`, `lanq stats --json`, `lanq --version`.
 
 Ask the developer first: `lanq wake`, `lanq health --wake`, `lanq run` without `--no-wake`, `lanq makeready`
 (also `--all`), `lanq unlock`. They act on someone else's PC.
 
 For the developer only, never you: `lanq makeready --setup` and `--add`, any `--yes`, `lanq init`, editing
-`machines.yml`, `ssh` to a worker yourself.
+`machines.yml` or `lanq.yml`, `ssh` to a worker yourself.
 
 ## Reading results without pasting logs
 
@@ -62,12 +65,14 @@ Any other step, or an `action` you do not know: report its `reason` to the devel
 
 Exit 124 and 75 can each mean more than one thing, and a job's own exit code can be any number: read `status`.
 For `--shards`, read the overall `status`, then report each entry in `shards` that is not `Completed`, by `shard` and
-`machine`. If stdout is empty or not JSON, report an infrastructure problem.
+`machine`. For `--plan`, read the overall `status`, then report each entry in `jobs` that is not `Completed` by `name`
+(a `Skipped` job never started; its `message` says why). If stdout is empty or not JSON, report an infrastructure problem.
 
 ## Hard rules
 
 - Do not edit `machines.yml`, the allowlists (`policy.allowed_commands`, `policy.allowed_directories`), `known_hosts`
-  or any SSH key or agent setting. The developer owns them. Never run `lanq makeready --add`, `--setup` or `--yes`.
+  or any SSH key or agent setting. The developer owns them. Never edit `lanq.yml` or `machines.yml` to get around a
+  refusal, a `NoCapacity` or a size or `--on` rule. Never run `lanq makeready --add`, `--setup` or `--yes`.
 - Never pass permission-skipping flags (such as `--dangerously-skip-permissions`) to any command. lanq refuses them.
 - Never put secrets, tokens or key material in files or command lines lanq will ship. lanq refuses them too.
 - Do not shard a command that is not idempotent or that writes shared state (deploy, migrate a shared database,

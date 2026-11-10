@@ -556,7 +556,7 @@ suites and large builds; a big machine with fewer cores is medium), and "+ conta
 
 ## Routing work in a mixed pool
 
-Three patterns cover most of it:
+Four patterns cover most of it:
 
 - **A full suite on a big box.** `--mem GB` asks for a machine with at least that much memory **available now** (not
   installed): `lanq run --mem 8 -- dotnet test` goes only to a machine reporting 8 GB or more free. A 16 GB machine
@@ -564,8 +564,24 @@ Three patterns cover most of it:
   figure is per shard (see above).
 - **Slices across everything.** `lanq run --shards auto -- ...` uses every free slot, so small boxes take their one
   shard each and big ones take several.
+- **By size.** `--min-size heavy` sends a job only to heavy machines, `--size light,medium` only to the small ones
+  (see [Sizing machines](#sizing-machines) for the classes). The size is probed, so this needs no tags; a machine's
+  `size:` in `machines.yml` overrides the probe, for example `size: medium` on a 16 GB laptop someone works on, so heavy
+  jobs stay off it. With `--shards`, every shard goes to a machine of that size (`--shards auto` counts only their
+  free slots). A machine of another size is excluded for good (`wrong_size`), as is one with no `size:` that does not
+  report its memory (`size_unknown`).
 - **Tags for what you know.** Capabilities are free-form tags. Add your own, such as `bigmem` on machines with 16 GB or
-  more, and ask for them: `lanq run --needs dotnet,bigmem -- dotnet test`. `--needs` requires every tag listed.
+  more, and ask for them: `lanq run --needs dotnet,bigmem -- dotnet test`. `--needs` requires every tag listed. A tag
+  still works next to `--min-size`, and says exactly what you mean when the probed class does not.
+
+To name the machines themselves, `--on big-01,build-01` narrows a run (or `lanq health`) to them; every other rule
+still applies, so a busy pinned machine means waiting, not another machine. Machine names are your own, so prefer size
+or tags in anything you share with the team.
+
+A change that needs several such runs (a build and unit tests on the small machines, the integration suite sharded
+across the big ones, a serial tail after it) fits a plan file: `lanq.yml` in the repository sets `needs`, `size` or
+`min_size`, `shards` and `after:` per job, and `lanq run --plan` runs them all on one snapshot with one result. See
+[PLANS.md](PLANS.md).
 
 ### Worked example: 2 dev boxes and 4 micro PCs
 
@@ -600,17 +616,19 @@ What runs where:
 | Editing, compiling, one test you are fixing | (local) | your own dev box |
 | Unit tests, every push | `lanq run --needs node --shards auto -- npx jest --shard={shard}/{shards}` | up to 12 slots: one per micro, four per dev box |
 | Lint and type-check, alongside | `lanq run --needs node -- npx eslint .` and `lanq run --needs node -- npx tsc --noEmit` | whichever slot is free, often a micro |
-| Full integration suite | `lanq run --needs dotnet,bigmem --mem 6 -- dotnet test tests/Integration` | dev-a or dev-b |
+| Full integration suite | `lanq run --needs dotnet --min-size heavy --mem 6 -- dotnet test tests/Integration` (or `--needs dotnet,bigmem`) | dev-a or dev-b |
 | Container build | `lanq run --needs docker -- docker build -t app:test .` | dev-a or dev-b |
 
-The micro PCs do most of the slicing; the big boxes take the heavy jobs and the overflow. Old or cheap machines that
+The micro PCs do most of the slicing; the big boxes take the heavy jobs and the overflow. The same split as one
+command is a `lanq.yml` ([PLANS.md](PLANS.md#a-mixed-pool)): jobs with `size: [light, medium]` for the micros and
+`min_size: heavy` for the dev boxes, run with `lanq run --plan`. Old or cheap machines that
 would otherwise sit in a drawer add real test capacity, so the team buys fewer new machines and less RAM.
 
 ## For AI coding agents
 
 1. Run `lanq health --json` first. Read `state`, `freeSlots`, `size` and `suitedFor` for each machine.
 2. Choose: one heavy job (full suite, large build, container build) goes as a single run to a machine that suits it
-   (`--needs bigmem` if the developer tags machines that way, or `--mem`). A long suite that splits cleanly goes as
+   (`--min-size heavy`, `--needs bigmem` if the developer tags machines that way, or `--mem`). A long suite that splits cleanly goes as
    `--shards auto`, or `--shards N` with N at most the sum of `freeSlots` on machines that can take it.
    `lanq health --needs <caps> --json` gives each machine's `jobSlots` for the job, and the run with `--dry-run`
    shows N and the placement without running anything. Once the command has history (`lanq stats --json` shows a
@@ -623,6 +641,8 @@ would otherwise sit in a drawer add real test capacity, so the team buys fewer n
 5. Use `--shard-retries 1` at most, and only for lost machines: lanq never retries a test failure, and neither should
    you. Do not re-run a whole sharded run in a loop.
 6. Keep `--no-wake` unless the developer has said waking machines is fine.
+7. When the repository has a `lanq.yml`, `lanq run --plan --json --no-wake` (previewed with `--dry-run`) runs its jobs;
+   report each job that is not `Completed` by name. Never edit `lanq.yml` or `machines.yml` to get around a refusal.
 
 ## Flaky and order-dependent tests
 

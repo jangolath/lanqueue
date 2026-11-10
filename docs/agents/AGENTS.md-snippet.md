@@ -29,7 +29,12 @@
   `-- npx jest --shard={shard}/{shards}`. Report each entry in `shards` that is not `Completed`. Once the command has
   history (`lanq stats --json` shows a `timing` for it), use `--shards auto --target-minutes 10`, previewed with
   `--dry-run`.
-- Never edit the lanq machines file, the allowlists or any ssh/key configuration. Never run `lanq makeready --add`,
+- Route with `--needs`, `--size light,medium` / `--min-size heavy` (machine size) or `--on <machine>` (only those
+  machines; every other rule still applies). When the repository has a `lanq.yml`, run its jobs with
+  `lanq run --plan --json --no-wake` (`--only a,b` for some, `--dry-run` to preview); stdout is one object with `jobs[]`.
+  Report each job whose `status` is not `Completed` by `name`, with its `message` (a `Skipped` job never started).
+- Never edit the lanq machines file, the allowlists or any ssh/key configuration, and never edit `lanq.yml` or the
+  machines file to get around a refusal. Never run `lanq makeready --add`,
   `--setup` or any `--yes`: adding machines is the developer's job. Never pass permission-skipping flags.
   Never shard a command that is not idempotent or writes shared state (deploy, migrate, publish, push).
   Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder.

@@ -187,8 +187,9 @@ Security, then Enable Account and Remote Enable for the build user.
 ## What a job sees
 
 Every job runs with `LANQ_JOB=<job id>` in its environment (on Linux and Windows), besides the machine's own `env:`
-and `path_prepend:` (names starting with `LANQ_` are reserved, so `env:` cannot set them). A build script may read it,
-for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
+and `path_prepend:` (names starting with `LANQ_` are reserved, so `env:` cannot set them). A shard also gets
+`LANQ_SHARD` and `LANQ_SHARDS`, and a job of a plan file (`lanq run --plan`) `LANQ_PLAN_JOB=<its name in lanq.yml>`.
+A build script may read them, for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
 the environment of long-running helper processes you want stopped with the job.
 
 ## Then, on your PC

@@ -84,6 +84,7 @@ machines:
       - "Sat,Sun 01:00-09:00"  # weekend nights
     priority: low              # the default; written out here for clarity
     min_free_mem_gb: 2         # overrides policy.min_free_mem_gb for this machine
+    size: medium               # optional (light, medium, heavy): a 16 GB, 8-core PC probes heavy; medium keeps --min-size heavy jobs off a PC people use
     env:                       # for the job process only
       DOTNET_GCHeapHardLimitPercent: "0x32"      # .NET GC heap at most 50% of RAM (hexadecimal)
       NODE_OPTIONS: "--max-old-space-size=2048"  # Node heap at most 2 GB
