@@ -20,13 +20,23 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
 ## Cutting a release
 
 1. Make sure `main` is green.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0` (the version is the tag without `v`). The tag must be
+2. Date the release's section in `CHANGELOG.md`: the heading must be `## X.Y.Z (YYYY-MM-DD)`
+   (for example `## 0.6.0 (2026-11-10)`, not `## 0.6.0 (unreleased)`) with the release's notes under it, merged to
+   `main` before tagging.
+   `scripts/release-notes.sh` takes that section's text (up to the next level-two heading) as the release notes, and the
+   `pack` job fails for a stable tag whose section is missing, empty or still says "unreleased". A prerelease tag
+   (`v0.6.0-rc.1`) uses a `## 0.6.0-rc.1` section if it has one, else the `## 0.6.0` section, dated or not; a manual run
+   uses the first section that is not `## Unreleased`. The notes, followed by a link to the full `CHANGELOG.md`, appear
+   on the package's **Release Notes** tab on nuget.org and at the top of the GitHub release body, above the "Full
+   Changelog" compare link GitHub generates. Fix a typo after release by editing the GitHub release; the nuget.org notes
+   are part of the package and change only with a new version.
+3. Tag and push: `git tag v0.2.0 && git push origin v0.2.0` (the version is the tag without `v`). The tag must be
    `v` + strict semver (`scripts/release-version.sh` refuses anything else, including build metadata such as `+abc`). A
    tag with a pre-release part, such as `v0.5.0-rc.1`, becomes a GitHub **prerelease** that is never marked latest, so
    `releases/latest` (and the Scoop URL) keep serving the last stable release; nuget.org lists it as a prerelease too.
-3. Watch the `release` run in the Actions tab. In order:
+4. Watch the `release` run in the Actions tab. In order:
    - `pack` checks the runtime pin against the SDK's runtime, validates and classifies the version, builds with
-     warnings as errors, runs the tests and packs the `.nupkg`;
+     warnings as errors, runs the tests and packs the `.nupkg` with the release notes (and checks they are in it);
    - `native` publishes one NativeAOT binary per target (win-x64 and win-arm64 on Windows, osx-arm64 on macOS, linux-x64
      and linux-arm64 inside Microsoft's .NET 10 cross-build images against their glibc 2.27 sysroot), packages it and
      smoke-tests it where the runner can run it (`scripts/smoke-native.sh`);

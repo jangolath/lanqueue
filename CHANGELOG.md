@@ -82,6 +82,10 @@
   machine that is unreachable AND lacks a capability says `lacks gpu (capabilities: ...)` instead of its ssh error, and
   a Windows machine skipped for arguments cmd.exe would re-parse says so even when it is down.
 
+### Releases
+
+- Release notes from CHANGELOG.md now appear on nuget.org and on the GitHub release.
+
 ## Unreleased
 
 - Docs: [docs/JSON.md](docs/JSON.md), the `--json` contract (every field, status and exit code, with jq and
