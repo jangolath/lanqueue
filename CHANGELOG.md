@@ -4,69 +4,53 @@
 
 ### Agents and scripts
 
-- `lanq doctor --json` (also with `--remote`): stdout is one object `{status, exitCode, message, remote, counts,
-  checks, nextSteps}`; each check is `{scope, machine, name, level, detail, fix, capability}` (scope `local`,
-  `machine` or `remote`; level `ok`, `warn`, `fail`, `skip` or `hold`; `detail` is the text line after its level and
-  machine). Status `Ok` (0), `Warnings` (1), `Failing` (1, a config that does not load included), `Rejected` (2),
-  `InfraError` (70) or `Cancelled` (130), with an object on every path. The text lines go to stderr. Without
-  `--json` doctor prints exactly what it printed before.
-- `lanq stats --json`: one object `{status, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
-  newestUtc, logs, machines, commands, nextSteps}`. Each machine has `jobs`, `completed`, `failed`, `other`,
-  `wallMinutes`, `medianSeconds` and `p90Seconds` (of completed jobs, nearest rank) and `lastRunUtc`. Each command
-  (key and dir; a line from before 0.7.0 by its recorded command, `dir` null) has `runs` (all shards of one
-  `--shards` run are one run), `jobs` (each shard is one job), the same counts and times, and `lastShards`. `logs`
-  is `{files, megabytes, keepDays}`. Each machine also has `speedFactor` (null under 5 samples) and `speedSamples`;
-  each command `timing` `{runsUsed, workMinutes, overheadSeconds, suggestedShards}` (the estimate `--target-minutes`
-  uses; null without a key or a usable run). At most 500 commands (`commandsMore` counts the rest). Status `Ok` (0,
-  also with no job log), `Rejected` (2), `InfraError` (70, the job log could not be read) or `Cancelled` (130). Times
-  are UTC. stats never suggests a command.
-- `lanq stats --target-minutes M` fills `suggestedShards`: the shards M needs on a machine of speed factor 1, before
-  any free-slot cap (stats probes nothing); null when the per-shard overhead alone is near or above M.
-- `lanq run --dry-run --json` adds `shardCountWhy` (with `--shards auto`: why that N, as `lanq run` prints it) and
-  `shardTiming` (with `--target-minutes`), both always present and null when they do not apply. `lanq run --shards
-  auto --target-minutes M --json` adds `shardTiming` (only then): `{targetMinutes, command, dir, basis, runsUsed,
-  lastRunUtc, workMinutes, overheadSeconds, slowestMachine, speedFactor, wanted, freeSlots, capped, picked,
-  expectedShardMinutes, why}`; `basis` is `history`, `no_history` or `overhead`, `capped` is `free_slots`,
-  `max_shards` or null.
+- `lanq doctor --json` (also with `--remote`): one object on stdout on every path, `{status, exitCode, message,
+  remote, counts, checks, nextSteps}`. Each check is `{scope, machine, name, level, detail, fix, capability}`, so an
+  agent can report the `fail` checks and their fix. Status `Ok` (0), `Warnings` (1), `Failing` (1), `Rejected` (2),
+  `InfraError` (70) or `Cancelled` (130). The text lines go to stderr.
+- `lanq stats --json`: one object with the totals, `logs`, `machines` (counts, median and p90 of completed jobs,
+  `speedFactor`, `speedSamples`) and `commands` (runs, jobs, results, times, `lastShards` and `timing`: the work and
+  per-shard overhead `--target-minutes` uses). At most 500 commands (`commandsMore` counts the rest). Times are UTC.
+- `lanq run --dry-run --json` adds `shardCountWhy` and `shardTiming` (null when they do not apply); a `--shards`
+  run with `--target-minutes` adds `shardTiming`.
+- Agent docs: agents may run `lanq doctor --json`, `lanq doctor --remote --json` and `lanq stats --json`; on
+  `InfraError` they run `lanq doctor --remote --json` and report the `fail` checks. Contract:
+  https://github.com/jangolath/lanqueue/blob/main/docs/JSON.md
 
 ### Sharding
 
-- `--shards auto --target-minutes M` (1 to 1440) picks N from earlier completed runs of the same command (same
-  arguments and `--dir`; the newest 10 runs of the last 90 days in which at least half the shards completed) so each
-  shard takes about M minutes: the work W and the per-shard overhead O come from `runSeconds` and `wallSeconds`,
-  N = ceil(f x W / (60 x M - O)) where f is the speed factor of the slowest machine the shards would be dealt to
-  now, never more than the free slots (or 64). Without history, N is the free slots, as plain `--shards auto`; when
-  the overhead alone is near or above M, every free slot is used. The reasoning is printed on the `--shards auto`
-  line (and as a `Timing:` line in `--dry-run`). Plain `--shards auto` is unchanged and never reads the job log.
-  Timing history starts with 0.7.0 runs.
-- Per-machine speed factors: how much longer a machine takes than is typical for the same command, from its own
-  completed jobs of the last 90 days that ran at least 30 s (5 or more; clamped to 0.25 to 4). A machine with fewer
-  borrows the median of the measured machines of its size class; else 1.
+- `--shards auto --target-minutes M` (1 to 1440) picks N from earlier completed runs of the same command and `--dir`
+  (the newest 10 of the last 90 days), so each shard takes about M minutes on the slowest machine it would go to,
+  never more than the free slots. Without history it is plain `--shards auto`. The `--shards auto` line (and a
+  `Timing:` line in `--dry-run`) says why. Plain `--shards auto` is unchanged. Timing history starts with 0.7.0 runs.
+- Per-machine speed factors, learned from completed jobs in the job log (`x1.62` = 62% slower than typical; 5 jobs
+  needed, else the median of machines of the same size, else 1).
+- `lanq stats --target-minutes M` shows the shards M needs per command, without probing.
+- Guide: https://github.com/jangolath/lanqueue/blob/main/docs/SHARDING.md (new: choosing N from history, and
+  balancing shards by duration for pytest, Jest, Playwright, .NET and Go).
 
 ### Behaviour changes
 
-- Doctor suggestions in `--json` output now include `--json`: a `run_doctor` or `retry` step made by a command run
-  with `--json` suggests `lanq doctor --json` (or `lanq doctor --remote --json`). Text output still suggests plain
-  `lanq doctor`.
+- `jobs.jsonl` lines gain optional fields: `v`, `key`, `dir`, `shard`, `shards`, `runId` and `runSeconds` (the
+  command's own run time). At 4 MiB the file moves to `jobs.1.jsonl`; lanq reads both, lanq 0.6 only the current file.
+- `lanq stats` survives bad lines: a torn or unreadable line is skipped and counted, with one warning. It exits 70
+  when the job log cannot be read.
+- A locked `jobs.jsonl` no longer turns a finished job into `InfraError`: the append is retried, then skipped with a
+  warning. Two lanq processes no longer collide on it.
+- Doctor suggestions in `--json` output now carry `--json` (`lanq doctor --json`, `lanq doctor --remote --json`).
+  Text output still suggests plain `lanq doctor`.
+- Job logs in the state folder's `logs/` are pruned after a run, at most once a day: lanq's own logs older than
+  `policy.keep_logs_days` (new; default 30, 0 = never) and the oldest beyond 5,000. A log modified in the last hour,
+  other files and links are never deleted.
+- `lanq doctor` prints one more line after `config`: `logs` with the count and size of the job logs (`WARN` over
+  2 GB when `policy.keep_logs_days` is 0).
+- `lanq stats` keeps its first lines, then adds a machine table (median, p90, last run, speed), the newest 20
+  commands with a `timing:` line each, and a `logs:` line.
 
-- `jobs.jsonl` lines gain optional fields: `v` (2), `key` (the command; for `--shards` the template with `{shard}`
-  and `{shards}`), `dir`, `shard`, `shards`, `runId` (shared by every shard of one run) and `runSeconds` (how long
-  the job's own command ran, without upload, prepare or fetch). A field that does not apply is left out, so older
-  readers are unaffected.
-- `jobs.jsonl` moves to `jobs.1.jsonl` at 4 MiB (two files at most); lanq reads both.
-- A torn or unreadable line in `jobs.jsonl` is skipped instead of making `lanq stats` fail; stats prints one warning
-  with the count on stderr.
-- `lanq stats` prints more after its unchanged totals and per-machine lines: a machine table (median and p90 of
-  completed jobs, last run, in local time, and speed factor), the newest 20 commands with their runs, jobs, results,
-  times and a `timing:` line, and a `logs:` line with the count and size of the job logs. It exits 70 when
-  `jobs.jsonl` cannot be read.
-- A `jobs.jsonl` that another program holds open no longer turns a finished job into `InfraError`: the append is
-  retried briefly, then skipped with a warning. Concurrent lanq processes no longer collide on it.
-- Per-job logs in the state folder's `logs/` are pruned after a run, at most once a day: lanq's own logs older than
-  `policy.keep_logs_days` (new, default 30; 0 never prunes) and the oldest beyond 5,000. A log modified in the last
-  hour, any other file and any link are never deleted.
-- `lanq doctor` prints one more line, after the config line: `logs` with the count and size of the job logs in
-  `logs/` (`WARN` when they are over 2 GB and `policy.keep_logs_days` is 0).
+### Docs
+
+- README: a Local state section (what `jobs.jsonl` and `logs/` hold, rotation and pruning; nothing leaves the
+  machine): https://github.com/jangolath/lanqueue/blob/main/README.md#local-state
 
 ## 0.6.0 (2026-11-09)
 
