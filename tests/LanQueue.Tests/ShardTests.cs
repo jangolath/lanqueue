@@ -60,8 +60,11 @@ internal sealed partial class PoolSsh : ISshClient
     {
         public int? Shard => Regex.Match(Command, "LANQ_SHARD=([0-9]+)", RegexOptions.None, TimeSpan.FromSeconds(5)) is { Success: true } m ? int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) : null;
 
+        /// <summary>The wrapper's exit marker as this run's script prints it (with the run's nonce), before the exit code.</summary>
+        public string Marker => T.ExitMarkerOf(Command);
+
         /// <summary>What the job wrapper prints when the job exits with <paramref name="code"/>: its output, then the final exit marker.</summary>
-        public SshResult Exit(int code) => new(code, $"output of {JobId}\nLANQ_EXIT={JobId}:{code.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        public SshResult Exit(int code) => new(code, $"output of {JobId}\n{Marker}{code.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
     }
 
     [GeneratedRegex("LANQ_EXIT=([A-Za-z0-9_-]+):", RegexOptions.None, 5000)]

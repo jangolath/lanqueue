@@ -183,6 +183,24 @@ internal static class T
 {
     public const string RepoId = "0123456789abcdef";
 
+    /// <summary>
+    /// The exit marker a job wrapper command prints (RemoteScripts.ExitMarker with the run's nonce: "LANQ_EXIT=id:nonce:"), read from the
+    /// command (an encoded Windows command is decoded first), so a fake worker can answer as the wrapper would. Throws when there is none.
+    /// </summary>
+    public static string ExitMarkerOf(string command) => MarkerOf(command, "LANQ_EXIT");
+
+    /// <summary>The same for the Windows wrapper's refusal line (RemoteScripts.WindowsArgsMarker: "LANQ_WINARGS=id:nonce:").</summary>
+    public static string WindowsArgsMarkerOf(string command) => MarkerOf(command, "LANQ_WINARGS");
+
+    private static string MarkerOf(string command, string name)
+    {
+        var text = command.StartsWith("powershell ", StringComparison.Ordinal) && command.Contains("-EncodedCommand ", StringComparison.Ordinal)
+            ? Encoding.Unicode.GetString(Convert.FromBase64String(command[(command.LastIndexOf(' ') + 1)..]))
+            : command;
+        var m = System.Text.RegularExpressions.Regex.Match(text, name + "=[A-Za-z0-9_-]+:(?:[0-9a-f]{16}:)?", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(5));
+        return m.Success ? m.Value : throw new InvalidOperationException("no " + name + " marker in the command");
+    }
+
     /// <summary>A real job wrapper's output without its final exit marker (RemoteScripts.ExitMarker), for tests that compare the job's own output.</summary>
     public static string JobOutput(string output, string jobId = "j1") => JobRunner.ReadExitMarker(output.TrimEnd((char)13, (char)10), jobId).Before;
 

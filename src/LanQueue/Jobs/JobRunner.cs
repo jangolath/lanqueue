@@ -419,9 +419,9 @@ public sealed partial class JobRunner(
     /// Splits the wrapper's exit marker (<see cref="RemoteScripts.ExitMarker"/>) off the end of an output line: the text before it (job output
     /// that had no final newline) and the job's exit code, or the line unchanged and null when it does not end with this job's marker.
     /// </summary>
-    internal static (string Before, int? Code) ReadExitMarker(string line, string jobId)
+    internal static (string Before, int? Code) ReadExitMarker(string line, string jobId, string? nonce = null)
     {
-        var marker = RemoteScripts.ExitMarker(jobId);
+        var marker = RemoteScripts.ExitMarker(jobId, nonce);
         var at = line.TrimEnd('\r').LastIndexOf(marker, StringComparison.Ordinal);
         if (at < 0)
         {
@@ -441,9 +441,9 @@ public sealed partial class JobRunner(
     /// What the Windows wrapper said it resolved the program to when it refused to start a job given &amp; or |
     /// (<see cref="RemoteScripts.WindowsArgsMarker"/>), or null when <paramref name="line"/> is not that line for this job.
     /// </summary>
-    internal static string? ReadWindowsArgsRefusal(string line, string jobId)
+    internal static string? ReadWindowsArgsRefusal(string line, string jobId, string? nonce = null)
     {
-        var marker = RemoteScripts.WindowsArgsMarker(jobId);
+        var marker = RemoteScripts.WindowsArgsMarker(jobId, nonce);
         var text = line.TrimEnd('\r');
         return text.StartsWith(marker, StringComparison.Ordinal) ? text[marker.Length..] : null;
     }
@@ -885,7 +885,9 @@ public sealed partial class JobRunner(
         }
 
         // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
-        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob));
+        // A fresh nonce in the wrapper's marker lines, so a job printing "LANQ_EXIT=..." or "LANQ_WINARGS=..." itself is only output.
+        var nonce = RemoteScripts.NewMarkerNonce();
+        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob, nonce));
         // The wrapper's exit marker counts only as the FINAL output line (or glued to the end of it): a line carrying one is held back until
         // the next line arrives, which shows it was not final, and is then passed on unchanged as ordinary output. The final one is taken off.
         var heldGate = new object();
@@ -897,13 +899,13 @@ public sealed partial class JobRunner(
             {
                 // The Windows wrapper refused to start a job given & or | (its program is not an .exe there): that line counts only when the
                 // final exit marker with 2 follows it. It is held back like the marker, and passed on as ordinary output if anything else follows.
-                if (refusedLine is not null && (held is not null || ReadExitMarker(line, jobId).Code is null))
+                if (refusedLine is not null && (held is not null || ReadExitMarker(line, jobId, nonce).Code is null))
                 {
                     onLine(refusedLine);
                     refusedLine = null;
                 }
 
-                if (held is null && refusedLine is null && ReadWindowsArgsRefusal(line, jobId) is not null)
+                if (held is null && refusedLine is null && ReadWindowsArgsRefusal(line, jobId, nonce) is not null)
                 {
                     refusedLine = line;
                     return;
@@ -914,7 +916,7 @@ public sealed partial class JobRunner(
                     onLine(held);
                 }
 
-                var marked = ReadExitMarker(line, jobId).Code is not null;
+                var marked = ReadExitMarker(line, jobId, nonce).Code is not null;
                 held = marked ? line : null;
                 if (!marked)
                 {
@@ -937,11 +939,11 @@ public sealed partial class JobRunner(
         string? refusedAs = null;
         if (held is { } last)
         {
-            var (before, code) = ReadExitMarker(last, jobId);
+            var (before, code) = ReadExitMarker(last, jobId, nonce);
             markedExit = code;
             if (refusedLine is not null && code == 2 && before.Length == 0)
             {
-                refusedAs = ReadWindowsArgsRefusal(refusedLine, jobId);
+                refusedAs = ReadWindowsArgsRefusal(refusedLine, jobId, nonce);
             }
             else if (refusedLine is not null)
             {

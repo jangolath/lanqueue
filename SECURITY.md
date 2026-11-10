@@ -47,12 +47,14 @@ environment, and, like `makeready`, skips a machine that is paused or outside it
 connection. When a capability's tool is missing there, doctor also lists a few install folders and asks the dotnet on `PATH`
 for its SDKs and runtimes (read-only, about five seconds) to suggest a `path_prepend:` line; it never changes the config or the worker.
 
-On a Windows worker lanq writes one helper script to `work_root/bin/lanq-<hash>.ps1` before each job (if it is not there
-yet); the job wrapper, stop, cleanup, slot reclaim and doctor scripts dot-source it to run the job in a Windows job
-object and to stop process trees without WMI. Like everything in `work_root`, it is only as safe as the build account:
-a job runs as that account and could replace the file, and so change what lanq's later scripts on that worker do. This
-adds no power a job does not already have there (it can already leave programs running or change that account's
-files), but it is one more reason to give the build account nothing but its work folder.
+On a Windows worker lanq writes one helper script to `work_root/bin/lanq-<hash>.ps1` before each job (and writes it
+again whenever the file there is not exactly lanq's text); the job wrapper, stop, cleanup, slot reclaim and doctor
+scripts use it to run the job in a Windows job object and to stop process trees without WMI. A job runs as the build
+account and can change that file, so no script runs it as it finds it: each one reads the file once, compares its
+SHA-256 with the hash lanq computed from its own copy, and runs exactly the bytes it checked only when they match.
+A changed or unreadable helper is never run (the script falls back to taskkill and Stop-Process), and the load sits in
+`try`/`catch`, so cleanup still removes the job's folder and frees its slot. A job can still leave programs running or
+change that account's other files, which is one more reason to give the build account nothing but its work folder.
 
 Wake-on-LAN is opt-in per machine (`wake:` in the config). The magic packet is a plain, unauthenticated UDP broadcast
 that only works inside the LAN: anyone on the LAN who knows a machine's MAC address can send the same packet, so

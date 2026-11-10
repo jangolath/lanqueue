@@ -131,8 +131,10 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var s = RemoteScripts.Execute(T.Windows(), "j1", ".", ["dotnet", "test"], TimeSpan.FromSeconds(90.5));
         Assert.Contains("WaitForExit(91000)", s, StringComparison.Ordinal);
-        Assert.Contains("$jo = LqJob $pf $cp.Handle", s, StringComparison.Ordinal); // the child and everything it starts are in one job object
-        Assert.Contains("if ($jo) { [void]$LqW::TerminateJobObject($jo, 124) } else { LqKill $cp.Id }", s, StringComparison.Ordinal);
+        Assert.Contains("$jo=if($LqW){LqJob $pf $cp.Handle}", s, StringComparison.Ordinal); // the child and everything it starts are in one job object
+        // The tree walk first, while the child is alive (it also reaches a grandchild started before the child was put in the job object),
+        // then the job object for anything started during the walk.
+        Assert.Contains("else{$code=124;LqKill $cp.Id;if($jo){[void]$LqW::TerminateJobObject($jo,124)} }", s, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-CimInstance", s, StringComparison.Ordinal); // denied to a non-admin account on some workers
         Assert.Contains("& 'dotnet' 'test'", s, StringComparison.Ordinal);
     }
@@ -347,6 +349,80 @@ public sealed class WorkerScriptTests : IDisposable
         {
             Stop(wrapper, script);
         }
+    }
+
+    /// <summary>
+    /// A job runs as the same account as lanq's scripts, so it can rewrite the helper file in work_root/bin. A file that is not byte for byte
+    /// lanq's helper is never run: not by the job wrapper, not by the stop step, not by cleanup. "exit 0" would otherwise end cleanup before it
+    /// removes the slot (a slot leaked for ever) and a write would run the job's code in other jobs' scripts. Cleanup still frees the slot.
+    /// </summary>
+    [WindowsFact]
+    public void AChangedHelperIsNeverRunAndCleanupStillFreesTheSlot()
+    {
+        var m = Worker(MachineOs.Windows);
+        var helper = RemoteScripts.WindowsHelperPath(m);
+        var marker = Path.Combine(_root, "pwned.txt");
+        var slot = Path.Combine(_root, "locks", "slot-1");
+        foreach (var tampered in new[] { "exit 0", "function {{{ (( ) garbage", "Set-Content -LiteralPath '" + marker.Replace('/', (char)92) + "' -Value pwned" })
+        {
+            Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+            InstallHelper(m);
+            File.WriteAllText(helper, tampered);
+
+            var (jobCode, jobOutput) = Shells.Run("windows", RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "exit 3"], TimeSpan.FromMinutes(5)));
+            Assert.True(jobCode == 3, tampered + ": " + jobOutput);
+            var (stopCode, stopOutput) = Shells.Run("windows", RemoteScripts.StopJob(m, "j1"));
+            Assert.True(stopCode == 0, tampered + ": " + stopOutput);
+
+            File.WriteAllText(slot, "j1\n1\n");
+            File.WriteAllText(Path.Combine(_root, "locks", "job-j1.pid"), "1\n1\n"); // so cleanup goes through KillRecorded
+            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
+            Assert.True(code == 0, tampered + ": " + output);
+            Assert.False(File.Exists(slot), tampered + ": the slot was not removed: " + output);
+            Assert.False(File.Exists(marker), tampered + ": the changed helper ran");
+        }
+    }
+
+    /// <summary>The helper as lanq wrote it is loaded (LqName exists only in the real helper).</summary>
+    [WindowsFact]
+    public void TheVerifiedHelperIsLoaded()
+    {
+        var m = Worker(MachineOs.Windows);
+        InstallHelper(m);
+        var probe = RemoteScripts.WindowsHelperLoad(LanQueue.Policy.ShellQuote.PowerShell(RemoteScripts.WindowsHelperPath(m))) + "\nif (Get-Command LqName -EA 0) { 'loaded' } else { 'missing' }";
+        Assert.Equal("loaded", Shells.Run("windows", probe).Output.Trim());
+    }
+
+    /// <summary>EnsureIncoming writes the helper's exact bytes, and writes them again over a file that is not exactly them.</summary>
+    [PowerShellFact]
+    public void EnsureIncomingRewritesAChangedHelper()
+    {
+        var m = Worker(MachineOs.Windows);
+        var helper = RemoteScripts.WindowsHelperPath(m);
+        var expected = System.Text.Encoding.UTF8.GetBytes(RemoteScripts.WindowsJobHelper);
+        InstallHelper(m);
+        Assert.Equal(expected, File.ReadAllBytes(helper));
+        File.WriteAllText(helper, "exit 0");
+        InstallHelper(m);
+        Assert.Equal(expected, File.ReadAllBytes(helper));
+        File.WriteAllBytes(helper, [.. expected, (byte)'\n']); // one byte more is a different file too
+        InstallHelper(m);
+        Assert.Equal(expected, File.ReadAllBytes(helper));
+    }
+
+    [Fact]
+    public void EveryScriptChecksTheHelpersFullHashBeforeRunningIt()
+    {
+        var m = T.Windows();
+        m.Capabilities = ["dotnet"];
+        foreach (var script in new[] { RemoteScripts.Execute(m, "j1", ".", ["dotnet", "test"]), RemoteScripts.StopJob(m, "j1"), RemoteScripts.Cleanup(m, "j1", "1", T.RepoId), RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromHours(1)), RemoteScripts.Doctor(m), RemoteScripts.Unlock(m, all: false) })
+        {
+            Assert.Contains("-ceq'" + RemoteScripts.WindowsJobHelperBase64 + "'", script, StringComparison.Ordinal);
+            Assert.Contains("[scriptblock]::Create(", script, StringComparison.Ordinal);
+            Assert.DoesNotContain(". $LqH", script, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(64, RemoteScripts.WindowsJobHelperHash.Length);
     }
 
     /// <summary>A job that starts a grandchild PowerShell (output detached to files) which records its pid and start time, then sleeps ten minutes.</summary>

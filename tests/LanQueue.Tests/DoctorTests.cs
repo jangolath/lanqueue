@@ -624,7 +624,9 @@ public sealed class DoctorTests : IDisposable
         windows.Capabilities = ["dotnet", "rust"];
         var ps = RemoteScripts.Doctor(windows, checkSeconds: 7);
         Assert.Contains("WaitForExit(7000)", ps, StringComparison.Ordinal);
-        Assert.Contains("if (Test-Path -LiteralPath $LqH) { . $LqH; LqKill $p.Id }", ps, StringComparison.Ordinal); // the check's tree, without WMI
+        Assert.Contains("{ LqKill $p.Id; \"cap.$n=timeout|\"; return }", ps, StringComparison.Ordinal); // the check's tree, without WMI
+        Assert.Contains(RemoteScripts.WindowsJobHelperBase64, ps, StringComparison.Ordinal); // the helper runs only when it is lanq's own text
+        Assert.DoesNotContain(". $LqH", ps, StringComparison.Ordinal);
         Assert.DoesNotContain("Get-CimInstance", ps, StringComparison.Ordinal); // a separate small call (RemoteScripts.WmiCheck)
     }
 

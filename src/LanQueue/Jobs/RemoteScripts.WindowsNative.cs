@@ -21,8 +21,9 @@ namespace LanQueue.Jobs;
 /// started no earlier than its parent, so a reused parent pid adds nothing), stopped with Stop-Process; taskkill /T without the helper.</item>
 /// </list>
 /// The helper is too long to inline in scripts that are near the Windows command-line cap, so <see cref="EnsureIncoming"/> writes it to
-/// <see cref="WindowsHelperPath"/> before every job and the job, stop, cleanup, slot-reclaim and doctor scripts dot-source it when it is there
-/// (<see cref="WindowsHelperLoad"/>). The probe, which runs before any job, carries its own small load fallback (<see cref="WindowsProbeLoad"/>).
+/// <see cref="WindowsHelperPath"/> before every job (again whenever the file there is not exactly lanq's text) and the job, stop, cleanup,
+/// slot-reclaim and doctor scripts run it only when its SHA-256 is the one lanq computed from its own text (<see cref="WindowsHelperLoad"/>):
+/// a job runs as the same account and could otherwise rewrite the file to run code in another job's scripts. The probe, which runs before any job, carries its own small load fallback (<see cref="WindowsProbeLoad"/>).
 /// </summary>
 public static partial class RemoteScripts
 {
@@ -85,28 +86,46 @@ public static partial class RemoteScripts
     internal const string WmiCheck = "try { $null = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; 'wmi=ok' } catch { 'wmi=fail|' + \"$_\".Trim() }";
 
     /// <summary>Where <see cref="EnsureIncoming"/> keeps <see cref="WindowsJobHelper"/> on a Windows worker; the name carries a hash of its text, so a changed helper is a new file.</summary>
-    internal static string WindowsHelperPath(Machine m) => $"{m.WorkRoot}/bin/lanq-{WindowsJobHelperHash}.ps1";
+    internal static string WindowsHelperPath(Machine m) => $"{m.WorkRoot}/bin/lanq-{WindowsJobHelperHash[..10]}.ps1";
 
-    private static string WindowsJobHelperHash => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(WindowsJobHelper)))[..10];
+    /// <summary>SHA-256 of the UTF-8 bytes of <see cref="WindowsJobHelper"/>, lowercase hex (its first ten characters name the file).</summary>
+    internal static string WindowsJobHelperHash => Convert.ToHexStringLower(WindowsJobHelperDigest);
+
+    /// <summary>The same SHA-256 in base64 (shorter than hex under the command-line cap): the only content a worker script will run.</summary>
+    internal static string WindowsJobHelperBase64 => Convert.ToBase64String(WindowsJobHelperDigest);
+
+    private static byte[] WindowsJobHelperDigest => SHA256.HashData(Encoding.UTF8.GetBytes(WindowsJobHelper));
 
     /// <summary>
-    /// Loads <see cref="WindowsJobHelper"/> from <paramref name="pathExpression"/> (a PowerShell expression) when the file is there. First
-    /// defines what the script uses when it is not (an older or a fresh worker): no job object (<c>LqJob</c> only with <paramref name="job"/>),
-    /// and taskkill /T plus Stop-Process for a tree.
+    /// PowerShell: true when the file at <paramref name="variable"/> holds exactly <see cref="WindowsJobHelper"/>; its bytes are left in
+    /// <c>$LqB</c>, so what was checked is what runs (no second read). Throws when the file cannot be read.
+    /// </summary>
+    private static string WindowsHelperVerified(string variable) =>
+        "([Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash(($LqB=[IO.File]::ReadAllBytes(" + variable + "))))-ceq'" + WindowsJobHelperBase64 + "')";
+
+    /// <summary>
+    /// Loads <see cref="WindowsJobHelper"/> from <paramref name="pathExpression"/> (a PowerShell expression) when the file there is lanq's own
+    /// text, byte for byte (<see cref="WindowsHelperVerified"/>); anything else (missing, unreadable, or changed by a job, which runs as the same
+    /// account) is never run. First defines what the script uses when it is not loaded (an older or a fresh worker): taskkill /T plus
+    /// Stop-Process for a tree, and (except for the job wrapper, <paramref name="job"/>, which calls <c>LqJob</c> only when <c>$LqW</c> is set)
+    /// no job object to end. The load sits in try/catch, so the script
+    /// (cleanup, slot removal) always goes on.
     /// </summary>
     internal static string WindowsHelperLoad(string pathExpression, bool job = false) =>
-        (job ? "function LqJob($f,$h){};" : "function LqEndJob($f){};")
+        (job ? "" : "function LqEndJob($f){};")
         + "function LqKill($x){taskkill /PID $x /T /F 2>$null|Out-Null;kill $x -Force -EA 0}\n"
-        + "$LqH=" + pathExpression + ";if(Test-Path -LiteralPath $LqH){. $LqH}";
+        + "$LqH=" + pathExpression + ";try{if" + WindowsHelperVerified("$LqH") + "{. ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($LqB)))}}catch{}";
 
     /// <summary>
-    /// Writes <see cref="WindowsJobHelper"/> to <see cref="WindowsHelperPath"/> when it is not there yet, through a temporary file so a reader
-    /// never sees half of it. The text travels deflated (it is lanq's own constant; the script must stay under the command-line cap).
+    /// Writes <see cref="WindowsJobHelper"/> to <see cref="WindowsHelperPath"/> when it is not there or is not exactly lanq's text, through a
+    /// temporary file (moved into place, or replacing the changed file) so a reader never sees half of it. The text travels deflated (it is
+    /// lanq's own constant; the script must stay under the command-line cap) and is written as the exact bytes the hash was taken of.
     /// </summary>
     private static string WindowsInstallHelper(Machine m) => $$"""
         New-Item -ItemType Directory -Force -Path ({{ShellQuote.PowerShell(m.WorkRoot + "/bin")}}) | Out-Null
-        $h = {{ShellQuote.PowerShell(WindowsHelperPath(m))}}
-        if (-not (Test-Path -LiteralPath $h)) { $t = "$h.$PID"; try { $z = New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('{{Deflated(WindowsJobHelper)}}')), ([IO.Compression.CompressionMode]::Decompress); [IO.File]::WriteAllText($t, (New-Object IO.StreamReader $z).ReadToEnd()); [IO.File]::Move($t, $h) } catch { }; Remove-Item -Force -EA 0 -LiteralPath $t }
+        $h = {{ShellQuote.PowerShell(WindowsHelperPath(m))}}; $ok = $false
+        try { $ok = {{WindowsHelperVerified("$h")}} } catch { }
+        if (-not $ok) { $t = "$h.$PID"; try { $z = New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('{{Deflated(WindowsJobHelper)}}')), ([IO.Compression.CompressionMode]::Decompress); $ms = New-Object IO.MemoryStream; $z.CopyTo($ms); [IO.File]::WriteAllBytes($t, $ms.ToArray()); if ([IO.File]::Exists($h)) { try { [IO.File]::Replace($t, $h, [NullString]::Value) } catch { [IO.File]::Delete($h); [IO.File]::Move($t, $h) } } else { [IO.File]::Move($t, $h) } } catch { }; Remove-Item -Force -EA 0 -LiteralPath $t }
         """;
 
     /// <summary>Raw deflate (no zlib header, as .NET Framework's DeflateStream reads it) of the UTF-8 text, in base64.</summary>

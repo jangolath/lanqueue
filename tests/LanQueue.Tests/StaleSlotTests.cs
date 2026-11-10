@@ -386,7 +386,7 @@ public sealed class StaleSlotTests : IDisposable
         var script = RemoteScripts.AcquireSlot(T.Linux(), "j", TimeSpan.FromMinutes(30));
         var seconds = (long)(TimeSpan.FromMinutes(30) + RemoteScripts.SlotTransferAllowance).TotalSeconds;
         Assert.Contains("+ " + seconds.ToString(CultureInfo.InvariantCulture), script, StringComparison.Ordinal);
-        Assert.Contains("+ " + seconds.ToString(CultureInfo.InvariantCulture), RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(30)), StringComparison.Ordinal);
+        Assert.Contains("$deadline=$now+" + seconds.ToString(CultureInfo.InvariantCulture), RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(30)), StringComparison.Ordinal);
     }
 
     [Fact]

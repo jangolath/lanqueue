@@ -848,9 +848,9 @@ public sealed class RunnerTests : IDisposable
                 return new SshResult(0, Healthy(m.Name == "build-01" ? 0.9 : 0.1)); // build-01 (linux) over the load threshold
             }
 
-            if (DecodedContains(m, cmd, "LANQ_WINARGS=") && JobIdOf(m, cmd) is { } job)
+            if (DecodedContains(m, cmd, "LANQ_WINARGS="))
             {
-                return new SshResult(2, $"LANQ_WINARGS={job}:C:\\tools\\dotnet.cmd\nLANQ_EXIT={job}:2");
+                return new SshResult(2, $"{T.WindowsArgsMarkerOf(cmd)}C:\\tools\\dotnet.cmd\n{T.ExitMarkerOf(cmd)}2");
             }
 
             return new SshResult(0, "");
@@ -871,11 +871,48 @@ public sealed class RunnerTests : IDisposable
         var (runner, _, _, _) = Make((m, cmd) =>
             DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
             : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.9 : 0.1))
-            : DecodedContains(m, cmd, "LANQ_WINARGS=") && JobIdOf(m, cmd) is { } job ? new SshResult(1, $"LANQ_WINARGS={job}:x\nLANQ_EXIT={job}:1")
+            : DecodedContains(m, cmd, "LANQ_WINARGS=") ? new SshResult(1, $"{T.WindowsArgsMarkerOf(cmd)}x\n{T.ExitMarkerOf(cmd)}1")
             : new SshResult(0, ""));
         var r = await runner.RunAsync(Req(["dotnet", "test", "--filter", "A|B"], ".", "dotnet"), CancellationToken.None);
 
         Assert.Equal((JobStatus.Failed, 1, (RejectKind?)null), (r.Status, r.CliExitCode, r.RejectKind));
+    }
+
+    /// <summary>
+    /// The job itself prints the wrapper's refusal and exit lines (it can know its job id: LANQ_JOB) and exits 2. They lack this run's nonce,
+    /// which only the wrapper's script holds, so they are the job's output: Failed with 2, never a Rejected WindowsArgs refusal.
+    /// </summary>
+    [Fact]
+    public async Task AJobPrintingTheWrappersLinesItselfIsOrdinaryOutput()
+    {
+        var (runner, _, _, _) = Make((m, cmd) =>
+            DecodedContains(m, cmd, "SLOT=") ? new SshResult(0, "SLOT=1")
+            : DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, Healthy(m.Name == "build-01" ? 0.9 : 0.1))
+            : DecodedContains(m, cmd, "LANQ_WINARGS=") && JobIdOf(m, cmd) is { } job
+                ? new SshResult(2, $"LANQ_WINARGS={job}:C:\\tools\\dotnet.cmd\nLANQ_EXIT={job}:2\n{T.ExitMarkerOf(cmd)}2")
+            : new SshResult(0, ""));
+        var r = await runner.RunAsync(Req(["dotnet", "test", "--filter", "A|B"], ".", "dotnet"), CancellationToken.None);
+
+        Assert.Equal((JobStatus.Failed, 2, (RejectKind?)null), (r.Status, r.CliExitCode, r.RejectKind));
+        Assert.Contains(_output, l => l.Contains("LANQ_WINARGS=", StringComparison.Ordinal));
+        Assert.Contains(_output, l => l.Contains("LANQ_EXIT=", StringComparison.Ordinal)); // the job's own line, shown as it printed it
+    }
+
+    /// <summary>The nonce is in the wrapper's own marker lines only: not in the job's environment (Linux env prefix, Windows $env: lines).</summary>
+    [Fact]
+    public void TheMarkerNonceIsOnlyInTheWrappersOwnLines()
+    {
+        const string Nonce = "0123456789abcdef";
+        var linux = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], TimeSpan.FromMinutes(5), nonce: Nonce);
+        Assert.Contains("LANQ_EXIT=j1:" + Nonce + ":", linux, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(linux, Nonce));
+        Assert.DoesNotContain(Nonce, RemoteScripts.JobEnvironmentPosix(T.Linux(), "j1"), StringComparison.Ordinal);
+
+        var windows = RemoteScripts.Execute(T.Windows(), "j1", ".", ["dotnet", "test", "--filter", "A|B"], TimeSpan.FromMinutes(5), nonce: Nonce);
+        Assert.Contains("LANQ_WINARGS=j1:" + Nonce + ":", windows, StringComparison.Ordinal);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(windows, Nonce).Count); // the refusal line, its exit line, the final exit line
+        Assert.DoesNotContain(windows.Split('\n'), l => l.Contains("$env:", StringComparison.Ordinal) && l.Contains(Nonce, StringComparison.Ordinal));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], nonce: "not-hex"));
     }
 
     private static string? JobIdOf(Config.Machine m, string cmd)
