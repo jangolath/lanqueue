@@ -611,9 +611,9 @@ settings keep `lanq` a polite guest there (a full example is the "family PC" ent
   status `[lanq] WindowClosed`.
 - **A PAUSE switch anyone can use.** If a file named `PAUSE` exists in the machine's `work_root`, `lanq` holds the
   machine ("paused on the machine") and starts nothing there. No lanq knowledge needed:
-  - Windows: in a Command Prompt, `type nul > D:\lanq\PAUSE` (use your `work_root`), and `del D:\lanq\PAUSE` to
+  - Windows: in a Command Prompt, `type nul > C:\lq\PAUSE` (use your `work_root`), and `del C:\lq\PAUSE` to
     resume. Friendlier: put two desktop shortcuts on that PC, "Pause builds" with the target
-    `cmd /c type nul > D:\lanq\PAUSE` and "Resume builds" with the target `cmd /c del D:\lanq\PAUSE`.
+    `cmd /c type nul > C:\lq\PAUSE` and "Resume builds" with the target `cmd /c del C:\lq\PAUSE`.
   - Linux: `touch /srv/lq/PAUSE` to pause, `rm /srv/lq/PAUSE` to resume.
 
   The person needs write access to the `work_root` folder (grant it once, or make the shortcuts for an account that
