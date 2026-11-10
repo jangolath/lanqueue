@@ -562,7 +562,8 @@ public static class RemoteScripts
     /// Windows by running it in a child PowerShell and killing that tree (taskkill /T /F) when the wait runs out (exit 124).
     /// </summary>
     /// <param name="shard">lanq run --shards: sets LANQ_SHARD and LANQ_SHARDS for the job (next to LANQ_JOB), or null.</param>
-    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null)
+    /// <param name="planJob">lanq run --plan: sets LANQ_PLAN_JOB to the plan job's name, or null.</param>
+    public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null, string? planJob = null)
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
@@ -592,6 +593,7 @@ public static class RemoteScripts
                 {{JobEnvironmentPowerShell(m)}}
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{ShardEnvironmentPowerShell(shard)}}
+                {{PlanJobEnvironmentPowerShell(planJob)}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
                 Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
                 $job = {
@@ -631,7 +633,7 @@ public static class RemoteScripts
             T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
-            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
             printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
@@ -661,7 +663,7 @@ public static class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null)
+    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
         if (jobId is not null)
@@ -673,6 +675,11 @@ public static class RemoteScripts
         if (shard is not null)
         {
             words.AddRange(ShardVariables(shard).Select(v => ShellQuote.Posix(v.Name + "=" + v.Value)));
+        }
+
+        if (planJob is not null)
+        {
+            words.Add(ShellQuote.Posix(PlanJobVariable + "=" + SafePlanJob(planJob)));
         }
 
         if (m.PathPrepend.Count > 0)
@@ -713,6 +720,18 @@ public static class RemoteScripts
         yield return ("LANQ_SHARD", shard.Index.ToString(CultureInfo.InvariantCulture));
         yield return ("LANQ_SHARDS", shard.Count.ToString(CultureInfo.InvariantCulture));
     }
+
+    /// <summary>LANQ_PLAN_JOB: the name of the lanq.yml job this job runs for (lanq run --plan).</summary>
+    internal const string PlanJobVariable = "LANQ_PLAN_JOB";
+
+    /// <summary>A plan job name as lanq.yml allows it (1 to 32 of A-Z, a-z, 0-9, '_' and '-', not starting with '_' or '-'), checked again here.</summary>
+    internal static string SafePlanJob(string name) =>
+        name.Length is > 0 and <= 32 && char.IsAsciiLetterOrDigit(name[0]) && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
+            ? name
+            : throw new ArgumentException("Invalid plan job name.", nameof(name));
+
+    private static string PlanJobEnvironmentPowerShell(string? planJob) =>
+        planJob is null ? "" : $"$env:{PlanJobVariable} = '{SafePlanJob(planJob)}'";
 
     private static string ShardEnvironmentPowerShell(ShardInfo? shard) =>
         shard is null ? "" : string.Join('\n', ShardVariables(shard).Select(v => $"$env:{v.Name} = '{v.Value}'"));

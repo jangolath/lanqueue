@@ -40,6 +40,9 @@ public enum RejectKind
 
     /// <summary>The config could not be found or loaded.</summary>
     Config,
+
+    /// <summary>lanq run --plan: the plan file (lanq.yml) is missing or not valid.</summary>
+    PlanFile,
 }
 
 /// <summary>Where an InfraError (exit 70) came from.</summary>
@@ -91,6 +94,24 @@ public sealed record JobRequest(
 
     /// <summary>lanq run --size / --min-size: the machine size classes the job may run on, or null for any.</summary>
     public SizeRule? Size { get; init; }
+
+    /// <summary>
+    /// lanq run --plan: the lanq.yml job this request runs for, or null. Its lines are prefixed "[name machine] " (shards "[name i/N machine] "),
+    /// the job gets LANQ_PLAN_JOB=name, and jobs.jsonl records it as planJob.
+    /// </summary>
+    public string? PlanJob { get; init; }
+
+    /// <summary>lanq run --plan: the id every job of one plan run shares (jobs.jsonl planRun), or null.</summary>
+    public string? PlanRun { get; init; }
+
+    /// <summary>
+    /// lanq run --plan: the wait gate every job of one plan shares (<see cref="Jobs.PlanProgress"/>): --wait then counts only while no job of the
+    /// plan holds a slot, so a job waits behind its siblings even with --wait 0. Null for a plain run (--wait counts from the start).
+    /// </summary>
+    public PlanProgress? Progress { get; init; }
+
+    /// <summary>lanq run --plan: called once the job holds its first slot or begins waiting for one (the next job's start waits for it).</summary>
+    public Action? Placed { get; init; }
 
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
@@ -298,10 +319,14 @@ public sealed partial class JobRunner(
     /// Snapshots the repository once (under <paramref name="payloadId"/>) and scans it for secrets. Every job given the result shares its
     /// snapshot, its bundles and its archive, each built at most once, on first use; disposing it deletes them.
     /// </summary>
-    private async Task<(PreparedPayload? Prepared, JobResult? Failed)> PrepareAsync(string payloadId, JobRequest req, Action<string> emit, CancellationToken ct)
+    private Task<(PreparedPayload? Prepared, JobResult? Failed)> PrepareAsync(string payloadId, JobRequest req, Action<string> emit, CancellationToken ct) =>
+        PrepareAsync(payloadId, req, Candidates(req).Any(m => m.Transfer == TransferMode.Git), emit, ct);
+
+    /// <param name="anyGit">Whether any machine that may take a job of this payload transfers by git (then the snapshot gets a repository id).</param>
+    private async Task<(PreparedPayload? Prepared, JobResult? Failed)> PrepareAsync(string payloadId, JobRequest req, bool anyGit, Action<string> emit, CancellationToken ct)
     {
         // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
-        var kinds = Candidates(req).Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
+        var kinds = anyGit ? PayloadKinds.Bundle : PayloadKinds.None;
         var (payload, failed) = await SnapshotAndScanAsync(payloadId, req, kinds, ct).ConfigureAwait(false);
         if (payload is null)
         {
@@ -436,20 +461,43 @@ public sealed partial class JobRunner(
     internal static List<ExcludedMachine> Excluded(IEnumerable<Assessment> assessed) =>
         [.. assessed.Select(a => new ExcludedMachine(a.Machine.Name, a.Code ?? Eligibility.Code(Exclusion.Busy)!, WhyNot(a), a.Permanent))];
 
-    private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct)
+    /// <param name="onSlot">Called with the machine's name once the job holds a slot there (a plan job reports where it ran when cancelled).</param>
+    private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null)
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
         var needs = NeedsOf(req, !JobPolicy.ValidateForWindows(req.Argv).Ok);
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
         var candidates = Candidates(req);
+        var say = Say(req);
         while (true)
         {
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
             foreach (var a in ranked)
             {
-                var result = await TryOnMachine(jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, output, ct).ConfigureAwait(false);
+                var held = false;
+                JobResult? result;
+                try
+                {
+                    result = await TryOnMachine(
+                        jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, MachineLines(req, a.Machine.Name), ct,
+                        onSlot: () =>
+                        {
+                            held = true;
+                            req.Progress?.Hold();
+                            onSlot?.Invoke(a.Machine.Name);
+                            req.Placed?.Invoke();
+                        }).ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (held)
+                    {
+                        req.Progress?.Release();
+                    }
+                }
+
                 if (result is not null)
                 {
                     return result;
@@ -466,18 +514,51 @@ public sealed partial class JobRunner(
             // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
             if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
             {
-                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, ct).ConfigureAwait(false);
+                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false);
             }
 
-            if (deadline.Elapsed >= req.Wait)
+            if (WaitedOut(req, deadline))
             {
                 return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
             }
 
-            output("[lanq] no eligible machine; waiting 15s");
-            await delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+            say(req.Progress is { AnyHolding: true } ? "[lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)" : "[lanq] no eligible machine; waiting 15s");
+            req.Placed?.Invoke();
+            await PauseAsync(req, ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Whether a job still waiting for a slot has used up --wait: from its own start, or in a plan (<see cref="JobRequest.Progress"/>) only
+    /// while no job of the plan holds a slot (a job waits behind its siblings even with --wait 0).
+    /// </summary>
+    private static bool WaitedOut(JobRequest req, Stopwatch own) =>
+        req.Progress is { } plan ? !plan.AnyHolding && plan.IdleFor >= req.Wait : own.Elapsed >= req.Wait;
+
+    /// <summary>The 15 s between two looks at the machines; in a plan cut short when a job of the plan gives back a slot.</summary>
+    private async Task PauseAsync(JobRequest req, CancellationToken ct)
+    {
+        var timer = delay(TimeSpan.FromSeconds(15), ct);
+        if (req.Progress is { } plan)
+        {
+            await Task.WhenAny(timer, plan.Released).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (timer.IsFaulted)
+            {
+                await timer.ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        await timer.ConfigureAwait(false);
+    }
+
+    /// <summary>Where a job's own lanq lines go: as they are, or for a plan job prefixed "[name] ".</summary>
+    private Action<string> Say(JobRequest req) => req.PlanJob is { } name ? line => output($"[{name}] {line}") : output;
+
+    /// <summary>Where a single job's lines on a machine go: as they are, or for a plan job prefixed "[name machine] ".</summary>
+    private Action<string> MachineLines(JobRequest req, string machine) => req.PlanJob is { } name ? line => output($"[{name} {machine}] {line}") : output;
 
     /// <summary>
     /// Static property of the config: can any git-transfer candidate ever take this job (capabilities and a declared size: only; load, hours
@@ -493,8 +574,57 @@ public sealed partial class JobRunner(
     /// </summary>
     private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(IReadOnlyList<Machine> machines, JobNeeds needs, CancellationToken ct)
     {
-        var probes = await Task.WhenAll(machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        var probes = await Task.WhenAll(machines.Select(m => ProbeSharedAsync(m, ct))).ConfigureAwait(false);
         return (probes, Scheduler.Assess(machines.Zip(probes), needs));
+    }
+
+    /// <summary>How recent an in-flight probe of a machine must be for another job of this runner to share it (<see cref="ProbeSharedAsync"/>).</summary>
+    internal static readonly TimeSpan ProbeShareWindow = TimeSpan.FromSeconds(3);
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Task<MachineHealth> Probe, long Started)> _probes = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// One probe of <paramref name="m"/>, shared: a job that asks while another job of this runner (a plan's jobs run side by side) has a probe of
+    /// the same machine in flight that started at most <see cref="ProbeShareWindow"/> ago gets that probe's answer instead of starting its own.
+    /// A finished probe is never reused, and the slot claim stays the authority on whether a slot is free.
+    /// </summary>
+    private async Task<MachineHealth> ProbeSharedAsync(Machine m, CancellationToken ct)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var mine = new TaskCompletionSource<MachineHealth>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entry = _probes.AddOrUpdate(
+            m.Name,
+            _ => (mine.Task, now),
+            (_, old) => !old.Probe.IsCompleted && Stopwatch.GetElapsedTime(old.Started, now) <= ProbeShareWindow ? old : (mine.Task, now));
+        if (!ReferenceEquals(entry.Probe, mine.Task))
+        {
+            try
+            {
+                return await entry.Probe.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // The job that started it was cancelled, this one was not: probe again on its own.
+                return await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
+            }
+        }
+
+        try
+        {
+            var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
+            mine.TrySetResult(h);
+            return h;
+        }
+        catch (OperationCanceledException ex)
+        {
+            mine.TrySetCanceled(ex.CancellationToken);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            mine.TrySetException(ex);
+            throw;
+        }
     }
 
     /// <summary>
@@ -514,7 +644,7 @@ public sealed partial class JobRunner(
     /// </summary>
     /// <param name="machines">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> and <paramref name="assessed"/> are index-aligned with it.</param>
     private async Task WakeBestSleeperAsync(
-        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, CancellationToken ct)
+        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit, CancellationToken ct)
     {
         foreach (var i in WakeOrder(machines))
         {
@@ -534,7 +664,7 @@ public sealed partial class JobRunner(
             assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
             if (probe.Waker!.AnyPending)
             {
-                output($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
+                emit($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
                 return;
             }
         }
@@ -652,6 +782,8 @@ public sealed partial class JobRunner(
                 Shards = req.Shard?.Count,
                 RunId = req.RunId,
                 RunSeconds = result.RunSeconds,
+                PlanJob = req.PlanJob,
+                PlanRun = req.PlanRun,
             });
             return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
@@ -674,7 +806,7 @@ public sealed partial class JobRunner(
         try
         {
             // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
-            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard));
+            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob));
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -731,7 +863,7 @@ public sealed partial class JobRunner(
         }
 
         // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
-        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard));
+        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob));
         // The wrapper's exit marker counts only as the FINAL output line (or glued to the end of it): a line carrying one is held back until
         // the next line arrives, which shows it was not final, and is then passed on unchanged as ordinary output. The final one is taken off.
         var heldGate = new object();

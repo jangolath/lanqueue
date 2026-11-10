@@ -44,6 +44,14 @@ public sealed record JobRecord(
     /// <summary>How long the job's own command ran on the worker (not the wait, upload, prepare, fetch or cleanup); null when it never started.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? RunSeconds { get; init; }
+
+    /// <summary>lanq run --plan only (0.8.0): the lanq.yml job this job ran for.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PlanJob { get; init; }
+
+    /// <summary>lanq run --plan only (0.8.0): the id every job of one plan run shares (its snapshot's id).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PlanRun { get; init; }
 }
 
 /// <summary>What <see cref="JobLog.Read"/> found: the records (oldest file first), how many lines could not be read, and the files read.</summary>
