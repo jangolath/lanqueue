@@ -168,5 +168,7 @@ public sealed partial class JobRunner
     {
         Assessed = assessed ?? [],
         Retryable = r.Status == JobStatus.NoCapacity ? r.Retryable ?? true : null,
+        RejectKind = r.RejectKind,
+        InfraKind = r.InfraKind,
     };
 }

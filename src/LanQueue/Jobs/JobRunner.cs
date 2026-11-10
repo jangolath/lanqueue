@@ -23,6 +23,47 @@ public enum JobStatus
     WindowClosed,
 }
 
+/// <summary>Why a run was refused (Rejected, exit 2): what the caller can do about it differs (see Output/NextSteps.cs).</summary>
+public enum RejectKind
+{
+    /// <summary>Not on policy.allowed_commands or allowed_directories, or a permission-skipping flag: for the developer, never worked around.</summary>
+    Policy,
+
+    /// <summary>Possible secrets in the command line or the uncommitted changes (nothing was sent).</summary>
+    Secret,
+
+    /// <summary>Arguments cmd.exe shims would re-parse, and only Windows machines have the capabilities.</summary>
+    WindowsArgs,
+
+    /// <summary>The command line itself is unusable (no command, control characters, bad lanq options, a command the machine cannot run).</summary>
+    Arguments,
+
+    /// <summary>The config could not be found or loaded.</summary>
+    Config,
+}
+
+/// <summary>Where an InfraError (exit 70) came from.</summary>
+public enum InfraKind
+{
+    /// <summary>The repository could not be snapshotted (local git).</summary>
+    Snapshot,
+
+    /// <summary>A git bundle could not be built (local git).</summary>
+    Bundle,
+
+    /// <summary>The tar.gz archive could not be built (for example a path Windows cannot store) and no git machine can ever take the job.</summary>
+    Archive,
+
+    /// <summary>Upload or prepare on the worker failed (not a lost connection).</summary>
+    Prepare,
+
+    /// <summary>The worker stopped answering ssh during upload, prepare or the job (see <see cref="JobResult.MayStillRun"/>).</summary>
+    Connection,
+
+    /// <summary>Anything else (an unexpected exception).</summary>
+    Unexpected,
+}
+
 /// <param name="Timeout">How long the job itself may run; null means <see cref="JobRequest.DefaultTimeout"/>.</param>
 /// <param name="MinMemGb">lanq run --mem: only machines that report at least this much available memory (GB).</param>
 /// <param name="Fetch">lanq run --fetch: files to bring back from the job's working folder after the job, or null.</param>
@@ -76,6 +117,12 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>The full path of the job's local log (see <see cref="JobLog.LogPathFor"/>), set once the job held a slot and the log was created; null otherwise.</summary>
     public string? LogPath { get; init; }
 
+    /// <summary>Rejected only: why the run was refused. Null for every other status.</summary>
+    public RejectKind? RejectKind { get; init; }
+
+    /// <summary>InfraError only: where the error came from. Null for every other status.</summary>
+    public InfraKind? InfraKind { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -108,6 +155,14 @@ public sealed partial class JobRunner(
     /// <summary>Last commit each git worker has fetched, per repository: the base for incremental bundles (in memory unless given a file).</summary>
     private readonly BaseStore bases = bases ?? new BaseStore(null);
 
+    private volatile string? _startedLogPath;
+
+    /// <summary>
+    /// The full path of the log of the job this runner started last (set as soon as the log file exists), or null when none was started:
+    /// a single run that was cancelled or broke after its job held a slot still has a log to point at.
+    /// </summary>
+    public string? StartedLogPath { get => _startedLogPath; private set => _startedLogPath = value; }
+
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
         var jobId = NewId();
@@ -134,7 +189,8 @@ public sealed partial class JobRunner(
         var policy = JobPolicy.Validate(config.Policy, req.Argv, req.Directory);
         if (!policy.Ok)
         {
-            return new JobResult(jobId, JobStatus.Rejected, 2, null, policy.Reason!);
+            var badArguments = req.Argv.Count == 0 || req.Argv.Any(a => a.Any(char.IsControl));
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, policy.Reason!) { RejectKind = badArguments ? Jobs.RejectKind.Arguments : Jobs.RejectKind.Policy };
         }
 
         var commandFindings = SecretScanner.ScanText(string.Join(' ', req.Argv), "command line");
@@ -148,7 +204,7 @@ public sealed partial class JobRunner(
         var windows = JobPolicy.ValidateForWindows(req.Argv);
         if (!windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
         {
-            return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!);
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!) { RejectKind = Jobs.RejectKind.WindowsArgs };
         }
 
         // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
@@ -222,7 +278,7 @@ public sealed partial class JobRunner(
         }
         catch (InvalidOperationException ex)
         {
-            return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message));
+            return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message) { InfraKind = Jobs.InfraKind.Snapshot });
         }
 
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
@@ -450,7 +506,7 @@ public sealed partial class JobRunner(
                 // does the archive failure end the job (70) instead of waiting for a machine that cannot help.
                 if (!gitCanEverTakeIt)
                 {
-                    return new JobResult(jobId, JobStatus.InfraError, 70, null, message);
+                    return new JobResult(jobId, JobStatus.InfraError, 70, null, message) { InfraKind = Jobs.InfraKind.Archive };
                 }
 
                 if (archive.MarkReported())
@@ -480,6 +536,7 @@ public sealed partial class JobRunner(
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         var logFile = new StreamWriter(logPath, append: false);
+        StartedLogPath = Path.GetFullPath(logPath);
         var logGate = new object();
         var logOpen = true;
         void OnLine(string line)
@@ -549,7 +606,7 @@ public sealed partial class JobRunner(
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
-            return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message);
+            return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, ex.Message) { RejectKind = Jobs.RejectKind.Arguments };
         }
 
         // One upload-and-prepare at a time per machine within this lanq: shards landing on one worker would otherwise race on its repository
@@ -572,6 +629,7 @@ public sealed partial class JobRunner(
                 "Could not prepare the job on the machine." + (step.TimedOut ? " (timed out)" : ""))
             {
                 ConnectionLost = step.IsSshFailure && !step.TimedOut,
+                InfraKind = step.IsSshFailure && !step.TimedOut ? Jobs.InfraKind.Connection : Jobs.InfraKind.Prepare,
             };
         }
 
@@ -659,7 +717,12 @@ public sealed partial class JobRunner(
         }
         else if (sshFailed)
         {
-            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.") { ConnectionLost = true, MayStillRun = true };
+            result = new JobResult(jobId, JobStatus.InfraError, run.ExitCode, machine.Name, "SSH connection failed while running the job.")
+            {
+                ConnectionLost = true,
+                MayStillRun = true,
+                InfraKind = Jobs.InfraKind.Connection,
+            };
         }
         else
         {
@@ -715,14 +778,14 @@ public sealed partial class JobRunner(
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
-                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message));
+                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message) { InfraKind = Jobs.InfraKind.Bundle });
             }
         }
 
         var step = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.EnsureIncoming(machine)), onLine, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         if (step.Ok && local is null)
         {
-            return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine."));
+            return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, $"No {machine.Transfer.ToString().ToLowerInvariant()} payload was built for this machine.") { InfraKind = Jobs.InfraKind.Prepare });
         }
 
         if (step.Ok)
@@ -740,7 +803,7 @@ public sealed partial class JobRunner(
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
             {
-                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message));
+                return (null, new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, "Could not build the bundle: " + ex.Message) { InfraKind = Jobs.InfraKind.Bundle });
             }
 
             step = await UploadAndPrepare(jobId, prepared, machine, local, onLine, ct).ConfigureAwait(false);
@@ -961,7 +1024,7 @@ public sealed partial class JobRunner(
         var hint = findings.Any(f => f.Rule == SecretScanner.CommittedFileRule)
             ? " Committed files named like secrets are refused because the bundle or archive would carry them; rename samples to *.example or keep them under a fixtures/ or testdata/ folder."
             : "";
-        return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.");
+        return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.") { RejectKind = Jobs.RejectKind.Secret };
     }
 
     /// <summary>

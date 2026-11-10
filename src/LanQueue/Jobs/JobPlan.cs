@@ -54,6 +54,12 @@ public sealed record JobPlan(string Status, int ExitCode, string Message)
     /// <summary>NoCapacity only: as <see cref="JobResult.Retryable"/>; null otherwise.</summary>
     public bool? Retryable { get; init; }
 
+    /// <summary>Rejected only: as <see cref="JobResult.RejectKind"/>; null otherwise.</summary>
+    public RejectKind? RejectKind { get; init; }
+
+    /// <summary>InfraError only: as <see cref="JobResult.InfraKind"/>; null otherwise.</summary>
+    public InfraKind? InfraKind { get; init; }
+
     /// <summary>True when every machine is ruled out for good (lanq run would end at once, whatever --wait).</summary>
     public bool Never => Assessed.Count > 0 && Assessed.All(a => a.Permanent);
 }

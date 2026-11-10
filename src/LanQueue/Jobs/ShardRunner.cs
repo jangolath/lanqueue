@@ -56,6 +56,15 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
 
     /// <summary>The full path of the local log of the shard's last attempt that got a slot (see <see cref="JobResult.LogPath"/>), or null.</summary>
     public string? LogPath { get; init; }
+
+    /// <summary>Rejected only: see <see cref="JobResult.RejectKind"/>.</summary>
+    public RejectKind? RejectKind { get; init; }
+
+    /// <summary>InfraError only: see <see cref="JobResult.InfraKind"/>.</summary>
+    public InfraKind? InfraKind { get; init; }
+
+    /// <summary>True when the shard's job may still be running on its machine (the connection dropped while it ran and its cleanup did not finish).</summary>
+    public bool MayStillRun { get; init; }
 }
 
 /// <summary>A whole lanq run --shards: the overall status and exit code (see <see cref="JobRunner.Aggregate"/>) and every shard, in index order.</summary>
@@ -66,6 +75,12 @@ public sealed record ShardRunResult(string Status, int ExitCode, int Count, IRea
 
     /// <summary>NoCapacity only: every machine that took none of the waiting shards and why. Null otherwise.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>Rejected only: why (the whole run's refusal, or the shard that decided the status). Null otherwise.</summary>
+    public RejectKind? RejectKind { get; init; }
+
+    /// <summary>InfraError only: where it came from (the snapshot, or the shard that decided the status). Null otherwise.</summary>
+    public InfraKind? InfraKind { get; init; }
 }
 
 public sealed partial class JobRunner
@@ -116,7 +131,7 @@ public sealed partial class JobRunner
         var (prepared, failed) = await PrepareAsync(payloadId, template, output, ct).ConfigureAwait(false);
         if (prepared is null)
         {
-            return new ShardRunResult(failed!.Status.ToString(), failed.CliExitCode, count, [], failed.Message);
+            return new ShardRunResult(failed!.Status.ToString(), failed.CliExitCode, count, [], failed.Message) { RejectKind = failed.RejectKind, InfraKind = failed.InfraKind };
         }
 
         await using (prepared.ConfigureAwait(false))
@@ -128,7 +143,7 @@ public sealed partial class JobRunner
         }
 
         static ShardRunResult Refused(int n, string message, JobResult? r) =>
-            new(r?.Status.ToString() ?? nameof(JobStatus.Rejected), r?.CliExitCode ?? 2, n, [], message);
+            new(r?.Status.ToString() ?? nameof(JobStatus.Rejected), r?.CliExitCode ?? 2, n, [], message) { RejectKind = r is null ? Jobs.RejectKind.Arguments : r.RejectKind };
     }
 
     /// <summary>
@@ -187,6 +202,8 @@ public sealed partial class JobRunner
         {
             Retryable = noCapacity ? worst.Retryable ?? true : null,
             Excluded = noCapacity ? worst.Excluded ?? [] : null,
+            RejectKind = worst.RejectKind,
+            InfraKind = worst.InfraKind,
         };
 
         static int Rank(string status) => status switch
@@ -299,7 +316,10 @@ public sealed partial class JobRunner
                 catch (Exception ex)
                 {
                     // Anything else (an OperationCanceledException nobody asked for included) is this attempt's result: the other shards go on.
-                    var failed = new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"));
+                    var failed = new JobResult(jobId, JobStatus.InfraError, 70, machine.Name, SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"))
+                    {
+                        InfraKind = InfraKind.Unexpected,
+                    };
                     return new Attempt(st, machine, failed, clock.Elapsed, false, slot.Holding, jobId);
                 }
             }, CancellationToken.None);
@@ -455,7 +475,10 @@ public sealed partial class JobRunner
         {
             st.Final = loopError is null
                 ? new ShardResult(st.Shard.Index, Cancelled, 130, null, null, TimeSpan.Zero, st.Attempts, "cancelled before it started")
-                : new ShardResult(st.Shard.Index, nameof(JobStatus.InfraError), 70, null, null, TimeSpan.Zero, st.Attempts, SafeLine($"not run: unexpected error: {loopError.GetType().Name}: {loopError.Message}"));
+                : new ShardResult(st.Shard.Index, nameof(JobStatus.InfraError), 70, null, null, TimeSpan.Zero, st.Attempts, SafeLine($"not run: unexpected error: {loopError.GetType().Name}: {loopError.Message}"))
+                {
+                    InfraKind = InfraKind.Unexpected,
+                };
         }
 
         return [.. states.Select(s => s.Final!)];
@@ -521,6 +544,9 @@ public sealed partial class JobRunner
             Retryable = r.Retryable,
             Excluded = r.Excluded,
             LogPath = r.LogPath ?? LogIfCreated(a),
+            RejectKind = r.RejectKind,
+            InfraKind = r.InfraKind,
+            MayStillRun = r.MayStillRun && !r.CleanedUp,
         };
         return r.Status != JobStatus.Completed;
     }
