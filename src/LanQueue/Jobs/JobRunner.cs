@@ -77,6 +77,12 @@ public sealed record JobRequest(
     /// <summary>lanq run --shards: this job is shard <see cref="ShardInfo.Index"/> of <see cref="ShardInfo.Count"/> (LANQ_SHARD, LANQ_SHARDS), or null.</summary>
     public ShardInfo? Shard { get; init; }
 
+    /// <summary>The command's identity recorded in jobs.jsonl (<see cref="JobHistory.Key"/>); null means the key of <see cref="Argv"/>. Shards carry their template's.</summary>
+    public string? CommandKey { get; init; }
+
+    /// <summary>The id every shard of one --shards run records (the run's payload id); null for a single run.</summary>
+    public string? RunId { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -122,6 +128,12 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
 
     /// <summary>InfraError only: where the error came from. Null for every other status.</summary>
     public InfraKind? InfraKind { get; init; }
+
+    /// <summary>
+    /// How long the job's own command ran: the ssh call that executes it, without the wait for a slot, upload, prepare, fetch or cleanup.
+    /// Null when the command never started.
+    /// </summary>
+    public double? RunSeconds { get; init; }
 
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
@@ -580,7 +592,17 @@ public sealed partial class JobRunner(
                 }
             }
 
-            log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString()));
+            // Never throws: a job whose stats line cannot be written keeps its result (the log warns instead).
+            log.Append(new JobRecord(jobId, machine.Name, command, started, Math.Round(clock.Elapsed.TotalSeconds, 2), result.ExitCode, result.Status.ToString())
+            {
+                V = 2,
+                Key = req.CommandKey ?? JobHistory.Key(req.Argv),
+                Dir = JobHistory.Dir(req.Directory),
+                Shard = req.Shard?.Index,
+                Shards = req.Shard?.Count,
+                RunId = req.RunId,
+                RunSeconds = result.RunSeconds,
+            });
             return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
         finally
@@ -683,12 +705,14 @@ public sealed partial class JobRunner(
         }
 
         onRunning?.Invoke();
+        var runStarted = clock.GetTimestamp();
         var run = await ssh.RunAsync(
             machine,
             executeCommand,
             OnJobLine,
             timeout,
             ct).ConfigureAwait(false);
+        var runSeconds = Math.Round(clock.GetElapsedTime(runStarted).TotalSeconds, 2);
 
         int? markedExit = null;
         if (held is { } last)
@@ -733,6 +757,8 @@ public sealed partial class JobRunner(
                 machine.Name,
                 $"exit {jobExit.ToString(CultureInfo.InvariantCulture)}");
         }
+
+        result = result with { RunSeconds = runSeconds };
 
         // A job lanq stopped (timeout or window) may still be running on the worker, which enforces the limit only a margin later: stop it
         // first, so the fetch reads files that are no longer being written. Cleanup would kill it anyway, but only after the fetch.

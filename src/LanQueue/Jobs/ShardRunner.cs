@@ -128,6 +128,9 @@ public sealed partial class JobRunner
         }
 
         var payloadId = NewId();
+
+        // Every shard (and every retried attempt) records the template's key and this run's id in jobs.jsonl.
+        template = template with { CommandKey = JobHistory.Key(template.Argv), RunId = payloadId };
         var (prepared, failed) = await PrepareAsync(payloadId, template, output, ct).ConfigureAwait(false);
         if (prepared is null)
         {
