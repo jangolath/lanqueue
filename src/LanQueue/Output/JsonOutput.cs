@@ -198,8 +198,9 @@ internal sealed record ShardTimingJson(
 
 /// <summary>One machine in excluded (NoCapacity only).</summary>
 /// <param name="Reason">
-/// missing_capability, windows_unsafe_args, mem_exceeds_total, mem_unknown, tool_missing (permanent); unreachable, asleep, unreadable, paused,
-/// outside_hours, window_closing, low_disk, low_memory, memory_pressure, load, mem_below_request, busy, avoided, held (waiting may help).
+/// missing_capability, wrong_size, size_unknown, windows_unsafe_args, mem_exceeds_total, mem_unknown, tool_missing (permanent); unreachable,
+/// asleep, unreadable, paused, outside_hours, window_closing, low_disk, low_memory, memory_pressure, load, mem_below_request, busy, avoided,
+/// held (waiting may help).
 /// </param>
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
