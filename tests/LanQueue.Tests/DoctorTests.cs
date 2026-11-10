@@ -550,10 +550,12 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains("end=$(( $(date +%s) + 5 ))", linux, StringComparison.Ordinal);
         foreach (var script in new[] { windows, linux })
         {
-            foreach (var write in new[] { "Set-Content", "New-Item", "Remove-Item", "rm ", "mkdir", "> /" })
+            foreach (var write in new[] { "Set-Content", "New-Item", "Remove-Item", "mkdir", "> /", "Set-Acl", "chmod", "icacls" })
             {
                 Assert.DoesNotContain(write, script, StringComparison.Ordinal);
             }
+
+            Assert.DoesNotMatch(@"(^|[\s;|&(])rm\s", script); // rm as a command (not the "rm " inside find's -perm)
         }
 
         Assert.Throws<ArgumentException>(() => RemoteScripts.FindToolchain(T.Linux(), "gpu"));
@@ -595,6 +597,56 @@ public sealed class DoctorTests : IDisposable
             Directory.Delete(root, recursive: true);
         }
     }
+
+    /// <summary>
+    /// A folder other local users can write to (Everyone may modify it on Windows, world-writable on Linux) could hold a planted dotnet:
+    /// the search reports it as open.dotnet, which ParseFound never proposes for path_prepend.
+    /// </summary>
+    [Fact]
+    public void AFolderOtherUsersCanWriteIsNeverProposed()
+    {
+        var shell = OperatingSystem.IsWindows() ? "windows" : "linux";
+        if (shell == "linux" && Shells.Sh is null)
+        {
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "lanq-open-" + Guid.NewGuid().ToString("N"));
+        var dotnet = Path.Combine(root, "dotnet");
+        Directory.CreateDirectory(Path.Combine(dotnet, "sdk", "10.0.102"));
+        File.WriteAllText(Path.Combine(dotnet, "sdk", "10.0.102", "dotnet.dll"), "");
+        var exe = Path.Combine(dotnet, shell == "windows" ? "dotnet.exe" : "dotnet");
+        File.WriteAllText(exe, "");
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("icacls.exe", [dotnet, "/grant", "*S-1-1-0:(OI)(CI)(M)"]) { RedirectStandardOutput = true, UseShellExecute = false })!;
+                p.StandardOutput.ReadToEnd();
+                p.WaitForExit();
+                Assert.Equal(0, p.ExitCode);
+            }
+            else
+            {
+                File.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                File.SetUnixFileMode(dotnet, (UnixFileMode)0b111_111_111); // 0777
+            }
+
+            var m = shell == "windows" ? T.Windows() : T.Linux();
+            var (code, output) = Shells.Run(shell, RemoteScripts.FindToolchain(m, "dotnet"), new Dictionary<string, string> { ["DOTNET_ROOT"] = dotnet });
+            Assert.True(code == 0, output);
+            Assert.Contains("open.dotnet=" + dotnet.Replace('\\', '/') + "|10.0.102", output, StringComparison.Ordinal);
+            Assert.DoesNotContain(RemoteScripts.ParseFound(output, "dotnet"), f => f.Dir == dotnet.Replace('\\', '/'));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void OpenFoldersAreNotParsedAsFound() =>
+        Assert.Equal([("D:/build/dotnet", "10.0.102")], RemoteScripts.ParseFound("open.dotnet=C:/tools/dotnet|11.0.100\nfound.dotnet=D:/build/dotnet|10.0.102\n", "dotnet"));
 
     /// <summary>If the whole ssh call runs out of time, what did arrive is still reported, and the rest says it did not finish.</summary>
     [Fact]

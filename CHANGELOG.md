@@ -2,18 +2,27 @@
 
 ## 0.8.1 (unreleased)
 
+### Security
+
+- The .NET SDK search behind `lanq doctor --remote` and `lanq makeready --add` no longer proposes `path_prepend` for a
+  folder other local users could plant a `dotnet` in: the folder or its `dotnet` not owned by Administrators, SYSTEM,
+  TrustedInstaller (root on Linux) or the build account, or writable by Users, Authenticated Users, Interactive or
+  Everyone (others, or a group other than root's). On a shared PC, a world-writable folder such as `C:\tools\dotnet`
+  could otherwise make every later .NET job run a planted program as the build account. Such a folder is skipped.
+
 ### Behaviour changes
 
 - `lanq makeready` runs lanq-makeready 0.3.0. On a Windows worker whose build account is denied WMI/CIM it now reports
   memory, CPUs, the Windows version and disks instead of 0 GB and "unreadable", and no longer reports OpenSSH Server as
-  "installed but not running" when that account may not read the service status. The .NET SDK search covers the same
-  folders `lanq doctor --remote` searches.
-- The suggested `machines.yml` entry (text, `--json` and `--add`) takes the script's `path_prepend` and `env: DOTNET_ROOT`
-  when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. lanq takes it only as exactly one absolute
-  folder with `DOTNET_ROOT` set to the same folder, with no quote, backslash, `<`/`>` or control character; anything
-  else is left out. A folder the report hides (under the user's home, redacted) is shown as a comment, and `--add`
-  then looks the SDK up itself as before. `--add` never writes a second `path_prepend:` or `env:` key or a second
-  `dotnet` capability.
+  "installed but not running" when that account may not read the service status. Keys in a file `sshd_config` names
+  (such as a `Match User` block's central file) are found. The .NET SDK search covers the same folders `lanq doctor
+  --remote` searches, with the same ownership rule.
+- The suggested `machines.yml` entry (text and `--add`) takes the script's `path_prepend` and `env: DOTNET_ROOT` when
+  the newest .NET SDK is in a folder that is not the `dotnet` on PATH. lanq takes it only as exactly one absolute folder
+  in printable ASCII with `DOTNET_ROOT` set to the same folder and none of `"` `\` `<` `>` `|` `?` `*` `;` `:`; anything
+  else is left out. A folder the report hides (under the user's home, redacted) is shown as a comment, and `--add` then
+  looks the SDK up itself as before. `--add` never writes a second `path_prepend:` or `env:` key or a second `dotnet`
+  capability. `--json` passes the script's `suggestedMachine` through as reported.
 
 ## 0.8.0 (2026-11-10)
 

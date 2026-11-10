@@ -449,6 +449,7 @@ public sealed class MakereadyAddTests : IDisposable
         Assert.Contains(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
         var text = Config();
         Assert.DoesNotContain("<redacted>", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("a folder the report hides", text, StringComparison.Ordinal); // the comment goes once the folder is known
         Assert.Contains("    capabilities: [dotnet, java, linux]", text, StringComparison.Ordinal);
         var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
         Assert.Equal(["/home/me/.dotnet"], added.PathPrepend);
@@ -470,6 +471,13 @@ public sealed class MakereadyAddTests : IDisposable
     [InlineData("linux", "/opt/a\nb", "/opt/a\nb", false)]
     [InlineData("linux", "/opt/a\u007fb", "/opt/a\u007fb", false)]
     [InlineData("linux", "/opt/a/\n", "/opt/a/\n", false)] // \z, not $
+    [InlineData("windows", "D:/a;b", "D:/a;b", false)] // ConfigLoader refuses ';' on Windows
+    [InlineData("windows", "D:/a:b", "D:/a:b", false)]
+    [InlineData("linux", "/opt/a:b", "/opt/a:b", false)] // and ':' on Linux
+    [InlineData("linux", "/opt/a?b", "/opt/a?b", false)] // what json_esc makes of a non-ASCII byte
+    [InlineData("linux", "/opt/caf\u00e9", "/opt/caf\u00e9", false)] // ASCII only
+    [InlineData("linux", "/opt/a\u2028b", "/opt/a\u2028b", false)] // line separator
+    [InlineData("linux", "/opt/a\u202eb", "/opt/a\u202eb", false)] // bidi override
     public void OnlyACleanSuggestedDotnetFolderIsTaken(string os, string dir, string root, bool taken)
     {
         var s = new MakereadySuggestion("old-pc", os, null, "/srv/lq", ["dotnet"], 1, null, "git", null, null, [dir], new() { ["DOTNET_ROOT"] = root });
@@ -478,6 +486,14 @@ public sealed class MakereadyAddTests : IDisposable
         Assert.Null(Cli.SuggestedDotnetDir(s with { Env = new() { ["DOTNET_ROOT"] = root, ["PATH"] = "/evil" } }));
         Assert.Null(Cli.SuggestedDotnetDir(s with { Env = null }));
         Assert.Null(Cli.SuggestedDotnetDir(s with { PathPrepend = [new string('a', 300).Insert(0, "/")], Env = new() { ["DOTNET_ROOT"] = "/" + new string('a', 300) } }));
+    }
+
+    [Fact]
+    public void ALoneSurrogateInTheFolderIsRefused()
+    {
+        var dir = "D:/a" + (char)0xD800 + "b";
+        var s = new MakereadySuggestion("old-pc", "windows", null, "C:/lq", ["dotnet"], 1, null, "git", null, null, [dir], new() { ["DOTNET_ROOT"] = dir });
+        Assert.Null(Cli.SuggestedDotnetDir(s));
     }
 
     /// <summary>Plain lanq makeready shows the folder in the suggested entry, or a comment when the report hides it.</summary>

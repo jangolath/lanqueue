@@ -289,6 +289,8 @@ public static partial class Cli
             return;
         }
 
+        item.Remove(RedactedDotnetComment); // the folder is known now
+        i = item.FindIndex(l => l.StartsWith(Caps, StringComparison.Ordinal) && l.EndsWith(']'));
         var listed = item[i][Caps.Length..^1];
         if (!listed.Split(", ").Contains(capability, StringComparer.Ordinal))
         {

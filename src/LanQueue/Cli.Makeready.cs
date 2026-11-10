@@ -34,11 +34,12 @@ public static partial class Cli
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex MachineNameRegex();
 
-    // A toolchain folder the script reports (0.3.0+): absolute, forward slashes, no quote, redaction marker or control character.
-    [GeneratedRegex(@"^[A-Za-z]:/[^""<>|?*\\\x00-\x1f\x7f]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
+    // A toolchain folder the script reports (0.3.0+): absolute, forward slashes, printable ASCII only (no Unicode line or bidi characters),
+    // and none of the characters ConfigLoader refuses in path_prepend or that would mark a redacted value: quote, backslash, < > | ? * ; :.
+    [GeneratedRegex(@"^[A-Za-z]:/[\x20-\x7e-[""<>|?*;:\\]]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex WindowsToolDirRegex();
 
-    [GeneratedRegex(@"^/[^""<>\\\x00-\x1f\x7f]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
+    [GeneratedRegex(@"^/[\x20-\x7e-[""<>|?*;:\\]]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex LinuxToolDirRegex();
 
     /// <summary>The embedded script, byte for byte as released (pinned by a test).</summary>
@@ -639,11 +640,14 @@ public static partial class Cli
         }
         else if (s.PathPrepend is not null)
         {
-            lines.Add("    # path_prepend: the newest .NET SDK is outside PATH, in a folder the report hides; lanq makeready --add looks it up");
+            lines.Add(RedactedDotnetComment);
         }
 
         return lines;
     }
+
+    internal const string RedactedDotnetComment =
+        "    # path_prepend: the newest .NET SDK is outside PATH, in a folder the report hides; lanq makeready --add looks it up";
 
     /// <summary>The script's suggested .NET SDK folder when it is usable as written (see <see cref="SuggestedItem"/>), else null.</summary>
     internal static string? SuggestedDotnetDir(MakereadySuggestion s) =>
