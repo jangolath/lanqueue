@@ -43,6 +43,7 @@ machines:
     max_jobs: 2
     transfer: git              # git (default, recommended): bundle + per-job worktree; the worker needs git
     priority: normal           # a dedicated build box; the default, low, yields to whoever uses the machine
+    # size: heavy              # optional: light, medium or heavy for --size / --min-size; leave it out to use the probed size
 
   - name: build-02
     os: windows

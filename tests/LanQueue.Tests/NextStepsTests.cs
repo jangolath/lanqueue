@@ -68,6 +68,8 @@ public sealed class NextStepsTests : IDisposable
             PlainRun,
             Args("run", "--json", "--wait", "60", "--needs", "node", "--", "npx", "jest"),
             Args("run", "--json", "--wait", "300", "--no-wake", "--config", "fleet.yml", "--mem", "4", "--timeout", "10080", "--", "npx", "jest"),
+            Args("run", "--json", "--on", "big-01,micro-01", "--min-size", "medium", "--needs", "node", "--", "npx", "jest"),
+            Args("run", "--size", "light,medium", "--wait", "30", "--on", "micro-02", "--", "npx", "jest"),
         ];
         var unreachable = new ExcludedMachine("big-01", "unreachable", "ssh: connect to host big-01 port 22: Connection refused", false);
         var lacks = new ExcludedMachine("big-01", "missing_capability", "lacks gpu (capabilities: node)", true);
@@ -148,6 +150,13 @@ public sealed class NextStepsTests : IDisposable
         foreach (var status in new[] { "Rejected", "InfraError", "Cancelled" })
         {
             yield return ($"health error {status}", NextSteps.ForHealthError(status, "message", ["node"], 4, "fleet.yml"));
+            yield return ($"health error {status} --on --size", NextSteps.ForHealthError(status, "message", ["node"], null, "fleet.yml", true, ["big-01"], SizeRule.AnyOfText("medium,heavy")));
+        }
+
+        var sized = new JobNeeds(["node"], null, false) { Size = SizeRule.AtLeastText("heavy") };
+        foreach (var h in new[] { Up(), Up() with { MemTotalGb = null } })
+        {
+            yield return ($"health --min-size {h.MemTotalGb}", NextSteps.ForHealthRow(m, h, Scheduler.Assess([(m, h)], sized)[0], null));
         }
 
         foreach (var status in new[] { "Sent", "Awake", "NoAnswer", "Rejected", "InfraError", "Cancelled" })
@@ -308,6 +317,82 @@ public sealed class NextStepsTests : IDisposable
 
         // The factories refuse even when asked: a run with --force is not a run lanq would suggest again.
         Assert.Null(SuggestedCommand.Rerun(Args("health", "--json")));
+    }
+
+    /// <summary>Every retry, wait and health step of a run with --on / --size / --min-size keeps them exactly; none is added where it was not.</summary>
+    [Fact]
+    public void RetryAndHealthKeepOnAndSize()
+    {
+        foreach (var raw in new[]
+        {
+            new[] { "run", "--json", "--on", "big-01,micro-01", "--min-size", "medium", "--needs", "node", "--", "npx", "jest", "--on", "x" },
+            ["run", "--size", "light,medium", "--wait", "30", "--on", "micro-02", "--", "npx", "jest"],
+            ["run", "--json", "--needs", "node", "--shards", "2", "--size", "heavy", "--", "npx", "jest"],
+        })
+        {
+            var p = Args(raw);
+            var steps = EveryRunStep(p).Where(s => s.Argv is not null).ToList();
+            Assert.NotEmpty(steps);
+            foreach (var s in steps)
+            {
+                var q = ParsedArgs.Parse([.. s.Argv!.Skip(1)]);
+                Assert.Equal(p.On, q.On);
+                Assert.Equal(p.Size?.Text, q.Size?.Text);
+                if (q.Command == "run")
+                {
+                    Assert.Equal(p.Argv, q.Argv); // the job's own "--on x" stays the job's
+                }
+            }
+
+            Assert.Contains(steps, s => s.Argv![1] == "health");
+        }
+
+        // A plain run never gains narrowing flags.
+        Assert.All(EveryRunStep(PlainRun).Where(s => s.Argv is not null), s => Assert.DoesNotContain(s.Argv!, a => a is "--on" or "--size" or "--min-size"));
+        Assert.Equal(
+            ["lanq", "health", "--on", "big-01", "--needs", "node", "--mem", "4", "--size", "medium,heavy", "--json", "--config", "fleet.yml"],
+            SuggestedCommand.Health(["node"], 4, "fleet.yml", ["big-01"], SizeRule.AnyOfText("heavy,medium"))!.Argv);
+    }
+
+    /// <summary>Every step lanq run (and its --shards and --dry-run forms) can give for <paramref name="p"/>.</summary>
+    private static IEnumerable<NextStepJson> EveryRunStep(ParsedArgs p)
+    {
+        var excluded = new ExcludedMachine("big-01", "busy", "busy (slots 4/4)", false);
+        var never = new ExcludedMachine("big-01", "wrong_size", "size light (config); --min-size heavy", true);
+        foreach (var o in new[]
+        {
+            Outcome("NoCapacity", 75, retryable: true, excluded: [excluded]),
+            Outcome("NoCapacity", 75, retryable: false, excluded: [never]),
+            Outcome("InfraError", 70, infra: InfraKind.Connection),
+            Outcome("InfraError", 70, infra: InfraKind.Connection, mayStillRun: true),
+            Outcome("TimedOut", 124),
+            Outcome("WindowClosed", 124),
+        })
+        {
+            foreach (var s in NextSteps.ForRun(p, o))
+            {
+                yield return s;
+            }
+        }
+
+        foreach (var s in NextSteps.ForPlan(Args([.. p.Raw.Take(1), "--dry-run", .. p.Raw.Skip(1)]), new("NoCapacity", 75, "none") { Retryable = true }))
+        {
+            yield return s;
+        }
+    }
+
+    [Fact]
+    public void PinnedNeverSuggestsDroppingOn()
+    {
+        var p = Args("run", "--json", "--on", "micro-01", "--needs", "gpu", "--", "npx", "jest");
+        var lacks = new ExcludedMachine("micro-01", "missing_capability", "lacks gpu (capabilities: node, dotnet)", true);
+        var steps = NextSteps.ForRun(p, Outcome("NoCapacity", 75, retryable: false, excluded: [lacks]));
+
+        Assert.Equal(["ask_developer", "run_health"], steps.Select(s => s.Action));
+        Assert.Equal("--on micro-01 cannot ever take this job: micro-01: lacks gpu (capabilities: node, dotnet); pick another machine or drop --on", steps[0].Reason);
+        Assert.Null(steps[0].Argv); // text only: only the developer decides to drop --on
+        Assert.Equal(["lanq", "health", "--on", "micro-01", "--needs", "gpu", "--json"], steps[1].Argv);
+        Assert.All(EveryRunStep(p).Where(s => s.Argv is not null), s => Assert.Equal(["micro-01"], ParsedArgs.Parse([.. s.Argv!.Skip(1)]).On));
     }
 
     [Theory]

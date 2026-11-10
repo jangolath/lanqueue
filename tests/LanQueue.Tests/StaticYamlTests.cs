@@ -40,6 +40,7 @@ public sealed class StaticYamlTests
             priority: normal
             allowed_hours: "22:00-07:00"
             transfer: archive
+            size: Heavy
             wake:
               mac: "aa:bb:cc:dd:ee:01"
               broadcast: 10.20.30.255
@@ -82,6 +83,8 @@ public sealed class StaticYamlTests
         Assert.Equal(JobPriority.Normal, lin.Priority);
         Assert.Equal(["22:00-07:00"], lin.AllowedHours!);
         Assert.Equal(TransferMode.Archive, lin.Transfer);
+        Assert.Equal(LanQueue.Health.SizeClass.Heavy, LanQueue.Health.MachineSize.Declared(lin));
+        Assert.Null(LanQueue.Health.MachineSize.Declared(c.Machines[1]));
         Assert.Equal(("aa:bb:cc:dd:ee:01", "10.20.30.255", 7, 90), (lin.Wake!.Mac, lin.Wake.Broadcast, lin.Wake.Port, lin.Wake.WaitSeconds));
 
         var win = c.Machines[1];

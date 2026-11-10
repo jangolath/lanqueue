@@ -70,10 +70,18 @@ internal sealed class SuggestedCommand
 
     public bool SafeToRunUnattended { get; }
 
-    /// <summary>lanq health [--needs a,b] [--mem N] --json [--config FILE]: read-only, safe.</summary>
-    public static SuggestedCommand? Health(IReadOnlyCollection<string> needs, double? memGb, string? config)
+    /// <summary>
+    /// lanq health [--on m,n] [--needs a,b] [--mem N] [--size C,C | --min-size C] --json [--config FILE]: read-only, safe. --on, --size and
+    /// --min-size are passed on exactly as the command that produced the step had them (never added or dropped).
+    /// </summary>
+    public static SuggestedCommand? Health(IReadOnlyCollection<string> needs, double? memGb, string? config, IReadOnlyList<string>? on = null, SizeRule? size = null)
     {
         List<string> argv = ["lanq", "health"];
+        if (on is { Count: > 0 })
+        {
+            argv.AddRange(["--on", string.Join(',', on)]);
+        }
+
         if (needs.Count > 0)
         {
             argv.AddRange(["--needs", string.Join(',', needs)]);
@@ -82,6 +90,11 @@ internal sealed class SuggestedCommand
         if (memGb is { } mem)
         {
             argv.AddRange(["--mem", mem.ToString(CultureInfo.InvariantCulture)]);
+        }
+
+        if (size is not null)
+        {
+            argv.AddRange([size.Option, size.Value]);
         }
 
         argv.Add("--json");
@@ -277,10 +290,13 @@ internal static class NextSteps
     internal static RunOutcome Outcome(JobResult r) => new(
         r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath);
 
+    /// <summary>lanq health judging a job like the one of <paramref name="p"/>: its --on, --needs, --mem, --size / --min-size and --config.</summary>
+    private static SuggestedCommand? HealthFor(ParsedArgs p) => SuggestedCommand.Health(p.Needs, p.MemGb, p.ConfigPath, p.On, p.Size);
+
     /// <summary>lanq run (one job) or an error object of lanq run: the steps for its status (see docs/JSON.md).</summary>
     public static List<NextStepJson> ForRun(ParsedArgs p, RunOutcome o)
     {
-        var health = SuggestedCommand.Health(p.Needs, p.MemGb, p.ConfigPath);
+        var health = HealthFor(p);
         switch (o.Status)
         {
             case nameof(JobStatus.Completed):
@@ -333,7 +349,7 @@ internal static class NextSteps
                     NextAction.AskDeveloper,
                     "the job may still be running on " + string.Join(", ", stillRunning.Select(s => s.Machine ?? "?").Distinct(StringComparer.Ordinal))
                         + " (the ssh connection dropped and its cleanup did not finish); do not re-run before it has stopped"));
-                steps.Add(Step(NextAction.RunHealth, "see which machines answer now", SuggestedCommand.Health(p.Needs, p.MemGb, p.ConfigPath)));
+                steps.Add(Step(NextAction.RunHealth, "see which machines answer now", HealthFor(p)));
                 retry = null;
             }
 
@@ -365,7 +381,7 @@ internal static class NextSteps
             return
             [
                 Step(NextAction.Wait, "no machine could take the job now; machines may free up, so check again later", SuggestedCommand.DryRun(p)),
-                Step(NextAction.RunHealth, "see how each machine is judged for this job", SuggestedCommand.Health(p.Needs, p.MemGb, p.ConfigPath)),
+                Step(NextAction.RunHealth, "see how each machine is judged for this job", HealthFor(p)),
             ];
         }
 
@@ -393,13 +409,24 @@ internal static class NextSteps
 
     private static List<NextStepJson> NoCapacity(ParsedArgs p, bool retryable, IReadOnlyList<ExcludedMachine> excluded, SuggestedCommand? health)
     {
+        if (!retryable && p.On is { Count: > 0 } on)
+        {
+            // Pinned: say so plainly; the suggested health keeps --on (a suggestion never drops it, only the developer may).
+            var lacks = string.Join("; ", excluded.Select(x => $"{x.Machine}: {x.Why}"));
+            return
+            [
+                Step(NextAction.AskDeveloper, $"--on {string.Join(',', on)} cannot ever take this job" + (lacks.Length > 0 ? ": " + lacks : "") + "; pick another machine or drop --on"),
+                Step(NextAction.RunHealth, "see how each machine is judged for this job", health),
+            ];
+        }
+
         if (!retryable)
         {
             var why = string.Join("; ", excluded.Select(x => $"{x.Machine}: {x.Why}"));
             return
             [
                 Step(NextAction.AskDeveloper, "no machine can ever take this job as configured, so waiting will not help" + (why.Length > 0 ? " (" + why + ")" : "")
-                    + "; a machine needs the capability or the memory, or the job needs other --needs or --mem"),
+                    + "; a machine needs the capability, the size or the memory, or the job needs other --needs, --size / --min-size or --mem"),
                 Step(NextAction.RunHealth, "see how each machine is judged for this job", health),
             ];
         }
@@ -458,7 +485,8 @@ internal static class NextSteps
     public static List<NextStepJson> ForHealthRow(Machine m, MachineHealth h, Assessment? a, string? config, bool json = false)
     {
         var name = m.Name;
-        if (a is { Eligible: false } job && job.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal or Exclusion.MemUnknown)
+        if (a is { Eligible: false } job && job.Reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal
+            or Exclusion.MemUnknown or Exclusion.SizeUnknown)
         {
             return [Step(NextAction.AskDeveloper, $"{name} can never take such a job as configured: {job.Why}")];
         }
@@ -503,9 +531,10 @@ internal static class NextSteps
     }
 
     /// <summary>lanq health's error object: Rejected (arguments or config), InfraError (retry the same read-only health), Cancelled.</summary>
-    public static List<NextStepJson> ForHealthError(string status, string message, IReadOnlyCollection<string> needs, double? memGb, string? config, bool json = false) => status switch
+    public static List<NextStepJson> ForHealthError(
+        string status, string message, IReadOnlyCollection<string> needs, double? memGb, string? config, bool json = false, IReadOnlyList<string>? on = null, SizeRule? size = null) => status switch
     {
-        "InfraError" => [Step(NextAction.Retry, "lanq health broke unexpectedly (" + message + "); try once more", SuggestedCommand.Health(needs, memGb, config))],
+        "InfraError" => [Step(NextAction.Retry, "lanq health broke unexpectedly (" + message + "); try once more", SuggestedCommand.Health(needs, memGb, config, on, size))],
         "Cancelled" => Nothing("cancelled (Ctrl+C)"),
         _ => [Step(NextAction.AskDeveloper, message), Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config, json))],
     };

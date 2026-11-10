@@ -178,7 +178,7 @@ public sealed partial class JobRunner
     /// </summary>
     private async Task<(int Count, ShardTimingResult? Timing)> AutoShardCountAsync(JobRequest template, int? targetMinutes, CancellationToken ct)
     {
-        var (_, assessed) = await ProbeForJobAsync(ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
+        var (_, assessed) = await ProbeForJobAsync(Candidates(template), ShardNeeds(template, [new ShardInfo(1, 1)]), ct).ConfigureAwait(false);
         var (n, freeWhy, timing) = PickShardCount(template, assessed, targetMinutes);
         output(string.Create(CultureInfo.InvariantCulture, $"[lanq] --shards auto: {n} shard(s) ({ShardTiming.ShardCountWhy(timing, freeWhy)})"));
         return (n, timing);
@@ -203,9 +203,9 @@ public sealed partial class JobRunner
         return (timing.Picked, why, timing);
     }
 
-    /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
+    /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, its size rule, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
     private static JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
-        new(template.Needs, template.MinMemGb, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
+        NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
 
     /// <summary>
     /// The machines shards can go to now, in rank order, each with its free slots for this job (<see cref="Scheduler.FreeFor"/>, counting
@@ -326,6 +326,7 @@ public sealed partial class JobRunner
 
         var needs = ShardNeeds(template, shards);
         var gitCanEverTakeIt = GitCanEverTakeIt(template);
+        var candidates = Candidates(template);
         var states = shards.Select(s => new ShardState(s)).ToList();
         var pending = new List<ShardState>(states);
         var running = new Dictionary<Task<Attempt>, Running>();
@@ -403,7 +404,7 @@ public sealed partial class JobRunner
                     MachineHealth[] probes;
                     try
                     {
-                        (probes, assessed) = await ProbeForJobAsync(needs, stop.Token).ConfigureAwait(false);
+                        (probes, assessed) = await ProbeForJobAsync(candidates, needs, stop.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (stop.IsCancellationRequested)
                     {
@@ -427,11 +428,11 @@ public sealed partial class JobRunner
                     if (pending.Count > 0 && assessed.All(a => a.Permanent))
                     {
                         // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish).
-                        EndWaiting(NoCapacity("shard", AssessForWaiting(config.Machines.Zip(probes), needs, pending), ArchiveNote()));
+                        EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()));
                     }
                     else if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
                     {
-                        await WakeBestSleeperAsync(needs, probes, assessed, prepared.Archive, stop.Token).ConfigureAwait(false);
+                        await WakeBestSleeperAsync(candidates, needs, probes, assessed, prepared.Archive, stop.Token).ConfigureAwait(false);
                     }
                 }
 
@@ -442,7 +443,7 @@ public sealed partial class JobRunner
                 }
                 else if (pending.Count > 0 && running.Count == 0 && idle.Elapsed >= template.Wait)
                 {
-                    EndWaiting(NoCapacity("shard", AssessForWaiting(config.Machines.Zip(lastProbes), needs, pending), ArchiveNote()));
+                    EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()));
                     break;
                 }
 

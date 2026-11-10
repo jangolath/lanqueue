@@ -332,7 +332,8 @@ public static partial class Cli
         m.Priority,
         m.AllowedHours is null ? "-" : string.Join(',', m.AllowedHours),
         m.Transfer,
-        m.Wake is { } w ? string.Create(CultureInfo.InvariantCulture, $"{w.Mac}/{w.Broadcast}/{w.Port}/{w.WaitSeconds}") : "-");
+        m.Wake is { } w ? string.Create(CultureInfo.InvariantCulture, $"{w.Mac}/{w.Broadcast}/{w.Port}/{w.WaitSeconds}") : "-",
+        m.Size ?? "-");
 
     private static string Describe(PolicyConfig p) => string.Join(
         "\u001f",

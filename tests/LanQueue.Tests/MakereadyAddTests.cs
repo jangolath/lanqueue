@@ -238,7 +238,7 @@ public sealed class MakereadyAddTests : IDisposable
     /// <summary>The comparison covers every machine setting: a new property on Machine must be added to Cli.Describe too.</summary>
     [Fact]
     public void TheMachineComparisonCoversEveryProperty() =>
-        Assert.Equal(14, typeof(Machine).GetProperties().Length);
+        Assert.Equal(15, typeof(Machine).GetProperties().Length);
 
     [Fact]
     public async Task AddNeedsYesWithoutATerminalAndWithJson()

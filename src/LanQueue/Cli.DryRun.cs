@@ -35,10 +35,7 @@ public static partial class Cli
         // plan prints nothing while it works.
         var probe = new HealthProbe(ssh, time);
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), _ => { }, clock: time);
-        var req = new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb)
-        {
-            NoWake = p.NoWake,
-        };
+        var req = RequestOf(p, repoDir, null);
 
         JobPlan plan;
         try
@@ -82,7 +79,9 @@ public static partial class Cli
             : "command line clean; no snapshot taken, lanq run would end before it";
         Line($"Command:  {JobRunner.SafeLine(string.Join(' ', p.Argv))}   (allowed by \"{JobRunner.SafeLine(plan.AllowedBy ?? "?")}\"; dir {JobRunner.SafeLine(p.Directory)}; secret scan: {scan})");
         Line("Needs:    " + (p.Needs.Count > 0 ? JobRunner.SafeLine(string.Join(", ", p.Needs)) : "(nothing)")
-            + (p.MemGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"   --mem {mem}") : ""));
+            + (p.MemGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"   --mem {mem}") : "")
+            + (p.Size is { } size ? "   " + size.Text : "")
+            + (p.On is { } on ? "   --on " + JobRunner.SafeLine(string.Join(',', on)) + " (only these machines)" : ""));
         if (OptionsText(p) is { } options)
         {
             Line("Options:  " + options);
@@ -127,7 +126,9 @@ public static partial class Cli
             var whyWidth = Math.Max(53, excluded.Max(a => JobRunner.SafeLine(JobRunner.WhyNot(a)).Length) + 2);
             foreach (var a in excluded)
             {
-                var when = !a.Permanent ? "can change" : a.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs ? "never (config)" : "never (machine)";
+                var byConfig = a.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs
+                    || (a.Reason == Exclusion.WrongSize && MachineSize.Declared(a.Machine) is not null);
+                var when = !a.Permanent ? "can change" : byConfig ? "never (config)" : "never (machine)";
                 Line($"  {JobRunner.SafeLine(a.Machine.Name).PadRight(nameWidth)}{JobRunner.SafeLine(JobRunner.WhyNot(a)).PadRight(whyWidth)}{when}");
             }
         }

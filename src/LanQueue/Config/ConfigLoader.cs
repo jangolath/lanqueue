@@ -338,6 +338,11 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': transfer must be 'git' or 'archive'.");
             }
 
+            if (m.Size is not null && Health.MachineSize.Declared(m) is null)
+            {
+                throw new ConfigException($"Machine '{m.Name}': size must be light, medium or heavy (or leave it out to use the probed size).");
+            }
+
             if (m.MinFreeMemGb is { } minMem && (!double.IsFinite(minMem) || minMem < 0))
             {
                 throw new ConfigException($"Machine '{m.Name}': min_free_mem_gb must be >= 0.");

@@ -83,6 +83,15 @@ public sealed record JobRequest(
     /// <summary>The id every shard of one --shards run records (the run's payload id); null for a single run.</summary>
     public string? RunId { get; init; }
 
+    /// <summary>
+    /// lanq run --on: the only machines the job may use (names matched ignoring case; an unknown name refuses the run before any network),
+    /// or null for every machine. It only narrows: every other rule (capabilities, size, --mem, holds, slots, Windows, wake) still applies.
+    /// </summary>
+    public IReadOnlyList<string>? On { get; init; }
+
+    /// <summary>lanq run --size / --min-size: the machine size classes the job may run on, or null for any.</summary>
+    public SizeRule? Size { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -195,9 +204,23 @@ public sealed partial class JobRunner(
         }
     }
 
-    /// <summary>The checks on the command line alone (policy, secrets in it, Windows-safe arguments), before any network or git work; null when it may run.</summary>
+    /// <summary>
+    /// The machines this job may use, in config order: every machine, or with --on only those named (<see cref="Pinning.Candidates"/>). Every
+    /// probe, judgement and wake of the job looks at these only; probe arrays are index-aligned with this list.
+    /// </summary>
+    private List<Machine> Candidates(JobRequest req) => Pinning.Candidates(config, req.On);
+
+    /// <summary>What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>).</summary>
+    private static JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe) { Size = req.Size };
+
+    /// <summary>The checks on the command line alone (--on names, policy, secrets in it, Windows-safe arguments), before any network or git work; null when it may run.</summary>
     private JobResult? Precheck(string jobId, JobRequest req)
     {
+        if (Pinning.Resolve(config, req.On).Error is { } unknown)
+        {
+            return new JobResult(jobId, JobStatus.Rejected, 2, null, unknown) { RejectKind = Jobs.RejectKind.Arguments };
+        }
+
         var policy = JobPolicy.Validate(config.Policy, req.Argv, req.Directory);
         if (!policy.Ok)
         {
@@ -214,7 +237,7 @@ public sealed partial class JobRunner(
         // Arguments that cmd.exe shims would re-parse can still run on a Linux worker; refuse only when no non-Windows machine has
         // the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
-        if (!windows.Ok && !config.Machines.Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
         {
             return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!) { RejectKind = Jobs.RejectKind.WindowsArgs };
         }
@@ -224,13 +247,32 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>
-    /// When no machine in the config has every capability the job needs: each machine judged from the config alone (never probed), all
-    /// permanently ruled out. Null when at least one machine has them.
+    /// When the config alone rules out every candidate machine (<see cref="Candidates"/>): each lacks a capability the job needs or has a
+    /// declared size: outside --size / --min-size. Each judged from the config alone (never probed), all permanently ruled out. Null when at
+    /// least one candidate could take the job as far as the config says.
     /// </summary>
-    private List<Assessment>? NeverByConfig(JobRequest req) =>
-        config.Machines.Any(m => HasCapabilities(m, req.Needs))
-            ? null
-            : [.. config.Machines.Select(m => new Assessment(m, Unprobed(m), Exclusion.MissingCapability, Eligibility.Lacks(m, Eligibility.Missing(m, req.Needs)), true, 0, 0))];
+    private List<Assessment>? NeverByConfig(JobRequest req)
+    {
+        var judged = new List<Assessment>();
+        foreach (var m in Candidates(req))
+        {
+            var missing = Eligibility.Missing(m, req.Needs);
+            if (missing.Count > 0)
+            {
+                judged.Add(new Assessment(m, Unprobed(m), Exclusion.MissingCapability, Eligibility.Lacks(m, missing), true, 0, 0));
+            }
+            else if (Eligibility.DeclaredSizeMismatch(m, req.Size) is { } wrongSize)
+            {
+                judged.Add(new Assessment(m, Unprobed(m), Exclusion.WrongSize, wrongSize, true, 0, 0));
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        return judged;
+    }
 
     /// <summary>
     /// The per-shard command-line checks of lanq run --shards (<see cref="Precheck"/> on each shard's substituted arguments, in index order):
@@ -259,7 +301,7 @@ public sealed partial class JobRunner(
     private async Task<(PreparedPayload? Prepared, JobResult? Failed)> PrepareAsync(string payloadId, JobRequest req, Action<string> emit, CancellationToken ct)
     {
         // Only the snapshot is built up front; a bundle or archive is built lazily, when a machine of that kind actually gets the job.
-        var kinds = config.Machines.Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
+        var kinds = Candidates(req).Any(m => m.Transfer == TransferMode.Git) ? PayloadKinds.Bundle : PayloadKinds.None;
         var (payload, failed) = await SnapshotAndScanAsync(payloadId, req, kinds, ct).ConfigureAwait(false);
         if (payload is null)
         {
@@ -398,11 +440,12 @@ public sealed partial class JobRunner(
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
-        var needs = new JobNeeds(req.Needs, req.MinMemGb, !JobPolicy.ValidateForWindows(req.Argv).Ok);
+        var needs = NeedsOf(req, !JobPolicy.ValidateForWindows(req.Argv).Ok);
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
+        var candidates = Candidates(req);
         while (true)
         {
-            var (probes, assessed) = await ProbeForJobAsync(needs, ct).ConfigureAwait(false);
+            var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
             foreach (var a in ranked)
             {
@@ -423,7 +466,7 @@ public sealed partial class JobRunner(
             // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
             if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
             {
-                await WakeBestSleeperAsync(needs, probes, assessed, archive, ct).ConfigureAwait(false);
+                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, ct).ConfigureAwait(false);
             }
 
             if (deadline.Elapsed >= req.Wait)
@@ -436,18 +479,22 @@ public sealed partial class JobRunner(
         }
     }
 
-    /// <summary>Static property of the config: can any git-transfer machine ever take this job (capabilities only; load, hours and slots are temporary)?</summary>
+    /// <summary>
+    /// Static property of the config: can any git-transfer candidate ever take this job (capabilities and a declared size: only; load, hours
+    /// and slots are temporary)?
+    /// </summary>
     private bool GitCanEverTakeIt(JobRequest req) =>
-        config.Machines.Any(m => m.Transfer == TransferMode.Git && HasCapabilities(m, req.Needs));
+        Candidates(req).Any(m => m.Transfer == TransferMode.Git && HasCapabilities(m, req.Needs) && Eligibility.DeclaredSizeMismatch(m, req.Size) is null);
 
     /// <summary>
-    /// Probes every machine at once (WhenAll keeps the config order whatever order the answers arrive in), then judges each one for this job
-    /// (<see cref="Scheduler.Assess"/>): the raw probe results, and the assessments in config order.
+    /// Probes every machine of <paramref name="machines"/> (the job's <see cref="Candidates"/>) at once (WhenAll keeps their order whatever
+    /// order the answers arrive in), then judges each one for this job (<see cref="Scheduler.Assess"/>): the raw probe results and the
+    /// assessments, both index-aligned with <paramref name="machines"/>.
     /// </summary>
-    private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(JobNeeds needs, CancellationToken ct)
+    private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(IReadOnlyList<Machine> machines, JobNeeds needs, CancellationToken ct)
     {
-        var probes = await Task.WhenAll(config.Machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
-        return (probes, Scheduler.Assess(config.Machines.Zip(probes), needs));
+        var probes = await Task.WhenAll(machines.Select(m => probe.ProbeAsync(m, config.Policy, ct))).ConfigureAwait(false);
+        return (probes, Scheduler.Assess(machines.Zip(probes), needs));
     }
 
     /// <summary>
@@ -457,6 +504,7 @@ public sealed partial class JobRunner(
     /// </summary>
     internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
         m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
+        && Eligibility.DeclaredSizeMismatch(m, needs.Size) is null
         && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !(m.Transfer == TransferMode.Archive && archiveFailed);
 
     /// <summary>
@@ -464,11 +512,13 @@ public sealed partial class JobRunner(
     /// the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the new result in <paramref name="probes"/>
     /// and is judged again in <paramref name="assessed"/>.
     /// </summary>
-    private async Task WakeBestSleeperAsync(JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, CancellationToken ct)
+    /// <param name="machines">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> and <paramref name="assessed"/> are index-aligned with it.</param>
+    private async Task WakeBestSleeperAsync(
+        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, CancellationToken ct)
     {
-        foreach (var i in WakeOrder())
+        foreach (var i in WakeOrder(machines))
         {
-            var m = config.Machines[i];
+            var m = machines[i];
             if (!CouldWakeFor(m, probes[i], needs, archive.Failure is not null))
             {
                 continue;
@@ -490,8 +540,8 @@ public sealed partial class JobRunner(
         }
     }
 
-    /// <summary>The order sleepers are considered for a wake: the indexes of the config's machines, by name (ordinal).</summary>
-    private IEnumerable<int> WakeOrder() => Enumerable.Range(0, config.Machines.Count).OrderBy(i => config.Machines[i].Name, StringComparer.Ordinal);
+    /// <summary>The order sleepers are considered for a wake: the indexes of <paramref name="machines"/> (the job's candidates), by name (ordinal).</summary>
+    private static IEnumerable<int> WakeOrder(IReadOnlyList<Machine> machines) => Enumerable.Range(0, machines.Count).OrderBy(i => machines[i].Name, StringComparer.Ordinal);
 
     /// <summary>Returns null when the machine had no free slot (caller tries the next one).</summary>
     /// <param name="emit">Where this job's lines go (lanq's own and the job's output, already sanitised).</param>

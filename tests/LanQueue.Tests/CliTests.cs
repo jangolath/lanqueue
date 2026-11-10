@@ -57,11 +57,53 @@ public class CliTests
     [InlineData("lanq doctor [--remote")]
     [InlineData("lanq doctor [--remote [--force]] [--json] [--config FILE]")]
     [InlineData("--json: the lines go to stderr and")]
+    [InlineData("lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test")]
+    [InlineData("lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]")]
+    [InlineData("--min-size light|medium|heavy (that class or larger) or --size C[,C] (one of these classes)")]
+    [InlineData("--on m[,m] uses only the")]
     public async Task UsageListsEveryCommandAndOption(string text)
     {
         var o = new StringWriter();
         Assert.Equal(0, await Cli.RunAsync(["--help"], o, new StringWriter(), CancellationToken.None));
         Assert.Contains(text, o.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("run", "--size", "light", "--min-size", "medium", "--", "npx", "jest")]
+    [InlineData("run", "--min-size", "medium", "--size", "light", "--", "npx", "jest")]
+    [InlineData("health", "--size", "light", "--min-size", "medium")]
+    public void SizeAndMinSizeTogetherAreRefused(params string[] args)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(args));
+        Assert.Equal("--size and --min-size do not go together; --size light,medium or --min-size medium.", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("stats", "--on", "big-01")]
+    [InlineData("doctor", "--min-size", "heavy")]
+    [InlineData("makeready", "big-01", "--size", "light")]
+    [InlineData("health", "--plan")]
+    [InlineData("health", "--only", "build")]
+    [InlineData("run", "--only", "build", "--", "npx", "jest")] // --only goes with --plan
+    [InlineData("run", "--plan", "--", "npx", "jest")]
+    [InlineData("run", "--plan", "--needs", "node")]
+    [InlineData("run", "--plan-file", "ci/lanq.yml", "--shards", "2")]
+    [InlineData("run", "--plan", "--on", "big-01")]
+    [InlineData("run", "--plan", "--fetch", "x")]
+    public void RoutingAndPlanOptionsStayWhereTheyBelong(params string[] args) =>
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(args));
+
+    [Fact]
+    public void PlanOptionsParse()
+    {
+        var p = ParsedArgs.Parse(["run", "--plan-file", "ci/lanq.yml", "--only", "build, unit", "--fail-fast", "--wait", "60", "--no-wake", "--json"]);
+        Assert.True(p.Plan);
+        Assert.Equal("ci/lanq.yml", p.PlanFile);
+        Assert.Equal(["build", "unit"], p.Only);
+        Assert.True(p.FailFast);
+        Assert.Null(p.Shards); // --fail-fast without --shards is the plan's own, not refused
+        Assert.True(ParsedArgs.Parse(["run", "--plan"]).Plan);
+        Assert.False(ParsedArgs.Parse(["run", "--", "npx", "jest"]).Plan);
     }
 
     [Fact]

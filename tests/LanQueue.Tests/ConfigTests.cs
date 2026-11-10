@@ -40,6 +40,40 @@ public class ConfigTests
         Assert.DoesNotContain("YamlSerializable", ex.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("light", Health.SizeClass.Light)]
+    [InlineData("medium", Health.SizeClass.Medium)]
+    [InlineData("heavy", Health.SizeClass.Heavy)]
+    [InlineData("Heavy", Health.SizeClass.Heavy)]
+    [InlineData("\"medium\"", Health.SizeClass.Medium)]
+    public void SizeAcceptsLightMediumHeavy(string value, Health.SizeClass expected)
+    {
+        var c = ConfigLoader.Parse(T.Yaml.Replace("max_jobs: 2", "max_jobs: 2\n    size: " + value, StringComparison.Ordinal));
+        Assert.Equal(expected, Health.MachineSize.Declared(c.Machines[0]));
+        Assert.Null(Health.MachineSize.Declared(c.Machines[1])); // no size: the probe decides
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("huge")]
+    [InlineData("16")]
+    [InlineData("\"\"")]
+    [InlineData("light,heavy")]
+    public void SizeUnknownOrNumberIsRefused(string value)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace("max_jobs: 2", "max_jobs: 2\n    size: " + value, StringComparison.Ordinal)));
+        Assert.Equal("Machine 'build-01': size must be light, medium or heavy (or leave it out to use the probed size).", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("size:", "has no value")]
+    [InlineData("size: [heavy]", "wrong shape")]
+    public void SizeMustBeOneWord(string line, string expected)
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(T.Yaml.Replace("max_jobs: 2", "max_jobs: 2\n    " + line, StringComparison.Ordinal)));
+        Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void PasswordFieldIsRefusedAsUnknownKey()
     {

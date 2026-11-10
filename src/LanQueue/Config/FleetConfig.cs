@@ -94,6 +94,12 @@ public sealed class Machine
 
     /// <summary>Wake-on-LAN settings; null (the default) means lanq never sends a magic packet to this machine automatically.</summary>
     public WakeConfig? Wake { get; set; }
+
+    /// <summary>
+    /// size: light, medium or heavy (any case), for --size / --min-size; null (the default) means the probed class (memory and cores). A
+    /// word rather than an enum so that the error names the machine; read it through Health.MachineSize.Declared.
+    /// </summary>
+    public string? Size { get; set; }
 }
 
 public sealed class FleetConfig

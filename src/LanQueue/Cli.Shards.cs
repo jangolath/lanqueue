@@ -93,7 +93,7 @@ public static partial class Cli
         try
         {
             result = await runner.RunShardsAsync(
-                new JobRequest(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch) { NoWake = p.NoWake },
+                RequestOf(p, repoDir, fetch),
                 options,
                 ct).ConfigureAwait(false);
         }

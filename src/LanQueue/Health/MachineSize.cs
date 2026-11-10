@@ -45,10 +45,37 @@ public static class MachineSize
         _ => SizeClass.Medium,
     };
 
-    /// <summary>The "suited for" text, word for word as lanq-makeready prints it, plus " + container builds" with a docker capability.</summary>
+    /// <summary>The words a machine's size: key and --size / --min-size accept (lower case; matched ignoring case).</summary>
+    public static readonly string[] Words = ["light", "medium", "heavy"];
+
+    /// <summary>Light, Medium or Heavy for one of <see cref="Words"/> (any case); null for anything else (unknown included).</summary>
+    public static SizeClass? Parse(string? word) => word?.ToLowerInvariant() switch
+    {
+        "light" => SizeClass.Light,
+        "medium" => SizeClass.Medium,
+        "heavy" => SizeClass.Heavy,
+        _ => null,
+    };
+
+    /// <summary>The class as lanq prints it: light, medium, heavy or unknown.</summary>
+    public static string Word(SizeClass size) => size.ToString().ToLowerInvariant();
+
+    /// <summary>The machine's size: key from machines.yml (validated by ConfigLoader), or null when it has none (the probe decides).</summary>
+    public static SizeClass? Declared(Machine machine) => Parse(machine.Size);
+
+    /// <summary>
+    /// The size lanq routes by: the machine's size: key when it has one (for example a 16 GB laptop someone works on, declared medium), else
+    /// the probed class (<see cref="Classify"/>).
+    /// </summary>
+    public static SizeClass Effective(Machine machine, double? memTotalGb, int? cores) => Declared(machine) ?? Classify(memTotalGb, cores);
+
+    /// <summary>
+    /// The "suited for" text, word for word as lanq-makeready prints it, plus " + container builds" with a docker capability. The class is
+    /// the effective one (<see cref="Effective"/>): a declared size: wins over the probe.
+    /// </summary>
     public static string SuitedFor(Machine machine, double? memTotalGb, int? cores)
     {
-        var size = Classify(memTotalGb, cores);
+        var size = Effective(machine, memTotalGb, cores);
         var text = size switch
         {
             SizeClass.Light => "light: lint and unit-test shards",

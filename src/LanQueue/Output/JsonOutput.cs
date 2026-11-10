@@ -30,8 +30,14 @@ internal record HealthJson(
     /// <summary>max_jobs minus the slots in use (0 for a machine that is down).</summary>
     public int FreeSlots { get; init; }
 
-    /// <summary>light, medium, heavy or unknown (see <see cref="Health.MachineSize"/>).</summary>
+    /// <summary>
+    /// light, medium, heavy or unknown: the machine's effective size (its size: in machines.yml when it has one, else the probed class; see
+    /// <see cref="Health.MachineSize"/>).
+    /// </summary>
     public string Size { get; init; } = "unknown";
+
+    /// <summary>Where <see cref="Size"/> came from: "probe" (memory and cores) or "config" (the machine's size: key). Always present.</summary>
+    public string SizeSource { get; init; } = "probe";
 
     /// <summary>What the machine suits, in lanq-makeready's words, for example "light: lint and unit-test shards + container builds".</summary>
     public string SuitedFor { get; init; } = "";
