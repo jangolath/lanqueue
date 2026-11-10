@@ -38,50 +38,88 @@ public static partial class RemoteScripts
             throw new ArgumentException("No search is known for this tool.", nameof(tool));
         }
 
-        return m.Os == MachineOs.Windows
-            ? $$"""
-                {{FindToolchainMarker}} dotnet
-                $sw=[Diagnostics.Stopwatch]::StartNew();$seen=@{};try{$me=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}catch{$me=0}
-                function T{$sw.Elapsed.TotalSeconds -gt 5}
-                function Ok($s,$k){$t='^(BA|SY|CO|OW|S-1-5-(32-544|18|80-956008885-3418522649-1831038044-1853292631-2271478464)|S-1-3-[04]|'+[regex]::Escape($me)+')$'
-                if($s -notmatch '^O:([^G]+)G:' -or $Matches[1] -notmatch $t -or $s -notmatch 'D:' -or $s -match 'D:[A-Z]*NO_A'){return 0}
-                foreach($m in [regex]::Matches(($s -replace '^.*?D:' -replace 'S:.*'),'\((O|X|Z)?A;([^;]*);([^;]*);[^;]*;[^;]*;([^;)]+)')){if($m.Groups[4].Value -match $t -or($k -and $m.Groups[2].Value -match 'IO')){continue};$r=$m.Groups[3].Value;$q=+($k -eq 1)
-                if($k){$x=0x100C0040+0x10000*$q;$c='DT|WD|WO|GA|FA'+'|SD'*$q}else{$x=0x5FEDFF56;$c='(?!CC|SW|WP|LT|RC|GR|GX|FR|FX)..'}
-                if($r -match '^0x(.{1,8})$'){if([Convert]::ToInt64($Matches[1],16) -band $x){return 0} }elseif($r -match "^(..)*?($c)"){return 0} };1}
-                function Safe($d,$v){$a=@(($d,0),("$d\dotnet.exe",0),("$d\sdk\$v",0))
-                foreach($h in @("$d\host","$d\host\fxr")+@(gci -Li "$d\host\fxr" -ad -EA 0|%{$_.FullName})){if(Test-Path -Li $h){$a+=,($h,0)} }
-                $p=$d -split '\\';for($i=$p.Count-2;$i -ge 0;$i--){$a+=,($(if($i){$p[0..$i] -join '\'}else{"$($p[0])\"}),$(if($i){1}else{2}))}
-                foreach($e in $a){try{$s="$((Get-Acl -Li $e[0] -EA Stop).Sddl)"}catch{return 0};if(!(Ok $s $e[1])){return 0} };1}
-                function Sdk($d){if(!$d -or(T)){return};$d="$d".Trim().TrimEnd('\','/');if($seen[$d]){return};$seen[$d]=1
-                if(!(Test-Path -Li "$d\dotnet.exe")){return}
-                $v=@(gci -Li "$d\sdk" -ad -EA 0|?{$_.Name -match '^\d+\.\d+\.\d+' -and(Test-Path -Li "$($_.FullName)\dotnet.dll")}|%{$_.Name})
-                if($v.Count){$b=$v|sort{[version](($_ -split '-')[0])}|select -Last 1;$(if(Safe $d $b){'found'}else{'open'})+'.dotnet='+$d.Replace('\','/')+'|'+$b} }
-                foreach($d in @($env:DOTNET_ROOT,$env:DOTNET_ROOT_X64,$env:DOTNET_ROOT_ARM64,"$env:ProgramFiles\dotnet","${env:ProgramFiles(x86)}\dotnet","$env:LOCALAPPDATA\Microsoft\dotnet","$env:USERPROFILE\.dotnet")){Sdk $d}
-                foreach($a in 'x64','arm64','x86'){try{Sdk (gp "HKLM:\SOFTWARE\dotnet\Setup\InstalledVersions\$a" -EA Stop).InstallLocation}catch{} }
-                foreach($r in @([IO.DriveInfo]::GetDrives()|?{"$($_.DriveType)" -eq 'Fixed' -and $_.IsReady})){if(T){break};Sdk "$($r.Name)dotnet";$n=0
-                try{foreach($x in [IO.Directory]::EnumerateDirectories($r.Name)){if(++$n -gt 64 -or(T)){break};Sdk "$x\dotnet"} }catch{} }
-                try{if(!@(dotnet --list-sdks 2>$null)){$v=@(dotnet --list-runtimes 2>$null) -match '^Microsoft.NETCore.App ';if($v){'runtime.dotnet='+($v[-1] -split ' ')[1]} } }catch{}
+        return FindToolchainMarker + " dotnet\n" + (m.Os == MachineOs.Windows ? WindowsDotnetSearch : LinuxDotnetSearch);
+    }
+
+    /// <summary>The script lanq sends on stdin (see <see cref="FindToolchainCommand"/>): it runs from memory, so no command-line limit applies.</summary>
+    internal static string FindToolchainCommand(MachineOs os) => os == MachineOs.Windows
+        ? "powershell -NoProfile -NonInteractive -Command \"& ([scriptblock]::Create([Console]::In.ReadToEnd()))\""
+        : "sh -s";
+
+    private const string WindowsDotnetSearch = """
+                $sw = [Diagnostics.Stopwatch]::StartNew(); $seen = @{}
+                $tr = @(); try { $tr += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { }
+                try { $tr += @((Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop).SID.Value) } catch { }
+                function Test-Sddl([string]$Sd, [int]$Kind) {
+                  $trust = '^(BA|SY|CO|OW|S-1-5-32-544|S-1-5-18|S-1-3-0|S-1-3-4|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464|' + ((@($tr) | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')$'
+                  if ($Sd -notmatch '^O:([^G]+)G:' -or $Matches[1] -notmatch $trust) { return $false }
+                  if ($Sd -notmatch 'D:' -or $Sd -match 'D:[A-Z]*NO_ACCESS_CONTROL') { return $false }
+                  foreach ($m in [regex]::Matches(($Sd -replace '^.*?D:', ''), '\((A|OA|XA|ZA);([^;]*);([^;]*);[^;]*;[^;]*;([^;)]+)[^)]*\)')) {
+                    if ($m.Groups[4].Value -match $trust -or ($Kind -gt 0 -and $m.Groups[2].Value -match '^(..)*?IO')) { continue }
+                    $r = $m.Groups[3].Value
+                    if ($Kind -eq 0) { $mask = 0x5FEDFF56; $codes = '^(..)*?(?!CC|SW|WP|LO|LT|RC|GR|GX|FR|FX)..' }
+                    else { $mask = 0x100C0040 + 0x10000 * [int]($Kind -eq 1); $codes = '^(..)*?(DT|WD|WO|GA|FA|KA' + ('|SD' * [int]($Kind -eq 1)) + ')' }
+                    if ($r -match '^0x([0-9A-Fa-f]{1,8})$') { try { $hv = [Convert]::ToInt64($Matches[1], 16) } catch { return $false }; if (($hv -band $mask) -ne 0) { return $false } }
+                    elseif ($r -match $codes) { return $false } }
+                  return $true
+                }
+                function Test-SafeFolder([string]$Dir, [string]$Sdk) {
+                  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\sdk", 0), @("$Dir\sdk\$Sdk", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3), @("$Dir\shared", 3), @("$Dir\shared\Microsoft.NETCore.App", 3))
+                  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue) + @(Get-ChildItem -LiteralPath "$Dir\shared\Microsoft.NETCore.App" -Directory -ErrorAction SilentlyContinue)) { $chk += , @($x.FullName, 0) }
+                  $parts = @($Dir -split '\\')
+                  for ($i = $parts.Count - 2; $i -ge 0; $i--) { if ($i -eq 0) { $chk += , @("$($parts[0])\", 2) } else { $chk += , @(($parts[0..$i] -join '\'), 1) } }
+                  foreach ($c in $chk) {
+                    $k = $c[1]; if ($k -eq 3) { if (-not (Test-Path -LiteralPath $c[0])) { continue }; $k = 0 }
+                    try { $it = Get-Item -LiteralPath $c[0] -Force -ErrorAction Stop; $sd = "$((Get-Acl -LiteralPath $c[0] -ErrorAction Stop).Sddl)" } catch { return $false }
+                    if ($k -ne 2 -and ($it.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+                    if (-not (Test-Sddl $sd $k)) { return $false } }
+                  return $true
+                }
+                function Sdk($d) {
+                  if (-not $d -or $sw.Elapsed.TotalSeconds -gt 5) { return }
+                  $d = "$d".Trim() -replace '/', '\' -replace '\\+$', ''
+                  if ($d -notmatch '^[A-Za-z]:\\' -or $seen[$d]) { return }; $seen[$d] = 1
+                  if (-not (Test-Path -LiteralPath "$d\dotnet.exe" -PathType Leaf)) { return }
+                  $v = @(Get-ChildItem -LiteralPath "$d\sdk" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^[0-9]+\.[0-9]+\.[0-9]+' -and (Test-Path -LiteralPath "$($_.FullName)\dotnet.dll") } | ForEach-Object { $_.Name })
+                  if ($v.Count) {
+                    $b = $v | Sort-Object { [version](($_ -split '-')[0]) } | Select-Object -Last 1
+                    $(if (Test-SafeFolder $d $b) { 'found' } else { 'open' }) + '.dotnet=' + ($d -replace '\\', '/') + '|' + $b
+                  }
+                }
+                foreach ($d in @($env:DOTNET_ROOT, $env:DOTNET_ROOT_X64, $env:DOTNET_ROOT_ARM64, "$env:ProgramFiles\dotnet", "${env:ProgramFiles(x86)}\dotnet", "$env:LOCALAPPDATA\Microsoft\dotnet", "$env:USERPROFILE\.dotnet")) { Sdk $d }
+                foreach ($a in 'x64', 'arm64', 'x86') { try { Sdk (Get-ItemProperty "HKLM:\SOFTWARE\dotnet\Setup\InstalledVersions\$a" -ErrorAction Stop).InstallLocation } catch { } }
+                foreach ($r in @([IO.DriveInfo]::GetDrives() | Where-Object { "$($_.DriveType)" -eq 'Fixed' -and $_.IsReady })) {
+                  if ($sw.Elapsed.TotalSeconds -gt 5) { break }; Sdk "$($r.Name)dotnet"; $n = 0
+                  try { foreach ($x in [IO.Directory]::EnumerateDirectories($r.Name)) { if (++$n -gt 64 -or $sw.Elapsed.TotalSeconds -gt 5) { break }; Sdk "$x\dotnet" } } catch { }
+                }
+                try { if (-not @(dotnet --list-sdks 2>$null)) { $v = @(dotnet --list-runtimes 2>$null) -match '^Microsoft\.NETCore\.App '; if ($v) { 'runtime.dotnet=' + ($v[-1] -split ' ')[1] } } } catch { }
                 exit 0
-                """
-            : $$"""
-                {{FindToolchainMarker}} dotnet
+        """;
+
+    private const string LinuxDotnetSearch = """
                 end=$(( $(date +%s) + 5 ))
+                u=$(id -u); g=0; [ "$(id -gn)" = "$(id -un)" ] && g=$(id -g)
+                safe() { # $1 = folder, $2 = its newest SDK: no other local user can plant code a job's dotnet runs (as lanq-makeready 0.3.0 judges it)
+                  for x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1/shared/Microsoft.NETCore.App" "$1"/shared/Microsoft.NETCore.App/*; do
+                    case "$x" in "$1/host"*|"$1/shared"*) [ -e "$x" ] || continue ;; esac
+                    x=$(readlink -f -- "$x" 2>/dev/null) && [ -n "$(find "$x" -maxdepth 0 \( -user 0 -o -user "$u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) 2>/dev/null)" ] || return 1
+                  done
+                  r=$(readlink -f -- "$1" 2>/dev/null) || return 1
+                  for a in "$1" "$r"; do
+                    while n=${a%/*}; [ "$n" != "$a" ] && [ -n "$n" ]; do
+                      a=$n
+                      [ -n "$(find "$a" -maxdepth 0 \( -user 0 -o -user "$u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) \) \) 2>/dev/null)" ] || return 1
+                    done
+                  done
+                  return 0
+                }
                 sdk() {
-                  d=${1%/}; [ -n "$d" ] && [ "$(date +%s)" -le "$end" ] && [ -x "$d/dotnet" ] && [ -d "$d/sdk" ] || return 0
+                  d=${1%/}; case "$d" in /*) ;; *) return 0 ;; esac
+                  [ "$(date +%s)" -le "$end" ] && [ -x "$d/dotnet" ] && [ -d "$d/sdk" ] || return 0
                   case " $seen " in *" $d "*) return 0 ;; esac; seen="$seen $d"
                   v=$(ls "$d/sdk" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | while IFS= read -r s; do [ -f "$d/sdk/$s/dotnet.dll" ] && echo "$s"; done | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
                   [ -n "$v" ] || return 0
-                  u=$(id -u); g=0; [ "$(id -gn)" = "$(id -un)" ] && g=$(id -g)
-                  for x in "$d" "$d/dotnet" "$d/sdk/$v" "$d/host" "$d/host/fxr" "$d"/host/fxr/*; do
-                    case "$x" in "$d/host"*) [ -e "$x" ] || continue ;; esac
-                    x=$(readlink -f -- "$x" 2>/dev/null) && [ -n "$(find "$x" -maxdepth 0 \( -user 0 -o -user "$u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) 2>/dev/null)" ] || { echo "open.dotnet=$d|$v"; return 0; }
-                  done
-                  for a in "$d" "$(readlink -f -- "$d")"; do
-                    while a=${a%/*}; [ -n "$a" ]; do
-                      [ -n "$(find "$a" -maxdepth 0 \( -user 0 -o -user "$u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) \) \) 2>/dev/null)" ] || { echo "open.dotnet=$d|$v"; return 0; }
-                    done
-                  done
-                  echo "found.dotnet=$d|$v"
+                  if safe "$d" "$v"; then echo "found.dotnet=$d|$v"; else echo "open.dotnet=$d|$v"; fi
                   return 0
                 }
                 seen=
@@ -90,8 +128,7 @@ public static partial class RemoteScripts
                 for d in /usr/share/dotnet /usr/lib/dotnet /usr/lib64/dotnet /opt/dotnet /snap/dotnet-sdk/current /usr/local/share/dotnet /opt/homebrew/opt/dotnet/libexec /usr/local/opt/dotnet/libexec; do sdk "$d"; done
                 if [ -z "$(dotnet --list-sdks 2>/dev/null)" ]; then v=$(dotnet --list-runtimes 2>/dev/null | sed -n 's/^Microsoft\.NETCore\.App \([^ ]*\).*/\1/p' | tail -n 1); [ -n "$v" ] && echo "runtime.dotnet=$v"; fi
                 exit 0
-                """;
-    }
+        """;
 
     /// <summary>
     /// The <c>found.TOOL=DIR|VERSION</c> lines of <see cref="FindToolchain"/> (or, with <paramref name="kind"/> "open", the folders it skipped

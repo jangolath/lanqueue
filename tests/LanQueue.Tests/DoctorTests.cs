@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
@@ -481,9 +482,10 @@ public sealed class DoctorTests : IDisposable
         var ssh = new FakeSsh
         {
             Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe)
-                : cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
-                    ? new SshResult(0, "runtime.dotnet=6.0.11\nfound.dotnet=/usr/share/dotnet|8.0.404\nfound.dotnet=/srv/build/dotnet|10.0.102\n")
-                    : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=145|The command could not be loaded, possibly because:\n"),
+                : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=145|The command could not be loaded, possibly because:\n"),
+            InputHandler = (_, cmd, input) => cmd == RemoteScripts.FindToolchainCommand(MachineOs.Linux) && Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+                ? new SshResult(0, "runtime.dotnet=6.0.11\nfound.dotnet=/usr/share/dotnet|8.0.404\nfound.dotnet=/srv/build/dotnet|10.0.102\n")
+                : new SshResult(1, ""),
         };
         var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, json: true);
         Assert.Equal(1, code);
@@ -494,7 +496,8 @@ public sealed class DoctorTests : IDisposable
         Assert.Equal(
             "add `path_prepend: [/srv/build/dotnet]` to build-01 in machines.yml (found .NET SDK 10.0.102 there), and `DOTNET_ROOT: /srv/build/dotnet` under its env: so the SDK's tools find the runtimes next to it",
             Str(dotnet, "fix"));
-        Assert.Equal(2, ssh.Calls.Count(c => !IsProbe(c.Command))); // the checks, then one search; nothing else ran on the worker
+        Assert.Equal(1, ssh.Calls.Count(c => !IsProbe(c.Command))); // the checks, then one search on stdin; nothing else ran on the worker
+        Assert.Single(ssh.InputRuns);
     }
 
     /// <summary>A Windows build account denied WMI is a WARN with what the owner could grant; lanq works without it. Linux is never asked.</summary>
@@ -522,10 +525,10 @@ public sealed class DoctorTests : IDisposable
         config.Machines[0].Capabilities = ["dotnet"];
         var ssh = new FakeSsh
         {
-            Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe)
-                : cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
-                    ? new SshResult(0, "open.dotnet=/srv/shared/dotnet|10.0.102\n")
-                    : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n"),
+            Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n"),
+            InputHandler = (_, _, input) => Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+                ? new SshResult(0, "open.dotnet=/srv/shared/dotnet|10.0.102\n")
+                : new SshResult(1, ""),
         };
         var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, json: true);
         Assert.Equal(1, code);
@@ -570,6 +573,8 @@ public sealed class DoctorTests : IDisposable
         var linux = RemoteScripts.FindToolchain(T.Linux(), "dotnet");
         Assert.Contains("/etc/dotnet/install_location", linux, StringComparison.Ordinal);
         Assert.Contains("end=$(( $(date +%s) + 5 ))", linux, StringComparison.Ordinal);
+        Assert.Equal("sh -s", RemoteScripts.FindToolchainCommand(MachineOs.Linux));
+        Assert.Contains("[Console]::In.ReadToEnd()", RemoteScripts.FindToolchainCommand(MachineOs.Windows), StringComparison.Ordinal);
         foreach (var script in new[] { windows, linux })
         {
             foreach (var write in new[] { "Set-Content", "New-Item", "Remove-Item", "mkdir", "> /", "Set-Acl", "chmod", "icacls" })

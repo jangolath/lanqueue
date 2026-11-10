@@ -37,7 +37,12 @@ public sealed class MakereadyAddTests : IDisposable
         MakereadyTests.Report().Replace("\"os\": \"linux\"", "\"os\": \"windows\"", StringComparison.Ordinal).Replace("/srv/lq", "C:/lq", StringComparison.Ordinal)
             .Replace("\"linux\"]", "\"windows\"]", StringComparison.Ordinal);
 
-    private sealed record Result(int Code, string Out, string Err, FakeSsh Ssh, int Asked);
+    private sealed record Result(int Code, string Out, string Err, FakeSsh Ssh, int Asked)
+    {
+        public bool Searched => Ssh.InputRuns.Any(r => IsSearch(r.Input));
+    }
+
+    private static bool IsSearch(byte[] input) => Encoding.UTF8.GetString(input).StartsWith(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal);
 
     private async Task<Result> Add(
         string[] args, string? report = null, bool? answer = null, Action? beforeWrite = null, SshResult? scan = null, Dictionary<string, string>? env = null,
@@ -45,8 +50,8 @@ public sealed class MakereadyAddTests : IDisposable
     {
         var ssh = new FakeSsh
         {
-            Handler = (_, cmd) => found is not null && cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal) ? new SshResult(0, found) : new SshResult(0, Healthy),
-            InputHandler = (_, _, _) => scan ?? new SshResult(0, report ?? Report()),
+            Handler = (_, _) => new SshResult(0, Healthy),
+            InputHandler = (_, _, input) => IsSearch(input) ? new SshResult(0, found ?? "") : scan ?? new SshResult(0, report ?? Report()),
         };
         var asked = 0;
         var host = new MakereadyHost(
@@ -402,14 +407,14 @@ public sealed class MakereadyAddTests : IDisposable
         var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
         Assert.Equal(["/srv/build/dotnet"], added.PathPrepend);
         Assert.Equal("/srv/build/dotnet", added.Env["DOTNET_ROOT"]);
-        Assert.Contains(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+        Assert.True(r.Searched);
 
         // When the scan already lists dotnet, nothing is searched and the entry stays as the report suggests.
         await File.WriteAllTextAsync(ConfigPath, Cli.StarterConfig);
         r = await Add(AddArgs(more: "--yes"), found: "found.dotnet=/srv/build/dotnet|10.0.102\n");
         Assert.Equal(0, r.Code);
         Assert.DoesNotContain("path_prepend", Config(), StringComparison.Ordinal);
-        Assert.DoesNotContain(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+        Assert.False(r.Searched);
     }
 
     private static string WithDotnetDir(string dir, string? root = null) =>
@@ -431,7 +436,7 @@ public sealed class MakereadyAddTests : IDisposable
         Assert.Single(text.Split('\n'), l => l.StartsWith("    path_prepend:", StringComparison.Ordinal));
         Assert.Single(text.Split('\n'), l => l.TrimEnd('\r') == "    env:");
         Assert.Contains("    capabilities: [dotnet, java, linux]", text, StringComparison.Ordinal);
-        Assert.DoesNotContain(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+        Assert.False(r.Searched);
         var added = ConfigLoader.Load(ConfigPath).Machines.Single(m => m.Name == "build-01");
         Assert.Equal(["/opt/build/dotnet"], added.PathPrepend);
         Assert.Equal("/opt/build/dotnet", added.Env["DOTNET_ROOT"]);
@@ -446,7 +451,7 @@ public sealed class MakereadyAddTests : IDisposable
     {
         var r = await Add(AddArgs(more: "--yes"), WithDotnetDir("<redacted>/.dotnet"), found: "found.dotnet=/home/me/.dotnet|10.0.102\n");
         Assert.Equal(0, r.Code);
-        Assert.Contains(r.Ssh.Calls, c => c.Command.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal));
+        Assert.True(r.Searched);
         var text = Config();
         Assert.DoesNotContain("<redacted>", text, StringComparison.Ordinal);
         Assert.DoesNotContain("a folder the report hides", text, StringComparison.Ordinal); // the comment goes once the folder is known

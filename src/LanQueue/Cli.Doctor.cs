@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
@@ -545,7 +546,9 @@ public static partial class Cli
         SshResult r;
         try
         {
-            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.FindToolchain(m, tool)), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+            // On stdin, run from memory (as lanq makeready sends its script): the search is too long for a Windows command line.
+            r = await ssh.RunWithInputAsync(m, RemoteScripts.FindToolchainCommand(m.Os), Encoding.UTF8.GetBytes(RemoteScripts.FindToolchain(m, tool)), 64_000, TimeSpan.FromSeconds(30), ct)
+                .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {

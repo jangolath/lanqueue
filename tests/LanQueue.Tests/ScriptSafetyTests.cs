@@ -138,7 +138,6 @@ public class ScriptSafetyTests
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), Job, "1"),
             ["incoming"] = RemoteScripts.EnsureIncoming(m),
             ["stop"] = RemoteScripts.StopJob(m, Job),
-            ["find-toolchain"] = RemoteScripts.FindToolchain(m, "dotnet"),
         };
         var lengths = scripts.ToDictionary(s => s.Key, s => RemoteScripts.WindowsCommand(s.Value).Length);
         var all = string.Join(", ", lengths.Select(l => $"{l.Key} {l.Value}"));
