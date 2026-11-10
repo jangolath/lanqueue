@@ -384,6 +384,60 @@ public sealed partial class PlanFileRunTests : IDisposable
         Assert.Equal("Completed", Json(stdout).GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// --wait 0: the second job's look at the machines sees the one slot taken, and its answer comes back only after the first job has given
+    /// the slot back. The second job must look again (the slot is free now), not end NoCapacity because nothing of the plan holds a slot
+    /// any more. The same for a job with shards.
+    /// </summary>
+    [Theory(Timeout = TestTimeout)]
+    [InlineData("")]
+    [InlineData("    shards: 1")]
+    public async Task AJobThatSawTheSlotTakenJustBeforeASiblingGaveItBackLooksAgain(string secondExtra)
+    {
+        Plan("""
+            version: 1
+            jobs:
+              first:
+                command: npm run first
+              second:
+                command: npm run second
+            """ + "\n" + secondExtra + "\n");
+        var ssh = new PoolSsh();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gated = 0;
+        ssh.OnExecute = async (e, ct) =>
+        {
+            if (JobOf(e) == "first")
+            {
+                await release.Task.WaitAsync(ct);
+            }
+
+            return e.Exit(0);
+        };
+        ssh.AfterProbe = async (m, r, ct) =>
+        {
+            if (r.Output.Contains("slots_used=1", StringComparison.Ordinal) && Interlocked.Exchange(ref gated, 1) == 0)
+            {
+                release.SetResult(); // the first job ends while this answer is on its way back
+                while (ssh.Used(m.Name) != 0)
+                {
+                    await Task.Delay(10, ct);
+                }
+
+                await Task.Delay(500, ct); // the first job gives its slot back to the plan right after its cleanup
+            }
+
+            return r;
+        };
+
+        var (code, stdout, stderr) = await Run(ssh, new RunnerTests.FakePayloads(""), ["--plan", "--json", "--wait", "0"], fleet: Solo);
+
+        Assert.Equal(1, gated);
+        Assert.True(code == 0, stderr);
+        Assert.Equal(2, ssh.Executes.Count);
+        Assert.Equal("Completed", Json(stdout).GetProperty("status").GetString());
+    }
+
     [Fact(Timeout = TestTimeout)]
     public async Task WithNothingOfThePlanRunningWaitZeroEndsAtOnce()
     {

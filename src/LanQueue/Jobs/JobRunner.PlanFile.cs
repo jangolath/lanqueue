@@ -14,6 +14,8 @@ public sealed class PlanProgress
     private readonly Lock _gate = new();
     private int _holding;
     private long _idleSince = Stopwatch.GetTimestamp();
+    private long _releases;
+    private long _lastRelease;
     private TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>True while at least one job of the plan holds a slot.</summary>
@@ -52,6 +54,19 @@ public sealed class PlanProgress
         }
     }
 
+    /// <summary>
+    /// The plan's latest slot release (a count, 1 for the first) when it happened at or after <paramref name="timestamp"/> (a
+    /// <see cref="Stopwatch"/> timestamp), else 0. A job that saw every slot full in a look that began before that release has not seen the
+    /// free slot yet: it looks once more before it may give up (<see cref="JobRunner.RoundStart"/>).
+    /// </summary>
+    public long ReleaseSince(long timestamp)
+    {
+        lock (_gate)
+        {
+            return _releases > 0 && _lastRelease >= timestamp ? _releases : 0;
+        }
+    }
+
     /// <summary>A job (or shard) of the plan now holds a slot.</summary>
     public void Hold()
     {
@@ -69,6 +84,8 @@ public sealed class PlanProgress
         {
             _holding = Math.Max(0, _holding - 1);
             _idleSince = Stopwatch.GetTimestamp();
+            _lastRelease = _idleSince;
+            _releases++;
             done = _released;
             _released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }

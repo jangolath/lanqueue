@@ -492,8 +492,10 @@ public sealed partial class JobRunner(
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
         var candidates = Candidates(req);
         var say = Say(req);
+        var relooked = 0L;
         while (true)
         {
+            var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
             foreach (var a in ranked)
@@ -539,9 +541,15 @@ public sealed partial class JobRunner(
                 await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false);
             }
 
-            if (WaitedOut(req, deadline))
+            if (WaitedOut(req, deadline, round, relooked))
             {
                 return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
+            }
+
+            if (Relook(req.Progress, round, relooked) is > 0 and var release)
+            {
+                relooked = release;
+                continue; // a sibling gave back a slot after this look began: look again now, it may be free
             }
 
             say(req.Progress is { AnyHolding: true } ? "[lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)" : "[lanq] no eligible machine; waiting 15s");
@@ -552,10 +560,26 @@ public sealed partial class JobRunner(
 
     /// <summary>
     /// Whether a job still waiting for a slot has used up --wait: from its own start, or in a plan (<see cref="JobRequest.Progress"/>) only
-    /// while no job of the plan holds a slot (a job waits behind its siblings even with --wait 0).
+    /// while no job of the plan holds a slot (a job waits behind its siblings even with --wait 0), and only when no slot of the plan was given
+    /// back since the look at the machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before
+    /// its sibling gave it back looks again instead of ending NoCapacity next to a free slot.
     /// </summary>
-    private static bool WaitedOut(JobRequest req, Stopwatch own) =>
-        req.Progress is { } plan ? !plan.AnyHolding && plan.IdleFor >= req.Wait : own.Elapsed >= req.Wait;
+    private static bool WaitedOut(JobRequest req, Stopwatch own, long round, long relooked) =>
+        req.Progress is { } plan ? !plan.AnyHolding && plan.IdleFor >= req.Wait && Relook(plan, round, relooked) == 0 : own.Elapsed >= req.Wait;
+
+    /// <summary>
+    /// The plan's slot release a job must look again for (<see cref="PlanProgress.ReleaseSince"/>): one given back after this look began
+    /// (<paramref name="round"/>) that the job has not already looked again for (<paramref name="relooked"/>), else 0. Once per release, so a
+    /// slot that is still full after the second look does not keep the job looking.
+    /// </summary>
+    internal static long Relook(PlanProgress? plan, long round, long relooked) =>
+        plan?.ReleaseSince(round) is > 0 and var release && release != relooked ? release : 0;
+
+    /// <summary>
+    /// When the look at the machines that is about to start began, for <see cref="PlanProgress.ReleaseSince"/>: now, less
+    /// <see cref="ProbeShareWindow"/>, since the look may use another job's probe that started up to that long ago.
+    /// </summary>
+    internal static long RoundStart() => Stopwatch.GetTimestamp() - (long)(ProbeShareWindow.TotalSeconds * Stopwatch.Frequency);
 
     /// <summary>The 15 s between two looks at the machines; in a plan cut short when a job of the plan gives back a slot.</summary>
     private async Task PauseAsync(JobRequest req, CancellationToken ct)

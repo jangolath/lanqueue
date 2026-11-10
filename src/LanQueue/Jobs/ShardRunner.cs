@@ -395,6 +395,8 @@ public sealed partial class JobRunner
         // --wait: how long no shard of this run has held a slot. Restarted only by an attempt that really got one, so attempts that keep
         // failing to claim a slot (the probe said free, the machine said full) cannot hold the run open for ever.
         var idle = Stopwatch.StartNew();
+        var round = RoundStart();
+        var relooked = 0L;
         var backoff = false;
         Exception? loopError = null;
 
@@ -481,6 +483,7 @@ public sealed partial class JobRunner
                     MachineHealth[] probes;
                     try
                     {
+                        round = RoundStart();
                         (probes, assessed) = await ProbeForJobAsync(candidates, needs, stop.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (stop.IsCancellationRequested)
@@ -529,10 +532,15 @@ public sealed partial class JobRunner
                 {
                     idle.Restart();
                 }
-                else if (pending.Count > 0 && running.Count == 0 && WaitedOut(template, idle))
+                else if (pending.Count > 0 && running.Count == 0 && WaitedOut(template, idle, round, relooked))
                 {
                     EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()));
                     break;
+                }
+                else if (pending.Count > 0 && running.Count == 0 && launched == 0 && Relook(plan, round, relooked) is > 0 and var release)
+                {
+                    relooked = release;
+                    continue; // a sibling job gave back a slot after this look began: look again now, it may be free
                 }
 
                 // Wait for a shard to finish; with shards still waiting for a slot, look again after 15 s at the latest.
