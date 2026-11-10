@@ -366,10 +366,15 @@ public static partial class ConfigLoader
         }
     }
 
+    /// <summary>The shortest job arguments that still bring the native .exe check into the Windows job script (a one-letter program and a |).</summary>
+    private static readonly string[] WorstCaseArgv = ["x", "|"];
+
     /// <summary>
     /// A Windows worker gets each script as one encoded command line of at most 8000 characters. The machine's env: and path_prepend: go
     /// into the job script, so if they alone, with no job arguments at all, already pass the cap, every job there would fail: refuse the
-    /// config now and say by how much (measured with the largest LANQ_SHARD / LANQ_SHARDS and the longest LANQ_PLAN_JOB, so a sharded plan job fits too). Only the job script gates loading; lanq doctor checks (and reports) its own script's size.
+    /// config now and say by how much (measured at its largest: the largest LANQ_SHARD / LANQ_SHARDS, the longest LANQ_PLAN_JOB, and the check a
+    /// job given &amp; or | carries that its program is a native .exe, so a sharded plan job with such an argument fits too). Only the job
+    /// script gates loading; lanq doctor checks (and reports) its own script's size.
     /// </summary>
     private static void ValidateWindowsCommandLength(Machine m)
     {
@@ -378,7 +383,7 @@ public static partial class ConfigLoader
             return;
         }
 
-        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", [], Jobs.JobRequest.DefaultTimeout, new Jobs.ShardInfo(Jobs.ShardInfo.MaxShards, Jobs.ShardInfo.MaxShards), new string('x', Plan.PlanFileLoader.MaxNameLength))).Length;
+        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", WorstCaseArgv, Jobs.JobRequest.DefaultTimeout, new Jobs.ShardInfo(Jobs.ShardInfo.MaxShards, Jobs.ShardInfo.MaxShards), new string('x', Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
         var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
         if (size > limit)
         {
