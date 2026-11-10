@@ -141,6 +141,10 @@ internal sealed record MakereadyCheck(
     [property: JsonPropertyName("advice")] string? Advice,
     [property: JsonPropertyName("needsAdmin")] bool NeedsAdmin);
 
+/// <summary>
+/// The suggested machines.yml entry. <see cref="PathPrepend"/> and <see cref="Env"/> (optional, 0.3.0+) come only when the newest .NET SDK
+/// is in a folder that is not the dotnet on PATH: that folder, and DOTNET_ROOT set to it.
+/// </summary>
 internal sealed record MakereadySuggestion(
     [property: JsonPropertyName("name")] string? Name,
     [property: JsonPropertyName("os")] string? Os,
@@ -151,7 +155,9 @@ internal sealed record MakereadySuggestion(
     [property: JsonPropertyName("min_free_mem_gb")] double? MinFreeMemGb,
     [property: JsonPropertyName("transfer")] string? Transfer,
     [property: JsonPropertyName("allowed_hours")] string? AllowedHours,
-    [property: JsonPropertyName("wake")] MakereadyWake? Wake);
+    [property: JsonPropertyName("wake")] MakereadyWake? Wake,
+    [property: JsonPropertyName("path_prepend")] List<string>? PathPrepend = null,
+    [property: JsonPropertyName("env")] Dictionary<string, string>? Env = null);
 
 /// <summary>Source-generated (de)serialization for the report: no reflection. Depth is capped well below the default.</summary>
 [JsonSourceGenerationOptions(MaxDepth = 16, WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]

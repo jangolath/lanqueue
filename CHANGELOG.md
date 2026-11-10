@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.1 (unreleased)
+
+### Behaviour changes
+
+- `lanq makeready` runs lanq-makeready 0.3.0. On a Windows worker whose build account is denied WMI/CIM it now reports
+  memory, CPUs, the Windows version and disks instead of 0 GB and "unreadable", and no longer reports OpenSSH Server as
+  "installed but not running" when that account may not read the service status. The .NET SDK search covers the same
+  folders `lanq doctor --remote` searches.
+- The suggested `machines.yml` entry (text, `--json` and `--add`) takes the script's `path_prepend` and `env: DOTNET_ROOT`
+  when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. lanq takes it only as exactly one absolute
+  folder with `DOTNET_ROOT` set to the same folder, with no quote, backslash, `<`/`>` or control character; anything
+  else is left out. A folder the report hides (under the user's home, redacted) is shown as a comment, and `--add`
+  then looks the SDK up itself as before. `--add` never writes a second `path_prepend:` or `env:` key or a second
+  `dotnet` capability.
+
 ## 0.8.0 (2026-11-10)
 
 ### Routing

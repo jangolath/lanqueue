@@ -535,7 +535,7 @@ Exit 0 when the machine is worker-ready, 1 when it is not. Its top-level keys:
 | `suitedFor` | object | 0.2.0 and later: `tier` (`light`, `medium`, `heavy`), `containers`, `text`. |
 | `checks` | array | Each `id`, `title`, `status` (`OK`, `WARN`, `FAIL`, `SKIP`), `detail`, `advice`, `needsAdmin`. |
 | `capabilities` | array of string | Capabilities the script detected. |
-| `suggestedMachine` | object | A `machines.yml` entry: `name`, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`, `min_free_mem_gb`, `transfer`, `allowed_hours`, `wake` (`mac`). |
+| `suggestedMachine` | object | A `machines.yml` entry: `name`, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`, `min_free_mem_gb`, `transfer`, `allowed_hours`, `wake` (`mac`), and (lanq-makeready 0.3.0+) `path_prepend` and `env` (`DOTNET_ROOT`) when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. |
 
 The report is the script's output, not lanq's: its `summary.nextSteps` and `advice` are for the PC's owner to read,
 and it has no lanq `nextSteps` (this is the one `--json` object without them). The report has no `status` key. When
