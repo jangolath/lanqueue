@@ -32,11 +32,16 @@
 - To see which machines are free: `lanq health --json` (an array of `name`, `state` ok|hold|down, `reasons`, `load`,
   `diskFreeGb`, `memFreeGb`, `slotsUsed`, `maxJobs`, `localTime`, `cores`, `memTotalGb`, `freeSlots`, `size`,
   `suitedFor`, `nextSteps`; unknown numbers are null). If a tool is "not found" on a worker, `lanq doctor
-  --remote` shows which one; tell the developer (the fix is `path_prepend:` in their config, not yours to make).
+  --remote --json` shows which one; tell the developer (the fix is `path_prepend:` in their config, not yours to make).
+- Setup and history, read-only: `lanq doctor --json` and `lanq doctor --remote --json` (one object: `status` `Ok`,
+  `Warnings` or `Failing`, `counts`, and `checks[]` with `scope`, `machine`, `name`, `level` ok|warn|fail|skip|hold,
+  `detail`, `fix`); `lanq stats --json` (the local job log: per machine `medianSeconds`, `p90Seconds`, `speedFactor`;
+  per command `runs`, results and `timing`). The text lines of doctor go to stderr with `--json`.
 - Exit codes: the job's own code (`Completed` or `Failed`); `2` refused by policy or bad arguments (`Rejected`: report
   and stop); `70` infrastructure error, ssh or git (`InfraError`: report, no retry loop); `75` no eligible machine
   (`NoCapacity`: if `retryable` is `false`, no machine can ever take the job as configured, so stop and tell the
-  developer what `excluded` says; if `true`, run the `wait` step once, then tell the developer); `124` timed out or the machine's
+  developer what `excluded` says; if `true`, run the `wait` step once, then tell the developer); for `70` run
+  `lanq doctor --remote --json` once and report the `fail` checks with their `fix`; `124` timed out or the machine's
   hours ended (`TimedOut`, `WindowClosed`: report it); `130` Ctrl+C (`Cancelled`: stop). `--wait` above 0 can
   wake a sleeping PC as a last resort; leave out `--no-wake` only if the developer has said waking is fine.
 - Never edit the lanq machines file, the allowlists or any ssh/key configuration. The developer owns them. Never run
@@ -47,6 +52,8 @@
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
   commands run through lanq. lanq rejects them anyway.
 - Never put secrets, tokens or key material in files or command lines that lanq will ship; it refuses them.
+- Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder (in lanq's state folder); read them through
+  `lanq stats --json` and `logPath`.
 
 ## Shard long work across the pool (lanq run --shards)
 
@@ -61,6 +68,9 @@
   gets `LANQ_SHARD` and `LANQ_SHARDS`):
   `lanq run --json --log-tail 60 --no-wake --needs node --shards auto -- npx jest --shard={shard}/{shards} 2>/dev/null`
   (`--dry-run` first shows the N `auto` would pick and where each shard would start)
+  Once the command has history (`lanq stats --json` shows a `timing` for it), add `--target-minutes 10`: lanq then
+  picks N so each shard takes about 10 minutes, never more than the free slots; `--dry-run` shows the reasoning
+  (`shardTiming` in the JSON).
   `lanq run --json --no-wake --needs node --shards 4 -- npx playwright test --shard={shard}/{shards}`
   `lanq run --json --no-wake --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/{shards}`
   .NET, Python and Go need a small committed helper script that reads `LANQ_SHARD` (examples in LanQueue's
