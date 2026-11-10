@@ -136,11 +136,14 @@ public class ScriptSafetyTests
             ["doctor"] = RemoteScripts.Doctor(m),
             ["archive-prepare"] = RemoteScripts.Prepare(Archive(m), Job),
             ["archive-cleanup"] = RemoteScripts.Cleanup(Archive(m), Job, "1"),
+            ["incoming"] = RemoteScripts.EnsureIncoming(m),
+            ["stop"] = RemoteScripts.StopJob(m, Job),
         };
-        foreach (var (name, script) in scripts)
+        var lengths = scripts.ToDictionary(s => s.Key, s => RemoteScripts.WindowsCommand(s.Value).Length);
+        var all = string.Join(", ", lengths.Select(l => $"{l.Key} {l.Value}"));
+        foreach (var (name, length) in lengths)
         {
-            var length = RemoteScripts.Wrap(m, script).Length;
-            Assert.True(length <= 7200, $"the Windows '{name}' script is {length} characters once encoded; keep each under 7200");
+            Assert.True(length <= 7200, $"the Windows '{name}' script is {length} characters once encoded; keep each under 7200 ({all})");
         }
     }
 

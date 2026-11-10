@@ -546,7 +546,7 @@ public static partial class Cli
           lanq wake <machine> [--wait] [--json] [--config FILE]
           lanq --version
 
-        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory).
+        Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory); lanq init writes there too.
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
         --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
         --mem is in GB: only machines reporting at least that much available memory take the job.
@@ -1114,7 +1114,7 @@ public static partial class Cli
     {
         var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
         var detail = h.Reachable
-            ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
+            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
                 + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                 + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores) + DeclaredSizeNote(m, h)
             : h.Error ?? "";
@@ -1140,6 +1140,7 @@ public static partial class Cli
         {
             Cores = h.Cores,
             MemTotalGb = h.MemTotalGb,
+            LoadKnown = !h.Reachable || h.LoadKnown,
             FreeSlots = h.Reachable ? FreeSlots(m, h) : 0,
             Size = MachineSize.Word(MachineSize.Effective(m, h.MemTotalGb, h.Cores)),
             SizeSource = MachineSize.Declared(m) is null ? "probe" : "config",
@@ -1155,6 +1156,8 @@ public static partial class Cli
 
     /// <summary>Slots a job could take now: max_jobs minus the slots in use (never below 0).</summary>
     private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsUsed);
+
+    private static string Load(MachineHealth h) => h.LoadKnown ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}") : "load ?";
 
     private static string Size(MachineHealth h) =>
         (h.Cores is { } c ? string.Create(CultureInfo.InvariantCulture, $"cores {c}") : "cores ?")

@@ -147,6 +147,8 @@ public sealed class MachineSizeTests : IDisposable
         var values = HealthProbe.Parse(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Probe(m)));
         Assert.True(double.Parse(values["mem_total_gb"], System.Globalization.CultureInfo.InvariantCulture) > 0);
         Assert.True(int.Parse(values["cores"], System.Globalization.CultureInfo.InvariantCulture) >= 1);
+        Assert.Contains(values["mem_source"], new[] { "cim", "vb", "native" }); // where WMI is denied, the fallbacks still read memory
+        Assert.Contains(values["load_source"], new[] { "cim", "native" });
     }
 
     /// <summary>The real Windows probe reports total memory (CIM) and cores.</summary>
@@ -158,5 +160,7 @@ public sealed class MachineSizeTests : IDisposable
         var values = HealthProbe.Parse(Shells.Run("windows", RemoteScripts.Probe(m)).Output);
         Assert.True(double.Parse(values["mem_total_gb"], System.Globalization.CultureInfo.InvariantCulture) > 0);
         Assert.True(int.Parse(values["cores"], System.Globalization.CultureInfo.InvariantCulture) >= 1);
+        Assert.Contains(values["mem_source"], new[] { "cim", "vb", "native" }); // where WMI is denied, the fallbacks still read memory
+        Assert.Contains(values["load_source"], new[] { "cim", "native" });
     }
 }

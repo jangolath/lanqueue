@@ -79,14 +79,16 @@ public static partial class Cli
         """;
 
     /// <summary>
-    /// lanq init [--config PATH] [--json]: writes <see cref="StarterConfig"/> to PATH (default machines.yml in the current folder), creating
-    /// its folder; never over an existing file. Exit 0 written, 2 the file exists (or bad arguments), 70 it could not be written. With
+    /// lanq init [--config PATH] [--json]: writes <see cref="StarterConfig"/> to PATH, else to $LANQ_CONFIG, else to the per-user config file
+    /// that lookup reads without flags (<see cref="UserConfigPath"/>; never the current folder, which may be a repository), creating its
+    /// folder; never over an existing file. Exit 0 written, 2 the file exists (or bad arguments), 70 it could not be written. With
     /// --json, stdout is one object (status, exitCode, path, message) and the next steps go to stderr.
     /// </summary>
     internal static async Task<int> Init(
         ParsedArgs p, string currentDir, Func<string, string?> env, bool windows, TextWriter stdout, TextWriter stderr, Action? beforeWrite = null)
     {
-        var path = Path.GetFullPath(p.ConfigPath ?? "machines.yml", currentDir);
+        // The same places lookup reads (ResolveConfig), so the file is found afterwards without flags.
+        var path = Path.GetFullPath(p.ConfigPath ?? (env("LANQ_CONFIG") is { Length: > 0 } named ? named : UserConfigPath(env, windows)), currentDir);
         var exists = $"{path} already exists; lanq init never overwrites a file. Edit it, or pass --config with a new path.";
         async Task<int> Done(string status, int code, string message, IEnumerable<string>? steps = null)
         {

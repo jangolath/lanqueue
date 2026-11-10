@@ -131,7 +131,9 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var s = RemoteScripts.Execute(T.Windows(), "j1", ".", ["dotnet", "test"], TimeSpan.FromSeconds(90.5));
         Assert.Contains("WaitForExit(91000)", s, StringComparison.Ordinal);
-        Assert.Contains("taskkill /PID $cp.Id /T /F", s, StringComparison.Ordinal);
+        Assert.Contains("$jo = LqJob $pf $cp.Handle", s, StringComparison.Ordinal); // the child and everything it starts are in one job object
+        Assert.Contains("if ($jo) { [void]$LqW::TerminateJobObject($jo, 124) } else { LqKill $cp.Id }", s, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-CimInstance", s, StringComparison.Ordinal); // denied to a non-admin account on some workers
         Assert.Contains("& 'dotnet' 'test'", s, StringComparison.Ordinal);
     }
 
@@ -148,9 +150,9 @@ public sealed class WorkerScriptTests : IDisposable
         var detached = "Start-Process -Wait -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile -EncodedCommand " + encoded + "'"
             + " -RedirectStandardOutput '" + Path.Combine(_root, "gc.out").Replace('/', (char)92) + "'"
             + " -RedirectStandardError '" + Path.Combine(_root, "gc.err").Replace('/', (char)92) + "'";
-        var (code, output) = Shells.Run(
-            "windows",
-            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["powershell", "-NoProfile", "-Command", detached], TimeSpan.FromSeconds(30)));
+        var m = Worker(MachineOs.Windows);
+        InstallHelper(m); // as before every job (EnsureIncoming): the wrapper puts the job in a job object
+        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", detached], TimeSpan.FromSeconds(30)));
         Assert.Equal(124, code);
         Assert.True(File.Exists(grandchild), "the grandchild never started: " + output);
         Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the deadline");
@@ -170,6 +172,13 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var (code, _) = Shells.Run("windows", RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["lanq-no-such-program-xyz"], TimeSpan.FromMinutes(5)));
         Assert.Equal(1, code);
+    }
+
+    /// <summary>Writes the job wrapper's helper into the worker's work_root/bin, as the runner's EnsureIncoming step does before every job.</summary>
+    private static void InstallHelper(Machine m)
+    {
+        var (code, output) = Shells.Run("windows", RemoteScripts.EnsureIncoming(m));
+        Assert.True(code == 0 && File.Exists(RemoteScripts.WindowsHelperPath(m)), "the helper was not written: " + output);
     }
 
     /// <summary>
@@ -222,53 +231,152 @@ public sealed class WorkerScriptTests : IDisposable
     }
 
     /// <summary>
-    /// The wrapper dies (killed, or its session dropped) while the job child runs on: the pid file also names the child with its start time,
-    /// so cleanup still stops it, although taskkill /T on the dead wrapper's pid would not reach it.
+    /// The wrapper dies (killed, or its session dropped) while the job runs on: the job process (the wrapper's grandchild) is stopped, by the
+    /// job object ending with its wrapper or at the latest by cleanup, which names the child with its start time in the pid file although
+    /// taskkill /T on the dead wrapper's pid would not reach it (and where WMI is denied, taskkill cannot stop anything at all).
     /// </summary>
     [WindowsFact]
     public void CleanupStopsTheJobChildEvenWhenItsWrapperIsGone()
     {
         var m = Worker(MachineOs.Windows);
+        InstallHelper(m);
+        var job = Path.Combine(_root, "job.pid").Replace('/', (char)92);
         var script = Path.Combine(Path.GetTempPath(), "lanq-orphan-" + Guid.NewGuid().ToString("N") + ".ps1");
-        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "Start-Sleep -Seconds 600"], TimeSpan.FromMinutes(30)));
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", Recorded.PowerShellWrite(job) + "; Start-Sleep -Seconds 600"], TimeSpan.FromMinutes(30)));
         var pidFile = Path.Combine(_root, "locks", "job-j1.pid");
         using var wrapper = Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
         try
         {
-            string[] lines = [];
-            // Event-based waits with generous bounds: two PowerShells start here, which takes seconds on a busy machine. The child would sleep
-            // ten minutes, so it being gone within a minute of cleanup still proves cleanup stopped it.
-            var started = Stopwatch.StartNew();
-            while (lines.Length < 4 && started.Elapsed < TimeSpan.FromMinutes(2))
-            {
-                Thread.Sleep(100);
-                try
-                {
-                    lines = File.ReadAllLines(pidFile).Where(l => l.Trim().Length > 0).ToArray();
-                }
-                catch (IOException)
-                {
-                }
-            }
-
-            Assert.True(lines.Length >= 4, "the wrapper did not record its child: " + string.Join("|", lines));
-            using var child = Process.GetProcessById(int.Parse(lines[2], System.Globalization.CultureInfo.InvariantCulture));
+            // Event-based waits with generous bounds: three PowerShells start here, which takes seconds on a busy machine. The job would sleep
+            // ten minutes, so it being gone within a minute of cleanup still proves it was stopped.
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(job) && new FileInfo(job).Length > 0, TimeSpan.FromMinutes(2)), "the job never started");
+            Assert.Equal(4, File.ReadAllLines(pidFile).Count(l => l.Trim().Length > 0)); // the wrapper and its child, each with its start time
             wrapper.Kill(entireProcessTree: false);
             Assert.True(wrapper.WaitForExit(TimeSpan.FromSeconds(60)));
-            Assert.False(child.HasExited);
 
             var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
             Assert.True(code == 0, output);
-            Assert.True(child.WaitForExit(TimeSpan.FromSeconds(60)), "the orphaned job child is still running");
+            Assert.True(Recorded.Gone(job, TimeSpan.FromSeconds(60)), "the orphaned job is still running");
         }
         finally
         {
-            if (!wrapper.HasExited)
-            {
-                wrapper.Kill(entireProcessTree: true);
-            }
-
-            File.Delete(script);
+            Stop(wrapper, script);
         }
+    }
+
+    /// <summary>
+    /// Without a job object (a tree lanq did not start in one, or a worker where assigning failed): cleanup stops the recorded process and
+    /// every process below it, found with a process snapshot, so no WMI is needed. The grandchild proves the walk.
+    /// </summary>
+    [WindowsFact]
+    public void CleanupWalksTheRecordedTreeWithoutAJobObject()
+    {
+        var m = Worker(MachineOs.Windows);
+        InstallHelper(m);
+        var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(Recorded.PowerShellWrite(grandchild) + "; Start-Sleep -Seconds 600"));
+        using var parent = Process.Start(new ProcessStartInfo("powershell.exe")
+        {
+            ArgumentList = { "-NoProfile", "-Command", "Start-Process -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile -EncodedCommand " + encoded + "'; Start-Sleep -Seconds 600" },
+            UseShellExecute = false,
+        })!;
+        try
+        {
+            File.WriteAllText(Path.Combine(_root, "locks", "job-j1.pid"), StaleSlotTests.PidRecord(parent));
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(grandchild) && new FileInfo(grandchild).Length > 0, TimeSpan.FromMinutes(2)), "the grandchild never started");
+
+            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
+            Assert.True(code == 0, output);
+            Assert.True(parent.WaitForExit(TimeSpan.FromSeconds(60)), "the recorded process is still running");
+            Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the recorded process's child is still running");
+        }
+        finally
+        {
+            if (!parent.HasExited)
+            {
+                parent.Kill(entireProcessTree: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// With the helper the job runs in a job object that ends with its wrapper (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE): killing the wrapper alone
+    /// takes the job's whole tree with it, grandchildren included, without WMI and before any cleanup runs.
+    /// </summary>
+    [WindowsFact]
+    public void KillingTheWrapperEndsTheWholeJobTree()
+    {
+        var m = Worker(MachineOs.Windows);
+        InstallHelper(m);
+        var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
+        using var wrapper = StartWrapper(m, GrandchildJob(grandchild), out var script);
+        try
+        {
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(grandchild) && new FileInfo(grandchild).Length > 0, TimeSpan.FromMinutes(2)), "the grandchild never started");
+            Thread.Sleep(500);
+            wrapper.Kill(entireProcessTree: false);
+            Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild outlived its wrapper");
+        }
+        finally
+        {
+            Stop(wrapper, script);
+        }
+    }
+
+    /// <summary>
+    /// lanq's stop step (another ssh call, another PowerShell) opens the running job's job object by name and ends the whole tree, grandchild
+    /// included, while the wrapper is still alive; then the wrapper itself is stopped and the pid file removed.
+    /// </summary>
+    [WindowsFact]
+    public void TheStopScriptEndsTheRunningJobsWholeTree()
+    {
+        var m = Worker(MachineOs.Windows);
+        InstallHelper(m);
+        var grandchild = Path.Combine(_root, "grandchild.pid").Replace('/', (char)92);
+        using var wrapper = StartWrapper(m, GrandchildJob(grandchild), out var script);
+        try
+        {
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(grandchild) && new FileInfo(grandchild).Length > 0, TimeSpan.FromMinutes(2)), "the grandchild never started");
+            var (code, output) = Shells.Run("windows", RemoteScripts.StopJob(m, "j1"));
+            Assert.True(code == 0, output);
+            Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the stop step");
+            Assert.True(wrapper.WaitForExit(TimeSpan.FromSeconds(60)), "the wrapper survived the stop step");
+            Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+        }
+        finally
+        {
+            Stop(wrapper, script);
+        }
+    }
+
+    /// <summary>A job that starts a grandchild PowerShell (output detached to files) which records its pid and start time, then sleeps ten minutes.</summary>
+    private string[] GrandchildJob(string grandchild)
+    {
+        var inner = Recorded.PowerShellWrite(grandchild) + "; Start-Sleep -Seconds 600";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(inner));
+        return
+        [
+            "powershell", "-NoProfile", "-Command",
+            "Start-Process -Wait -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile -EncodedCommand " + encoded + "'"
+                + " -RedirectStandardOutput '" + Path.Combine(_root, "gc.out").Replace('/', (char)92) + "'"
+                + " -RedirectStandardError '" + Path.Combine(_root, "gc.err").Replace('/', (char)92) + "'",
+        ];
+    }
+
+    private static Process StartWrapper(Machine m, string[] argv, out string script)
+    {
+        script = Path.Combine(Path.GetTempPath(), "lanq-wrapper-" + Guid.NewGuid().ToString("N") + ".ps1");
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", argv, TimeSpan.FromMinutes(30)));
+        return Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
+    }
+
+    private static void Stop(Process wrapper, string script)
+    {
+        if (!wrapper.HasExited)
+        {
+            wrapper.Kill(entireProcessTree: true);
+        }
+
+        File.Delete(script);
     }
 }

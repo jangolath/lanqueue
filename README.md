@@ -167,10 +167,10 @@ Before your first job, each worker needs an SSH server, git (or only `tar` in ar
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
 [docs/WORKERS.md](docs/WORKERS.md).
 
-1. Write a starter config with `lanq init --config ~/.config/lanq/machines.yml` (bash; in PowerShell
-   `lanq init --config "$env:APPDATA\lanq\machines.yml"`; plain `lanq init` writes `./machines.yml`), or copy
-   `machines.example.yml` to one of those places, and edit it. A config in the current directory is never picked up
-   implicitly; pass `--config FILE` or set `LANQ_CONFIG`.
+1. Write a starter config with `lanq init`: it goes to the per-user file lanq reads without flags
+   (`~/.config/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`), never into the current folder. Or copy
+   `machines.example.yml` there, and edit it. A config in the current directory is never picked up implicitly; for
+   another file pass `--config FILE` or set `LANQ_CONFIG` (`lanq init` then writes that file).
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
    (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
 3. Check your setup and the fleet (`lanq doctor --remote` also checks each worker's tools; see [Commands](#commands)):
@@ -228,7 +228,7 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | `lanq makeready --ssh user@host --os windows\|linux --setup [--key-env VAR]` | Prints the PC's full one-time setup (build user, your public key, work folder, firewall, password logins off, the fingerprint check) and connects to nothing. |
 | `lanq makeready --ssh user@host --os windows\|linux --add --name NAME [--key-env VAR] [--yes] [--json]` | Scans the PC and, only when it is READY, adds it to your `machines.yml` (it shows the lines and asks first; `--yes` without a terminal). |
 | `lanq makeready --all [--json] [--force]` | The same check on every configured machine, four at a time, as one summary table. |
-| `lanq init [--json]` | Writes a commented starter `machines.yml` (in the current folder, or at `--config FILE`); never overwrites a file. |
+| `lanq init [--json]` | Writes a commented starter `machines.yml` to the per-user config file (or to `--config FILE` / `$LANQ_CONFIG`), never into the current folder; never overwrites a file. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
 | `lanq wake <machine> [--wait] [--json]` | Sends a Wake-on-LAN magic packet to a machine with a `wake:` setting, even outside its `allowed_hours`; `--wait` waits for ssh. |
 | `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready version. |
@@ -253,7 +253,7 @@ other checks still run. On a git machine a worker git older than 2.32 is a `WARN
 
 | Capability | Command run |
 | --- | --- |
-| `dotnet` / `node` / `npm` | `dotnet --version` / `node --version` / `npm --version` |
+| `dotnet` / `node` / `npm` | `dotnet --version` (fails without an SDK) / `node --version` / `npm --version` |
 | `python` | `python3 --version`, falling back to `python --version` |
 | `go` | `go version` with `GOTOOLCHAIN=local` (never downloads a toolchain) |
 | `rust` / `java` | `cargo --version` with `RUSTUP_AUTO_INSTALL=0` (never installs a toolchain) / `java -version` |
@@ -261,8 +261,13 @@ other checks still run. On a git machine a worker git older than 2.32 is a `WARN
 
 Other capability names are listed as `SKIP ... not checked`. This is how you find the classic "npm works when I log
 in, but `npm: not found` in a lanq job" problem: a non-login SSH session does not run your shell profile, so add the
-tool's folder to `path_prepend:`. Output is one `OK`, `WARN`, `FAIL` or `SKIP` line per check; the exit code is `0`
-when nothing is `WARN` or `FAIL`, otherwise `1`.
+tool's folder to `path_prepend:`. When the `dotnet` check fails, doctor also searches the worker's install folders
+(read-only, a few seconds; [docs/WORKERS.md](docs/WORKERS.md#toolchain-in-a-non-standard-place)) and, when it finds an
+SDK somewhere the job's `PATH` does not reach (say `D:/build/dotnet`), the fix names the exact `path_prepend:` and
+`DOTNET_ROOT` lines to add. On a Windows worker whose build account is denied WMI, a `wmi` line is a `WARN` with what
+the owner could grant; lanq works without it ([docs/WORKERS.md](docs/WORKERS.md#windows-workers-where-wmi-is-denied)).
+Output is one `OK`, `WARN`, `FAIL` or `SKIP` line per check; the exit code is `0` when nothing is `WARN` or `FAIL`,
+otherwise `1`.
 
 ```
 $ lanq doctor --remote
@@ -387,8 +392,11 @@ edit; `70` ssh failed, the report was unusable or the file could not be written.
 
 ### lanq init
 
-`lanq init` writes a commented, minimal `machines.yml` to the current folder (or to `--config FILE`, creating its
-folder). It never overwrites a file and never writes through a link: an existing file, folder or link (even one
+`lanq init` writes a commented, minimal `machines.yml` to the per-user config file that lanq reads without flags
+(`%APPDATA%\lanq\machines.yml` on Windows, `~/.config/lanq/machines.yml` elsewhere; `$XDG_CONFIG_HOME` is honoured),
+or to `--config FILE` or `$LANQ_CONFIG` when given, creating the folder. It never writes into the current folder (which
+may be a repository; since 0.8.0, earlier versions wrote `./machines.yml`). Text and JSON say the path written.
+It never overwrites a file and never writes through a link: an existing file, folder or link (even one
 pointing nowhere) at that path is refused (exit `2`). The file loads as written: a policy memory floor suited to
 small PCs (`min_free_mem_gb: 1.5`), one live example machine to replace (`max_jobs: 1`, set per machine), and commented examples of a
 Windows micro PC (`key_env`, a memory floor, heap caps) and a Linux family PC (`allowed_hours`, `wake:`). It then
@@ -761,6 +769,10 @@ path_prepend:
   - /home/build/.nvm/versions/node/v22.11.0/bin
   - /home/build/.cargo/bin
 ```
+
+The same goes for a toolchain in a private folder, for example a .NET SDK in `D:/build/dotnet` on a Windows worker
+whose `PATH` only has a runtime-only dotnet: `path_prepend: [D:/build/dotnet]` plus `DOTNET_ROOT: D:/build/dotnet`
+under `env:`. `lanq doctor --remote` finds such a folder and prints these lines; lanq never edits `machines.yml` itself.
 
 `env:` names must be letters, digits and `_`; values may not be empty (Windows PowerShell 5.1 cannot set an empty
 variable, so an empty value is refused everywhere: leave the variable out) or contain control characters. As a

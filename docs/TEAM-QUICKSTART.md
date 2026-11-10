@@ -85,20 +85,16 @@ ssh-add ~/.ssh/lanq_ed25519
 The alternative is `key_env:` in the config, naming an environment variable that holds the key file's path; `lanq
 health` warns when that file has no passphrase. See [Keeping your keys safe](../README.md#keeping-your-keys-safe).
 
-Now write the starter config to the per-user path, which lanq reads without `--config`:
+Now write the starter config. `lanq init` puts it at the per-user path, which lanq reads without `--config`
+(`%APPDATA%\lanq\machines.yml` on Windows, `~/.config/lanq/machines.yml` elsewhere), and prints that path:
 
-```powershell
-# PowerShell
-lanq init --config "$env:APPDATA\lanq\machines.yml"
+```text
+lanq init
 ```
 
-```bash
-# bash
-lanq init --config ~/.config/lanq/machines.yml
-```
-
-`lanq init` with no `--config` writes `./machines.yml` instead. A config in the current folder is **never** read by
-itself: then pass `--config FILE` on every command or set `LANQ_CONFIG`. `lanq init` never overwrites a file. The
+It never writes into the current folder (since 0.8.0; older versions wrote `./machines.yml` there). For a config
+somewhere else pass `--config FILE` (or set `LANQ_CONFIG`), to `lanq init` and then to every command: a config in the
+current folder is **never** read by itself. `lanq init` never overwrites a file. The
 starter has one live example machine (`example-01`, which you will replace), a commented Windows micro PC and a
 commented Linux family PC, a policy memory floor for small PCs (`min_free_mem_gb: 1.5`) and `max_jobs: 1` on each
 example machine (`max_jobs` is set per machine; `lanq makeready` suggests one from the PC's RAM and CPUs). `lanq init

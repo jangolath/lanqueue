@@ -329,8 +329,8 @@ explains the rule.
 One array, one object per machine in config order:
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
- {"name":"micro-01","state":"down","reasons":["ssh: connect to host 10.20.30.21 port 22: Connection timed out"],"load":0,"diskFreeGb":0,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":null,"memTotalGb":null,"freeSlots":0,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds"},
+ {"name":"micro-01","state":"down","reasons":["ssh: connect to host 10.20.30.21 port 22: Connection timed out"],"load":0,"diskFreeGb":0,"memFreeGb":null,"slotsUsed":0,"maxJobs":1,"localTime":null,"cores":null,"memTotalGb":null,"loadKnown":true,"freeSlots":0,"size":"unknown","suitedFor":"unknown: the machine did not report its memory"}]
 ```
 
 | Key | Type | Notes |
@@ -346,6 +346,7 @@ One array, one object per machine in config order:
 | `localTime` | string or null | The worker's own clock, `yyyy-MM-ddTHH:mm:ss`; `null` when not reported. |
 | `cores` | number or null | Logical processors; `null` when not reported. |
 | `memTotalGb` | number or null | Total memory; `null` when not reported. |
+| `loadKnown` | boolean | `false` when the worker could not measure its load (a Windows account denied WMI where the fallback is refused too): `load` is then 0 and means nothing, and load alone never holds the machine. `true` otherwise, also when `down` (0.8.0). |
 | `freeSlots` | number | `maxJobs` minus `slotsUsed`, never below 0; 0 when `down`. |
 | `size` | string | `light`, `medium`, `heavy` or `unknown`. |
 | `suitedFor` | string | What the machine suits, for example `light: lint and unit-test shards`; `+ container builds` with a `docker` capability. |
@@ -368,7 +369,7 @@ the same probe. Each row has the keys above plus these five, always present:
 | `jobSlots` | number | How many copies (or shards) of the job it could take now, `--mem` counted per copy; 0 when not eligible. |
 
 ```json
-[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds",
+[{"name":"build-01","state":"ok","reasons":[],"load":0.12,"diskFreeGb":180.4,"memFreeGb":9.8,"slotsUsed":0,"maxJobs":2,"localTime":"2026-11-09T22:15:03","cores":8,"memTotalGb":15.6,"loadKnown":true,"freeSlots":2,"size":"heavy","suitedFor":"heavy: full suites and large builds",
   "nextSteps":[{"action":"none","reason":"build-01 can take such a job now","safeToRunUnattended":false}],"eligible":true,"why":null,"reason":null,"permanent":false,"jobSlots":2}]
 ```
 
@@ -469,7 +470,7 @@ prints one object on every path. Every key is always there, `null` when it has n
 | --- | --- | --- |
 | `status` | string | `Created`, `Rejected` or `InfraError`. |
 | `exitCode` | number | 0, 2 or 70. |
-| `path` | string or null | Full path of the config file; `null` only when the arguments were refused. |
+| `path` | string or null | Full path of the config file (the per-user config file unless `--config` or `LANQ_CONFIG` named another); `null` only when the arguments were refused. |
 | `message` | string | One line. The next steps for people go to stderr. |
 | `nextSteps` | array | `Created`: replace `example-01` (for the developer) and `lanq doctor --json --config <path>`. |
 
@@ -547,7 +548,8 @@ The check names, with the levels each can have:
 | `work_root_writable` | `remote` | `ok`, `warn`, `fail` | `warn` when `work_root` does not exist yet. |
 | `transfer_tool` | `remote` | `ok`, `fail` | git (or tar with `transfer: archive`) in a non-login ssh session. |
 | `git_version` | `remote` | `warn` | Only on a git machine with git older than 2.32. |
-| `capability` | `remote` | `ok`, `fail`, `skip` | One per capability: its tool answers in the job environment; `skip` for a name lanq has no check for. |
+| `wmi` | `remote` | `warn` | Only on a Windows machine whose ssh user is denied WMI/CIM (0.8.0). lanq works without it; `fix` says what the owner could grant. |
+| `capability` | `remote` | `ok`, `fail`, `skip` | One per capability: its tool answers in the job environment (`dotnet --version` needs an SDK); `skip` for a name lanq has no check for. When `dotnet` fails and the worker has an SDK in a folder the job's `PATH` does not reach, `detail` names it and `fix` is the `path_prepend:` (and `DOTNET_ROOT`) line to add (0.8.0). |
 
 `nextSteps` for doctor:
 

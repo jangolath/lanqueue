@@ -402,6 +402,11 @@ public static partial class Cli
         return string.IsNullOrEmpty(home) ? null : home.Replace('\\', '/') + file[1..];
     }
 
+    /// <summary>doctor --remote's fix for a Windows ssh user that is denied WMI (only a suggestion: lanq works without it).</summary>
+    internal const string WmiFix =
+        "nothing is required (lanq uses fallbacks); for faster probes the machine's owner can grant the account WMI read: wmimgmt.msc, "
+        + "WMI Control, Properties, Security, Root\\CIMV2, Security: Enable Account and Remote Enable for the user";
+
     private static async Task<List<DoctorCheck>> RemoteMachineChecks(Machine m, ISshClient ssh, Func<Machine, string> doctorScript, CancellationToken ct)
     {
         DoctorCheck Check(string name, string level, string detail, string? fix = null, string? capability = null) => new("remote", m.Name, name, level, detail, fix, capability);
@@ -469,6 +474,15 @@ public static partial class Cli
                 "update git on that machine to 2.32 or later"));
         }
 
+        if (m.Os == MachineOs.Windows && await WmiDenied(m, ssh, ct).ConfigureAwait(false) is { } why)
+        {
+            lines.Add(Check(
+                "wmi",
+                "warn",
+                $"WMI/CIM is not available to the ssh user ({why}); lanq uses its fallbacks for memory, load and stopping job trees",
+                WmiFix));
+        }
+
         foreach (var cap in m.Capabilities.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!RemoteScripts.ToolChecks.TryGetValue(cap, out var commands))
@@ -482,6 +496,25 @@ public static partial class Cli
             var bar = raw?.IndexOf('|', StringComparison.Ordinal) ?? -1;
             var code = bar < 0 ? "?" : raw![..bar];
             var text = bar < 0 ? (partial ? "did not finish before the ssh call timed out" : "no answer") : raw![(bar + 1)..];
+            if (code is not ("0" or "timeout" or "?") && RemoteScripts.FindableTools.Contains(cap)
+                && await FindToolchain(m, ssh, cap, ct).ConfigureAwait(false) is { } search)
+            {
+                // A dotnet with runtimes only fails dotnet --version ("No .NET SDKs were found"): say so in plain words.
+                var failed = search.Runtime is { } runtime ? $"dotnet {runtime} runtime only, no SDK" : text.Length > 0 ? text : "exit " + code;
+                if (search.Found is { } found)
+                {
+                    lines.Add(Check(
+                        "capability",
+                        "fail",
+                        $"{cap}: '{command}' failed in the job environment ({failed}), but {found.What} is installed in {found.Dir}, a folder the ssh session's PATH does not reach",
+                        found.Fix,
+                        cap));
+                    continue;
+                }
+
+                text = failed;
+            }
+
             lines.Add(code == "0"
                 ? Check("capability", "ok", $"{cap}: {text}", capability: cap)
                 : code == "timeout"
@@ -497,5 +530,56 @@ public static partial class Cli
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// After a failed tool check: searches the worker's usual and private install folders (<see cref="RemoteScripts.FindToolchain"/>, one more
+    /// read-only ssh call). Found is the best folder (highest version) with the path_prepend: line to suggest, or null; Runtime the version of a
+    /// runtime-only dotnet on PATH, or null. Null when the search could not run. lanq never edits the config itself.
+    /// </summary>
+    internal static async Task<((string Dir, string What, string Fix)? Found, string? Runtime)?> FindToolchain(Machine m, ISshClient ssh, string tool, CancellationToken ct)
+    {
+        SshResult r;
+        try
+        {
+            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.FindToolchain(m, tool)), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+
+        var runtime = HealthProbe.Parse(r.Output).GetValueOrDefault("runtime." + tool.ToLowerInvariant()) is { Length: > 0 and <= 40 } v && System.Version.TryParse(v.Split('-')[0], out _)
+            ? JobRunner.SafeLine(v)
+            : null;
+        if (RemoteScripts.ParseFound(r.Output, tool) is not [var best, ..])
+        {
+            return (null, runtime);
+        }
+
+        var dir = JobRunner.SafeLine(best.Dir);
+        var version = JobRunner.SafeLine(best.Version);
+        var what = tool.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? $".NET SDK {version}" : $"{tool} {version}";
+        var fix = $"add `path_prepend: [{dir}]` to {m.Name} in machines.yml (found {what} there)"
+            + (tool.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? $", and `DOTNET_ROOT: {dir}` under its env: so the SDK's tools find the runtimes next to it" : "");
+        return ((dir, what, fix), runtime);
+    }
+
+    /// <summary>Why the Windows ssh user may not use WMI/CIM (one more small ssh call), or null when it may (or the check did not answer).</summary>
+    private static async Task<string?> WmiDenied(Machine m, ISshClient ssh, CancellationToken ct)
+    {
+        SshResult r;
+        try
+        {
+            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.WmiCheck), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+
+        return HealthProbe.Parse(r.Output).GetValueOrDefault("wmi") is { } wmi && wmi.StartsWith("fail", StringComparison.Ordinal)
+            ? JobRunner.SafeLine(wmi.IndexOf('|', StringComparison.Ordinal) is var bar && bar >= 0 && wmi[(bar + 1)..].Trim() is { Length: > 0 } text ? text : "failed")
+            : null;
     }
 }
