@@ -102,7 +102,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     {
         ["health"] = ["--json", "--wake", "--needs", "--mem"],
         ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail", "--dry-run"],
-        ["stats"] = [],
+        ["stats"] = ["--json"],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force", "--json"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
@@ -408,7 +408,7 @@ public static partial class Cli
           lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
-          lanq stats
+          lanq stats [--json]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
@@ -433,6 +433,11 @@ public static partial class Cli
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise. --json: the lines go to stderr and
         stdout gets one object (status Ok, Warnings, Failing, Rejected, InfraError or Cancelled, exitCode, message, remote, counts, checks: scope,
         machine, name, level, detail, fix, capability; nextSteps); 2 bad arguments, 70 unexpected error, 130 Ctrl+C, each with that object.
+        stats summarises this computer's job log (nothing leaves it): the totals and one line per machine, then per machine the median and p90
+        of completed jobs and the last run, the newest 20 commands (runs, jobs: each shard is one job, passed, failed, median, p90) and the size of
+        logs/. Unreadable lines are skipped with a warning. --json prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode,
+        message, files, jobs, wallMinutes, skippedLines, oldestUtc, newestUtc, logs, machines, commands, nextSteps; times in UTC). Exit 0 (no job
+        log is 0 jobs), 2 bad arguments, 70 the job log could not be read, 130 Ctrl+C.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
         such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
@@ -514,7 +519,7 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && own.Contains("--dry-run")
@@ -542,7 +547,7 @@ public static partial class Cli
         var log = new JobLog(home, line => stderr.WriteLine(line));
         if (p.Command == "stats")
         {
-            return Stats(log, stdout);
+            return await Stats(p, log, StatsKeepDays(p, loadConfig), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake"))
@@ -720,6 +725,7 @@ public static partial class Cli
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
             "doctor" => JsonSerializer.Serialize(
                 new DoctorJson(status, exitCode, message, null, new DoctorCountsJson(0, 0, 0, 0, 0), []) { NextSteps = steps }, LanqJson.Default.DoctorJson),
+            "stats" => JsonSerializer.Serialize(StatsError(status, exitCode, message, LogPrune.DefaultKeepDays, steps), LanqJson.Default.StatsJson),
             _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message) { NextSteps = steps }, LanqJson.Default.ErrorJson),
         });
 
@@ -979,16 +985,4 @@ public static partial class Cli
     private static string Memory(MachineHealth h) =>
         (h.MemFreeGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"mem free {mem:0.0} GB") : "mem free ?")
         + (h.SwapFreeGb is { } swap ? string.Create(CultureInfo.InvariantCulture, $" (swap {swap:0.0} GB)") : "");
-
-    internal static int Stats(JobLog log, TextWriter stdout)
-    {
-        var all = log.ReadAll();
-        stdout.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{all.Count} jobs, {all.Sum(r => r.WallSeconds) / 60:0.#} min total wall-clock"));
-        foreach (var g in all.GroupBy(r => r.Machine ?? "-").OrderBy(g => g.Key, StringComparer.Ordinal))
-        {
-            stdout.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  {g.Key}: {g.Count()} jobs, {g.Sum(r => r.WallSeconds) / 60:0.#} min"));
-        }
-
-        return 0;
-    }
 }

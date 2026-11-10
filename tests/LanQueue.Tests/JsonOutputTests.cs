@@ -30,7 +30,7 @@ public sealed class JsonOutputTests : IDisposable
         Assert.False(ParsedArgs.Parse(["health"]).Json);
         Assert.True(ParsedArgs.Parse(["doctor", "--json"]).Json); // since 0.7.0
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["unlock", "build-01", "--json"]));
-        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["stats", "--json"])); // until stats --json lands (0.7.0, P3)
+        Assert.True(ParsedArgs.Parse(["stats", "--json"]).Json); // since 0.7.0
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--dir", "x"])); // health takes --needs since 0.6.0, never --dir
     }
 

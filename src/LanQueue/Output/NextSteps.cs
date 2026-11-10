@@ -708,4 +708,16 @@ internal static class NextSteps
         static string Listed(List<string> names) =>
             string.Join(", ", names.Take(5)) + (names.Count > 5 ? string.Create(CultureInfo.InvariantCulture, $" and {names.Count - 5} more") : "");
     }
+
+    /// <summary>
+    /// lanq stats only reads the local job log, so it never suggests a command: Ok -> none; Rejected -> fix the command line; InfraError (the
+    /// job log could not be read) -> ask_developer; Cancelled -> none.
+    /// </summary>
+    public static List<NextStepJson> ForStats(string status, string message) => status switch
+    {
+        "Ok" => Nothing("lanq stats only reads the local job log; nothing to do"),
+        "Rejected" => ArgumentsError(message),
+        "Cancelled" => Nothing("cancelled (Ctrl+C)"),
+        _ => [Step(NextAction.AskDeveloper, message + "; the developer can check that file's permissions or whether another program holds it locked")],
+    };
 }

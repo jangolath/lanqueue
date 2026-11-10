@@ -267,6 +267,50 @@ internal sealed record DoctorCountsJson(int Ok, int Warn, int Fail, int Skip, in
 /// <param name="Capability">The capability of a capability check, else null.</param>
 internal sealed record DoctorCheckJson(string Scope, string? Machine, string Name, string Level, string Detail, string? Fix, string? Capability);
 
+/// <summary>
+/// The one object <c>lanq stats --json</c> prints on every path: Ok (0; no job log is 0 jobs), Rejected (2: bad arguments), InfraError (70: the
+/// job log could not be read) or Cancelled (130: Ctrl+C). The error objects carry zeros and empty lists. Every member is always written except
+/// <see cref="CommandsMore"/>.
+/// </summary>
+/// <param name="Files">The job log files read, oldest first (jobs.1.jsonl, then jobs.jsonl).</param>
+/// <param name="SkippedLines">Lines that were not a job record (a torn line, a hand edit): skipped and counted.</param>
+/// <param name="OldestUtc">The start of the oldest job (UTC), or null for none.</param>
+/// <param name="Machines">Ordinal by name ("-" for jobs that never got a machine).</param>
+/// <param name="Commands">Newest first; at most <see cref="Cli.MaxStatsCommands"/> (see <see cref="CommandsMore"/>).</param>
+internal sealed record StatsJson(
+    string Status, int ExitCode, string Message, IReadOnlyList<string> Files, int Jobs, double WallMinutes, int SkippedLines, DateTime? OldestUtc,
+    DateTime? NewestUtc, StatsLogsJson Logs, IReadOnlyList<StatsMachineJson> Machines, IReadOnlyList<StatsCommandJson> Commands)
+{
+    /// <summary>How many more commands there were beyond <see cref="Commands"/>; left out when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? CommandsMore { get; init; }
+
+    /// <summary>What to do next (see <see cref="NextStepJson"/>): stats never suggests a command.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>lanq's own job logs in the state folder's logs/ (<see cref="Jobs.LogPrune.Measure"/>) and how long they are kept (0 = for ever).</summary>
+internal sealed record StatsLogsJson(int Files, double Megabytes, int KeepDays);
+
+/// <summary>One machine of <c>lanq stats --json</c>; median and p90 are wall-clock seconds of its Completed jobs (nearest rank), null when none.</summary>
+/// <param name="SpeedFactor">How fast the machine runs a command compared with the others (filled in by a later version; null until then).</param>
+/// <param name="SpeedSamples">How many jobs <paramref name="SpeedFactor"/> comes from (null until it is filled in).</param>
+internal sealed record StatsMachineJson(
+    string Machine, int Jobs, int Completed, int Failed, int Other, double WallMinutes, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
+    double? SpeedFactor, int? SpeedSamples);
+
+/// <summary>One command of <c>lanq stats --json</c>: every job with the same key and dir (or, before 0.7.0, the same recorded command; dir null).</summary>
+/// <param name="Runs">Distinct runs: every shard of one --shards run is one run.</param>
+/// <param name="Jobs">Every job: each shard and each retried attempt.</param>
+/// <param name="LastShards">The newest job's shard count (1 for a single run); null for lines written before 0.7.0.</param>
+/// <param name="Timing">What earlier runs say about the command's work and overhead (filled in by a later version; null until then).</param>
+internal sealed record StatsCommandJson(
+    string Command, string? Dir, int Runs, int Jobs, int Completed, int Failed, int Other, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
+    int? LastShards, StatsTimingJson? Timing);
+
+/// <summary>The timing block of a <c>lanq stats --json</c> command (declared now; filled in by a later version).</summary>
+internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double OverheadSeconds, int? SuggestedShards);
+
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(List<HealthJson>))]
@@ -281,6 +325,11 @@ internal sealed record DoctorCheckJson(string Scope, string? Machine, string Nam
 [JsonSerializable(typeof(DoctorJson))]
 [JsonSerializable(typeof(DoctorCheckJson))]
 [JsonSerializable(typeof(DoctorCountsJson))]
+[JsonSerializable(typeof(StatsJson))]
+[JsonSerializable(typeof(StatsMachineJson))]
+[JsonSerializable(typeof(StatsCommandJson))]
+[JsonSerializable(typeof(StatsTimingJson))]
+[JsonSerializable(typeof(StatsLogsJson))]
 [JsonSerializable(typeof(NextStepJson))]
 [JsonSerializable(typeof(List<NextStepJson>))]
 internal sealed partial class LanqJson : JsonSerializerContext;

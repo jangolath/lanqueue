@@ -49,6 +49,8 @@ public class CliTests
     [InlineData("--setup prints that PC's full one-time setup and connects to nothing")]
     [InlineData("--add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml")]
     [InlineData("lanq unlock <machine>")]
+    [InlineData("lanq stats [--json]")]
+    [InlineData("stats summarises this computer's job log")]
     [InlineData("lanq doctor [--remote")]
     [InlineData("lanq doctor [--remote [--force]] [--json] [--config FILE]")]
     [InlineData("--json: the lines go to stderr and")]

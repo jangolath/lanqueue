@@ -206,6 +206,11 @@ public sealed class NextStepsTests : IDisposable
             yield return ("doctor Cancelled", NextSteps.ForDoctor("Cancelled", ok, remote, "fleet.yml", "cancelled (Ctrl+C)"));
         }
 
+        foreach (var status in new[] { "Ok", "Rejected", "InfraError", "Cancelled" })
+        {
+            yield return ($"stats {status}", NextSteps.ForStats(status, "message"));
+        }
+
         yield return ("arguments", NextSteps.ArgumentsError("Unknown or incomplete option '--bogus'."));
         yield return ("config", NextSteps.ConfigError("fleet.yml", "Config file not found: fleet.yml."));
     }
@@ -711,6 +716,7 @@ public sealed class NextStepsTests : IDisposable
     [InlineData("wake", "--json", "--bogus")]
     [InlineData("init", "--json", "--bogus")]
     [InlineData("doctor", "--json", "--bogus")]
+    [InlineData("stats", "--json", "--bogus")]
     public async Task EveryErrorObjectCarriesNextSteps(params string[] args)
     {
         var o = new StringWriter();
