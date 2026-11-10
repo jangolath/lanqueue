@@ -71,12 +71,33 @@
 - On Windows, processes a job leaves running (build servers, for example) now end with the job.
 - `lanq init` no longer writes `./machines.yml` (see Setup).
 
+- Loading a config now checks the Windows job script at its largest (a job given `&` or `|`, the longest plan job
+  name), so a Windows machine whose `env:` leaves no room for such a job is refused at load instead of at run time.
+- With no per-user config folder (no usable `HOME`/`APPDATA`), `lanq init` and config lookup exit 2 and name
+  `--config`/`LANQ_CONFIG`; a relative `XDG_CONFIG_HOME` is ignored.
+
+### Security
+
+- Windows workers run lanq's helper script (`work_root/bin`) only when its SHA-256 matches lanq's own copy, and lanq
+  rewrites it before each job if it changed, so a job cannot plant code in later jobs' wrapper, stop, cleanup or doctor
+  scripts, or stop a cleanup before it frees the slot.
+- The job wrapper's `LANQ_EXIT` and `LANQ_WINARGS` lines carry a per-run random value that is not in the job's
+  environment, so a job that prints them is ordinary output, not a refusal or an exit code.
+- `lanq.yml` refuses YAML anchors and aliases (`&name`, `*name`) with their line number, so an alias-bomb file cannot
+  hang lanq.
+
 ### Fixed
 
 - Windows workers denied WMI showed `ram ?`, a silent `load 0.00` and size `unknown`, and a timeout, stop or stale-slot
   cleanup could leave the job's process tree running.
 - `dotnet` passed `lanq doctor --remote` on a worker with only a .NET runtime, and the job then failed with "No .NET
   SDKs were found".
+- With `--plan` and `--wait 0`, a job no longer ends `NoCapacity` when a sibling frees the slot just after the job saw
+  it taken; it looks again first (also for jobs with shards).
+- When several plan jobs fail, the plan exits with the first failed job's own exit code in `lanq.yml` order, whatever
+  order they were launched in.
+- When a Windows job times out, its process tree is walked before the job object is ended, so a grandchild started
+  before the job object took hold is stopped too.
 
 ## 0.7.0 (2026-11-10)
 
