@@ -64,6 +64,12 @@ public sealed record MachineHealth(
     /// <summary>The worker's own local time as it reported it (yyyy-MM-ddTHH:mm:ss), or null when it did not.</summary>
     public string? LocalTime { get; init; }
 
+    /// <summary>
+    /// False when the worker could not measure its load (a Windows account denied WMI on a host where the fallback is refused too); then
+    /// <see cref="LoadRatio"/> is 0, never holds the machine, and health shows "load ?".
+    /// </summary>
+    public bool LoadKnown { get; init; } = true;
+
     /// <summary>True when the probe failed the way a sleeping or powered-off host does (connect timeout, no route or unreachable host); never for an auth or host-key failure.</summary>
     public bool LooksAsleep { get; init; }
 }
@@ -198,6 +204,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
         var remaining = windows is null ? null : HoursWindow.Remaining(windows, workerNow ?? clock.GetLocalNow().DateTime, offsets);
         var health = new MachineHealth(machine.Name, true, load, disk, (int)slotsRaw, null, null)
         {
+            LoadKnown = values.GetValueOrDefault("load_source") != "none",
             MemFreeGb = OptionalNum(values, "mem_free_gb"),
             MemTotalGb = OptionalNum(values, "mem_total_gb") is { } total and > 0 and < 1_048_576 ? total : null,
             Cores = OptionalNum(values, "cores") is { } cores and >= 1 and <= 65_536 && cores == Math.Floor(cores) ? (int)cores : null,

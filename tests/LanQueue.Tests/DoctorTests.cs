@@ -449,7 +449,7 @@ public sealed class DoctorTests : IDisposable
         (code, o) = await Doctor(Host(), ssh, () => config, remote: true, force: true, clock: noon);
         Assert.Empty(Lines(o, "HOLD"));
         Assert.DoesNotContain(ssh.Calls, c => IsProbe(c.Command));
-        Assert.Equal(2, ssh.Calls.Count);
+        Assert.Equal(3, ssh.Calls.Count); // the checks on both machines, and the WMI check on the Windows one
     }
 
     [Fact]
@@ -466,6 +466,22 @@ public sealed class DoctorTests : IDisposable
         Assert.Equal(1, code);
         Assert.Contains(Lines(o, "FAIL"), l => l.Contains("dotnet", StringComparison.Ordinal) && l.Contains("timed out", StringComparison.Ordinal));
         Assert.Contains(Lines(o, "OK"), l => l.Contains("node", StringComparison.Ordinal) && l.Contains("v22.1.0", StringComparison.Ordinal));
+    }
+
+    /// <summary>A Windows build account denied WMI is a WARN with what the owner could grant; lanq works without it. Linux is never asked.</summary>
+    [Fact]
+    public async Task WmiDeniedIsAWarnWithAFix()
+    {
+        var config = T.Config();
+        config.Machines[1].Capabilities = [];
+        var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok~tool=ok~git_version=git version 2.47.0~wmi=fail|Access denied~cap.dotnet=0|10.0.100~cap.node=0|v22~".Replace('~', (char)10)) };
+        var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, force: true, json: true);
+        Assert.Equal(1, code);
+        var wmi = Assert.Single(Checks(OneObject(o)), c => Str(c, "name") == "wmi");
+        Assert.Equal(("remote", "build-02", "warn"), (Str(wmi, "scope"), Str(wmi, "machine"), Str(wmi, "level")));
+        Assert.Contains("Access denied", Str(wmi, "detail"), StringComparison.Ordinal);
+        Assert.Equal(Cli.WmiFix, Str(wmi, "fix"));
+        Assert.Contains("wmimgmt.msc", Cli.WmiFix, StringComparison.Ordinal);
     }
 
     /// <summary>If the whole ssh call runs out of time, what did arrive is still reported, and the rest says it did not finish.</summary>
@@ -496,7 +512,8 @@ public sealed class DoctorTests : IDisposable
         windows.Capabilities = ["dotnet", "rust"];
         var ps = RemoteScripts.Doctor(windows, checkSeconds: 7);
         Assert.Contains("WaitForExit(7000)", ps, StringComparison.Ordinal);
-        Assert.Contains("taskkill /PID $p.Id /T /F", ps, StringComparison.Ordinal);
+        Assert.Contains("if (Test-Path -LiteralPath $LqH) { . $LqH; LqKill $p.Id }", ps, StringComparison.Ordinal); // the check's tree, without WMI
+        Assert.DoesNotContain("Get-CimInstance", ps, StringComparison.Ordinal); // a separate small call (RemoteScripts.WmiCheck)
     }
 
     [Fact]
@@ -592,6 +609,13 @@ public sealed class DoctorTests : IDisposable
         m.Capabilities = ["dotnet", "npm"];
         m.PathPrepend = [dir];
         m.Transfer = TransferMode.Archive;
+        if (shell == "windows")
+        {
+            // A worker that has run a job has the wrapper's helper; with it the check runs in a job object (no WMI needed to stop its tree).
+            StaleSlotTests.RunScript(shell, RemoteScripts.EnsureIncoming(m));
+            Assert.True(File.Exists(RemoteScripts.WindowsHelperPath(m)));
+        }
+
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var lines = StaleSlotTests.RunScript(shell, RemoteScripts.Doctor(m, checkSeconds: 20)).Replace("\r", "", StringComparison.Ordinal).Split('\n');
         Assert.True(watch.Elapsed < TimeSpan.FromMinutes(5), "took " + watch.Elapsed);

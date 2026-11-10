@@ -27,6 +27,12 @@ internal record HealthJson(
     [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     public double? MemTotalGb { get; init; }
 
+    /// <summary>
+    /// False when the worker could not measure its load (a Windows account denied WMI where the fallback is refused too): <see cref="HealthJson.Load"/>
+    /// is then 0 and means nothing. True otherwise (also for a machine that is down). Added in 0.8.0.
+    /// </summary>
+    public bool LoadKnown { get; init; } = true;
+
     /// <summary>max_jobs minus the slots in use (0 for a machine that is down).</summary>
     public int FreeSlots { get; init; }
 

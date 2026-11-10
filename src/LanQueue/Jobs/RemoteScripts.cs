@@ -6,7 +6,7 @@ using LanQueue.Policy;
 namespace LanQueue.Jobs;
 
 /// <summary>Builds the remote command strings (sh on Linux, PowerShell on Windows). Pure functions, unit tested.</summary>
-public static class RemoteScripts
+public static partial class RemoteScripts
 {
     /// <summary>Conservative cap on the whole remote command line for Windows hosts (cmd.exe allows 8191 characters).</summary>
     internal const int MaxWindowsCommandLength = 8000;
@@ -36,20 +36,33 @@ public static class RemoteScripts
             + Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'\n" + compact));
     }
 
+    /// <summary>
+    /// The health probe: one <c>key=value</c> per line. On Windows <c>load=</c> and memory come from CIM when the ssh user may use it, else
+    /// load from GetSystemTimes (<see cref="WindowsProbeLoad"/>) and memory from .NET's ComputerInfo (GlobalMemoryStatusEx underneath);
+    /// <c>load_source=cim|native|none</c> and <c>mem_source=cim|vb|none</c> say which (with none, load= stays 0 for an older lanq, and this one
+    /// shows the load as unknown). Keys are only ever added, so an older lanq reads the output of a newer probe.
+    /// </summary>
     public static string Probe(Machine m) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
             $inv = [cultureinfo]::InvariantCulture
-            $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+            $cpu = $null; $ls = 'cim'
+            try { $cpu = (Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average } catch { }
+            if ($null -eq $cpu) { $ls = 'none'; try {
+            {{WindowsProbeLoad}}
+            } catch { } }
             if ($null -eq $cpu) { $cpu = 0 }
             $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
             $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }).Count
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
+            'load_source=' + $ls
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
             'slots_used=' + $slots
-            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-            if ($os -and $os.FreePhysicalMemory) { 'mem_free_gb=' + ([double]$os.FreePhysicalMemory / 1MB).ToString('0.##', $inv) }
-            if ($os -and $os.TotalVisibleMemorySize) { 'mem_total_gb=' + ([double]$os.TotalVisibleMemorySize / 1MB).ToString('0.##', $inv) }
+            $mt = 0; $ms = 'cim'
+            try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $mt = 1KB * $os.TotalVisibleMemorySize; $mf = 1KB * $os.FreePhysicalMemory } catch { }
+            if (-not $mt) { $ms = 'vb'; try { Add-Type -AssemblyName Microsoft.VisualBasic; $vb = New-Object Microsoft.VisualBasic.Devices.ComputerInfo; $mt = $vb.TotalPhysicalMemory; $mf = $vb.AvailablePhysicalMemory } catch { } }
+            if ($mt) { 'mem_free_gb=' + ($mf / 1GB).ToString('0.##', $inv); 'mem_total_gb=' + ($mt / 1GB).ToString('0.##', $inv) } else { $ms = 'none' }
+            'mem_source=' + $ms
             'cores=' + [Environment]::ProcessorCount
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
@@ -193,7 +206,7 @@ public static class RemoteScripts
     /// unique token; an abandoned lock renamed away and put back if fresh; Drop removes only a lock that still holds its own token), and <c>StopJob</c>, which kills a stale slot's still-running job (wrapper and child, with their trees) through
     /// <see cref="WindowsKillRecorded"/>: only processes whose pid AND start time match what the job recorded.
     /// </summary>
-    internal const string WindowsSlotFunctions = """
+    internal static string WindowsSlotFunctions => """
         $tok = "$PID." + [guid]::NewGuid().ToString('N'); $IOFile = [IO.File]
         function Take($f) {
         $k = "$f.reclaim"; $o = "$k.old.$PID"; $old = [DateTime]::UtcNow.AddMinutes(-10)
@@ -206,23 +219,23 @@ public static class RemoteScripts
         """ + "\n" + WindowsKillRecorded;
 
     /// <summary>
-    /// <c>KillRecorded $pf $legacy</c>: the Windows job wrapper records pairs of "pid" and "process start time (UTC ticks)" in
-    /// locks/job-ID.pid, first its own PowerShell, then the child that runs the job. Each recorded process (child first) is killed with
-    /// its tree (taskkill /T /F) only when a process with that pid exists AND started at that very instant, so a pid that Windows has
-    /// since given to another process (for example the owner's own PowerShell) is never touched, and an orphaned child whose wrapper
-    /// died is still reached. A pid file without start times (an older lanq) is honoured only by cleanup right after its job
-    /// (<paramref name="legacy"/>), with the old "is a PowerShell process" check; a stale-slot reclaim never kills on it.
+    /// <c>KillRecorded $pf $legacy</c> (needs $root): the Windows job wrapper records pairs of "pid" and "process start time (UTC ticks)" in
+    /// locks/job-ID.pid, first its own PowerShell, then the child that runs the job. The job object the wrapper put the child in (named after
+    /// the pid file, see <see cref="WindowsJobHelper"/>) is terminated first when it still exists. Then each recorded process (child first) is
+    /// stopped with its tree (<c>LqKill</c>: a toolhelp walk, no WMI; taskkill /T where the helper is not available) only when a process with
+    /// that pid exists AND started at that very instant, so a pid that Windows has since given to another process (for example the owner's
+    /// own PowerShell) is never touched, and an orphaned child whose wrapper died is still reached. A pid file without start times (an older
+    /// lanq) is honoured only by cleanup right after its job (<paramref name="legacy"/>), with the old "is a PowerShell process" check; a
+    /// stale-slot reclaim never kills on it.
     /// </summary>
-    internal const string WindowsKillRecorded = """
-        function KillRecorded($pf, $legacy) {
-        $l = @(Get-Content -LiteralPath $pf -EA 0 | ForEach-Object { "$_".Trim() }); $timed = $false
-        for ($i = $l.Count - $l.Count % 2 - 2; $i -ge 0; $i -= 2) {
-        if ($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i + 1] -notmatch '^[0-9]{1,19}\z') { continue }
-        $timed = $true; $p = Get-Process -Id $l[$i] -EA 0; $t = $null
-        if ($p) { try { $t = "$($p.StartTime.ToUniversalTime().Ticks)" } catch { } }
-        if ($t -and $t -eq $l[$i + 1]) { taskkill /PID $l[$i] /T /F 2>$null | Out-Null } }
-        if (-not $timed -and $legacy -and $l[0] -match '^[0-9]{1,9}\z') { $p = Get-Process -Id $l[0] -EA 0; if ($p.ProcessName -match '^(powershell|pwsh)') { taskkill /PID $l[0] /T /F 2>$null | Out-Null } }
-        Remove-Item -Force -EA 0 -LiteralPath $pf }
+    internal static string WindowsKillRecorded => WindowsHelperLoad("\"$root/bin/lanq-" + WindowsJobHelperHash + ".ps1\"") + "\n" + """
+        function KillRecorded($pf,$lg){LqEndJob $pf
+        $l=@(Get-Content -LiteralPath $pf -EA 0|%{"$_".Trim()});$tm=$false
+        for($i=$l.Count-$l.Count%2-2;$i -ge 0;$i-=2){if($l[$i] -notmatch '^[0-9]{1,9}\z' -or $l[$i+1] -notmatch '^[0-9]{1,19}\z'){continue}
+        $tm=$true;$p=Get-Process -Id $l[$i] -EA 0;$t=$null;if($p){try{$t="$($p.StartTime.ToUniversalTime().Ticks)"}catch{}}
+        if($t -and $t -eq $l[$i+1]){LqKill $l[$i]}}
+        if(!$tm -and $lg -and $l[0] -match '^[0-9]{1,9}\z'){$p=Get-Process -Id $l[0] -EA 0;if($p.ProcessName -match '^(powershell|pwsh)'){LqKill $l[0]}}
+        Remove-Item -Force -EA 0 -LiteralPath $pf}
         """;
 
     /// <summary>How long past its own deadline a slot file must be before another job may reclaim it.</summary>
@@ -319,7 +332,8 @@ public static class RemoteScripts
     /// <c>cap.NAME=EXITCODE|FIRST LINE</c> for each capability in <see cref="ToolChecks"/>, run in the job environment: the machine's
     /// env: and path_prepend: applied exactly as for a job, in the same non-login shell. Each check may take <paramref name="checkSeconds"/>:
     /// on Linux it runs under <c>timeout</c> (when that works), on Windows in a child PowerShell killed with its tree when the wait runs
-    /// out; a check stopped that way prints <c>cap.NAME=timeout|</c> and the next check runs.
+    /// out (with the worker's helper, <see cref="WindowsJobHelper"/>, by a process snapshot walk that needs no WMI); a check stopped that way
+    /// prints <c>cap.NAME=timeout|</c> and the next check runs.
     /// </summary>
     public static string Doctor(Machine m, int checkSeconds = 20)
     {
@@ -335,14 +349,14 @@ public static class RemoteScripts
                 } else { 'root=missing' }
                 {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows + "\n" + GitVersionWindows)}}
                 {{JobEnvironmentPowerShell(m)}}
-                $ErrorActionPreference = 'Continue'
+                $ErrorActionPreference = 'Continue'; $LqH = {{ShellQuote.PowerShell(WindowsHelperPath(m))}}
                 function Cap([string]$n, [string]$code) {
                   $si = New-Object System.Diagnostics.ProcessStartInfo ((Get-Process -Id $PID).Path)
                   $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$global:LASTEXITCODE = 0; try { ' + $code + ' } catch { Write-Output "$_"; exit 1 }; exit $LASTEXITCODE'))
                   $si.UseShellExecute = $false; $si.RedirectStandardOutput = $true; $si.RedirectStandardError = $true; $si.RedirectStandardInput = $true
                   try { $p = [Diagnostics.Process]::Start($si) } catch { "cap.$n=1|$_"; return }
                   $p.StandardInput.Close(); $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
-                  if (-not $p.WaitForExit({{seconds}}000)) { & taskkill /PID $p.Id /T /F 2>$null | Out-Null; "cap.$n=timeout|"; return }
+                  if (-not $p.WaitForExit({{seconds}}000)) { if (Test-Path -LiteralPath $LqH) { . $LqH; LqKill $p.Id } else { & taskkill /PID $p.Id /T /F 2>$null | Out-Null; kill $p.Id -Force -EA 0 }; "cap.$n=timeout|"; return }
                   $p.WaitForExit()
                   "cap.$n=$($p.ExitCode)|" + "$(($o.Result + "`n" + $e.Result) -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)"
                 }
@@ -550,8 +564,9 @@ public static class RemoteScripts
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
 
+    /// <summary>Creates incoming/ before an upload; on Windows also writes the job wrapper's helper (<see cref="WindowsInstallHelper"/>).</summary>
     public static string EnsureIncoming(Machine m) => m.Os == MachineOs.Windows
-        ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null"
+        ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null\n" + WindowsInstallHelper(m)
         : $"mkdir -p {ShellQuote.Posix(m.WorkRoot + "/incoming")}";
 
     /// <summary>
@@ -559,7 +574,9 @@ public static class RemoteScripts
     /// normalized one (never the raw input) and its real path must stay inside the worktree. The job's process group
     /// (Linux, via setsid) or PowerShell PID (Windows) is recorded in locks/job-ID.pid so cleanup can kill it. With a
     /// <paramref name="limit"/> the worker also stops the job itself: on Linux under <c>timeout -k 30</c> when that works (exit 124), on
-    /// Windows by running it in a child PowerShell and killing that tree (taskkill /T /F) when the wait runs out (exit 124).
+    /// Windows by running it in a child PowerShell and ending that tree when the wait runs out (exit 124). On Windows the child runs in a job
+    /// object (<see cref="WindowsJobHelper"/>, loaded from the file <see cref="EnsureIncoming"/> wrote): the timeout terminates it, and it ends
+    /// by itself when the wrapper dies; without the helper the tree is stopped with taskkill /T (which needs WMI) and Stop-Process.
     /// </summary>
     /// <param name="shard">lanq run --shards: sets LANQ_SHARD and LANQ_SHARDS for the job (next to LANQ_JOB), or null.</param>
     public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null)
@@ -593,6 +610,7 @@ public static class RemoteScripts
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{ShardEnvironmentPowerShell(shard)}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
+                {{WindowsHelperLoad(ShellQuote.PowerShell(WindowsHelperPath(m)), job: true)}}
                 Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
                 $job = {
                 & {{parts}}
@@ -605,14 +623,10 @@ public static class RemoteScripts
                 $code = 1
                 try {
                   $cp = [Diagnostics.Process]::Start($si)
+                  $jo = LqJob $pf $cp.Handle
                   Add-Content -LiteralPath $pf -Value @($cp.Id, $cp.StartTime.ToUniversalTime().Ticks)
                   if ($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})) { $cp.WaitForExit(); $code = $cp.ExitCode }
-                  else {
-                    & taskkill /PID $cp.Id /T /F 2>$null | Out-Null; $code = 124
-                    # A process the child was starting at that very moment is not in the tree taskkill saw: stop any left whose parent was the child.
-                    Start-Sleep -Milliseconds 500
-                    Get-CimInstance Win32_Process -Filter "ParentProcessId=$($cp.Id)" -EA 0 | Where-Object { $_.CreationDate -ge $cp.StartTime } | ForEach-Object { & taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }
-                  }
+                  else { $code = 124; if ($jo) { [void]$LqW::TerminateJobObject($jo, 124) } else { LqKill $cp.Id } }
                 } finally {
                   Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $pf
                 }

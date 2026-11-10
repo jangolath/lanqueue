@@ -402,6 +402,11 @@ public static partial class Cli
         return string.IsNullOrEmpty(home) ? null : home.Replace('\\', '/') + file[1..];
     }
 
+    /// <summary>doctor --remote's fix for a Windows ssh user that is denied WMI (only a suggestion: lanq works without it).</summary>
+    internal const string WmiFix =
+        "nothing is required (lanq uses fallbacks); for faster probes the machine's owner can grant the account WMI read: wmimgmt.msc, "
+        + "WMI Control, Properties, Security, Root\\CIMV2, Security: Enable Account and Remote Enable for the user";
+
     private static async Task<List<DoctorCheck>> RemoteMachineChecks(Machine m, ISshClient ssh, Func<Machine, string> doctorScript, CancellationToken ct)
     {
         DoctorCheck Check(string name, string level, string detail, string? fix = null, string? capability = null) => new("remote", m.Name, name, level, detail, fix, capability);
@@ -469,6 +474,15 @@ public static partial class Cli
                 "update git on that machine to 2.32 or later"));
         }
 
+        if (m.Os == MachineOs.Windows && await WmiDenied(m, ssh, ct).ConfigureAwait(false) is { } why)
+        {
+            lines.Add(Check(
+                "wmi",
+                "warn",
+                $"WMI/CIM is not available to the ssh user ({why}); lanq uses its fallbacks for memory, load and stopping job trees",
+                WmiFix));
+        }
+
         foreach (var cap in m.Capabilities.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!RemoteScripts.ToolChecks.TryGetValue(cap, out var commands))
@@ -497,5 +511,23 @@ public static partial class Cli
         }
 
         return lines;
+    }
+
+    /// <summary>Why the Windows ssh user may not use WMI/CIM (one more small ssh call), or null when it may (or the check did not answer).</summary>
+    private static async Task<string?> WmiDenied(Machine m, ISshClient ssh, CancellationToken ct)
+    {
+        SshResult r;
+        try
+        {
+            r = await ssh.RunAsync(m, RemoteScripts.Wrap(m, RemoteScripts.WmiCheck), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+
+        return HealthProbe.Parse(r.Output).GetValueOrDefault("wmi") is { } wmi && wmi.StartsWith("fail", StringComparison.Ordinal)
+            ? JobRunner.SafeLine(wmi.IndexOf('|', StringComparison.Ordinal) is var bar && bar >= 0 && wmi[(bar + 1)..].Trim() is { Length: > 0 } text ? text : "failed")
+            : null;
     }
 }
