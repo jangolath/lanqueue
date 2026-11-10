@@ -617,7 +617,13 @@ public sealed class DoctorTests : IDisposable
             var m = shell == "windows" ? T.Windows() : T.Linux();
             var (code, output) = Shells.Run(shell, RemoteScripts.FindToolchain(m, "dotnet"), new Dictionary<string, string> { ["DOTNET_ROOT"] = dotnet });
             Assert.True(code == 0, output);
-            Assert.Contains((dotnet.Replace('\\', '/'), "10.0.102"), RemoteScripts.ParseFound(output, "dotnet"));
+
+            // Found, or open when this host's temp folder lets other accounts write (GitHub's Windows runner, a PC with sandbox accounts):
+            // which one is the folder rule's call, tested on exact security descriptors elsewhere; this test is about finding the folder.
+            var dir = dotnet.Replace('\\', '/');
+            Assert.True(
+                RemoteScripts.ParseFound(output, "dotnet").Contains((dir, "10.0.102")) || RemoteScripts.ParseFound(output, "dotnet", "open").Contains((dir, "10.0.102")),
+                output);
         }
         finally
         {
