@@ -184,6 +184,31 @@ public sealed class WorkerScriptTests : IDisposable
     }
 
     /// <summary>
+    /// The prepare step as a worker really runs it: powershell -EncodedCommand (not -File, as <see cref="Shells.Run"/> does), whose exit code is
+    /// 1 when the script's last statement failed, even with -EA 0. A fresh worker (no helper yet), one with the helper, and one with a changed
+    /// helper must all succeed, or the first job on every fresh Windows worker ends InfraError "Could not prepare the job".
+    /// </summary>
+    [WindowsFact]
+    public void EnsureIncomingSucceedsAsAnEncodedCommandOnAFreshWorker()
+    {
+        var m = Worker(MachineOs.Windows);
+        var helper = RemoteScripts.WindowsHelperPath(m);
+        string[] Args() => RemoteScripts.WindowsCommand(RemoteScripts.EnsureIncoming(m)).Split(' ')[1..];
+
+        var (fresh, freshOutput) = Shells.Exec("powershell.exe", Args());
+        Assert.True(fresh == 0, "fresh worker: exit " + fresh + ": " + freshOutput);
+        Assert.True(File.Exists(helper), "the helper was not written");
+
+        var (again, againOutput) = Shells.Exec("powershell.exe", Args());
+        Assert.True(again == 0, "helper present: exit " + again + ": " + againOutput);
+
+        File.AppendAllText(helper, "#changed");
+        var (changed, changedOutput) = Shells.Exec("powershell.exe", Args());
+        Assert.True(changed == 0, "changed helper: exit " + changed + ": " + changedOutput);
+        Assert.DoesNotContain("#changed", File.ReadAllText(helper), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A job given &amp; or | whose program resolves (through path_prepend:, as the job's own lookup would) to a .cmd shim is refused by the
     /// wrapper before anything starts: the shim never runs, no pid file is written, and the output is the refusal marker naming the .cmd
     /// followed by the exit marker with 2, which lanq reports as Rejected. (pwsh elsewhere does not resolve a .cmd at all: refused too.)

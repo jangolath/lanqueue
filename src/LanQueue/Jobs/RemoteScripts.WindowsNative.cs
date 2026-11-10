@@ -125,7 +125,7 @@ public static partial class RemoteScripts
         New-Item -ItemType Directory -Force -Path ({{ShellQuote.PowerShell(m.WorkRoot + "/bin")}}) | Out-Null
         $h = {{ShellQuote.PowerShell(WindowsHelperPath(m))}}; $ok = $false
         try { $ok = {{WindowsHelperVerified("$h")}} } catch { }
-        if (-not $ok) { $t = "$h.$PID"; try { $z = New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('{{Deflated(WindowsJobHelper)}}')), ([IO.Compression.CompressionMode]::Decompress); $ms = New-Object IO.MemoryStream; $z.CopyTo($ms); [IO.File]::WriteAllBytes($t, $ms.ToArray()); if ([IO.File]::Exists($h)) { try { [IO.File]::Replace($t, $h, [NullString]::Value) } catch { [IO.File]::Delete($h); [IO.File]::Move($t, $h) } } else { [IO.File]::Move($t, $h) } } catch { }; Remove-Item -Force -EA 0 -LiteralPath $t }
+        if (-not $ok) { $t = "$h.$PID"; try { $z = New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('{{Deflated(WindowsJobHelper)}}')), ([IO.Compression.CompressionMode]::Decompress); $ms = New-Object IO.MemoryStream; $z.CopyTo($ms); [IO.File]::WriteAllBytes($t, $ms.ToArray()); if ([IO.File]::Exists($h)) { try { [IO.File]::Replace($t, $h, [NullString]::Value) } catch { [IO.File]::Delete($h); [IO.File]::Move($t, $h) } } else { [IO.File]::Move($t, $h) } } catch { }; if (Test-Path -LiteralPath $t) { Remove-Item -Force -EA 0 -LiteralPath $t } }
         """;
 
     /// <summary>Raw deflate (no zlib header, as .NET Framework's DeflateStream reads it) of the UTF-8 text, in base64.</summary>
