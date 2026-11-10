@@ -980,7 +980,7 @@ public static partial class Cli
         (h.MemFreeGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"mem free {mem:0.0} GB") : "mem free ?")
         + (h.SwapFreeGb is { } swap ? string.Create(CultureInfo.InvariantCulture, $" (swap {swap:0.0} GB)") : "");
 
-    private static int Stats(JobLog log, TextWriter stdout)
+    internal static int Stats(JobLog log, TextWriter stdout)
     {
         var all = log.ReadAll();
         stdout.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{all.Count} jobs, {all.Sum(r => r.WallSeconds) / 60:0.#} min total wall-clock"));
