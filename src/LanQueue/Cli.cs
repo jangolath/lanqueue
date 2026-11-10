@@ -421,7 +421,7 @@ public static partial class Cli
           lanq run ... --shards N|auto [--target-minutes M] [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
-          lanq stats [--json]
+          lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
@@ -447,10 +447,12 @@ public static partial class Cli
         stdout gets one object (status Ok, Warnings, Failing, Rejected, InfraError or Cancelled, exitCode, message, remote, counts, checks: scope,
         machine, name, level, detail, fix, capability; nextSteps); 2 bad arguments, 70 unexpected error, 130 Ctrl+C, each with that object.
         stats summarises this computer's job log (nothing leaves it): the totals and one line per machine, then per machine the median and p90
-        of completed jobs and the last run, the newest 20 commands (runs, jobs: each shard is one job, passed, failed, median, p90) and the size of
-        logs/. Unreadable lines are skipped with a warning. --json prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode,
-        message, files, jobs, wallMinutes, skippedLines, oldestUtc, newestUtc, logs, machines, commands, nextSteps; times in UTC). Exit 0 (no job
-        log is 0 jobs), 2 bad arguments, 70 the job log could not be read, 130 Ctrl+C.
+        of completed jobs, the last run and its speed factor (from 5 jobs), the newest 20 commands (runs, jobs: each shard is one job, passed,
+        failed, median, p90, and timing: the work and per-shard overhead --target-minutes would use) and the size of logs/. --target-minutes M
+        adds the shards M needs on a typical machine (no probe, before any free-slot cap). Unreadable lines are skipped with a warning. --json
+        prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
+        newestUtc, logs, machines, commands, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad arguments, 70
+        the job log could not be read, 130 Ctrl+C.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
         such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using LanQueue.Jobs;
+using LanQueue.Scheduling;
 using Xunit;
 
 namespace LanQueue.Tests;
@@ -49,13 +50,16 @@ public sealed class StatsTests : IDisposable
             + "{\"id\":\"20261103-120000-0000\n");
     }
 
+    /// <summary>The end of the 90-day timing window in these tests.</summary>
+    private static readonly DateTimeOffset Now = T0.AddDays(8);
+
     /// <summary>lanq stats (text, or --json) on the temporary state folder, times in UTC; stdout and stderr with "\n" line ends.</summary>
-    private async Task<(int Code, string Out, string Err)> Stats(bool json = false, int keepDays = 30, CancellationToken ct = default)
+    private async Task<(int Code, string Out, string Err)> Stats(bool json = false, int keepDays = 30, CancellationToken ct = default, params string[] options)
     {
         var o = new StringWriter();
         var e = new StringWriter();
-        var p = ParsedArgs.Parse(json ? ["stats", "--json"] : ["stats"]);
-        var code = await Cli.Stats(p, Log, keepDays, o, e, ct, TimeZoneInfo.Utc);
+        var p = ParsedArgs.Parse([.. json ? ["stats", "--json"] : new[] { "stats" }, .. options]);
+        var code = await Cli.Stats(p, Log, keepDays, o, e, ct, TimeZoneInfo.Utc, Now);
         return (code, o.ToString().ReplaceLineEndings("\n"), e.ToString().ReplaceLineEndings("\n"));
     }
 
@@ -118,10 +122,10 @@ public sealed class StatsTests : IDisposable
             OldLines
             + "\n"
             + "Machines (median and p90 of completed jobs):\n"
-            + "  machine   jobs  pass  fail  other   median       p90  last run\n"
-            + "  -            1     0     0      1        -         -  2026-11-03 11:00\n"
-            + "  build-01     3     2     1      0  1.5 min  10.3 min  2026-11-02 10:00\n"
-            + "  micro-01     1     1     0      0    1 min     1 min  2026-11-03 10:00\n"
+            + "  machine   jobs  pass  fail  other   median       p90  last run          speed\n"
+            + "  -            1     0     0      1        -         -  2026-11-03 11:00  -\n"
+            + "  build-01     3     2     1      0  1.5 min  10.3 min  2026-11-02 10:00  -\n"
+            + "  micro-01     1     1     0      0    1 min     1 min  2026-11-03 10:00  - (1 job; 5 needed)\n"
             + "\n"
             + "Commands (newest first; each shard is one job):\n"
             + "  npx jest (recorded before 0.7.0)\n"
@@ -129,6 +133,7 @@ public sealed class StatsTests : IDisposable
             + "    timing: none (no key)\n"
             + "  npx jest --shard={shard}/{shards}\n"
             + "    1 run, 1 job (1 passed, 0 failed, 0 other); median 1 min, p90 1 min; last run 2026-11-03 10:00 (2 shards)\n"
+            + "    timing: about 1.7 min of work + 11.3 s per shard (from 1 run)\n"
             + "  dotnet test (recorded before 0.7.0)\n"
             + "    2 runs, 2 jobs (1 passed, 1 failed, 0 other); median 1.5 min, p90 1.5 min; last run 2026-11-02 10:00\n"
             + "    timing: none (no key)\n"
@@ -169,8 +174,9 @@ public sealed class StatsTests : IDisposable
                 build.GetProperty("wallMinutes").GetDouble()));
         Assert.Equal((90.5, 615.0), (build.GetProperty("medianSeconds").GetDouble(), build.GetProperty("p90Seconds").GetDouble()));
         Assert.Equal("2026-11-02T10:00:00Z", build.GetProperty("lastRunUtc").GetString());
-        Assert.Equal(JsonValueKind.Null, build.GetProperty("speedFactor").ValueKind); // filled in with timing (P4)
-        Assert.Equal(JsonValueKind.Null, build.GetProperty("speedSamples").ValueKind);
+        Assert.Equal(JsonValueKind.Null, build.GetProperty("speedFactor").ValueKind); // no keyed job: no sample
+        Assert.Equal(0, build.GetProperty("speedSamples").GetInt32());
+        Assert.Equal((JsonValueKind.Null, 1), (machines[2].GetProperty("speedFactor").ValueKind, machines[2].GetProperty("speedSamples").GetInt32())); // 1 of 5
         Assert.Equal(JsonValueKind.Null, machines[0].GetProperty("medianSeconds").ValueKind); // no completed job
 
         var commands = r.GetProperty("commands").EnumerateArray().ToList();
@@ -182,7 +188,12 @@ public sealed class StatsTests : IDisposable
         Assert.Equal(
             (".", 1, 1, 2),
             (sharded.GetProperty("dir").GetString(), sharded.GetProperty("runs").GetInt32(), sharded.GetProperty("jobs").GetInt32(), sharded.GetProperty("lastShards").GetInt32()));
-        Assert.Equal(JsonValueKind.Null, sharded.GetProperty("timing").ValueKind); // filled in with timing (P4)
+        // One shard of 2 completed (50 s of its own run, 61.25 s wall-clock): half the shards, so the run counts: W = 2 x 50 s, O = 11.25 s.
+        var timing = sharded.GetProperty("timing");
+        Assert.Equal(["runsUsed", "workMinutes", "overheadSeconds", "suggestedShards"], timing.EnumerateObject().Select(p => p.Name));
+        Assert.Equal((1, 1.7, 11.3), (timing.GetProperty("runsUsed").GetInt32(), timing.GetProperty("workMinutes").GetDouble(), timing.GetProperty("overheadSeconds").GetDouble()));
+        Assert.Equal(JsonValueKind.Null, timing.GetProperty("suggestedShards").ValueKind); // only with --target-minutes
+        Assert.Equal(JsonValueKind.Null, commands[2].GetProperty("timing").ValueKind); // no key
     }
 
     [Fact]
@@ -367,7 +378,9 @@ public sealed class StatsTests : IDisposable
     [Theory]
     [InlineData("stats", "--json", "--bogus")]
     [InlineData("stats", "--json", "--needs", "node")]
-    [InlineData("stats", "--json", "--target-minutes", "5")] // comes with timing (P4)
+    [InlineData("stats", "--json", "--target-minutes", "0")]
+    [InlineData("stats", "--json", "--target-minutes", "1441")]
+    [InlineData("stats", "--json", "--shards", "auto")]
     [InlineData("stats", "--json", "--", "x")]
     public async Task StatsBadArgumentPrintsOneObject(params string[] args)
     {
@@ -408,7 +421,7 @@ public sealed class StatsTests : IDisposable
         Assert.Contains("  npm test --suite=s23\n", text, StringComparison.Ordinal);
         Assert.Contains("  npm test --suite=s04\n", text, StringComparison.Ordinal);
         Assert.DoesNotContain("--suite=s03", text, StringComparison.Ordinal);
-        Assert.Contains("  and 3 more (lanq stats --json lists them all)\n", text, StringComparison.Ordinal);
+        Assert.Contains("  and 3 more (lanq stats --json lists up to 500)\n", text, StringComparison.Ordinal);
 
         var (_, json, _) = await Stats(json: true);
         var r = OneObject(json, "Ok", 0);
@@ -426,5 +439,73 @@ public sealed class StatsTests : IDisposable
         Assert.DoesNotContain('\u0007', text);
         Assert.DoesNotContain("\\u001b", json, StringComparison.Ordinal);
         Assert.DoesNotContain("\\u0007", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>stats' timing block is the estimate --target-minutes uses: the same runs, work, overhead and (on a free fleet) wanted N.</summary>
+    [Fact]
+    public async Task StatsTimingMatchesShardTimingEstimate()
+    {
+        const string Key = ShardTimingTests.Key;
+        var records = new List<JobRecord>();
+        var id = 0;
+        JobRecord Job(string machine, string key, double run, double wall, double daysAgo, string? runId = null, int? shard = null, int? shards = null) =>
+            new($"20261101-100000-{++id:x6}", machine, key, Now.AddDays(-daysAgo), wall, 0, "Completed")
+            {
+                V = 2,
+                Key = key,
+                Dir = ".",
+                RunId = runId,
+                Shard = shard,
+                Shards = shards,
+                RunSeconds = run,
+            };
+
+        // Two 4-shard runs and one 2-shard run of the jest template; micro-01 is measured twice as slow on another command.
+        for (var i = 1; i <= 4; i++)
+        {
+            records.Add(Job(i % 2 == 0 ? "micro-01" : "build-01", Key, i % 2 == 0 ? 300 : 150, i % 2 == 0 ? 340 : 190, 1, "a", i, 4));
+            records.Add(Job("build-01", Key, 160, 200, 2, "b", i, 4));
+        }
+
+        records.Add(Job("build-01", Key, 320, 350, 3, "c", 1, 2));
+        records.Add(Job("build-01", Key, 300, 330, 3, "c", 2, 2));
+        for (var i = 0; i < 7; i++)
+        {
+            records.Add(Job("build-01", "npm test", 100, 110, 4 + i));
+        }
+
+        for (var i = 0; i < 6; i++)
+        {
+            records.Add(Job("micro-01", "npm test", 200, 210, 4 + i));
+        }
+
+        Append([.. records]);
+        var (_, json, _) = await Stats(json: true, options: ["--target-minutes", "5"]);
+        var t = OneObject(json, "Ok", 0).GetProperty("commands").EnumerateArray().Single(c => c.GetProperty("command").GetString() == Key).GetProperty("timing");
+
+        // stats probes nothing, so the pick's fleet reports no memory (no size class): each factor is the measured one or 1, as in stats.
+        var history = JobHistory.From(records, Key, ".", Now);
+        var one = ShardTimingTests.Fleet(("build-01", 32, 0.1, null, null));
+        var pick = ShardTiming.Pick(history, 5, one.Free, one.Assessed, ShardInfo.MaxShards);
+        Assert.Equal(
+            (pick.RunsUsed, pick.WorkMinutes, pick.OverheadSeconds, pick.Wanted),
+            (t.GetProperty("runsUsed").GetInt32(), (double?)t.GetProperty("workMinutes").GetDouble(), (double?)t.GetProperty("overheadSeconds").GetDouble(),
+                (int?)t.GetProperty("suggestedShards").GetInt32()));
+        Assert.Equal(3, pick.RunsUsed);
+        Assert.Equal(2.0, history.Speeds["micro-01"].Factor);
+
+        // The work and overhead do not depend on the fleet the pick sees; only N follows the slowest dealt machine.
+        var two = ShardTimingTests.Fleet(("build-01", 32, 0.1, null, null), ("micro-01", 32, 0.2, null, null));
+        var both = ShardTiming.Pick(history, 5, two.Free, two.Assessed, ShardInfo.MaxShards);
+        Assert.Equal((pick.WorkMinutes, pick.OverheadSeconds), (both.WorkMinutes, both.OverheadSeconds));
+
+        // The text says the same, with the machine's speed in the table.
+        var (_, text, _) = await Stats(options: ["--target-minutes", "5"]);
+        Assert.Contains(
+            $"    timing: about {JobStats.Duration(pick.WorkMinutes!.Value * 60)} of work + {JobStats.Duration(pick.OverheadSeconds!.Value)} per shard (from 3 runs); "
+            + $"--target-minutes 5: {pick.Wanted} shards on a typical machine\n",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains("  x2.00 (8 jobs)\n", text, StringComparison.Ordinal);
     }
 }

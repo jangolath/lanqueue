@@ -184,20 +184,20 @@ public static class ShardTiming
 
         string Each(int n, (string? Machine, SpeedFactor Speed) slow, out double expected)
         {
-            expected = Math.Round((o + (slow.Speed.Factor * w / n)) / 60, 1);
+            expected = Round1((o + (slow.Speed.Factor * w / n)) / 60);
             var by = slow.Machine is { } m && slow.Speed.Source != Unknown
                 ? string.Create(CultureInfo.InvariantCulture, $"slowest machine {m} x{slow.Speed.Factor:0.00}: ")
                 : "";
             return string.Create(CultureInfo.InvariantCulture, $"{by}about {expected:0.0} min each");
         }
 
-        string? basis;
+        string basis;
         int? wanted = null;
         int picked;
         string decision;
         (string? Machine, SpeedFactor Speed) slowest;
         double expectedMinutes;
-        if (budget < MinBudgetShare * target)
+        if (SuggestedShards(estimate, targetMinutes) is not { } n0)
         {
             basis = Overhead;
             picked = cap;
@@ -210,7 +210,6 @@ public static class ShardTiming
         else
         {
             basis = History;
-            var n0 = Ceiling(w / budget);
             var f = Slowest(n0).Speed.Factor;
             var n1 = Ceiling(f * w / budget);
             if (n1 > n0)
@@ -232,10 +231,25 @@ public static class ShardTiming
             ? want > cap ? total > max ? CappedByMaxShards : CappedByFreeSlots : null
             : total > max ? CappedByMaxShards : null;
         return new ShardTimingResult(
-            targetMinutes, history.Key, history.Dir, basis, estimate.RunsUsed, estimate.LastRunUtc, Math.Round(w / 60, 1), Math.Round(o, 1), slowest.Machine,
+            targetMinutes, history.Key, history.Dir, basis, estimate.RunsUsed, estimate.LastRunUtc, Round1(w / 60), Round1(o), slowest.Machine,
             slowest.Machine is null ? null : slowest.Speed.Factor, wanted, total, capped, picked, expectedMinutes,
             lead + summary + (basis == Overhead ? "; " : "") + decision);
     }
+
+    /// <summary>
+    /// The N <paramref name="targetMinutes"/> needs on a machine of speed factor 1, before any cap: ceil(W / (60 x M - O)); null when the
+    /// overhead leaves less than a tenth of the target for the work (more shards cannot reach it). lanq stats --target-minutes shows it as
+    /// suggestedShards (no probe, so no slowest machine and no free slots); <see cref="Pick"/> starts from it.
+    /// </summary>
+    public static int? SuggestedShards(TimingEstimate estimate, int targetMinutes)
+    {
+        var target = 60.0 * targetMinutes;
+        var budget = target - estimate.OverheadSeconds;
+        return budget < MinBudgetShare * target ? null : Ceiling(estimate.WorkSeconds / budget);
+    }
+
+    /// <summary>One decimal, halves away from zero (as the text formats them), so the JSON and the text agree.</summary>
+    public static double Round1(double value) => Math.Round(value, 1, MidpointRounding.AwayFromZero);
 
     /// <summary>
     /// The text and JSON reason for an auto N: the free slots alone (plain --shards auto, exactly as before), or with --target-minutes the

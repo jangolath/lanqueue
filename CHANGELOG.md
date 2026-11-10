@@ -15,9 +15,13 @@
   `wallMinutes`, `medianSeconds` and `p90Seconds` (of completed jobs, nearest rank) and `lastRunUtc`. Each command
   (key and dir; a line from before 0.7.0 by its recorded command, `dir` null) has `runs` (all shards of one
   `--shards` run are one run), `jobs` (each shard is one job), the same counts and times, and `lastShards`. `logs`
-  is `{files, megabytes, keepDays}`. `speedFactor`, `speedSamples` and `timing` are present and null for now. Status
-  `Ok` (0, also with no job log), `Rejected` (2), `InfraError` (70, the job log could not be read) or `Cancelled`
-  (130). Times are UTC. stats never suggests a command.
+  is `{files, megabytes, keepDays}`. Each machine also has `speedFactor` (null under 5 samples) and `speedSamples`;
+  each command `timing` `{runsUsed, workMinutes, overheadSeconds, suggestedShards}` (the estimate `--target-minutes`
+  uses; null without a key or a usable run). At most 500 commands (`commandsMore` counts the rest). Status `Ok` (0,
+  also with no job log), `Rejected` (2), `InfraError` (70, the job log could not be read) or `Cancelled` (130). Times
+  are UTC. stats never suggests a command.
+- `lanq stats --target-minutes M` fills `suggestedShards`: the shards M needs on a machine of speed factor 1, before
+  any free-slot cap (stats probes nothing); null when the per-shard overhead alone is near or above M.
 - `lanq run --dry-run --json` adds `shardCountWhy` (with `--shards auto`: why that N, as `lanq run` prints it) and
   `shardTiming` (with `--target-minutes`), both always present and null when they do not apply. `lanq run --shards
   auto --target-minutes M --json` adds `shardTiming` (only then): `{targetMinutes, command, dir, basis, runsUsed,
@@ -53,8 +57,9 @@
 - A torn or unreadable line in `jobs.jsonl` is skipped instead of making `lanq stats` fail; stats prints one warning
   with the count on stderr.
 - `lanq stats` prints more after its unchanged totals and per-machine lines: a machine table (median and p90 of
-  completed jobs, last run, in local time), the newest 20 commands with their runs, jobs, results and times, and a
-  `logs:` line with the count and size of the job logs. It exits 70 when `jobs.jsonl` cannot be read.
+  completed jobs, last run, in local time, and speed factor), the newest 20 commands with their runs, jobs, results,
+  times and a `timing:` line, and a `logs:` line with the count and size of the job logs. It exits 70 when
+  `jobs.jsonl` cannot be read.
 - A `jobs.jsonl` that another program holds open no longer turns a finished job into `InfraError`: the append is
   retried briefly, then skipped with a warning. Concurrent lanq processes no longer collide on it.
 - Per-job logs in the state folder's `logs/` are pruned after a run, at most once a day: lanq's own logs older than

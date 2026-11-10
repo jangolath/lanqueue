@@ -325,22 +325,32 @@ internal sealed record StatsJson(
 internal sealed record StatsLogsJson(int Files, double Megabytes, int KeepDays);
 
 /// <summary>One machine of <c>lanq stats --json</c>; median and p90 are wall-clock seconds of its Completed jobs (nearest rank), null when none.</summary>
-/// <param name="SpeedFactor">How fast the machine runs a command compared with the others (filled in by a later version; null until then).</param>
-/// <param name="SpeedSamples">How many jobs <paramref name="SpeedFactor"/> comes from (null until it is filled in).</param>
+/// <param name="SpeedFactor">
+/// How much longer the machine takes than is typical for the same command (1.62 = 62% slower), from at least 5 completed jobs of the last 90
+/// days that ran 30 s or more; clamped to 0.25..4. Null with fewer samples.
+/// </param>
+/// <param name="SpeedSamples">How many such jobs it has (0 for none).</param>
 internal sealed record StatsMachineJson(
     string Machine, int Jobs, int Completed, int Failed, int Other, double WallMinutes, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
-    double? SpeedFactor, int? SpeedSamples);
+    double? SpeedFactor, int SpeedSamples);
 
 /// <summary>One command of <c>lanq stats --json</c>: every job with the same key and dir (or, before 0.7.0, the same recorded command; dir null).</summary>
 /// <param name="Runs">Distinct runs: every shard of one --shards run is one run.</param>
 /// <param name="Jobs">Every job: each shard and each retried attempt.</param>
 /// <param name="LastShards">The newest job's shard count (1 for a single run); null for lines written before 0.7.0.</param>
-/// <param name="Timing">What earlier runs say about the command's work and overhead (filled in by a later version; null until then).</param>
+/// <param name="Timing">What earlier runs say about the command's work and overhead, as --target-minutes estimates it; null without a key or a usable run.</param>
 internal sealed record StatsCommandJson(
     string Command, string? Dir, int Runs, int Jobs, int Completed, int Failed, int Other, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
     int? LastShards, StatsTimingJson? Timing);
 
-/// <summary>The timing block of a <c>lanq stats --json</c> command (declared now; filled in by a later version).</summary>
+/// <summary>
+/// The timing block of a <c>lanq stats --json</c> command: the estimate --shards auto --target-minutes uses (machines without their own speed
+/// factor count as 1: stats probes nothing).
+/// </summary>
+/// <param name="RunsUsed">How many earlier runs it comes from (the newest 10 of the last 90 days in which at least half the shards completed).</param>
+/// <param name="WorkMinutes">The whole command's own run time on a machine of speed factor 1.</param>
+/// <param name="OverheadSeconds">Per shard: wall-clock minus the command's own run time.</param>
+/// <param name="SuggestedShards">With --target-minutes: the shards it needs on such a machine, before any free-slot cap; null without it, or when the overhead alone is near or above it.</param>
 internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double OverheadSeconds, int? SuggestedShards);
 
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>

@@ -3,6 +3,7 @@ using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Jobs;
 using LanQueue.Output;
+using LanQueue.Scheduling;
 
 namespace LanQueue;
 
@@ -11,7 +12,7 @@ public static partial class Cli
     /// <summary>The most commands lanq stats --json lists; the rest are counted in commandsMore.</summary>
     internal const int MaxStatsCommands = 500;
 
-    /// <summary>The most commands lanq stats prints as text (newest first); --json lists them all.</summary>
+    /// <summary>The most commands lanq stats prints as text (newest first); --json lists up to <see cref="MaxStatsCommands"/>.</summary>
     internal const int StatsTextCommands = 20;
 
     /// <summary>The longest command lanq stats prints as text; longer ones are cut and end in "...".</summary>
@@ -36,14 +37,17 @@ public static partial class Cli
 
     /// <summary>
     /// lanq stats: what the local job log (jobs.1.jsonl, then jobs.jsonl) says. Text: the totals line and one line per machine (exactly as
-    /// before 0.7.0), then a table of machines (median and p90 of completed jobs), the newest <see cref="StatsTextCommands"/> commands and the
-    /// size of logs/. --json: one <see cref="StatsJson"/>. Exit 0 (no job log is 0 jobs), 70 the job log could not be read, 130 Ctrl+C (with
-    /// --json; without it Ctrl+C ends lanq as everywhere else). Unreadable lines are skipped with one warning on stderr.
+    /// before 0.7.0), then a table of machines (median and p90 of completed jobs, speed factor), the newest <see cref="StatsTextCommands"/>
+    /// commands with their timing (the estimate --target-minutes uses) and the size of logs/. --json: one <see cref="StatsJson"/>. With
+    /// --target-minutes M each timing adds the shards M needs on a machine of speed factor 1 (no probe: before any free-slot cap). Exit 0 (no
+    /// job log is 0 jobs), 70 the job log could not be read, 130 Ctrl+C (with --json; without it Ctrl+C ends lanq as everywhere else).
+    /// Unreadable lines are skipped with one warning on stderr.
     /// </summary>
     /// <param name="keepDays">policy.keep_logs_days (0 = never pruned), for the logs line.</param>
     /// <param name="zone">The time zone of the text's times (local when null); JSON is always UTC.</param>
+    /// <param name="now">The end of the 90-day timing window (tests); null is now.</param>
     internal static async Task<int> Stats(
-        ParsedArgs p, JobLog log, int keepDays, TextWriter stdout, TextWriter stderr, CancellationToken ct, TimeZoneInfo? zone = null)
+        ParsedArgs p, JobLog log, int keepDays, TextWriter stdout, TextWriter stderr, CancellationToken ct, TimeZoneInfo? zone = null, DateTimeOffset? now = null)
     {
         JobLogRead read;
         try
@@ -84,6 +88,18 @@ public static partial class Cli
         }
 
         var report = JobStats.Of(read.Records);
+        var when = now ?? DateTimeOffset.UtcNow;
+        var speeds = ShardTiming.Speeds(read.Records, when);
+
+        // Each keyed command's timing, as --target-minutes would estimate it (no probe: a machine without its own factor counts as 1).
+        TimingEstimate? Timing(CommandStats c) => c.Keyed
+            ? ShardTiming.Estimate(JobHistory.From(read.Records, c.Command, c.Dir ?? ".", when, speeds), m => ShardTiming.SpeedOf(m, speeds, []).Factor)
+            : null;
+        StatsTimingJson? TimingJson(TimingEstimate? t) => t is null
+            ? null
+            : new(t.RunsUsed, ShardTiming.Round1(t.WorkSeconds / 60), ShardTiming.Round1(t.OverheadSeconds), p.TargetMinutes is { } m ? ShardTiming.SuggestedShards(t, m) : null);
+        MachineSpeed Speed(string machine) => speeds.GetValueOrDefault(machine) ?? new MachineSpeed(null, 0);
+
         if (p.Json)
         {
             var message = string.Create(CultureInfo.InvariantCulture, $"{report.Jobs} jobs");
@@ -91,10 +107,11 @@ public static partial class Cli
                 "Ok", 0, message, [.. read.Files.Select(JobRunner.SafeLine)], report.Jobs, report.WallMinutes, read.Skipped, report.OldestUtc?.UtcDateTime,
                 report.NewestUtc?.UtcDateTime, LogsJson(logs, keepDays),
                 [.. report.Machines.Select(m => new StatsMachineJson(
-                    JobRunner.SafeLine(m.Machine), m.Jobs, m.Completed, m.Failed, m.Other, m.WallMinutes, m.MedianSeconds, m.P90Seconds, m.LastRunUtc.UtcDateTime, null, null))],
+                    JobRunner.SafeLine(m.Machine), m.Jobs, m.Completed, m.Failed, m.Other, m.WallMinutes, m.MedianSeconds, m.P90Seconds, m.LastRunUtc.UtcDateTime,
+                    Speed(m.Machine).Factor, Speed(m.Machine).Samples))],
                 [.. report.Commands.Take(MaxStatsCommands).Select(c => new StatsCommandJson(
                     JobRunner.SafeLine(c.Command), c.Dir is null ? null : JobRunner.SafeLine(c.Dir), c.Runs, c.Jobs, c.Completed, c.Failed, c.Other, c.MedianSeconds,
-                    c.P90Seconds, c.LastRunUtc.UtcDateTime, c.LastShards, null))])
+                    c.P90Seconds, c.LastRunUtc.UtcDateTime, c.LastShards, TimingJson(Timing(c))))])
             {
                 CommandsMore = report.Commands.Count > MaxStatsCommands ? report.Commands.Count - MaxStatsCommands : null,
                 NextSteps = NextSteps.ForStats("Ok", message),
@@ -120,13 +137,14 @@ public static partial class Cli
             await stdout.WriteLineAsync("Machines (median and p90 of completed jobs):").ConfigureAwait(false);
             foreach (var line in Table(
                 [
-                    ["machine", "jobs", "pass", "fail", "other", "median", "p90", "last run"],
+                    ["machine", "jobs", "pass", "fail", "other", "median", "p90", "last run", "speed"],
                     .. report.Machines.Select(m => new[]
                     {
                         JobRunner.SafeLine(m.Machine), Num(m.Jobs), Num(m.Completed), Num(m.Failed), Num(m.Other), Seconds(m.MedianSeconds), Seconds(m.P90Seconds),
-                        Local(m.LastRunUtc, zone),
+                        Local(m.LastRunUtc, zone), SpeedText(Speed(m.Machine)),
                     }),
-                ]))
+                ],
+                leftFrom: 7))
             {
                 await stdout.WriteLineAsync("  " + line).ConfigureAwait(false);
             }
@@ -147,16 +165,13 @@ public static partial class Cli
                     CultureInfo.InvariantCulture,
                     $"    {Plural(c.Runs, "run")}, {Plural(c.Jobs, "job")} ({c.Completed} passed, {c.Failed} failed, {c.Other} other); median {Seconds(c.MedianSeconds)}, "
                     + $"p90 {Seconds(c.P90Seconds)}; last run {Local(c.LastRunUtc, zone)}{(c.LastShards is > 1 ? $" ({c.LastShards} shards)" : "")}")).ConfigureAwait(false);
-                if (!c.Keyed)
-                {
-                    await stdout.WriteLineAsync("    timing: none (no key)").ConfigureAwait(false);
-                }
+                await stdout.WriteLineAsync("    timing: " + TimingText(c, Timing(c), p.TargetMinutes)).ConfigureAwait(false);
             }
 
             if (report.Commands.Count > StatsTextCommands)
             {
                 await stdout.WriteLineAsync(string.Create(
-                    CultureInfo.InvariantCulture, $"  and {report.Commands.Count - StatsTextCommands} more (lanq stats --json lists them all)")).ConfigureAwait(false);
+                    CultureInfo.InvariantCulture, $"  and {report.Commands.Count - StatsTextCommands} more (lanq stats --json lists up to {MaxStatsCommands})")).ConfigureAwait(false);
             }
 
             await stdout.WriteLineAsync().ConfigureAwait(false);
@@ -173,6 +188,41 @@ public static partial class Cli
         static string Plural(int n, string word) => string.Create(CultureInfo.InvariantCulture, $"{n} {word}{(n == 1 ? "" : "s")}");
         static string Local(DateTimeOffset utc, TimeZoneInfo zone) =>
             TimeZoneInfo.ConvertTime(utc, zone).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        static string SpeedText(MachineSpeed s) => s switch
+        {
+            { Factor: { } f } => string.Create(CultureInfo.InvariantCulture, $"x{f:0.00} ({Plural(s.Samples, "job")})"),
+            { Samples: > 0 } => string.Create(CultureInfo.InvariantCulture, $"- ({Plural(s.Samples, "job")}; {ShardTiming.MinSpeedSamples} needed)"),
+            _ => "-",
+        };
+    }
+
+    /// <summary>
+    /// A command's timing line for people: "about 16.8 min of work + 41 s per shard (from 6 runs)" (with --target-minutes also the shards it
+    /// needs), "none (no key)" for lines written before 0.7.0, or why there is none yet.
+    /// </summary>
+    private static string TimingText(CommandStats c, TimingEstimate? t, int? targetMinutes)
+    {
+        if (!c.Keyed)
+        {
+            return "none (no key)";
+        }
+
+        if (t is null)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"none yet (no completed run with a run time in the last {JobHistory.HistoryDays} days)");
+        }
+
+        var text = string.Create(
+            CultureInfo.InvariantCulture,
+            $"about {JobStats.Duration(t.WorkSeconds)} of work + {JobStats.Duration(t.OverheadSeconds)} per shard (from {t.RunsUsed} run{(t.RunsUsed == 1 ? "" : "s")})");
+        if (targetMinutes is not { } m)
+        {
+            return text;
+        }
+
+        return text + (ShardTiming.SuggestedShards(t, m) is { } n
+            ? string.Create(CultureInfo.InvariantCulture, $"; --target-minutes {m}: {n} shard{(n == 1 ? "" : "s")} on a typical machine")
+            : string.Create(CultureInfo.InvariantCulture, $"; --target-minutes {m}: the per-shard overhead alone is near or above it"));
     }
 
     /// <summary>The logs object of lanq stats --json: count, megabytes (one decimal) and policy.keep_logs_days.</summary>
@@ -204,15 +254,19 @@ public static partial class Cli
         return exitCode;
     }
 
-    /// <summary>Rows as columns: the first column left-aligned, the last left-aligned, the others right-aligned, two spaces apart.</summary>
-    private static IEnumerable<string> Table(IReadOnlyList<string[]> rows)
+    /// <summary>
+    /// Rows as columns, two spaces apart: the first column and those from <paramref name="leftFrom"/> on left-aligned (the last one not padded),
+    /// the others right-aligned. Without <paramref name="leftFrom"/> only the last column is left-aligned.
+    /// </summary>
+    private static IEnumerable<string> Table(IReadOnlyList<string[]> rows, int? leftFrom = null)
     {
         var widths = Enumerable.Range(0, rows[0].Length).Select(i => rows.Max(r => r[i].Length)).ToArray();
+        var left = leftFrom ?? widths.Length - 1;
         foreach (var row in rows)
         {
             yield return string.Join(
                 "  ",
-                row.Select((cell, i) => i == 0 ? cell.PadRight(widths[i]) : i == row.Length - 1 ? cell : cell.PadLeft(widths[i])));
+                row.Select((cell, i) => i == row.Length - 1 ? cell : i == 0 || i >= left ? cell.PadRight(widths[i]) : cell.PadLeft(widths[i])));
         }
     }
 }
