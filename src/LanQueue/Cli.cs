@@ -428,7 +428,7 @@ public static partial class Cli
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
-        doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
+        doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder, job logs); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
         allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise. --json: the lines go to stderr and
         stdout gets one object (status Ok, Warnings, Failing, Rejected, InfraError or Cancelled, exitCode, message, remote, counts, checks: scope,

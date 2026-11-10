@@ -175,6 +175,40 @@ public static partial class LogPrune
         return new LogPruneResult(true, deleted, finished);
     }
 
+    /// <summary>
+    /// lanq's own job logs directly in <paramref name="logsFolder"/> (the files a prune considers: a job id plus ".log", no links): how many
+    /// and their total size in bytes. (0, 0) when the folder is missing or is itself a link. May throw an IO error.
+    /// </summary>
+    public static (int Files, long Bytes) Measure(string logsFolder)
+    {
+        var dir = new DirectoryInfo(logsFolder);
+        if (!dir.Exists || IsLink(dir))
+        {
+            return (0, 0);
+        }
+
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = false,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.Device,
+            MatchType = MatchType.Simple,
+            ReturnSpecialDirectories = false,
+        };
+        var files = 0;
+        var bytes = 0L;
+        foreach (var f in dir.EnumerateFiles("*.log", options))
+        {
+            if (LogName().IsMatch(f.Name) && !f.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                files++;
+                bytes += f.Length;
+            }
+        }
+
+        return (files, bytes);
+    }
+
     /// <summary>A symbolic link, junction or other reparse point (a dangling link included).</summary>
     private static bool IsLink(FileSystemInfo f) =>
         f.LinkTarget is not null || (f.Exists && f.Attributes.HasFlag(FileAttributes.ReparsePoint));

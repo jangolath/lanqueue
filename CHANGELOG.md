@@ -28,6 +28,8 @@
 - Per-job logs in the state folder's `logs/` are pruned after a run, at most once a day: lanq's own logs older than
   `policy.keep_logs_days` (new, default 30; 0 never prunes) and the oldest beyond 5,000. A log modified in the last
   hour, any other file and any link are never deleted.
+- `lanq doctor` prints one more line, after the config line: `logs` with the count and size of the job logs in
+  `logs/` (`WARN` when they are over 2 GB and `policy.keep_logs_days` is 0).
 
 ## 0.6.0 (2026-11-09)
 

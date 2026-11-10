@@ -23,6 +23,9 @@ internal sealed record DoctorHost(
         File.Exists,
         KeyCheck.SshKeygenAcceptsEmptyPassphrase,
         home);
+
+    /// <summary>Counts lanq's job logs in a logs folder and their size (<see cref="LogPrune.Measure"/>); tests stand in for a huge folder.</summary>
+    public Func<string, (int Files, long Bytes)> MeasureLogs { get; init; } = LogPrune.Measure;
 }
 
 /// <summary>One line of lanq doctor: its text line (<see cref="Text"/>) and, with --json, one entry of checks[]. Names and levels are only ever added.</summary>
@@ -58,8 +61,8 @@ public static partial class Cli
     internal const int DoctorParallelism = 4;
 
     /// <summary>
-    /// lanq doctor: local checks only (no network): ssh, scp, git and ssh-keygen on PATH; the config; per machine a known_hosts entry, the
-    /// key_env file and its passphrase, work_root; the state folder. With --remote, one ssh call per machine (a few at a time) checks
+    /// lanq doctor: local checks only (no network): ssh, scp, git and ssh-keygen on PATH; the state folder; the config; the job logs in
+    /// logs/ (size, and WARN over 2 GB when never pruned); per machine a known_hosts entry, the key_env file and its passphrase, work_root. With --remote, one ssh call per machine (a few at a time) checks
     /// work_root, git or tar, and each known capability's tool in the job environment. Exit 0 when no line is WARN or FAIL, else 1 (a config
     /// that does not load is a FAIL line). Text: the lines on stdout as they are found, nothing else. --json: the same lines on stderr, then
     /// stdout gets one <see cref="DoctorJson"/> on every path (2 bad arguments, 70 unexpected error and 130 Ctrl+C with the checks so far) and
@@ -180,6 +183,7 @@ public static partial class Cli
         }
 
         await say(DoctorCheck.Local("config", "ok", $"config: {config.Machines.Count} machine(s)")).ConfigureAwait(false);
+        await say(LogsCheck(host, config.Policy.KeepLogsDays)).ConfigureAwait(false);
         foreach (var m in config.Machines)
         {
             foreach (var check in await LocalMachineChecks(m, host).ConfigureAwait(false))
@@ -229,6 +233,38 @@ public static partial class Cli
                 await say(check).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>Above this, a logs/ folder that is never pruned (policy.keep_logs_days 0) is a WARN line of lanq doctor.</summary>
+    internal const long LogsWarnBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// The job logs in the state folder's logs/: OK with their count and size; WARN when they are over 2 GB and policy.keep_logs_days is 0 (never
+    /// pruned); SKIP when the folder could not be read.
+    /// </summary>
+    private static DoctorCheck LogsCheck(DoctorHost host, int keepDays)
+    {
+        var folder = Path.Combine(host.Home, "logs");
+        (int Files, long Bytes) size;
+        try
+        {
+            size = host.MeasureLogs(folder);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return DoctorCheck.Local("logs", "skip", $"logs: {folder} could not be read: {ex.Message}");
+        }
+
+        var text = string.Create(
+            CultureInfo.InvariantCulture,
+            $"logs: {size.Files} files, {size.Bytes / (1024.0 * 1024):0.0} MB ({(keepDays == 0 ? "kept for ever: policy.keep_logs_days is 0" : $"kept {keepDays} days")})");
+        return keepDays == 0 && size.Bytes > LogsWarnBytes
+            ? DoctorCheck.Local(
+                "logs",
+                "warn",
+                text + $"; over 2 GB in {folder}",
+                "set policy.keep_logs_days (for example 30) so lanq deletes old job logs after a run, or delete old logs there yourself")
+            : DoctorCheck.Local("logs", "ok", text);
     }
 
     /// <summary>"git version 2.48.1.windows.1" -> 2.48; null when the line is missing or does not look like that.</summary>

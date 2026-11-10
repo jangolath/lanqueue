@@ -215,7 +215,7 @@ public sealed class DoctorTests : IDisposable
         Assert.True(json.GetProperty("remote").GetBoolean());
         var checks = Checks(json);
         Assert.All(checks.Where(c => Str(c, "scope") == "local"), c => Assert.Equal(JsonValueKind.Null, c.GetProperty("machine").ValueKind));
-        Assert.Equal(["ssh", "scp", "git", "ssh_keygen", "state_folder", "config"], checks.Where(c => Str(c, "scope") == "local").Select(c => Str(c, "name")));
+        Assert.Equal(["ssh", "scp", "git", "ssh_keygen", "state_folder", "config", "logs"], checks.Where(c => Str(c, "scope") == "local").Select(c => Str(c, "name")));
         Assert.Equal(
             ["known_hosts", "key_env", "work_root", "known_hosts", "work_root"],
             checks.Where(c => Str(c, "scope") == "machine").Select(c => Str(c, "name")));
@@ -333,6 +333,63 @@ public sealed class DoctorTests : IDisposable
         Assert.All(Steps(json), s => Assert.False(s.TryGetProperty("argv", out _)));
         Assert.All(Steps(json), s => Assert.False(s.TryGetProperty("command", out _)));
         Assert.All(Steps(json), s => Assert.DoesNotContain("--force", Str(s, "reason"), StringComparison.Ordinal));
+    }
+
+    /// <summary>The logs check counts lanq's own job logs (as pruning would see them) and their size; other files in logs/ do not count.</summary>
+    [Fact]
+    public async Task TheLogsCheckReportsLanqsJobLogsAndTheirSize()
+    {
+        var logs = Path.Combine(_home, "logs");
+        Directory.CreateDirectory(logs);
+        File.WriteAllBytes(Path.Combine(logs, "20261109-101500-0a1b2c.log"), new byte[1024 * 1024]);
+        File.WriteAllBytes(Path.Combine(logs, "20261109-101501-0a1b2d.log"), new byte[512 * 1024]);
+        File.WriteAllText(Path.Combine(logs, "notes.log"), "not lanq's");
+        File.WriteAllText(Path.Combine(logs, LogPrune.MarkerName), "");
+
+        var (code, o) = await Doctor(Host());
+        Assert.Equal(0, code);
+        Assert.Contains("OK    logs: 2 files, 1.5 MB (kept 30 days)" + Environment.NewLine, o, StringComparison.Ordinal);
+
+        var config = T.Config();
+        config.Policy.KeepLogsDays = 0;
+        (code, o) = await Doctor(Host(), config: () => config);
+        Assert.Equal(0, code); // small and never pruned: fine
+        Assert.Contains("OK    logs: 2 files, 1.5 MB (kept for ever: policy.keep_logs_days is 0)", o, StringComparison.Ordinal);
+    }
+
+    /// <summary>Over 2 GB of logs is a WARN only when they are never pruned (policy.keep_logs_days 0).</summary>
+    [Theory]
+    [InlineData(0, 3L * 1024 * 1024 * 1024, "warn")]
+    [InlineData(30, 3L * 1024 * 1024 * 1024, "ok")]
+    [InlineData(0, 2L * 1024 * 1024 * 1024, "ok")]
+    public async Task TheLogsCheckWarnsOverTwoGigabytesWhenNeverPruned(int keepDays, long bytes, string level)
+    {
+        var config = T.Config();
+        config.Policy.KeepLogsDays = keepDays;
+        var host = Host() with { MeasureLogs = _ => (6000, bytes) };
+        var (code, o, _) = await DoctorRun(host, config: () => config, json: true);
+
+        var logs = Assert.Single(Checks(OneObject(o)), c => Str(c, "name") == "logs");
+        Assert.Equal(("local", level), (Str(logs, "scope"), Str(logs, "level")));
+        Assert.Equal(level == "warn" ? 1 : 0, code);
+        Assert.Contains("logs: 6000 files, ", Str(logs, "detail"), StringComparison.Ordinal);
+        if (level == "warn")
+        {
+            Assert.Contains("policy.keep_logs_days", Str(logs, "fix"), StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(JsonValueKind.Null, logs.GetProperty("fix").ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task AnUnreadableLogsFolderIsSkippedNotAProblem()
+    {
+        var host = Host() with { MeasureLogs = _ => throw new UnauthorizedAccessException("Access to the path is denied.") };
+        var (code, o) = await Doctor(host);
+        Assert.Equal(0, code);
+        Assert.Contains(Lines(o, "SKIP"), l => l.Contains("logs: ", StringComparison.Ordinal) && l.Contains("could not be read", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -589,7 +646,8 @@ public sealed class DoctorTests : IDisposable
     /// <summary>
     /// lanq doctor's text, pinned byte for byte (written on the 0.6.0 code before doctor --json): a healthy local check, a remote run with a
     /// HOLD machine (and OK, WARN, SKIP and FAIL remote lines), local FAIL lines, a config FAIL, and an unreachable machine. Only the state
-    /// folder (a temporary path per test) is replaced, and the platform's line end is written as \n.
+    /// folder (a temporary path per test) is replaced, and the platform's line end is written as \n. The one change since: the logs line
+    /// after the config line (0.7.0, job logs pruning, section L of the 0.7.0 design).
     /// </summary>
     [Fact]
     public async Task DoctorTextIsByteForByteUnchanged()
@@ -605,6 +663,7 @@ public sealed class DoctorTests : IDisposable
             OK    ssh-keygen: found
             OK    state folder <home> is writable
             OK    config: 2 machine(s)
+            OK    logs: 0 files, 0.0 MB (kept 30 days)
             OK    build-01: known_hosts has build-01.lan
             OK    build-01: key file named by LANQ_KEY_BUILD01 found
             OK    build-01: work_root /srv/lanq (linux, transfer: git)
@@ -634,6 +693,7 @@ public sealed class DoctorTests : IDisposable
             OK    ssh-keygen: found
             OK    state folder <home> is writable
             OK    config: 2 machine(s)
+            OK    logs: 0 files, 0.0 MB (kept 30 days)
             OK    build-01: known_hosts has build-01.lan
             OK    build-01: key file named by LANQ_KEY_BUILD01 found
             OK    build-01: work_root /srv/lanq (linux, transfer: git)
@@ -669,6 +729,7 @@ public sealed class DoctorTests : IDisposable
             OK    ssh-keygen: found
             OK    state folder <home> is writable
             OK    config: 2 machine(s)
+            OK    logs: 0 files, 0.0 MB (kept 30 days)
             OK    build-01: known_hosts has build-01.lan
             FAIL  build-01: key_env LANQ_KEY_BUILD01 is not set
             OK    build-01: work_root /srv/lanq (linux, transfer: git)
