@@ -481,6 +481,10 @@ public sealed partial class JobRunner
                 {
                     List<Assessment> assessed;
                     MachineHealth[] probes;
+
+                    // Which of this run's shards are not running yet, counted before the probe looks: a shard that starts while the probe is out
+                    // was not running when the machine answered, so its memory is not in that answer either.
+                    var notRunning = running.Values.Where(r => !r.Started).CountBy(r => r.Machine, StringComparer.Ordinal).ToDictionary(StringComparer.Ordinal);
                     try
                     {
                         round = RoundStart();
@@ -495,7 +499,7 @@ public sealed partial class JobRunner
                     // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
                     var free = Placeable(
-                        assessed, template.MinMemGb, m => running.Values.Count(r => r.Machine == m), m => running.Values.Count(r => r.Machine == m && !r.Started));
+                        assessed, template.MinMemGb, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
                     var first = firstRound == -1;
                     if (first)
