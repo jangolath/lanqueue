@@ -284,6 +284,141 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains("ssh-keygen -F [192.0.2.10]:2222", _ran);
     }
 
+    /// <summary>The exact text doctor printed, with the per-test state folder written as &lt;home&gt; and the line ends as \n.</summary>
+    private string Golden(string output) =>
+        output.Replace(_home, "<home>", StringComparison.Ordinal).Replace(Environment.NewLine, "\n", StringComparison.Ordinal);
+
+    /// <summary>
+    /// lanq doctor's text, pinned byte for byte (written on the 0.6.0 code before doctor --json): a healthy local check, a remote run with a
+    /// HOLD machine (and OK, WARN, SKIP and FAIL remote lines), local FAIL lines, a config FAIL, and an unreachable machine. Only the state
+    /// folder (a temporary path per test) is replaced, and the platform's line end is written as \n.
+    /// </summary>
+    [Fact]
+    public async Task DoctorTextIsByteForByteUnchanged()
+    {
+        // 1. Healthy, local only.
+        var (code, o) = await Doctor(Host());
+        Assert.Equal(0, code);
+        Assert.Equal(
+            """
+            OK    ssh: OpenSSH_9.6p1, OpenSSL 3.0.13
+            OK    scp: found
+            OK    git: git version 2.47.0
+            OK    ssh-keygen: found
+            OK    state folder <home> is writable
+            OK    config: 2 machine(s)
+            OK    build-01: known_hosts has build-01.lan
+            OK    build-01: key file named by LANQ_KEY_BUILD01 found
+            OK    build-01: work_root /srv/lanq (linux, transfer: git)
+            OK    build-02: known_hosts has build-02.lan
+            OK    build-02: work_root D:/lanq (windows, transfer: git)
+
+            """.Replace("\r", "", StringComparison.Ordinal),
+            Golden(o));
+
+        // 2. --remote at noon: build-02 is outside its allowed hours (HOLD, only probed); build-01 is checked: OK, WARN, FAIL and SKIP lines.
+        var config = T.Config();
+        config.Machines[0].Capabilities = ["dotnet", "node", "gpu"];
+        var noon = new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero));
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => IsProbe(cmd)
+                ? new SshResult(0, HealthyProbe + "local_time=2026-01-05T12:00:00\n")
+                : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.25.1\ncap.dotnet=0|10.0.100\ncap.node=127|sh: 1: node: not found\n"),
+        };
+        (code, o) = await Doctor(Host(), ssh, () => config, remote: true, clock: noon);
+        Assert.Equal(1, code);
+        Assert.Equal(
+            """
+            OK    ssh: OpenSSH_9.6p1, OpenSSL 3.0.13
+            OK    scp: found
+            OK    git: git version 2.47.0
+            OK    ssh-keygen: found
+            OK    state folder <home> is writable
+            OK    config: 2 machine(s)
+            OK    build-01: known_hosts has build-01.lan
+            OK    build-01: key file named by LANQ_KEY_BUILD01 found
+            OK    build-01: work_root /srv/lanq (linux, transfer: git)
+            OK    build-02: known_hosts has build-02.lan
+            OK    build-02: work_root D:/lanq (windows, transfer: git)
+            OK    build-01 (remote): work_root /srv/lanq is writable
+            OK    build-01 (remote): git (transfer: git)
+            WARN  build-01 (remote): git older than 2.32: global config not isolated (git 2.25 ignores GIT_CONFIG_GLOBAL, so a filter or attributes file in the ssh user's ~/.gitconfig can still run during a job's checkout; update git on that machine)
+            OK    build-01 (remote): dotnet: 10.0.100
+            FAIL  build-01 (remote): node: 'node --version' failed in the job environment (sh: 1: node: not found). If the tool is installed, a non-login ssh session does not see it: add its folder to path_prepend for this machine
+            SKIP  build-01 (remote): gpu: not checked (no known tool command)
+            HOLD  build-02 (remote): outside allowed hours; not checked. Add --force to check it anyway
+
+            """.Replace("\r", "", StringComparison.Ordinal),
+            Golden(o));
+
+        // 3. Local FAIL lines: git missing, no known_hosts entry (non-standard port), key_env unset; and a key without a passphrase (WARN).
+        (code, o) = await Doctor(Host(
+            exec: line => line switch
+            {
+                _ when line.StartsWith("git ", StringComparison.Ordinal) => new SshResult(255, "Could not start git: not found"),
+                "ssh -G user@build-02.lan" => new SshResult(0, "hostname 192.0.2.20\nport 2222\nuserknownhostsfile ~/.ssh/known_hosts\n"),
+                _ when line.StartsWith("ssh-keygen -F [192.0.2.20]:2222", StringComparison.Ordinal) => new SshResult(1, ""),
+                _ => null,
+            },
+            env: k => k == "HOME" ? "/home/me" : null));
+        Assert.Equal(1, code);
+        Assert.Equal(
+            """
+            OK    ssh: OpenSSH_9.6p1, OpenSSL 3.0.13
+            OK    scp: found
+            FAIL  git: not found on PATH
+            OK    ssh-keygen: found
+            OK    state folder <home> is writable
+            OK    config: 2 machine(s)
+            OK    build-01: known_hosts has build-01.lan
+            FAIL  build-01: key_env LANQ_KEY_BUILD01 is not set
+            OK    build-01: work_root /srv/lanq (linux, transfer: git)
+            FAIL  build-02: no known_hosts entry for [192.0.2.20]:2222: connect once with ssh user@build-02.lan, check the fingerprint with the machine's owner, then accept it
+            OK    build-02: work_root D:/lanq (windows, transfer: git)
+
+            """.Replace("\r", "", StringComparison.Ordinal),
+            Golden(o));
+
+        // 4. A config that does not load: one FAIL line after the local tools, nothing per machine.
+        (code, o) = await Doctor(Host(), config: () => throw new ConfigException("Machine 'x': ssh target must be user@host"));
+        Assert.Equal(1, code);
+        Assert.Equal(
+            """
+            OK    ssh: OpenSSH_9.6p1, OpenSSL 3.0.13
+            OK    scp: found
+            OK    git: git version 2.47.0
+            OK    ssh-keygen: found
+            OK    state folder <home> is writable
+            FAIL  config: Machine 'x': ssh target must be user@host
+
+            """.Replace("\r", "", StringComparison.Ordinal),
+            Golden(o));
+
+        // 5. --remote --force: build-01's work_root is missing and it has no tar; build-02 does not answer ssh.
+        config = T.Config();
+        config.Machines[0].Transfer = TransferMode.Archive;
+        config.Machines[0].Capabilities = [];
+        ssh = new FakeSsh
+        {
+            Handler = (m, _) => m.Name == "build-01"
+                ? new SshResult(0, "root=missing\ntool=missing\n")
+                : new SshResult(255, "ssh: connect to host build-02.lan port 22: Connection timed out"),
+        };
+        (code, o) = await Doctor(Host(), ssh, () => config, remote: true, force: true);
+        Assert.Equal(1, code);
+        var remote = Golden(o).Split('\n').SkipWhile(l => !l.Contains("(remote)", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(
+            [
+                "WARN  build-01 (remote): work_root /srv/lanq does not exist yet (the first job creates it)",
+                "FAIL  build-01 (remote): no usable tar for transfer: archive (see docs/WORKERS.md)",
+                "FAIL  build-02 (remote): unreachable: ssh: connect to host build-02.lan port 22: Connection timed out",
+                "",
+            ],
+            remote);
+        Assert.Contains("OK    build-01: work_root /srv/lanq (linux, transfer: archive)\n", Golden(o), StringComparison.Ordinal);
+    }
+
     private static string[] Lines(string output, string level) =>
         output.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Where(l => l.StartsWith(level, StringComparison.Ordinal)).ToArray();
 
