@@ -24,7 +24,25 @@ internal record HealthJson(
 
     /// <summary>What the machine suits, in lanq-makeready's words, for example "light: lint and unit-test shards + container builds".</summary>
     public string SuitedFor { get; init; } = "";
+
+    /// <summary>What to do about this machine (see <see cref="NextStepJson"/>): none when it can take work (or, with --needs/--mem, the job).</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 }
+
+/// <summary>
+/// One next step, in every --json object (nextSteps, at least one entry; <c>none</c> when there is nothing to do). <paramref name="Argv"/>,
+/// the exact arguments with no shell involved, is present exactly when a command is suggested and is the authoritative form;
+/// <paramref name="Command"/> is the same as one line for bash and PowerShell, present only when every argument can be written safely for both.
+/// </summary>
+/// <param name="Action">proceed, retry, wait, fix_code, fix_command, ask_developer, run_doctor, run_health or none. Values may be added; treat an unknown one as ask_developer.</param>
+/// <param name="Reason">Why, for people and agents (sanitised).</param>
+/// <param name="SafeToRunUnattended">True only for a suggested command an agent may run without asking (read-only, or the same run again with no more side effects).</param>
+internal sealed record NextStepJson(
+    string Action,
+    string Reason,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Command,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? Argv,
+    bool SafeToRunUnattended);
 
 /// <summary>
 /// One machine in <c>lanq health --needs ... --json</c> (or --mem): the plain row plus how the machine was judged for such a job, by the rules
@@ -104,6 +122,10 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>--log-tail N only: the log's last N lines (sanitised, each at most 4000 characters); empty when no job started.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? LogTail { get; init; }
+
+    /// <summary>What to do next (see <see cref="NextStepJson"/>): always present on a single run's object; absent in the shards of --shards (the top level carries them).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<NextStepJson>? NextSteps { get; init; }
 }
 
 /// <summary>
@@ -120,6 +142,9 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>NoCapacity only: as in <see cref="RunJson.Excluded"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>What to do next for the whole run (see <see cref="NextStepJson"/>).</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 }
 
 /// <summary>One machine in excluded (NoCapacity only).</summary>
@@ -132,8 +157,7 @@ internal sealed record ExcludedJson(string Machine, string Reason, string Why, b
 
 /// <summary>
 /// The one object <c>lanq run --dry-run --json</c> prints on stdout: what lanq run would do now. Every field is always present (null where it
-/// does not apply), except logTail (only with --log-tail, and then always empty: a dry run starts no job). Fields are only ever added (a
-/// later version adds nextSteps here).
+/// does not apply), except logTail (only with --log-tail, and then always empty: a dry run starts no job). Fields are only ever added.
 /// </summary>
 /// <param name="Status">WouldRun (0), Rejected (2), NoCapacity (75), InfraError (70) or Cancelled (130).</param>
 /// <param name="ExitCode">The exit code of this dry run.</param>
@@ -171,6 +195,9 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>--log-tail only: always empty (a dry run starts no job, so there is no log).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? LogTail { get; init; }
+
+    /// <summary>What to do next (see <see cref="NextStepJson"/>): WouldRun proceeds with the same command without --dry-run.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 }
 
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
@@ -191,11 +218,19 @@ internal sealed record FetchSkipJson(string Path, string Reason);
 /// What <c>lanq health --json</c> and <c>lanq makeready --json</c> print instead of their normal output when there is none: Rejected (2),
 /// InfraError (70), Held (75, makeready only) or Cancelled (130).
 /// </summary>
-internal sealed record ErrorJson(string Status, int ExitCode, string Message);
+internal sealed record ErrorJson(string Status, int ExitCode, string Message)
+{
+    /// <summary>What to do next (see <see cref="NextStepJson"/>).</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
 
 /// <summary>The one object <c>lanq wake --json</c> prints when a packet was sent: Sent (0), Awake (0, with --wait) or NoAnswer (1, with --wait). Failures use <see cref="ErrorJson"/>.</summary>
 /// <param name="Awake">Null without --wait (not checked).</param>
-internal sealed record WakeJson(string Status, int ExitCode, string Machine, bool Sent, bool? Awake, double DurationSeconds, string Message);
+internal sealed record WakeJson(string Status, int ExitCode, string Machine, bool Sent, bool? Awake, double DurationSeconds, string Message)
+{
+    /// <summary>What to do next (see <see cref="NextStepJson"/>): Sent suggests lanq health, never another wake.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
 
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -208,6 +243,8 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]
 [JsonSerializable(typeof(PlanJson))]
+[JsonSerializable(typeof(NextStepJson))]
+[JsonSerializable(typeof(List<NextStepJson>))]
 internal sealed partial class LanqJson : JsonSerializerContext;
 
 /// <summary>One machine in <c>lanq makeready --all --json</c>.</summary>
@@ -218,16 +255,28 @@ internal sealed partial class LanqJson : JsonSerializerContext;
 /// <param name="Problem">The first FAIL check, else the first WARN (title: detail), or why there is no report; absent when there is nothing.</param>
 /// <param name="Report">The validated lanq-makeready/v1 report, exactly as <c>lanq makeready &lt;machine&gt; --json</c> prints it; absent without one.</param>
 internal sealed record MakereadyRowJson(
-    string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReport? Report);
+    string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReport? Report)
+{
+    /// <summary>What to do about this machine (see <see cref="NextStepJson"/>).</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
 
 /// <summary>The one object <c>lanq makeready --all --json</c> prints: Ok (0), Failing (1: a machine is NOT READY), InfraError (70: unreachable or unusable) or Held (75), and every machine in config order.</summary>
-internal sealed record MakereadyAllJson(string Status, int ExitCode, IReadOnlyList<MakereadyRowJson> Machines);
+internal sealed record MakereadyAllJson(string Status, int ExitCode, IReadOnlyList<MakereadyRowJson> Machines)
+{
+    /// <summary>What to do next for the whole check (see <see cref="NextStepJson"/>).</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
 
 /// <summary>
 /// The one object <c>lanq init --json</c> prints: Created (0), Rejected (2: the file exists or bad arguments) or InfraError (70: it could not
 /// be written). <paramref name="Path"/> is the full path of the config file (null only when the arguments were refused).
 /// </summary>
-internal sealed record InitJson(string Status, int ExitCode, string? Path, string Message);
+internal sealed record InitJson(string Status, int ExitCode, string? Path, string Message)
+{
+    /// <summary>What to do next (see <see cref="NextStepJson"/>).</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
 
 /// <summary>
 /// Source-generated serialization for <c>lanq makeready --all --json</c>. Null members are left out, as in the single-machine report, so
@@ -235,4 +284,5 @@ internal sealed record InitJson(string Status, int ExitCode, string? Path, strin
 /// </summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, MaxDepth = 16)]
 [JsonSerializable(typeof(MakereadyAllJson))]
+[JsonSerializable(typeof(NextStepJson))]
 internal sealed partial class MakereadyAllJsonContext : JsonSerializerContext;

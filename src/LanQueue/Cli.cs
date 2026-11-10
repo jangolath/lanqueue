@@ -79,6 +79,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
     public ShardOptions? Shards { get; init; }
 
+    /// <summary>
+    /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
+    /// (see <see cref="Output.SuggestedCommand.Rerun"/>), so the user's own options and job arguments survive unchanged.
+    /// </summary>
+    public IReadOnlyList<string> Raw { get; init; } = [];
+
     /// <summary>The options each command accepts (--config is accepted everywhere); anything else is an error, never silently ignored.</summary>
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
@@ -298,6 +304,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchMaxFiles = fetchMaxFiles,
             Shards = shards.Build(),
             LogTail = logTail,
+            Raw = [.. args],
         };
     }
 
