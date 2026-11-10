@@ -177,7 +177,7 @@ public sealed class DryRunTests : IDisposable
         { ["rm", "-rf", "/"], "is not on policy.allowed_commands" },
         { ["dotnet", "test", "--dangerously-skip-permissions"], "Permission-skipping flag rejected" },
         { ["npm", "test", "--token=ghp_abcdefghijklmnopqrstuvwxyz0123456789"], "possible secrets" },
-        { ["npm", "test", "&calc"], "which Windows workers refuse" },
+        { ["npm", "test", "&calc"], "which Windows workers pass only to a native .exe" },
     };
 
     [Theory]

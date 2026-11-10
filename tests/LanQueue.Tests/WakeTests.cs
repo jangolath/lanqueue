@@ -668,7 +668,7 @@ public sealed class WakeTests
     {
         List<Machine> fleet = [Box("lin-1", wake: false), Box("win-1", MachineOs.Windows)];
 
-        var (r, sender, _, _) = await RunFleet(fleet, ["lin-1"], LongWait, argv: ["dotnet", "test", "--filter", "a&b"], memGb: 64);
+        var (r, sender, _, _) = await RunFleet(fleet, ["lin-1"], LongWait, argv: ["dotnet", "test", "--filter", "a^b"], memGb: 64);
 
         Assert.Equal(JobStatus.NoCapacity, r.Status);
         Assert.False(r.Retryable);
@@ -680,7 +680,7 @@ public sealed class WakeTests
     {
         List<Machine> fleet = [Box("win-1", MachineOs.Windows), Box("lin-1")];
 
-        var (r, sender, _, up) = await RunFleet(fleet, [], LongWait, argv: ["dotnet", "test", "--filter", "a&b"]);
+        var (r, sender, _, up) = await RunFleet(fleet, [], LongWait, argv: ["dotnet", "test", "--filter", "a^b"]);
 
         Assert.Equal("lin-1", r.Machine);
         Assert.Single(sender.Sent);

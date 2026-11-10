@@ -1093,11 +1093,16 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 - Wake-on-LAN is best effort and was exercised only against fakes and a loopback UDP socket, not real hardware. `lanq`
   cannot know whether a packet woke anything beyond the machine answering ssh later. The automatic wake judges
   `allowed_hours` on your PC's clock (an asleep worker cannot report its own), so keep both in the same time zone.
-- Windows workers never take a job whose arguments contain any of `"` `&` `|` `<` `>` `^` `%`. PowerShell 5.1 passes
+- Windows workers never take a job whose arguments contain any of `"` `<` `>` `^` `%`. PowerShell 5.1 passes
   embedded double quotes through unescaped, and `.cmd` shims such as `npm.cmd` re-parse the command line through
-  `cmd.exe`, so such an argument could run a second command. Such a job skips Windows workers (hold reason
-  "arguments not safe for Windows cmd shims") and runs on a Linux worker; it is refused (exit 2) only when no Linux
-  worker has the needed capabilities.
+  `cmd.exe`, so such an argument could run a second command. `&` and `|` (as in
+  `dotnet test --filter "Category=Unit|Category=Arch"`) are allowed only when the program is a native `.exe`: the
+  command must be a bare name or path with no extension or `.exe` (not `.cmd`, `.bat`, `.ps1`, not `cmd`, `npm`, `npx`,
+  `yarn` or `pnpm`), and the worker checks before starting anything that the name resolves there, with the job's own
+  PATH and `path_prepend:`, to an `.exe`. If it finds a `.cmd` or `.bat` instead (say a `dotnet.cmd` earlier on PATH),
+  nothing runs and the job is `Rejected` (exit 2) naming what it found: call the `.exe` directly or put the command in a
+  script. A job Windows cannot take skips Windows workers (hold reason "arguments not safe for Windows (...)") and
+  runs on a Linux worker; it is refused (exit 2) only when no Linux worker has the needed capabilities.
 - `allowed_hours` uses the worker's clock. Across a daylight-saving change the window end is placed with the UTC
   offsets the worker reports on every UTC quarter hour for the next 36 hours (an end time that happens twice counts as
   the earlier one); a Linux worker whose `date` cannot print the offset of another instant (`date -d @EPOCH +%z`) falls

@@ -489,7 +489,7 @@ The messages below are what lanq prints (`<...>` is filled in). `lanq doctor --r
    **`[lanq] NoCapacity: No eligible machine, and no machine can ever take this job as configured (waiting will not help). ...`**
    is the permanent kind (`retryable: false`): every machine is ruled out for good, for example `lacks <capability>`
    (no machine has every `--needs` tag), `--mem` above its total RAM, a Windows machine for arguments cmd.exe would
-   re-parse, or git or tar missing. lanq ends at once and `--wait` would not help: tag a machine with the capability
+   re-parse (`"` `<` `>` `^` `%`, or `&` `|` for a `.cmd`/`.bat` program such as `npm`), or git or tar missing. lanq ends at once and `--wait` would not help: tag a machine with the capability
    in `machines.yml`, add a machine that has it, or change `--needs` or `--mem`. `lanq health --needs <caps> [--mem N]`
    shows how each machine is judged, and `lanq run ... --dry-run` shows what a run would do, without running it.
 10. **`<tool>: '<tool> --version' failed in the job environment (...). If the tool is installed, a non-login ssh session does not see it: add its folder to path_prepend for this machine`**

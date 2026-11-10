@@ -309,4 +309,72 @@ public sealed class PlanFileDryRunTests : IDisposable
         Assert.Empty(ssh.Calls);
         Assert.StartsWith("[lanq] NoCapacity: job 'gpu': ", Lines(stderr)[^1], StringComparison.Ordinal);
     }
+    /// <summary>
+    /// A lanq.yml list command with --filter A|B (a native .exe) dry-runs on a Windows-only fleet; adding a job that hands & to npm (a .cmd
+    /// shim there) refuses the whole plan, as lanq run would, before any network work.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AFilterWithABarDryRunsOnWindowsButAnNpmAmpersandIsRefused()
+    {
+        const string windowsFleet = """
+            policy:
+              load_threshold: 0.8
+              allowed_commands: ["dotnet test", "npm run"]
+              allowed_directories: ["."]
+            machines:
+              - name: win-01
+                os: windows
+                ssh: user@10.20.30.51
+                work_root: C:/lanq
+                capabilities: [dotnet]
+                max_jobs: 2
+            """;
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(cmd[(cmd.LastIndexOf(' ') + 1)..])).Contains("disk_free_gb", StringComparison.Ordinal)
+                ? new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\nmem_free_gb=3\ntool=ok")
+                : new SshResult(0, ""),
+        };
+        async Task<(int Code, string Stdout, string Stderr)> DryWindows()
+        {
+            var o = new StringWriter();
+            var e = new StringWriter();
+            var code = await Cli.RunPlanFile(
+                ParsedArgs.Parse(["run", "--plan", "--dry-run", "--json"]), ConfigLoader.Parse(windowsFleet), ssh, new RunnerTests.FakePayloads(""),
+                new HealthProbe(ssh, TimeProvider.System), Log, Home, Repo, o, e, CancellationToken.None);
+            return (code, o.ToString(), e.ToString());
+        }
+
+        Plan("""
+            version: 1
+            defaults:
+              needs: [dotnet]
+            jobs:
+              unit:
+                command: [dotnet, test, --filter, "Category=Unit|Category=Arch"]
+            """);
+        var (code, stdout, _) = await DryWindows();
+        Assert.Equal(0, code);
+        var unit = JobsOf(Json(stdout))["unit"];
+        Assert.Equal("WouldRun", unit.GetProperty("status").GetString());
+        Assert.Contains("win-01", unit.GetRawText(), StringComparison.Ordinal);
+
+        Plan("""
+            version: 1
+            defaults:
+              needs: [dotnet]
+            jobs:
+              unit:
+                command: [dotnet, test, --filter, "Category=Unit|Category=Arch"]
+              scripts:
+                command: [npm, run, "x&y"]
+            """);
+        ssh.Calls.Clear();
+        var refused = await DryWindows();
+        Assert.Equal(2, refused.Code);
+        Assert.Equal("Rejected", Json(refused.Stdout).GetProperty("status").GetString());
+        Assert.StartsWith("[lanq] Rejected: job 'scripts': ", Lines(refused.Stderr)[^1], StringComparison.Ordinal);
+        Assert.Contains(".cmd/.bat shims", refused.Stderr, StringComparison.Ordinal);
+        Assert.Empty(ssh.Calls);
+    }
 }

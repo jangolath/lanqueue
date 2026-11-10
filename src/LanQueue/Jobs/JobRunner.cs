@@ -32,7 +32,10 @@ public enum RejectKind
     /// <summary>Possible secrets in the command line or the uncommitted changes (nothing was sent).</summary>
     Secret,
 
-    /// <summary>Arguments cmd.exe shims would re-parse, and only Windows machines have the capabilities.</summary>
+    /// <summary>
+    /// Arguments unsafe on Windows (cmd.exe could re-parse them) and only Windows machines have the capabilities, or a Windows worker found
+    /// that the program given &amp; or | does not resolve to an .exe there (nothing was started).
+    /// </summary>
     WindowsArgs,
 
     /// <summary>The command line itself is unusable (no command, control characters, bad lanq options, a command the machine cannot run).</summary>
@@ -255,8 +258,8 @@ public sealed partial class JobRunner(
             return Rejected(jobId, commandFindings);
         }
 
-        // Arguments that cmd.exe shims would re-parse can still run on a Linux worker; refuse only when no non-Windows machine has
-        // the needed capabilities, before any network or git work.
+        // Arguments unsafe on Windows (" < > ^ %, or & | for a program that is not an .exe) can still run on a Linux worker; refuse only
+        // when no non-Windows machine has the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
         if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
         {
@@ -433,6 +436,25 @@ public sealed partial class JobRunner(
             ? (line[..at], code)
             : (line, null);
     }
+
+    /// <summary>
+    /// What the Windows wrapper said it resolved the program to when it refused to start a job given &amp; or |
+    /// (<see cref="RemoteScripts.WindowsArgsMarker"/>), or null when <paramref name="line"/> is not that line for this job.
+    /// </summary>
+    internal static string? ReadWindowsArgsRefusal(string line, string jobId)
+    {
+        var marker = RemoteScripts.WindowsArgsMarker(jobId);
+        var text = line.TrimEnd('\r');
+        return text.StartsWith(marker, StringComparison.Ordinal) ? text[marker.Length..] : null;
+    }
+
+    /// <summary>The Rejected message for a job the Windows worker would not start because its program is not a native .exe there.</summary>
+    internal static string WindowsArgsRefusal(Machine machine, string program, string resolved) =>
+        $"{SafeLine(machine.Name)}: '{SafeLine(program)}' "
+        + (resolved.Length == 0 ? "was not found on the machine" : $"resolves to {SafeLine(resolved)} there")
+        + ", not a native .exe, so its arguments with & or | were refused and nothing was started: .cmd/.bat shims re-parse the command "
+        + "line through cmd.exe, which could run another command. Call the .exe directly, put the command in a script, or fix the machine's "
+        + "PATH (path_prepend:).";
 
     private static bool HasCapabilities(Machine m, IReadOnlyList<string> needs) =>
         needs.All(n => m.Capabilities.Contains(n, StringComparer.OrdinalIgnoreCase));
@@ -868,10 +890,25 @@ public sealed partial class JobRunner(
         // the next line arrives, which shows it was not final, and is then passed on unchanged as ordinary output. The final one is taken off.
         var heldGate = new object();
         string? held = null;
+        string? refusedLine = null;
         void OnJobLine(string line)
         {
             lock (heldGate)
             {
+                // The Windows wrapper refused to start a job given & or | (its program is not an .exe there): that line counts only when the
+                // final exit marker with 2 follows it. It is held back like the marker, and passed on as ordinary output if anything else follows.
+                if (refusedLine is not null && (held is not null || ReadExitMarker(line, jobId).Code is null))
+                {
+                    onLine(refusedLine);
+                    refusedLine = null;
+                }
+
+                if (held is null && refusedLine is null && ReadWindowsArgsRefusal(line, jobId) is not null)
+                {
+                    refusedLine = line;
+                    return;
+                }
+
                 if (held is not null)
                 {
                     onLine(held);
@@ -897,14 +934,28 @@ public sealed partial class JobRunner(
         var runSeconds = Math.Round(clock.GetElapsedTime(runStarted).TotalSeconds, 2);
 
         int? markedExit = null;
+        string? refusedAs = null;
         if (held is { } last)
         {
             var (before, code) = ReadExitMarker(last, jobId);
             markedExit = code;
+            if (refusedLine is not null && code == 2 && before.Length == 0)
+            {
+                refusedAs = ReadWindowsArgsRefusal(refusedLine, jobId);
+            }
+            else if (refusedLine is not null)
+            {
+                onLine(refusedLine);
+            }
+
             if (before.Length > 0)
             {
                 onLine(before);
             }
+        }
+        else if (refusedLine is not null)
+        {
+            onLine(refusedLine);
         }
 
         // ssh exits 255 both when the connection fails and when the job itself exited 255. The final marker is used for that one question
@@ -920,6 +971,15 @@ public sealed partial class JobRunner(
         else if (run.TimedOut)
         {
             result = new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, "timed out after " + ProcessSshClient.Describe(timeout));
+        }
+        else if (refusedAs is not null && machine.Os == MachineOs.Windows)
+        {
+            // Nothing was started, so there is nothing to stop or fetch; the caller's cleanup still releases the slot.
+            return new JobResult(jobId, JobStatus.Rejected, 2, machine.Name, WindowsArgsRefusal(machine, req.Argv[0], refusedAs))
+            {
+                RejectKind = Jobs.RejectKind.WindowsArgs,
+                RunSeconds = runSeconds,
+            };
         }
         else if (sshFailed)
         {

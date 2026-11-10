@@ -209,6 +209,7 @@ public sealed class PlanFileLoaderTests : IDisposable
     [InlineData("sh -c 'echo $HOME'", "'echo")]
     [InlineData("npm test && rm -rf /", "&&")]
     [InlineData("dotnet test > out.txt", ">")]
+    [InlineData("dotnet test --filter Category=Unit|Category=Arch", "Category=Unit|Category=Arch")]
     [InlineData("echo $LANQ_SHARD", "$LANQ_SHARD")]
     [InlineData("npx jest {shard*}", "{shard*}")]
     [InlineData("npx jest *.test.js", "*.test.js")]

@@ -594,6 +594,7 @@ public static class RemoteScripts
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{ShardEnvironmentPowerShell(shard)}}
                 {{PlanJobEnvironmentPowerShell(planJob)}}
+                {{WindowsNativeCheck(jobId, argv)}}
                 {{(m.Priority == JobPriority.Low ? "try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }" : "")}}
                 Set-Content -LiteralPath $pf -Value @($PID, (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)
                 $job = {
@@ -702,6 +703,40 @@ public static class RemoteScripts
     /// is over, can, when it is the final output line (<see cref="JobRunner.ReadExitMarker"/>). It decides only that; any other code is ssh's.
     /// </summary>
     internal static string ExitMarker(string jobId) => "LANQ_EXIT=" + SafeJobId(jobId) + ":";
+
+    /// <summary>
+    /// The line the Windows job wrapper prints instead of starting a job given &amp; or | whose program does not resolve to a native .exe:
+    /// <c>LANQ_WINARGS=&lt;job id&gt;:&lt;what it resolved to&gt;</c> (the file's path, "Alias where" and the like, or nothing when not found),
+    /// followed by the exit marker with 2. lanq reports that as Rejected (exit 2, <see cref="RejectKind.WindowsArgs"/>).
+    /// </summary>
+    internal static string WindowsArgsMarker(string jobId) => "LANQ_WINARGS=" + SafeJobId(jobId) + ":";
+
+    /// <summary>
+    /// For a job given &amp; or | (<see cref="JobPolicy.HasShimUnsafe"/>), the Windows wrapper's check before anything starts: argv[0] is looked
+    /// up exactly as the job's call operator will look it up (same PATH with path_prepend:, same folder, aliases and functions first) and
+    /// must be an application whose file is an .exe and not cmd or a package-manager shim; otherwise nothing runs and the wrapper prints
+    /// <see cref="WindowsArgsMarker"/> and exits 2. A .cmd/.bat (say a dotnet.cmd earlier on PATH) would re-parse the arguments through
+    /// cmd.exe. Empty for other jobs.
+    /// </summary>
+    private static string WindowsNativeCheck(string jobId, IReadOnlyList<string> argv)
+    {
+        if (!JobPolicy.HasShimUnsafe(argv))
+        {
+            return "";
+        }
+
+        var shims = string.Join(",", JobPolicy.WindowsShimPrograms.Select(ShellQuote.PowerShell));
+        return $$"""
+            $lc = Get-Command -Name {{ShellQuote.PowerShell(argv[0])}} -ErrorAction SilentlyContinue | Select-Object -First 1
+            $la = $null -ne $lc -and $lc.CommandType -eq 'Application'
+            if (-not ($la -and [IO.Path]::GetExtension($lc.Path) -ieq '.exe' -and @({{shims}}) -notcontains [IO.Path]::GetFileNameWithoutExtension($lc.Path))) {
+              $lr = if ($la) { $lc.Path } elseif ($null -ne $lc) { [string]$lc.CommandType + ' ' + $lc.Name } else { '' }
+              [Console]::Out.WriteLine({{ShellQuote.PowerShell(WindowsArgsMarker(jobId))}} + $lr)
+              [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId))}} + '2')
+              exit 2
+            }
+            """;
+    }
 
     /// <summary>A job id is 1 to 64 of A-Z, a-z, 0-9, '_' and '-' (lanq makes them as yyyyMMdd-HHmmss-xxxxxx).</summary>
     internal static string SafeJobId(string jobId) =>

@@ -173,6 +173,55 @@ public sealed class WorkerScriptTests : IDisposable
     }
 
     /// <summary>
+    /// A job given &amp; or | whose program resolves (through path_prepend:, as the job's own lookup would) to a .cmd shim is refused by the
+    /// wrapper before anything starts: the shim never runs, no pid file is written, and the output is the refusal marker naming the .cmd
+    /// followed by the exit marker with 2, which lanq reports as Rejected. (pwsh elsewhere does not resolve a .cmd at all: refused too.)
+    /// </summary>
+    [PowerShellFact]
+    public void AProgramResolvingToACmdShimIsRefusedBeforeItStarts()
+    {
+        var shims = Path.Combine(_root, "shims");
+        Directory.CreateDirectory(shims);
+        var ran = Path.Combine(_root, "ran.txt").Replace('/', (char)92);
+        File.WriteAllText(Path.Combine(shims, "lanqtool.cmd"), "@echo ran> \"" + ran + "\"\r\n");
+        var m = Worker(MachineOs.Windows);
+        m.PathPrepend.Add(shims);
+
+        foreach (var arg in new[] { "Category=Unit|Category=Arch", "a&b" })
+        {
+            var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, "j1", ".", ["lanqtool", "--filter", arg], TimeSpan.FromMinutes(5)));
+
+            Assert.Equal(2, code);
+            var lines = output.Replace("\r", "", StringComparison.Ordinal).TrimEnd('\n').Split('\n');
+            Assert.Equal(2, JobRunner.ReadExitMarker(lines[^1], "j1").Code);
+            var resolved = JobRunner.ReadWindowsArgsRefusal(lines[^2], "j1");
+            Assert.NotNull(resolved);
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.EndsWith("lanqtool.cmd", resolved, StringComparison.OrdinalIgnoreCase);
+            }
+
+            Assert.False(File.Exists(ran), "the .cmd shim ran: " + output);
+            Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+        }
+    }
+
+    /// <summary>
+    /// A native .exe receives &amp; and | verbatim, spaces included, through Windows PowerShell 5.1's native argument passing (git rev-parse
+    /// --sq-quote prints its arguments back, quoted). dotnet test --filter "Category=Unit|Category=Arch" reaches dotnet.exe the same way.
+    /// </summary>
+    [WindowsFact]
+    public void ANativeExeReceivesAmpersandAndBarVerbatim()
+    {
+        var (code, output) = Shells.Run(
+            "windows",
+            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["git", "rev-parse", "--sq-quote", "A|B", "A B|C", "x&y", "Name~A B|Name~C", "it's"], TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(0, code);
+        Assert.Equal("'A|B' 'A B|C' 'x&y' 'Name~A B|Name~C' 'it'\\''s'", T.JobOutput(output).Trim());
+    }
+
+    /// <summary>
     /// The wrapper dies (killed, or its session dropped) while the job child runs on: the pid file also names the child with its start time,
     /// so cleanup still stops it, although taskkill /T on the dead wrapper's pid would not reach it.
     /// </summary>

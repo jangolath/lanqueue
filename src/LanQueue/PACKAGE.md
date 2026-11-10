@@ -86,7 +86,8 @@ Recipes for .NET, Node, Python, Go and Rust:
 
 - Key-only SSH with strict host-key checking; there is no password option.
 - Only commands and directories you allowlist can run; arguments are quoted, never interpreted by a shell (Windows
-  workers never take arguments containing `"` `&` `|` `<` `>` `^` `%`, which `cmd.exe` shims would re-parse).
+  workers never take arguments containing `"` `<` `>` `^` `%`, nor `&` `|` unless the program is a native `.exe`,
+  since `cmd.exe` shims would re-parse them).
 - Worker output is untrusted: control, bidi and zero-width characters are shown as `?`.
 - `--fetch` treats the worker as untrusted: regular files only (links never followed), sent as checksummed text (no
   archive is ever extracted), every path, size, count and hash checked again locally, files created new below

@@ -151,6 +151,34 @@ public class SchedulerTests
         Assert.Equal(Scheduler.WindowsUnsafeHold, unsafeArgs.Health.Hold);
     }
 
+    /// <summary>
+    /// & and | keep a Windows machine eligible when the program is a native .exe (dotnet test --filter A|B); a shim (npm) or any of " < > ^ %
+    /// still rules it out for good, while a Linux machine takes every one of them.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "dotnet", "test", "--filter", "Category=Unit|Category=Arch")]
+    [InlineData(true, "dotnet.exe", "test", "--filter", "Name~A B|Name~C")]
+    [InlineData(true, "dotnet", "test", "--filter", "A&B")]
+    [InlineData(false, "npm", "run", "x&y")]
+    [InlineData(false, "npm.cmd", "run", "x|y")]
+    [InlineData(false, "build.bat", "a|b")]
+    [InlineData(false, "dotnet", "test", "%PATH%")]
+    [InlineData(false, "dotnet", "test", ">out")]
+    public void AWindowsMachineTakesAmpersandOrBarOnlyForANativeExe(bool windowsEligible, params string[] argv)
+    {
+        var needs = new JobNeeds(["dotnet"], null, !LanQueue.Policy.JobPolicy.ValidateForWindows(argv).Ok);
+        var win = Scheduler.Assess([(Box("win-01", ["dotnet"], os: MachineOs.Windows), Up("win-01"))], needs)[0];
+        var linux = Scheduler.Assess([(Box("linux-01", ["dotnet"]), Up("linux-01"))], needs)[0];
+
+        Assert.Equal(windowsEligible, win.Eligible);
+        Assert.True(linux.Eligible);
+        if (!windowsEligible)
+        {
+            Assert.Equal((Exclusion.WindowsUnsafeArgs, true, "windows_unsafe_args"), (win.Reason, win.Permanent, win.Code));
+            Assert.Equal(Scheduler.WindowsUnsafeHold, win.Health.Hold);
+        }
+    }
+
     [Fact]
     public void ToolMissingIsPermanent()
     {

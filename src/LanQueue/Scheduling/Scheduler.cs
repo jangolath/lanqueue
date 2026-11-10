@@ -6,8 +6,11 @@ namespace LanQueue.Scheduling;
 
 public static class Scheduler
 {
-    /// <summary>The hold put on a Windows machine for a job whose arguments cmd.exe shims would re-parse.</summary>
-    public const string WindowsUnsafeHold = "arguments not safe for Windows cmd shims";
+    /// <summary>
+    /// The hold put on a Windows machine for a job whose arguments are unsafe there (<see cref="LanQueue.Policy.JobPolicy.ValidateForWindows"/>): any of
+    /// " &lt; &gt; ^ %, or &amp; | for a program that is not a native .exe (a .cmd/.bat shim would re-parse them through cmd.exe).
+    /// </summary>
+    public const string WindowsUnsafeHold = "arguments not safe for Windows (\" < > ^ %, or & | for a program that is not an .exe)";
 
     /// <summary>
     /// Eligible machines (all required capabilities, reachable, not on hold, a free slot), least loaded first.

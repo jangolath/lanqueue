@@ -231,8 +231,9 @@ Every command below must be in `policy.allowed_commands` (an entry matches the l
 anything more (build then test, choose a list of files) goes in a small script you commit. The script then runs with
 the job's own rights, like any allowlisted command, so review it like code.
 
-Windows workers refuse arguments containing `"` `&` `|` `<` `>` `^` `%`. Keep such characters (a test filter with `|`,
-for example) inside the script, not on the lanq command line. The same command runs on every shard's machine, so in a
+Windows workers refuse arguments containing `"` `<` `>` `^` `%`, and `&` `|` unless the program is a native `.exe`
+(`dotnet test --filter "A|B"` is fine; `npm run x -- "a|b"` is not, since `npm.cmd` re-parses it through cmd.exe). Keep
+such characters inside the script, not on the lanq command line. The same command runs on every shard's machine, so in a
 pool of Linux and Windows workers either use a command that works on both or keep the shards on one kind with a
 capability tag (`--needs linux`).
 

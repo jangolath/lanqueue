@@ -12,9 +12,11 @@ volunteer-maintained project.
 checking, a command and directory allowlist, a best-effort secret scan and a ban on permission-skipping agent flags.
 
 On Windows workers every argument is passed to PowerShell as a single-quoted literal (all five PowerShell
-single-quote characters are escaped), and arguments containing `"` `&` `|` `<` `>` `^` `%` never go to a Windows worker, because
+single-quote characters are escaped), and arguments containing `"` `<` `>` `^` `%` never go to a Windows worker, because
 PowerShell 5.1 native-argument passing and `cmd.exe` (which runs `.cmd` shims such as `npm.cmd`) would re-parse
-them. Output from a worker is treated as untrusted: control and invisible formatting characters (C0 except tab, DEL,
+them. `&` and `|` go to a Windows worker only for a native `.exe`: the program must look like one (a bare name or path
+with no extension or `.exe`, not `cmd` or a package-manager shim such as `npm`), and the worker resolves it with the
+job's own PATH before starting anything and refuses (exit 2, nothing started) unless it is an `.exe`. Output from a worker is treated as untrusted: control and invisible formatting characters (C0 except tab, DEL,
 C1, bidi controls and marks, zero-width characters, U+2028/U+2029 and U+2060 to U+2064) are shown as `?`, and so are
 they in error messages that quote your own input.
 

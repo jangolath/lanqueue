@@ -47,7 +47,7 @@ error and do not guess the result.
 | --- | --- | --- | --- |
 | `run` | `Completed` | 0 | The job passed. |
 | `run` | `Failed` | the job's own code | The job ran and exited non-zero. |
-| `run` | `Rejected` | 2 | Bad arguments, a config error, or refused: not on the allowlist, a permission-skipping flag, a secret in the payload or command line, or a command the machine cannot run. Nothing ran. |
+| `run` | `Rejected` | 2 | Bad arguments, a config error, or refused: not on the allowlist, a permission-skipping flag, a secret in the payload or command line, or a command the machine cannot run (including a Windows worker where the program given `&` or `|` does not resolve to an `.exe`). Nothing ran. |
 | `run` | `NoCapacity` | 75 | No eligible machine within `--wait`, or the machine's allowed hours were about to end after upload. `retryable` says whether waiting can help; when it is `false` lanq ends at once. |
 | `run` | `InfraError` | 70 | ssh, git or snapshot trouble, a lost connection, or an unexpected error. |
 | `run` | `TimedOut` | 124 | The job ran past `--timeout`. |
@@ -172,7 +172,7 @@ added; judge an unknown one by `permanent`.
 | `reason` | Permanent | Meaning |
 | --- | --- | --- |
 | `missing_capability` | yes | The machine lacks a `--needs` capability (its config). |
-| `windows_unsafe_args` | yes | A Windows machine, and the job's arguments hold characters cmd.exe would re-parse. |
+| `windows_unsafe_args` | yes | A Windows machine, and the job's arguments hold `"` `<` `>` `^` `%`, or `&` `|` for a program that is not a native `.exe` (a `.cmd`/`.bat` shim such as `npm` would re-parse them through cmd.exe). |
 | `mem_exceeds_total` | yes | `--mem` is above the machine's total memory. |
 | `mem_unknown` | yes | With `--mem`: the machine answers but does not report its memory. |
 | `tool_missing` | yes | git (or tar with `transfer: archive`) is missing on the machine. |

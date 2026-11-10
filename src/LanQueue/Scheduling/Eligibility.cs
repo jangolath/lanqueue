@@ -3,7 +3,7 @@ using LanQueue.Health;
 
 namespace LanQueue.Scheduling;
 
-/// <summary>What one job asks of a machine: every capability, --mem (GB of available memory), and whether its arguments are unsafe for Windows cmd shims.</summary>
+/// <summary>What one job asks of a machine: every capability, --mem (GB of available memory), and whether its arguments are unsafe for Windows workers (JobPolicy.ValidateForWindows).</summary>
 public sealed record JobNeeds(IReadOnlyCollection<string> Capabilities, double? MemGb, bool WindowsUnsafe)
 {
     /// <summary>--size / --min-size: the size classes the job may run on, or null (any size).</summary>
