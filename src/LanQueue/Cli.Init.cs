@@ -39,7 +39,7 @@ public static partial class Cli
             - tests
 
         machines:
-          # Replace this example with a real worker: `lanq makeready --ssh user@host --os linux` prints an entry to paste.
+          # Replace this example with real workers: `lanq makeready --ssh user@host --os linux --add --name NAME` adds a ready one below.
           - name: example-01
             os: linux
             ssh: build@10.20.30.11     # user@host
@@ -173,14 +173,16 @@ public static partial class Cli
         var config = isDefault ? "" : " --config " + (path.Contains(' ', StringComparison.Ordinal) ? "\"" + path + "\"" : path);
         yield return "";
         yield return "Next steps:";
-        yield return "  1. On each worker, install and start the OpenSSH server, create a build user and add your public key:";
-        yield return "     docs/WORKERS.md (https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md); a team walk-through is in";
-        yield return "     docs/TEAM-QUICKSTART.md.";
-        yield return "  2. Connect once to each worker so its host key is in known_hosts: ssh user@host";
-        yield return "  3. Check each worker and get its machines.yml entry: lanq makeready --ssh user@host --os windows|linux";
-        yield return $"  4. Paste the entries under machines: in {path}, replacing example-01.";
-        yield return $"  5. Check your setup and every worker: lanq doctor --remote{config}";
-        yield return $"  6. Check them all at once later: lanq makeready --all{config}";
+        yield return "  1. For each worker, print its one-time setup (the build user, your public key, the work folder, the firewall, password";
+        yield return "     logins off and the first connection with its fingerprint check); lanq connects to nothing:";
+        yield return "       lanq makeready --ssh user@host --os windows|linux --setup";
+        yield return "     The PC's owner runs the worker part on that PC. Every step is explained in docs/WORKERS.md and docs/TEAM-QUICKSTART.md";
+        yield return "     (https://github.com/jangolath/lanqueue/blob/main/docs/WORKERS.md).";
+        yield return $"  2. Check each worker and, once it is ready, add it to {path} (it shows the lines and asks first):";
+        yield return $"       lanq makeready --ssh user@host --os windows|linux --add --name NAME{config}";
+        yield return $"  3. Delete example-01 from {path}.";
+        yield return $"  4. Check your setup and every worker: lanq doctor --remote{config}";
+        yield return $"  5. Check them all at once later: lanq makeready --all{config}";
         if (!isDefault)
         {
             yield return "";

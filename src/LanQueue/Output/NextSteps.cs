@@ -508,7 +508,7 @@ internal static class NextSteps
     {
         "Created" =>
         [
-            Step(NextAction.AskDeveloper, $"replace example-01 in {path} with real workers (lanq makeready --ssh user@host --os windows|linux prints an entry for each)"),
+            Step(NextAction.AskDeveloper, $"replace example-01 in {path} with real workers (lanq makeready --ssh user@host --os windows|linux --setup prints a worker's one-time setup; --add --name NAME then adds it once it is ready)"),
             Step(NextAction.RunDoctor, "check the new config and this computer's setup", SuggestedCommand.Doctor(remote: false, path)),
         ],
         "Rejected" when fileExists => [Step(NextAction.RunDoctor, "a config is already there; check it", SuggestedCommand.Doctor(remote: false, path))],
