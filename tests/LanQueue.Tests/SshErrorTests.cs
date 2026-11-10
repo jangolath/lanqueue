@@ -117,7 +117,7 @@ public class SshErrorTests
         config.Machines.RemoveAt(0);
         var ssh = new FakeSsh { Handler = (_, _) => new SshResult(124, "Host key verification failed.", TimedOut: true) };
         var o = new StringWriter();
-        await Cli.Doctor(ParsedArgs.Parse(["doctor", "--remote", "--force"]), () => config, host, ssh, new HealthProbe(ssh, TimeProvider.System), o, CancellationToken.None);
+        await Cli.Doctor(ParsedArgs.Parse(["doctor", "--remote", "--force"]), () => config, host, ssh, new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), CancellationToken.None);
         Assert.Contains("unreachable: Host key verification failed.", o.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("StrictHostKeyChecking", o.ToString(), StringComparison.Ordinal);
     }

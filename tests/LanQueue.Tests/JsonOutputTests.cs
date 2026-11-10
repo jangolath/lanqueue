@@ -28,8 +28,28 @@ public sealed class JsonOutputTests : IDisposable
         Assert.True(ParsedArgs.Parse(["health", "--json"]).Json);
         Assert.True(ParsedArgs.Parse(["run", "--json", "--", "dotnet", "test"]).Json);
         Assert.False(ParsedArgs.Parse(["health"]).Json);
-        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["stats", "--json"]));
+        Assert.True(ParsedArgs.Parse(["doctor", "--json"]).Json); // since 0.7.0
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["unlock", "build-01", "--json"]));
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["stats", "--json"])); // until stats --json lands (0.7.0, P3)
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--dir", "x"])); // health takes --needs since 0.6.0, never --dir
+    }
+
+    /// <summary>lanq doctor --json with a command line that does not parse: still one doctor object (no checks, remote null), exit 2.</summary>
+    [Theory]
+    [InlineData("doctor", "--json", "--bogus")]
+    [InlineData("doctor", "--json", "--needs", "node")]
+    [InlineData("doctor", "--json", "--", "x")]
+    public async Task DoctorBadArgumentStillPrintsOneJsonObject(params string[] args)
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(args, o, e, CancellationToken.None));
+        var r = OneObject(o.ToString(), "Rejected", 2);
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("remote").ValueKind);
+        Assert.Equal(0, r.GetProperty("checks").GetArrayLength());
+        Assert.Equal(["ok", "warn", "fail", "skip", "hold"], r.GetProperty("counts").EnumerateObject().Select(p => p.Name));
+        Assert.Equal("fix_command", r.GetProperty("nextSteps")[0].GetProperty("action").GetString());
+        Assert.Contains("Next: fix the command line: ", e.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

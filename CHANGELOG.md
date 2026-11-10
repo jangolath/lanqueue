@@ -2,7 +2,20 @@
 
 ## 0.7.0 (unreleased)
 
+### Agents and scripts
+
+- `lanq doctor --json` (also with `--remote`): stdout is one object `{status, exitCode, message, remote, counts,
+  checks, nextSteps}`; each check is `{scope, machine, name, level, detail, fix, capability}` (scope `local`,
+  `machine` or `remote`; level `ok`, `warn`, `fail`, `skip` or `hold`; `detail` is the text line after its level and
+  machine). Status `Ok` (0), `Warnings` (1), `Failing` (1, a config that does not load included), `Rejected` (2),
+  `InfraError` (70) or `Cancelled` (130), with an object on every path. The text lines go to stderr. Without
+  `--json` doctor prints exactly what it printed before.
+
 ### Behaviour changes
+
+- Doctor suggestions in `--json` output now include `--json`: a `run_doctor` or `retry` step made by a command run
+  with `--json` suggests `lanq doctor --json` (or `lanq doctor --remote --json`). Text output still suggests plain
+  `lanq doctor`.
 
 - `jobs.jsonl` lines gain optional fields: `v` (2), `key` (the command; for `--shards` the template with `{shard}`
   and `{shards}`), `dir`, `shard`, `shards`, `runId` (shared by every shard of one run) and `runSeconds` (how long

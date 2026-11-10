@@ -1,3 +1,4 @@
+using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
 using LanQueue.Jobs;
@@ -55,11 +56,308 @@ public sealed class DoctorTests : IDisposable
         DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false, bool force = false, TimeProvider? clock = null,
         Func<Machine, string>? doctorScript = null)
     {
+        var (code, o, e) = await DoctorRun(host, ssh, config, remote, force, clock, doctorScript);
+        Assert.Equal("", e); // text mode: nothing on stderr
+        return (code, o);
+    }
+
+    /// <summary>lanq doctor with stdout and stderr apart; <paramref name="json"/> adds --json.</summary>
+    private static async Task<(int Code, string Out, string Err)> DoctorRun(
+        DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false, bool force = false, TimeProvider? clock = null,
+        Func<Machine, string>? doctorScript = null, bool json = false, CancellationToken ct = default, string? configPath = null)
+    {
         var o = new StringWriter();
-        var p = ParsedArgs.Parse([.. (string[])["doctor"], .. remote ? ["--remote"] : (string[])[], .. force ? ["--force"] : (string[])[]]);
+        var e = new StringWriter();
+        var p = ParsedArgs.Parse([
+            "doctor", .. remote ? ["--remote"] : (string[])[], .. force ? ["--force"] : (string[])[], .. json ? ["--json"] : (string[])[],
+            .. configPath is null ? (string[])[] : ["--config", configPath]]);
         ssh ??= new FakeSsh();
-        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, CancellationToken.None, doctorScript);
-        return (code, o.ToString());
+        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, e, ct, doctorScript);
+        return (code, o.ToString(), e.ToString());
+    }
+
+    /// <summary>stdout of doctor --json: exactly one object (parsing fails on anything else).</summary>
+    private static JsonElement OneObject(string stdout)
+    {
+        using var doc = JsonDocument.Parse(stdout);
+        Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
+        return doc.RootElement.Clone();
+    }
+
+    private static List<JsonElement> Checks(JsonElement json) => [.. json.GetProperty("checks").EnumerateArray()];
+
+    private static List<JsonElement> Steps(JsonElement json) => [.. json.GetProperty("nextSteps").EnumerateArray()];
+
+    private static string? Str(JsonElement e, string name) => e.GetProperty(name).GetString();
+
+    /// <summary>A text line rebuilt from one JSON check: LEVEL, two spaces, the machine prefix by scope, the detail.</summary>
+    private static string TextOf(JsonElement check)
+    {
+        var prefix = Str(check, "scope") switch
+        {
+            "machine" => Str(check, "machine") + ": ",
+            "remote" => Str(check, "machine") + " (remote): ",
+            _ => "",
+        };
+        return $"{Str(check, "level")!.ToUpperInvariant(),-4}  {prefix}{Str(check, "detail")}";
+    }
+
+    private static string[] NonEmptyLines(string text) => text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>--remote where build-01 has a missing tool and an unknown capability, and build-02 is outside its allowed hours (noon).</summary>
+    private static (FleetConfig Config, FakeSsh Ssh, FakeClock Noon) HeldAndFailing()
+    {
+        var config = T.Config();
+        config.Machines[0].Capabilities = ["dotnet", "node", "gpu"];
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => IsProbe(cmd)
+                ? new SshResult(0, HealthyProbe + "local_time=2026-01-05T12:00:00\n")
+                : new SshResult(0, "root=ok\ntool=ok\ngit_version=git version 2.47.0\ncap.dotnet=0|10.0.100\ncap.node=127|sh: 1: node: not found\n"),
+        };
+        return (config, ssh, new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero)));
+    }
+
+    [Fact]
+    public async Task DoctorJsonIsOneObjectAndTheLinesGoToStderr()
+    {
+        var (text, textOut) = await Doctor(Host());
+        var (code, o, e) = await DoctorRun(Host(), json: true);
+
+        Assert.Equal(0, code);
+        var json = OneObject(o);
+        Assert.Equal("Ok", Str(json, "status"));
+        Assert.Equal(0, json.GetProperty("exitCode").GetInt32());
+        Assert.False(json.GetProperty("remote").GetBoolean());
+        Assert.False(string.IsNullOrEmpty(Str(json, "message")));
+        var counts = json.GetProperty("counts");
+        Assert.Equal(Checks(json).Count, counts.GetProperty("ok").GetInt32());
+        foreach (var level in new[] { "warn", "fail", "skip", "hold" })
+        {
+            Assert.Equal(0, counts.GetProperty(level).GetInt32());
+        }
+
+        // Every key of every check is present (null when it does not apply).
+        Assert.All(Checks(json), c => Assert.Equal(["scope", "machine", "name", "level", "detail", "fix", "capability"], c.EnumerateObject().Select(p => p.Name)));
+        Assert.Equal("none", Str(Assert.Single(Steps(json)), "action"));
+
+        // The lines are the text output, now on stderr; with nothing to do there is no Next: line.
+        Assert.Equal(0, text);
+        Assert.Equal(textOut, e);
+        Assert.DoesNotContain("Next:", e, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EveryTextLineIsACheckWithTheSameDetail()
+    {
+        var (config, ssh, noon) = HeldAndFailing();
+        var (_, text) = await Doctor(Host(), ssh, () => config, remote: true, clock: noon);
+        var (_, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, clock: noon, json: true);
+
+        Assert.Equal(NonEmptyLines(text), Checks(OneObject(o)).Select(TextOf));
+    }
+
+    [Fact]
+    public async Task DoctorJsonStatusAndExitCodeMatchTheText()
+    {
+        Directory.CreateDirectory(_home);
+        var key = Path.Combine(_home, "id_test");
+        File.WriteAllText(key, "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n");
+        var unencrypted = Host(
+            env: k => k switch { "HOME" => "/home/me", "LANQ_KEY_BUILD01" => key, _ => null },
+            exists: p => p == KnownHosts || p == key,
+            unencrypted: true);
+        var noGit = Host(exec: line => line.StartsWith("git ", StringComparison.Ordinal) ? new SshResult(255, "Could not start git: not found") : null);
+
+        foreach (var (host, status, exit) in new[] { (Host(), "Ok", 0), (unencrypted, "Warnings", 1), (noGit, "Failing", 1) })
+        {
+            var (textCode, _) = await Doctor(host);
+            var (code, o, _) = await DoctorRun(host, json: true);
+            var json = OneObject(o);
+            Assert.Equal(exit, textCode);
+            Assert.Equal(exit, code);
+            Assert.Equal(status, Str(json, "status"));
+            Assert.Equal(exit, json.GetProperty("exitCode").GetInt32());
+        }
+    }
+
+    [Fact]
+    public async Task AConfigErrorIsAFailingCheckNotAnErrorObject()
+    {
+        var (code, o, e) = await DoctorRun(Host(), config: () => throw new ConfigException("Machine 'x': ssh target must be user@host"), json: true, configPath: "fleet.yml");
+
+        Assert.Equal(1, code);
+        var json = OneObject(o);
+        Assert.Equal("Failing", Str(json, "status"));
+        Assert.Equal(1, json.GetProperty("counts").GetProperty("fail").GetInt32());
+        var config = Assert.Single(Checks(json), c => Str(c, "level") == "fail");
+        Assert.Equal(("local", "config"), (Str(config, "scope"), Str(config, "name")));
+        Assert.Contains("ssh target must be user@host", Str(config, "detail"), StringComparison.Ordinal);
+        Assert.Contains("ssh target must be user@host", Str(json, "message"), StringComparison.Ordinal);
+        Assert.DoesNotContain(Checks(json), c => Str(c, "scope") != "local"); // no machine was checked
+
+        // For the developer only: no command (a doctor suggestion would only repeat this).
+        var step = Assert.Single(Steps(json));
+        Assert.Equal("ask_developer", Str(step, "action"));
+        Assert.False(step.TryGetProperty("argv", out _));
+        Assert.Contains("Next: the config could not be loaded", e, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RemoteChecksCarryMachineScopeAndCapability()
+    {
+        var (config, ssh, noon) = HeldAndFailing();
+        var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, clock: noon, json: true);
+
+        Assert.Equal(1, code);
+        var json = OneObject(o);
+        Assert.Equal("Failing", Str(json, "status"));
+        Assert.True(json.GetProperty("remote").GetBoolean());
+        var checks = Checks(json);
+        Assert.All(checks.Where(c => Str(c, "scope") == "local"), c => Assert.Equal(JsonValueKind.Null, c.GetProperty("machine").ValueKind));
+        Assert.Equal(["ssh", "scp", "git", "ssh_keygen", "state_folder", "config"], checks.Where(c => Str(c, "scope") == "local").Select(c => Str(c, "name")));
+        Assert.Equal(
+            ["known_hosts", "key_env", "work_root", "known_hosts", "work_root"],
+            checks.Where(c => Str(c, "scope") == "machine").Select(c => Str(c, "name")));
+
+        var remote = checks.Where(c => Str(c, "scope") == "remote" && Str(c, "machine") == "build-01").ToList();
+        Assert.Equal(["work_root_writable", "transfer_tool", "capability", "capability", "capability"], remote.Select(c => Str(c, "name")));
+        Assert.Equal(["dotnet", "node", "gpu"], remote.Where(c => Str(c, "name") == "capability").Select(c => Str(c, "capability")));
+        Assert.Equal(["ok", "fail", "skip"], remote.Where(c => Str(c, "name") == "capability").Select(c => Str(c, "level")));
+        var node = remote.Single(c => Str(c, "capability") == "node");
+        Assert.Equal("add the tool's folder to path_prepend for this machine", Str(node, "fix"));
+        Assert.All(remote.Where(c => Str(c, "name") != "capability"), c => Assert.Equal(JsonValueKind.Null, c.GetProperty("capability").ValueKind));
+
+        // The fail is for the developer, named with its machine and capability; never a command.
+        var ask = Assert.Single(Steps(json), s => Str(s, "action") == "ask_developer");
+        Assert.Contains("build-01 capability node", Str(ask, "reason"), StringComparison.Ordinal);
+        Assert.Contains("checks[].fix", Str(ask, "reason"), StringComparison.Ordinal);
+        Assert.False(ask.TryGetProperty("argv", out _));
+    }
+
+    [Fact]
+    public async Task HeldMachinesAreHoldChecksAndAWaitStepWithoutForce()
+    {
+        var config = T.Config();
+        var noon = new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero));
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => IsProbe(cmd)
+                ? new SshResult(0, HealthyProbe.Replace("paused=0", m.Name == "build-01" ? "paused=1" : "paused=0", StringComparison.Ordinal) + "local_time=2026-01-05T12:00:00\n")
+                : new SshResult(0, "root=ok\ntool=ok\n"),
+        };
+        var (code, o, e) = await DoctorRun(Host(), ssh, () => config, remote: true, clock: noon, json: true);
+
+        Assert.Equal(0, code); // a held machine is not a problem with the setup
+        var json = OneObject(o);
+        Assert.Equal("Ok", Str(json, "status"));
+        Assert.Equal(2, json.GetProperty("counts").GetProperty("hold").GetInt32());
+        var held = Checks(json).Where(c => Str(c, "level") == "hold").ToList();
+        Assert.Equal(["build-01", "build-02"], held.Select(c => Str(c, "machine")));
+        Assert.All(held, c => Assert.Equal(("remote", "held"), (Str(c, "scope"), Str(c, "name"))));
+        Assert.All(held, c => Assert.Equal("the developer can add --force to check it anyway", Str(c, "fix")));
+
+        var wait = Assert.Single(Steps(json));
+        Assert.Equal("wait", Str(wait, "action"));
+        Assert.Contains("build-01, build-02", Str(wait, "reason"), StringComparison.Ordinal);
+        Assert.False(wait.TryGetProperty("argv", out _));
+        Assert.DoesNotContain("--force", Str(wait, "reason"), StringComparison.Ordinal);
+        Assert.Contains("Next: not checked now", e, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DoctorJsonCtrlCKeepsTheLocalChecks()
+    {
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var (code, o, _) = await DoctorRun(Host(), remote: true, json: true, ct: cts.Token);
+
+        Assert.Equal(130, code);
+        var json = OneObject(o);
+        Assert.Equal("Cancelled", Str(json, "status"));
+        Assert.Equal(130, json.GetProperty("exitCode").GetInt32());
+        Assert.Contains(Checks(json), c => Str(c, "name") == "config" && Str(c, "level") == "ok");
+        Assert.Contains(Checks(json), c => Str(c, "scope") == "machine");
+        Assert.DoesNotContain(Checks(json), c => Str(c, "scope") == "remote");
+        Assert.Equal("none", Str(Assert.Single(Steps(json)), "action"));
+
+        // Text mode is unchanged: Ctrl+C ends lanq (Program.cs exits 130 with no output of its own).
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DoctorRun(Host(), remote: true, ct: cts.Token));
+    }
+
+    [Fact]
+    public async Task DoctorJsonUnexpectedErrorIs70()
+    {
+        var host = Host(exec: line => line.StartsWith("ssh -G ", StringComparison.Ordinal) ? throw new InvalidOperationException("boom\u001b[2J") : (SshResult?)null);
+        var (code, o, e) = await DoctorRun(host, json: true, configPath: "fleet.yml");
+
+        Assert.Equal(70, code);
+        var json = OneObject(o);
+        Assert.Equal("InfraError", Str(json, "status"));
+        Assert.Equal(70, json.GetProperty("exitCode").GetInt32());
+        Assert.Contains("unexpected error: InvalidOperationException: boom", Str(json, "message"), StringComparison.Ordinal);
+        Assert.DoesNotContain("\u001b", o, StringComparison.Ordinal);
+        Assert.Contains(Checks(json), c => Str(c, "name") == "config"); // the checks so far
+
+        // Once more, the same read-only doctor with --json, never --force.
+        var retry = Assert.Single(Steps(json));
+        Assert.Equal("retry", Str(retry, "action"));
+        Assert.Equal(["lanq", "doctor", "--json", "--config", "fleet.yml"], retry.GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+        Assert.True(retry.GetProperty("safeToRunUnattended").GetBoolean());
+        Assert.Contains("Next: lanq doctor broke unexpectedly", e, StringComparison.Ordinal);
+
+        // Text mode is unchanged: the error is not caught.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => DoctorRun(host));
+    }
+
+    [Fact]
+    public async Task DoctorNextStepsNeverSuggestForceOrACommandForKnownHosts()
+    {
+        var host = Host(exec: line => line switch
+        {
+            "ssh -G user@build-01.lan" => new SshResult(0, "hostname 192.0.2.10\nport 2222\n"),
+            _ when line.StartsWith("ssh-keygen -F [192.0.2.10]:2222", StringComparison.Ordinal) => new SshResult(1, ""),
+            _ => null,
+        });
+        var (config, ssh, noon) = HeldAndFailing();
+        var (code, o, _) = await DoctorRun(host, ssh, () => config, remote: true, clock: noon, json: true);
+
+        Assert.Equal(1, code);
+        var json = OneObject(o);
+        var known = Assert.Single(Checks(json), c => Str(c, "name") == "known_hosts" && Str(c, "level") == "fail");
+        Assert.Equal("connect once with ssh user@build-01.lan, compare the fingerprint with the machine's owner, then accept it", Str(known, "fix"));
+        Assert.Contains(Steps(json), s => Str(s, "reason")!.Contains("build-01 known_hosts", StringComparison.Ordinal));
+        Assert.Contains(Steps(json), s => Str(s, "action") == "wait");
+
+        // No step carries a command at all, so certainly never --force (nor ssh, nor ssh-keygen).
+        Assert.All(Steps(json), s => Assert.False(s.TryGetProperty("argv", out _)));
+        Assert.All(Steps(json), s => Assert.False(s.TryGetProperty("command", out _)));
+        Assert.All(Steps(json), s => Assert.DoesNotContain("--force", Str(s, "reason"), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ManyProblemsAreNamedFiveAtATime()
+    {
+        var checks = Enumerable.Range(1, 7).Select(i => new DoctorCheck("machine", $"build-0{i}", "known_hosts", "fail", "no entry", "fix")).ToList();
+        var ask = Assert.Single(LanQueue.Output.NextSteps.ForDoctor("Failing", checks, false, null, "7 checks"));
+        Assert.Contains("build-01 known_hosts, build-02 known_hosts, build-03 known_hosts, build-04 known_hosts, build-05 known_hosts and 2 more", ask.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("build-06", ask.Reason, StringComparison.Ordinal);
+        Assert.Null(ask.Argv);
+    }
+
+    [Fact]
+    public async Task TextDoctorPrintsNoNextLines()
+    {
+        // Problems, a held machine and a config error: text mode prints only the lines, on stdout, and nothing on stderr (Doctor asserts it).
+        var (config, ssh, noon) = HeldAndFailing();
+        var (code, o) = await Doctor(Host(env: k => k == "HOME" ? "/home/me" : null), ssh, () => config, remote: true, clock: noon);
+        Assert.Equal(1, code);
+        Assert.DoesNotContain("Next:", o, StringComparison.Ordinal);
+        Assert.All(NonEmptyLines(o), l => Assert.Matches("^(OK|WARN|FAIL|SKIP|HOLD) ", l));
+
+        (code, o) = await Doctor(Host(), config: () => throw new ConfigException("bad"));
+        Assert.Equal(1, code);
+        Assert.DoesNotContain("Next:", o, StringComparison.Ordinal);
     }
 
     private const string HealthyProbe = "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok\npaused=0\n";

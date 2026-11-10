@@ -243,6 +243,30 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 }
 
+/// <summary>
+/// The one object <c>lanq doctor --json</c> prints on every path: Ok (0: no warn or fail; hold and skip allowed), Warnings (1), Failing (1: any
+/// fail, a config that does not load included), Rejected (2: bad arguments; no checks), InfraError (70: unexpected error; the checks so far) or
+/// Cancelled (130: Ctrl+C; the checks so far). Every member is always written.
+/// </summary>
+/// <param name="Remote">Whether --remote was given; null when the command line did not parse.</param>
+internal sealed record DoctorJson(string Status, int ExitCode, string Message, bool? Remote, DoctorCountsJson Counts, IReadOnlyList<DoctorCheckJson> Checks)
+{
+    /// <summary>What to do next (see <see cref="NextStepJson"/>): never --force, and never a command for a problem only the developer can fix.</summary>
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>How many checks of each level lanq doctor --json found.</summary>
+internal sealed record DoctorCountsJson(int Ok, int Warn, int Fail, int Skip, int Hold);
+
+/// <summary>One check of <c>lanq doctor --json</c>: one text line (see <see cref="DoctorCheck"/>); names and levels are only ever added.</summary>
+/// <param name="Scope">local, machine (a machine's settings, checked on this computer) or remote (checked on the machine over ssh).</param>
+/// <param name="Machine">Null for a local check.</param>
+/// <param name="Level">ok, warn, fail, skip or hold.</param>
+/// <param name="Detail">The text line after its level and machine prefix (sanitised).</param>
+/// <param name="Fix">A short remedy, or null.</param>
+/// <param name="Capability">The capability of a capability check, else null.</param>
+internal sealed record DoctorCheckJson(string Scope, string? Machine, string Name, string Level, string Detail, string? Fix, string? Capability);
+
 /// <summary>Source-generated serialization (no reflection) for everything lanq prints as JSON.</summary>
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(List<HealthJson>))]
@@ -254,6 +278,9 @@ internal sealed record WakeJson(string Status, int ExitCode, string Machine, boo
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]
 [JsonSerializable(typeof(PlanJson))]
+[JsonSerializable(typeof(DoctorJson))]
+[JsonSerializable(typeof(DoctorCheckJson))]
+[JsonSerializable(typeof(DoctorCountsJson))]
 [JsonSerializable(typeof(NextStepJson))]
 [JsonSerializable(typeof(List<NextStepJson>))]
 internal sealed partial class LanqJson : JsonSerializerContext;

@@ -78,7 +78,7 @@ public static partial class Cli
                 : await MakereadyCore(p, loadConfig, ssh, probe, stdout, stderr, ct, failed).ConfigureAwait(false);
             if (failed.Kind is { } kind)
             {
-                await NextSteps.WriteAsync(stderr, NextSteps.ForMakereadyError(kind, failed.Message, again, p.ConfigPath, SetupStep(p, failed))).ConfigureAwait(false);
+                await NextSteps.WriteAsync(stderr, NextSteps.ForMakereadyError(kind, failed.Message, again, p.ConfigPath, SetupStep(p, failed), p.Json)).ConfigureAwait(false);
             }
 
             return result;
@@ -128,7 +128,7 @@ public static partial class Cli
                 130 => NextSteps.MakereadyFailure.Cancelled,
                 _ => NextSteps.MakereadyFailure.Unexpected,
             };
-            var steps = NextSteps.ForMakereadyError(kind, message, again, p.ConfigPath, SetupStep(p, failed));
+            var steps = NextSteps.ForMakereadyError(kind, message, again, p.ConfigPath, SetupStep(p, failed), p.Json);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             await WriteJsonError("makeready", status, code, message, stdout, steps).ConfigureAwait(false);
         }
@@ -363,10 +363,10 @@ public static partial class Cli
 
         var scans = await Task.WhenAll(config.Machines.Select(Scanned)).ConfigureAwait(false);
         var rows = config.Machines.Zip(scans).Select(x => MakereadyRow(x.First, x.Second)).ToList();
-        rows = [.. rows.Select(r => r with { NextSteps = NextSteps.ForMakereadyRow(r.Machine, r.Verdict, r.Problem, p.ConfigPath) })];
+        rows = [.. rows.Select(r => r with { NextSteps = NextSteps.ForMakereadyRow(r.Machine, r.Verdict, r.Problem, p.ConfigPath, p.Json) })];
         var code = MakereadyAllExitCode(rows);
         var status = code switch { 0 => "Ok", 1 => "Failing", 75 => "Held", _ => "InfraError" };
-        var next = NextSteps.ForMakereadyAll(status, rows, p.ConfigPath);
+        var next = NextSteps.ForMakereadyAll(status, rows, p.ConfigPath, p.Json);
         await NextSteps.WriteAsync(stderr, next).ConfigureAwait(false);
         if (p.Json)
         {

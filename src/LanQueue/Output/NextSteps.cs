@@ -126,9 +126,25 @@ internal sealed class SuggestedCommand
         return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add, dropDryRun ? ["--dry-run"] : null)], safe: true);
     }
 
-    /// <summary>lanq doctor [--remote] [--config FILE]: read-only (--remote reads each worker over ssh, and leaves held machines alone), safe.</summary>
-    public static SuggestedCommand? Doctor(bool remote, string? config) =>
-        Make(WithConfig(remote ? ["lanq", "doctor", "--remote"] : ["lanq", "doctor"], config), safe: true);
+    /// <summary>
+    /// lanq doctor [--remote] [--json] [--config FILE]: read-only (--remote reads each worker over ssh, and leaves held machines alone), safe.
+    /// <paramref name="json"/> is the producing command's own --json: an agent reading JSON gets doctor's JSON too, people get the text.
+    /// </summary>
+    public static SuggestedCommand? Doctor(bool remote, string? config, bool json = false)
+    {
+        List<string> argv = ["lanq", "doctor"];
+        if (remote)
+        {
+            argv.Add("--remote");
+        }
+
+        if (json)
+        {
+            argv.Add("--json");
+        }
+
+        return Make(WithConfig(argv, config), safe: true);
+    }
 
     /// <summary>
     /// lanq makeready MACHINE [--config FILE] (or --ssh user@host --os X [--key-env VAR]): it runs a script on someone else's PC, so never safe
@@ -361,15 +377,15 @@ internal static class NextSteps
     {
         RejectKind.Policy => [Step(NextAction.AskDeveloper, $"refused by policy, not allowlisted ({message}); do not work around it, ask the developer")],
         RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes or the command line; nothing was sent")],
-        RejectKind.Config => ConfigError(p.ConfigPath, message),
+        RejectKind.Config => ConfigError(p.ConfigPath, message, p.Json),
         _ => [Step(NextAction.FixCommand, "fix the command line: " + message)],
     };
 
-    /// <summary>The config could not be found or loaded (any command).</summary>
-    public static List<NextStepJson> ConfigError(string? config, string message) =>
+    /// <summary>The config could not be found or loaded (any command). <paramref name="json"/>: the command's own --json.</summary>
+    public static List<NextStepJson> ConfigError(string? config, string message, bool json = false) =>
     [
         Step(NextAction.AskDeveloper, "the config could not be loaded (" + message + "); the developer owns machines.yml"),
-        Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config)),
+        Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config, json)),
     ];
 
     /// <summary>The command line could not be parsed (any command).</summary>
@@ -395,7 +411,7 @@ internal static class NextSteps
         ];
         if (excluded.Count > 0 && excluded.All(x => x.Reason == Eligibility.Code(Exclusion.Unreachable)))
         {
-            steps.Add(Step(NextAction.RunDoctor, "no machine answered ssh; check this computer's ssh setup", SuggestedCommand.Doctor(remote: false, p.ConfigPath)));
+            steps.Add(Step(NextAction.RunDoctor, "no machine answered ssh; check this computer's ssh setup", SuggestedCommand.Doctor(remote: false, p.ConfigPath, p.Json)));
         }
 
         return steps;
@@ -417,19 +433,19 @@ internal static class NextSteps
         InfraKind.Connection => [Step(NextAction.Retry, "the machine's ssh connection dropped before the job ran (or after its cleanup); run it again", SuggestedCommand.Rerun(p))],
         InfraKind.Snapshot or InfraKind.Bundle =>
         [
-            Step(NextAction.RunDoctor, "check git and lanq on this computer", SuggestedCommand.Doctor(remote: false, p.ConfigPath)),
+            Step(NextAction.RunDoctor, "check git and lanq on this computer", SuggestedCommand.Doctor(remote: false, p.ConfigPath, p.Json)),
             Step(NextAction.AskDeveloper, o.Message),
         ],
         InfraKind.Prepare =>
         [
-            Step(NextAction.RunDoctor, "check each worker's work_root, git or tar", SuggestedCommand.Doctor(remote: true, p.ConfigPath)),
+            Step(NextAction.RunDoctor, "check each worker's work_root, git or tar", SuggestedCommand.Doctor(remote: true, p.ConfigPath, p.Json)),
             Step(NextAction.AskDeveloper, o.Message),
         ],
         InfraKind.Archive => [Step(NextAction.FixCode, "the archive could not be built (for example a path Windows cannot store): " + o.Message)],
         _ =>
         [
             Step(NextAction.AskDeveloper, o.Message),
-            Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, p.ConfigPath)),
+            Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, p.ConfigPath, p.Json)),
         ],
     };
 
@@ -438,7 +454,8 @@ internal static class NextSteps
     /// low disk is for the owner; a missing tool or unreadable probe points at lanq doctor --remote; a machine that is down at the developer
     /// and lanq doctor; one that looks asleep at lanq wake (text only, never a command).
     /// </summary>
-    public static List<NextStepJson> ForHealthRow(Machine m, MachineHealth h, Assessment? a, string? config)
+    /// <param name="json">lanq health's own --json (a doctor suggestion then carries --json too).</param>
+    public static List<NextStepJson> ForHealthRow(Machine m, MachineHealth h, Assessment? a, string? config, bool json = false)
     {
         var name = m.Name;
         if (a is { Eligible: false } job && job.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal or Exclusion.MemUnknown)
@@ -453,7 +470,7 @@ internal static class NextSteps
                 :
                 [
                     Step(NextAction.AskDeveloper, $"{name} is down: {h.Error ?? "unreachable"}"),
-                    Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config)),
+                    Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config, json)),
                 ];
         }
 
@@ -472,10 +489,10 @@ internal static class NextSteps
                 return
                 [
                     Step(NextAction.AskDeveloper, $"{name}: {h.Hold}"),
-                    Step(NextAction.RunDoctor, "check each worker's tools", SuggestedCommand.Doctor(remote: true, config)),
+                    Step(NextAction.RunDoctor, "check each worker's tools", SuggestedCommand.Doctor(remote: true, config, json)),
                 ];
             case HoldKind.Unreadable:
-                return [Step(NextAction.RunDoctor, $"{name}: {h.Hold}; check each worker", SuggestedCommand.Doctor(remote: true, config))];
+                return [Step(NextAction.RunDoctor, $"{name}: {h.Hold}; check each worker", SuggestedCommand.Doctor(remote: true, config, json))];
             default:
                 return [Step(NextAction.Wait, $"{name} is held ({h.Hold}); it takes jobs again once that passes")];
         }
@@ -486,11 +503,11 @@ internal static class NextSteps
     }
 
     /// <summary>lanq health's error object: Rejected (arguments or config), InfraError (retry the same read-only health), Cancelled.</summary>
-    public static List<NextStepJson> ForHealthError(string status, string message, IReadOnlyCollection<string> needs, double? memGb, string? config) => status switch
+    public static List<NextStepJson> ForHealthError(string status, string message, IReadOnlyCollection<string> needs, double? memGb, string? config, bool json = false) => status switch
     {
         "InfraError" => [Step(NextAction.Retry, "lanq health broke unexpectedly (" + message + "); try once more", SuggestedCommand.Health(needs, memGb, config))],
         "Cancelled" => Nothing("cancelled (Ctrl+C)"),
-        _ => [Step(NextAction.AskDeveloper, message), Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config))],
+        _ => [Step(NextAction.AskDeveloper, message), Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config, json))],
     };
 
     /// <summary>lanq wake: Sent -> look at the machines with lanq health (read-only); never a wake command.</summary>
@@ -504,14 +521,14 @@ internal static class NextSteps
     };
 
     /// <summary>lanq init: Created -> replace example-01 (the developer's file) and check it with lanq doctor --config.</summary>
-    public static List<NextStepJson> ForInit(string status, string? path, string message, bool fileExists) => status switch
+    public static List<NextStepJson> ForInit(string status, string? path, string message, bool fileExists, bool json = false) => status switch
     {
         "Created" =>
         [
             Step(NextAction.AskDeveloper, $"replace example-01 in {path} with real workers (lanq makeready --ssh user@host --os windows|linux --setup prints a worker's one-time setup; --add --name NAME then adds it once it is ready)"),
-            Step(NextAction.RunDoctor, "check the new config and this computer's setup", SuggestedCommand.Doctor(remote: false, path)),
+            Step(NextAction.RunDoctor, "check the new config and this computer's setup", SuggestedCommand.Doctor(remote: false, path, json)),
         ],
-        "Rejected" when fileExists => [Step(NextAction.RunDoctor, "a config is already there; check it", SuggestedCommand.Doctor(remote: false, path))],
+        "Rejected" when fileExists => [Step(NextAction.RunDoctor, "a config is already there; check it", SuggestedCommand.Doctor(remote: false, path, json))],
         "Rejected" => [Step(NextAction.FixCommand, message)],
         _ => [Step(NextAction.AskDeveloper, message)],
     };
@@ -532,27 +549,27 @@ internal static class NextSteps
     /// lanq makeready's error object. A rescan is never safe unattended (it runs a script on someone else's PC). <paramref name="setup"/> (lanq
     /// makeready --ssh, when the worker refused the key or its host key is not in known_hosts yet) adds the one-time setup, for the developer.
     /// </summary>
-    public static List<NextStepJson> ForMakereadyError(MakereadyFailure failure, string message, SuggestedCommand? again, string? config, SuggestedCommand? setup = null) => failure switch
+    public static List<NextStepJson> ForMakereadyError(MakereadyFailure failure, string message, SuggestedCommand? again, string? config, SuggestedCommand? setup = null, bool json = false) => failure switch
     {
         MakereadyFailure.Arguments => ArgumentsError(message),
-        MakereadyFailure.Config => ConfigError(config, message),
+        MakereadyFailure.Config => ConfigError(config, message, json),
         MakereadyFailure.Held => [Step(NextAction.Wait, "the machine is paused or outside its allowed hours; check it later", again)],
         MakereadyFailure.Unreachable when setup is not null =>
         [
-            Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config)),
+            Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config, json)),
             Step(NextAction.AskDeveloper, message),
             Step(NextAction.AskDeveloper, "if the PC is not set up for your key yet, print its one-time setup (it connects to nothing; the PC's owner runs the worker part)", setup),
         ],
         MakereadyFailure.Unreachable =>
         [
-            Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config)),
+            Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config, json)),
             Step(NextAction.AskDeveloper, message),
         ],
         MakereadyFailure.Cancelled => Nothing("cancelled (Ctrl+C)"),
         MakereadyFailure.Unexpected =>
         [
             Step(NextAction.AskDeveloper, message),
-            Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config)),
+            Step(NextAction.RunDoctor, "check this computer's lanq setup", SuggestedCommand.Doctor(remote: false, config, json)),
         ],
         _ => [Step(NextAction.AskDeveloper, message)],
     };
@@ -582,12 +599,12 @@ internal static class NextSteps
     /// <param name="setup">The --setup step when the worker refused the key or its host key is unknown (see <see cref="ForMakereadyError"/>).</param>
     /// <param name="placeholder">init's example-01 is still in the file.</param>
     public static List<NextStepJson> ForMakereadyAdd(
-        AddOutcome outcome, string message, string? config, SuggestedCommand? rescan, SuggestedCommand? setup, bool placeholder = false)
+        AddOutcome outcome, string message, string? config, SuggestedCommand? rescan, SuggestedCommand? setup, bool placeholder = false, bool json = false)
     {
         switch (outcome)
         {
             case AddOutcome.Added:
-                List<NextStepJson> steps = [Step(NextAction.RunDoctor, "check the new machine and this computer's setup", SuggestedCommand.Doctor(remote: true, config))];
+                List<NextStepJson> steps = [Step(NextAction.RunDoctor, "check the new machine and this computer's setup", SuggestedCommand.Doctor(remote: true, config, json))];
                 if (placeholder)
                 {
                     steps.Add(Step(NextAction.AskDeveloper, "example-01, the example from lanq init, is still in machines.yml; delete it (it never answers, so it shows DOWN everywhere)"));
@@ -601,46 +618,94 @@ internal static class NextSteps
             case AddOutcome.Arguments:
                 return ArgumentsError(message);
             case AddOutcome.Config:
-                return ConfigError(config, message);
+                return ConfigError(config, message, json);
             case AddOutcome.Duplicate:
                 return [Step(NextAction.FixCommand, message)];
             case AddOutcome.Unsafe or AddOutcome.WriteFailed:
                 return [Step(NextAction.AskDeveloper, message)];
             case AddOutcome.Unreachable:
-                return ForMakereadyError(MakereadyFailure.Unreachable, message, rescan, config, setup);
+                return ForMakereadyError(MakereadyFailure.Unreachable, message, rescan, config, setup, json);
             case AddOutcome.Unusable:
-                return ForMakereadyError(MakereadyFailure.Unusable, message, rescan, config);
+                return ForMakereadyError(MakereadyFailure.Unusable, message, rescan, config, json: json);
             case AddOutcome.Cancelled:
                 return Nothing("cancelled (Ctrl+C); nothing was written");
             default:
-                return ForMakereadyError(MakereadyFailure.Unexpected, message, rescan, config);
+                return ForMakereadyError(MakereadyFailure.Unexpected, message, rescan, config, json: json);
         }
     }
 
     /// <summary>One lanq makeready --all row: OK and WARN none, FAIL for the PC's owner (with lanq makeready MACHINE for the details), else as the error object.</summary>
-    public static List<NextStepJson> ForMakereadyRow(string machine, string verdict, string? problem, string? config) => verdict switch
+    public static List<NextStepJson> ForMakereadyRow(string machine, string verdict, string? problem, string? config, bool json = false) => verdict switch
     {
         "OK" or "WARN" => Nothing($"{machine} is worker-ready"),
         "FAIL" => [Step(NextAction.AskDeveloper, $"{machine} is NOT READY ({problem ?? "see the report"}); its owner must fix it, details", SuggestedCommand.Makeready(machine, config))],
-        "held" => ForMakereadyError(MakereadyFailure.Held, $"{machine}: {problem}", SuggestedCommand.Makeready(machine, config), config),
-        "unreachable" => ForMakereadyError(MakereadyFailure.Unreachable, $"{machine}: {problem ?? "unreachable"}", null, config),
-        _ => ForMakereadyError(MakereadyFailure.Unusable, $"{machine}: {problem ?? "no usable report"}", null, config),
+        "held" => ForMakereadyError(MakereadyFailure.Held, $"{machine}: {problem}", SuggestedCommand.Makeready(machine, config), config, json: json),
+        "unreachable" => ForMakereadyError(MakereadyFailure.Unreachable, $"{machine}: {problem ?? "unreachable"}", null, config, json: json),
+        _ => ForMakereadyError(MakereadyFailure.Unusable, $"{machine}: {problem ?? "no usable report"}", null, config, json: json),
     };
 
     /// <summary>lanq makeready --all as a whole, from its rows.</summary>
-    public static List<NextStepJson> ForMakereadyAll(string status, IReadOnlyList<MakereadyRowJson> rows, string? config)
+    public static List<NextStepJson> ForMakereadyAll(string status, IReadOnlyList<MakereadyRowJson> rows, string? config, bool json = false)
     {
         string Names(params string[] verdicts) => string.Join(", ", rows.Where(r => verdicts.Contains(r.Verdict)).Select(r => r.Machine));
         return status switch
         {
             "Ok" => Nothing("every machine is worker-ready"),
-            "Failing" => [.. rows.Where(r => r.Verdict == "FAIL").Select(r => ForMakereadyRow(r.Machine, r.Verdict, r.Problem, config)[0])],
+            "Failing" => [.. rows.Where(r => r.Verdict == "FAIL").Select(r => ForMakereadyRow(r.Machine, r.Verdict, r.Problem, config, json)[0])],
             "Held" => [Step(NextAction.Wait, $"held now (paused or outside allowed hours): {Names("held")}; check them later")],
             _ =>
             [
-                Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config)),
+                Step(NextAction.RunDoctor, "check this computer's ssh setup and known_hosts", SuggestedCommand.Doctor(remote: false, config, json)),
                 Step(NextAction.AskDeveloper, $"no usable report from: {Names("unreachable", "error")}"),
             ],
         };
+    }
+
+    /// <summary>
+    /// lanq doctor --json: Ok without a held machine -> none. A warn or fail -> one ask_developer naming up to five "machine check" pairs and
+    /// pointing to each check's fix, never a command (only the developer or a machine's owner fixes known_hosts, keys, the config or tools).
+    /// Held machines (doctor --remote) -> also wait, without a command (--force is never suggested). A config that does not load ->
+    /// ask_developer only. Rejected -> fix the command line; InfraError -> the same doctor once more (read-only, --json, never --force);
+    /// Cancelled -> none.
+    /// </summary>
+    public static List<NextStepJson> ForDoctor(string status, IReadOnlyList<DoctorCheck> checks, bool remote, string? config, string message)
+    {
+        switch (status)
+        {
+            case "Rejected":
+                return ArgumentsError(message);
+            case "InfraError":
+                return [Step(NextAction.Retry, "lanq doctor broke unexpectedly (" + message + "); try once more", SuggestedCommand.Doctor(remote, config, json: true))];
+            case "Cancelled":
+                return Nothing("cancelled (Ctrl+C)");
+        }
+
+        if (checks.FirstOrDefault(c => c is { Scope: "local", Name: "config", Level: "fail" }) is { } bad)
+        {
+            return [Step(NextAction.AskDeveloper, "the config could not be loaded (" + bad.Detail + "); the developer owns machines.yml")];
+        }
+
+        List<NextStepJson> steps = [];
+        var problems = checks.Where(c => c.Level is "warn" or "fail").ToList();
+        if (problems.Count > 0)
+        {
+            var names = problems.Select(c => (c.Machine ?? "local") + " " + (c.Capability is { } cap ? c.Name + " " + cap : c.Name)).Distinct(StringComparer.Ordinal).ToList();
+            var fails = problems.Count(c => c.Level == "fail");
+            steps.Add(Step(
+                NextAction.AskDeveloper,
+                string.Create(CultureInfo.InvariantCulture, $"lanq doctor found {fails} fail and {problems.Count - fails} warn check(s): {Listed(names)}; ")
+                    + "each check's fix (checks[].fix) says what to do, and the developer or the machine's owner does it"));
+        }
+
+        var held = checks.Where(c => c.Level == "hold").Select(c => c.Machine ?? "?").Distinct(StringComparer.Ordinal).ToList();
+        if (held.Count > 0)
+        {
+            steps.Add(Step(NextAction.Wait, $"not checked now (paused or outside allowed hours): {Listed(held)}; run the same lanq doctor again later"));
+        }
+
+        return steps.Count > 0 ? steps : Nothing("every check passed");
+
+        static string Listed(List<string> names) =>
+            string.Join(", ", names.Take(5)) + (names.Count > 5 ? string.Create(CultureInfo.InvariantCulture, $" and {names.Count - 5} more") : "");
     }
 }

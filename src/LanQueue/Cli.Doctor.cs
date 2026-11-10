@@ -1,6 +1,9 @@
+using System.Globalization;
+using System.Text.Json;
 using LanQueue.Config;
 using LanQueue.Health;
 using LanQueue.Jobs;
+using LanQueue.Output;
 using LanQueue.Ssh;
 
 namespace LanQueue;
@@ -57,29 +60,111 @@ public static partial class Cli
     /// <summary>
     /// lanq doctor: local checks only (no network): ssh, scp, git and ssh-keygen on PATH; the config; per machine a known_hosts entry, the
     /// key_env file and its passphrase, work_root; the state folder. With --remote, one ssh call per machine (a few at a time) checks
-    /// work_root, git or tar, and each known capability's tool in the job environment. Exit 0 when every line is OK, else 1.
+    /// work_root, git or tar, and each known capability's tool in the job environment. Exit 0 when no line is WARN or FAIL, else 1 (a config
+    /// that does not load is a FAIL line). Text: the lines on stdout as they are found, nothing else. --json: the same lines on stderr, then
+    /// stdout gets one <see cref="DoctorJson"/> on every path (2 bad arguments, 70 unexpected error and 130 Ctrl+C with the checks so far) and
+    /// the next steps go to stderr as "Next:" lines.
     /// </summary>
-    internal static async Task<int> Doctor(ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, LanQueue.Health.HealthProbe probe, TextWriter stdout, CancellationToken ct,
+    internal static async Task<int> Doctor(
+        ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, LanQueue.Health.HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct,
         Func<Machine, string>? doctorScript = null)
     {
         var checks = new List<DoctorCheck>();
+        var lines = p.Json ? stderr : stdout;
         async Task Say(DoctorCheck check)
         {
             checks.Add(check);
-            await stdout.WriteLineAsync(check.Text).ConfigureAwait(false);
+            await lines.WriteLineAsync(check.Text).ConfigureAwait(false);
         }
 
+        if (!p.Json)
+        {
+            // Exactly as before --json: an unexpected error or Ctrl+C ends lanq here (Program.cs exits 130 on Ctrl+C, with no output).
+            await DoctorChecks(p, loadConfig, host, ssh, probe, Say, ct, doctorScript).ConfigureAwait(false);
+            return DoctorExitCode(checks);
+        }
+
+        try
+        {
+            await DoctorChecks(p, loadConfig, host, ssh, probe, Say, ct, doctorScript).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return await WriteDoctorJson("Cancelled", 130, "cancelled (Ctrl+C); the checks that had finished are listed", p.Remote, checks, p.ConfigPath, stdout, stderr)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return await WriteDoctorJson("InfraError", 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), p.Remote, checks, p.ConfigPath, stdout, stderr)
+                .ConfigureAwait(false);
+        }
+
+        var code = DoctorExitCode(checks);
+        var status = code == 0 ? "Ok" : checks.Any(c => c.Level == "fail") ? "Failing" : "Warnings";
+        var message = checks.FirstOrDefault(c => c is { Scope: "local", Name: "config", Level: "fail" }) is { } config
+            ? JobRunner.SafeLine(config.Detail)
+            : CountsText(checks);
+        return await WriteDoctorJson(status, code, message, p.Remote, checks, p.ConfigPath, stdout, stderr).ConfigureAwait(false);
+    }
+
+    private static int DoctorExitCode(List<DoctorCheck> checks) => checks.Any(c => c.Level is "warn" or "fail") ? 1 : 0;
+
+    /// <summary>"14 checks: 12 ok, 1 warn, 1 fail, 0 skip, 0 hold".</summary>
+    private static string CountsText(IReadOnlyCollection<DoctorCheck> checks)
+    {
+        var c = DoctorCounts(checks);
+        return string.Create(CultureInfo.InvariantCulture, $"{checks.Count} checks: {c.Ok} ok, {c.Warn} warn, {c.Fail} fail, {c.Skip} skip, {c.Hold} hold");
+    }
+
+    private static DoctorCountsJson DoctorCounts(IReadOnlyCollection<DoctorCheck> checks)
+    {
+        int Count(string level) => checks.Count(c => c.Level == level);
+        return new DoctorCountsJson(Count("ok"), Count("warn"), Count("fail"), Count("skip"), Count("hold"));
+    }
+
+    /// <summary>The one object lanq doctor --json prints after the checks ran (or were cut short), with its next steps also on stderr for people.</summary>
+    private static async Task<int> WriteDoctorJson(
+        string status, int exitCode, string message, bool remote, IReadOnlyList<DoctorCheck> checks, string? config, TextWriter stdout, TextWriter stderr)
+    {
+        var steps = NextSteps.ForDoctor(status, checks, remote, config, message);
+        await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
+        var json = new DoctorJson(
+            status,
+            exitCode,
+            message,
+            remote,
+            DoctorCounts(checks),
+            [.. checks.Select(c => new DoctorCheckJson(
+                c.Scope,
+                c.Machine is null ? null : JobRunner.SafeLine(c.Machine),
+                c.Name,
+                c.Level,
+                JobRunner.SafeLine(c.Detail),
+                c.Fix is null ? null : JobRunner.SafeLine(c.Fix),
+                c.Capability is null ? null : JobRunner.SafeLine(c.Capability)))])
+        {
+            NextSteps = steps,
+        };
+        await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.DoctorJson)).ConfigureAwait(false);
+        return exitCode;
+    }
+
+    /// <summary>Every check of lanq doctor, in the order they are printed, each handed to <paramref name="say"/> as soon as it is known.</summary>
+    private static async Task DoctorChecks(
+        ParsedArgs p, Func<FleetConfig> loadConfig, DoctorHost host, ISshClient ssh, LanQueue.Health.HealthProbe probe, Func<DoctorCheck, Task> say, CancellationToken ct,
+        Func<Machine, string>? doctorScript)
+    {
         foreach (var (exe, args) in new (string, string[])[] { ("ssh", ["-V"]), ("scp", []), ("git", ["--version"]), ("ssh-keygen", []) })
         {
             var r = await host.Exec(exe, args).ConfigureAwait(false);
             var missing = r.ExitCode == 255 && r.Output.StartsWith("Could not start", StringComparison.Ordinal);
             var name = exe.Replace('-', '_');
-            await Say(missing
+            await say(missing
                 ? DoctorCheck.Local(name, "fail", $"{exe}: not found on PATH", exe == "git" ? "install git and put it on PATH" : "install the OpenSSH client and put it on PATH")
                 : DoctorCheck.Local(name, "ok", $"{exe}: {(args.Length > 0 ? FirstLine(r.Output) : "found")}")).ConfigureAwait(false);
         }
 
-        await Say(StateFolderWritable(host.Home) is { } error
+        await say(StateFolderWritable(host.Home) is { } error
             ? DoctorCheck.Local("state_folder", "fail", $"state folder {host.Home} is not writable: {error}", "set LANQ_HOME to a folder this user can write")
             : DoctorCheck.Local("state_folder", "ok", $"state folder {host.Home} is writable")).ConfigureAwait(false);
 
@@ -90,16 +175,16 @@ public static partial class Cli
         }
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
-            await Say(DoctorCheck.Local("config", "fail", "config: " + ex.Message, "the developer fixes machines.yml (lanq init writes a starter file)")).ConfigureAwait(false);
-            return 1;
+            await say(DoctorCheck.Local("config", "fail", "config: " + ex.Message, "the developer fixes machines.yml (lanq init writes a starter file)")).ConfigureAwait(false);
+            return;
         }
 
-        await Say(DoctorCheck.Local("config", "ok", $"config: {config.Machines.Count} machine(s)")).ConfigureAwait(false);
+        await say(DoctorCheck.Local("config", "ok", $"config: {config.Machines.Count} machine(s)")).ConfigureAwait(false);
         foreach (var m in config.Machines)
         {
             foreach (var check in await LocalMachineChecks(m, host).ConfigureAwait(false))
             {
-                await Say(check).ConfigureAwait(false);
+                await say(check).ConfigureAwait(false);
             }
         }
 
@@ -141,11 +226,9 @@ public static partial class Cli
             var results = await Task.WhenAll(config.Machines.Select(Checked)).ConfigureAwait(false);
             foreach (var check in results.SelectMany(r => r))
             {
-                await Say(check).ConfigureAwait(false);
+                await say(check).ConfigureAwait(false);
             }
         }
-
-        return checks.Any(c => c.Level is "warn" or "fail") ? 1 : 0;
     }
 
     /// <summary>"git version 2.48.1.windows.1" -> 2.48; null when the line is missing or does not look like that.</summary>

@@ -50,6 +50,8 @@ public class CliTests
     [InlineData("--add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml")]
     [InlineData("lanq unlock <machine>")]
     [InlineData("lanq doctor [--remote")]
+    [InlineData("lanq doctor [--remote [--force]] [--json] [--config FILE]")]
+    [InlineData("--json: the lines go to stderr and")]
     public async Task UsageListsEveryCommandAndOption(string text)
     {
         var o = new StringWriter();

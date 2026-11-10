@@ -104,7 +104,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail", "--dry-run"],
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
-        ["doctor"] = ["--remote", "--force"],
+        ["doctor"] = ["--remote", "--force", "--json"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
@@ -410,7 +410,7 @@ public static partial class Cli
           lanq run ... --dry-run [--json] -- dotnet test
           lanq stats
           lanq unlock <machine> [--all --yes] [--config FILE]
-          lanq doctor [--remote [--force]] [--config FILE]
+          lanq doctor [--remote [--force]] [--json] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
           lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]
@@ -430,7 +430,9 @@ public static partial class Cli
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
-        allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
+        allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise. --json: the lines go to stderr and
+        stdout gets one object (status Ok, Warnings, Failing, Rejected, InfraError or Cancelled, exitCode, message, remote, counts, checks: scope,
+        machine, name, level, detail, fix, capability; nextSteps); 2 bad arguments, 70 unexpected error, 130 Ctrl+C, each with that object.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
         such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
@@ -512,7 +514,7 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && own.Contains("--dry-run")
@@ -555,7 +557,7 @@ public static partial class Cli
         if (p.Command == "doctor")
         {
             var doctorSsh = new ProcessSshClient(Environment.GetEnvironmentVariable);
-            return await Doctor(p, LoadConfig, DoctorHost.Real(home), doctorSsh, new HealthProbe(doctorSsh, TimeProvider.System), stdout, ct).ConfigureAwait(false);
+            return await Doctor(p, LoadConfig, DoctorHost.Real(home), doctorSsh, new HealthProbe(doctorSsh, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         if (p.Command == "makeready")
@@ -573,7 +575,7 @@ public static partial class Cli
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             var message = JobRunner.SafeLine(ex.Message);
-            var steps = NextSteps.ConfigError(p.ConfigPath, message);
+            var steps = NextSteps.ConfigError(p.ConfigPath, message, p.Json);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
@@ -716,6 +718,8 @@ public static partial class Cli
                 WithFetch(WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps }, logPath, logTail), fetch, null),
                 LanqJson.Default.RunJson),
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
+            "doctor" => JsonSerializer.Serialize(
+                new DoctorJson(status, exitCode, message, null, new DoctorCountsJson(0, 0, 0, 0, 0), []) { NextSteps = steps }, LanqJson.Default.DoctorJson),
             _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message) { NextSteps = steps }, LanqJson.Default.ErrorJson),
         });
 
@@ -874,7 +878,7 @@ public static partial class Cli
     {
         async Task<int> Error(string status, int code, string message)
         {
-            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath);
+            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath, json);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             await WriteJsonError("health", status, code, message, stdout, steps).ConfigureAwait(false);
             return code;
@@ -904,7 +908,7 @@ public static partial class Cli
         var exitCode = assessed is null || assessed.Any(a => a.Eligible) ? 0 : 75;
 
         // What to do about each machine: in every JSON row, and for people one "Next:" line per step on stderr (stdout is unchanged).
-        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath)).ToList();
+        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath, json)).ToList();
         await NextSteps.WriteAsync(stderr, next.SelectMany(s => s)).ConfigureAwait(false);
         if (json)
         {
