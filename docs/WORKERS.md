@@ -44,6 +44,10 @@ agent such as Claude Code, or admin rights for the build user.
 
 ## Setting up SSH on a worker
 
+`lanq makeready --ssh build@<worker> --os windows --setup` (or `--os linux`) prints every step below for that PC, with
+your public key filled in, and connects to nothing. [TEAM-QUICKSTART.md, section 3](TEAM-QUICKSTART.md#3-set-up-each-worker)
+explains each step.
+
 **Windows** (see Microsoft's
 [Get started with OpenSSH for Windows](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)):
 
@@ -61,21 +65,26 @@ Administrators (SIDs, so it works on a Windows in any language):
 
 ```powershell
 # PowerShell (as admin), on the worker
-New-LocalUser -Name lanqbuild -Password (Read-Host -AsSecureString -Prompt 'Password for lanqbuild') -PasswordNeverExpires
-Add-LocalGroupMember -SID S-1-5-32-545 -Member lanqbuild     # the built-in Users group, by SID
-runas /user:lanqbuild "cmd /c exit"                          # logs on once: creates the profile
-$p = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq (Get-LocalUser lanqbuild).SID.Value).LocalPath
-Test-Path "$p\NTUSER.DAT"                                    # must print True; if not, see TEAM-QUICKSTART.md
+New-LocalUser -Name build -Password (Read-Host -AsSecureString -Prompt 'Password for build') -PasswordNeverExpires
+Add-LocalGroupMember -SID S-1-5-32-545 -Member build     # the built-in Users group, by SID (any Windows language)
+runas /user:build "cmd /c exit"                          # type the password: logs on once, which creates the profile
+$sid = (Get-LocalUser build).SID.Value
+$p = (Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid).LocalPath
+Test-Path "$p\NTUSER.DAT"                                 # must print True; if not, check the password and run the runas line again
 New-Item -ItemType Directory -Force "$p\.ssh" | Out-Null
 Set-Content -Path "$p\.ssh\authorized_keys" -Value 'ssh-ed25519 AAAA...your key... lanq' -Encoding ascii
-icacls "$p\.ssh\authorized_keys" /inheritance:r /grant 'lanqbuild:F' /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
+icacls "$p\.ssh\authorized_keys" /inheritance:r /grant "*${sid}:F" /grant '*S-1-5-18:F' /grant '*S-1-5-32-544:F'
 ```
+
+The work folder needs the same care: a folder made on `C:\` inherits rights that let every signed-in user change it,
+so cut inheritance and grant by SID (`New-Item -ItemType Directory -Force C:\lq`, then
+`icacls C:\lq /inheritance:r /grant "*${sid}:(OI)(CI)M" /grant '*S-1-5-18:(OI)(CI)F' /grant '*S-1-5-32-544:(OI)(CI)F'`).
 
 For an administrator account, Windows reads `C:\ProgramData\ssh\administrators_authorized_keys` instead, which must
 grant only Administrators and SYSTEM (`icacls` with `/inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'`); a
 non-admin build user avoids that. Once the key login works, turn password logins off and limit the firewall rule to
 private networks and your subnet: [TEAM-QUICKSTART.md, Windows worker](TEAM-QUICKSTART.md#windows-1011-worker),
-steps 2 and 6. See "Keeping your keys safe" in the README for `restrict` and `from=` options.
+steps 2 and 8. See "Keeping your keys safe" in the README for `restrict` and `from=` options.
 
 **Linux** (Debian/Ubuntu shown):
 
@@ -133,19 +142,24 @@ the environment of long-running helper processes you want stopped with the job.
 
 ## Then, on your PC
 
-1. Add the worker to your `machines.yml` (`lanq init` writes a starter file; see also `machines.example.yml`): name, `os`, `ssh` target, `work_root`,
-   `capabilities`, `max_jobs`, optional `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for
-   a worker without git). For a PC someone else also uses, see the "family PC" example: hours by day, low priority
-   (the default), a memory floor, heap caps in `env:`, and a `PAUSE` file the people at that PC can create to hold it.
-   If a tool installed per user (nvm, pyenv, rustup, sdkman) works in your interactive shell but `lanq` jobs cannot
-   find it, list its folder under `path_prepend:`.
-2. Make sure the worker's host key is in your `known_hosts` (connect once with `ssh` and verify the fingerprint):
-   lanq uses `StrictHostKeyChecking=yes`.
+1. Make sure the worker's host key is in your `known_hosts` (connect once with `ssh` and compare the fingerprint
+   with the one the PC's owner reads on the worker): lanq uses `StrictHostKeyChecking=yes`.
+2. Add the worker to your `machines.yml` (`lanq init` writes a starter file):
+   `lanq makeready --ssh build@10.20.30.21 --os windows --add --name micro-01`. It runs the read-only check and, only
+   when the PC is READY, shows the entry (name, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`,
+   `min_free_mem_gb`, `transfer`) and asks before adding it after your last machine; add `--key-env VAR` when you use
+   a key file instead of ssh-agent. Then edit the entry if you need to (see `machines.example.yml`): optional
+   `allowed_hours`, optional `transfer` (`git`, the default, or `archive` for a worker without git). For a PC someone
+   else also uses, see the "family PC" example: hours by day, low priority (the default), a memory floor, heap caps in
+   `env:`, and a `PAUSE` file the people at that PC can create to hold it. If a tool installed per user (nvm, pyenv,
+   rustup, sdkman) works in your interactive shell but `lanq` jobs cannot find it, list its folder under
+   `path_prepend:`.
 3. Run `lanq doctor --remote`: it checks your side (ssh, known_hosts, key) and, on each worker, that `work_root` is
    writable, that git or tar is there, and that each capability's tool (`dotnet`, `node`, `npm`, `python`, `go`,
    `rust`, `java`, `docker`) answers in the same non-login shell and environment a job gets. A tool that works when you
    log in but fails here needs its folder in `path_prepend:`.
-4. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason.
+4. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason. `lanq health --needs
+   <caps>` also says whether it could take a job with those capabilities.
 
 If a `lanq` process was killed mid-job, its slot on the worker is reclaimed 30 minutes after the slot's deadline.
 `lanq unlock <name>` clears expired slots at once; `lanq unlock <name> --all --yes` clears every slot (including ones

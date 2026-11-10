@@ -20,6 +20,19 @@ Linux workers, `lanq init`, `lanq makeready --all`) is in [TEAM-QUICKSTART.md](T
   job right now: the right capabilities, inside their allowed hours, enough `--mem`, and not held. It is at least 1 and
   at most 64, and lanq prints the choice and why, for example
   `[lanq] --shards auto: 5 shard(s) (free slots: tiny-01 1, big-01 4)`.
+- **Preview with `--dry-run`.** The same command with `--dry-run` probes the machines once and prints the N that
+  `--shards auto` would pick and where each shard would start, then runs nothing (no slot, no upload, no wake):
+
+  ```text
+  $ lanq run --needs node --shards auto --dry-run -- npx jest --shard={shard}/{shards}
+  ...
+  --shards auto would pick 5 (free slots: tiny-01 1, big-01 4)
+  Placement now: tiny-01 shard 1; big-01 shards 2,3,4,5; 0 waiting
+  ```
+
+  With `--json` the object has `shardCount`, `shardCountAuto`, `placement` (`[{machine, shards}]`) and every machine
+  as judged for the job (see [JSON.md](JSON.md#lanq-run---dry-run---json)). The placement is the one at that moment;
+  a slot another run takes before the real start changes it.
 - **What each shard knows.** In the command's arguments, the literal tokens `{shard}` (1-based index) and `{shards}`
   (N) are replaced by numbers. Nothing else is expanded: no shell, no other placeholders, and the result must still pass
   `allowed_commands`, the permission-flag ban, the secret scan and (for Windows workers) the unsafe-character rule, for
@@ -313,7 +326,7 @@ machines:
   - name: micro-01            # micro-02 .. micro-04 the same
     os: linux
     ssh: build@10.20.30.21
-    work_root: /srv/lanq
+    work_root: /srv/lq
     capabilities: [dotnet, node, linux]
     max_jobs: 1
     min_free_mem_gb: 1.5
@@ -323,7 +336,7 @@ machines:
   - name: dev-a               # dev-b the same
     os: linux
     ssh: build@10.20.30.11
-    work_root: /srv/lanq
+    work_root: /srv/lq
     capabilities: [dotnet, node, linux, docker, bigmem]
     max_jobs: 4               # the sizing rule gives 8 (32 GB, 16 CPUs); lending 4 leaves the developer room
     min_free_mem_gb: 2        # jobs run at low priority by default
@@ -348,6 +361,8 @@ would otherwise sit in a drawer add real test capacity, so the team buys fewer n
 2. Choose: one heavy job (full suite, large build, container build) goes as a single run to a machine that suits it
    (`--needs bigmem` if the developer tags machines that way, or `--mem`). A long suite that splits cleanly goes as
    `--shards auto`, or `--shards N` with N at most the sum of `freeSlots` on machines that can take it.
+   `lanq health --needs <caps> --json` gives each machine's `jobSlots` for the job, and the run with `--dry-run`
+   shows N and the placement without running anything.
 3. Only shard commands that are safe to run several times at once: tests, lint, checks. Never shard a command that is
    not idempotent or that writes shared state (deploys, migrations against a shared database, publishing, anything that
    pushes).
