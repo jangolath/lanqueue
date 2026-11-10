@@ -513,6 +513,28 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains("wmimgmt.msc", Cli.WmiFix, StringComparison.Ordinal);
     }
 
+    /// <summary>The only SDK found is in a folder other local users can write: no path_prepend is proposed, and the failure says why.</summary>
+    [Fact]
+    public async Task AnSdkInAFolderOthersCanWriteIsNamedButNotProposed()
+    {
+        var config = T.Config();
+        config.Machines.RemoveAt(1);
+        config.Machines[0].Capabilities = ["dotnet"];
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe)
+                : cmd.Contains(RemoteScripts.FindToolchainMarker, StringComparison.Ordinal)
+                    ? new SshResult(0, "open.dotnet=/srv/shared/dotnet|10.0.102\n")
+                    : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n"),
+        };
+        var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, json: true);
+        Assert.Equal(1, code);
+        var dotnet = Checks(OneObject(o)).Single(c => Str(c, "name") == "capability");
+        Assert.Equal("fail", Str(dotnet, "level"));
+        Assert.Contains("a dotnet in /srv/shared/dotnet is not proposed: other local users can write there", Str(dotnet, "detail"), StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend: [/srv/shared", o, StringComparison.Ordinal);
+    }
+
     /// <summary>Nothing found: the plain failure stays, with the usual path_prepend advice.</summary>
     [Fact]
     public async Task AMissingToolNotFoundAnywhereKeepsThePlainFailure()

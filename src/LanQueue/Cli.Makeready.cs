@@ -647,7 +647,7 @@ public static partial class Cli
     }
 
     internal const string RedactedDotnetComment =
-        "    # path_prepend: the newest .NET SDK is outside PATH, in a folder the report hides; lanq makeready --add looks it up";
+        "    # path_prepend: the newest .NET SDK is outside PATH, in a folder the report hides or lanq cannot use as written; lanq makeready --add looks it up";
 
     /// <summary>The script's suggested .NET SDK folder when it is usable as written (see <see cref="SuggestedItem"/>), else null.</summary>
     internal static string? SuggestedDotnetDir(MakereadySuggestion s) =>

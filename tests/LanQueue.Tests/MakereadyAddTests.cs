@@ -456,6 +456,16 @@ public sealed class MakereadyAddTests : IDisposable
         Assert.Equal("/home/me/.dotnet", added.Env["DOTNET_ROOT"]);
     }
 
+    /// <summary>lanq's own search finds the SDK only in a folder other local users can write: nothing is proposed, and a note says why.</summary>
+    [Fact]
+    public async Task AnOpenFolderFromTheSearchIsNotProposed()
+    {
+        var r = await Add(AddArgs(more: "--yes"), MakereadyTests.Report(caps: "\"java\""), found: "open.dotnet=/srv/shared/dotnet|10.0.102\n");
+        Assert.Equal(0, r.Code);
+        Assert.DoesNotContain("path_prepend", Config(), StringComparison.Ordinal);
+        Assert.Contains("note: a .NET SDK in /srv/shared/dotnet is not proposed for path_prepend: other local users can write there.", r.Err, StringComparison.Ordinal);
+    }
+
     /// <summary>The folder comes from the worker: only exactly one absolute, clean folder with DOTNET_ROOT set to it is taken.</summary>
     [Theory]
     [InlineData("linux", "/opt/build/dotnet", "/opt/build/dotnet", true)]

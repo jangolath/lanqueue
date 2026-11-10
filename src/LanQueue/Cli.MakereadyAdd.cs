@@ -204,9 +204,16 @@ public static partial class Cli
         var scriptDir = SuggestedDotnetDir(report.SuggestedMachine);
         if (scriptDir is null
             && (!(report.SuggestedMachine.Capabilities ?? []).Contains("dotnet", StringComparer.OrdinalIgnoreCase) || report.SuggestedMachine.PathPrepend is not null)
-            && await FindToolchain(AdHocMachine(target, os, p.KeyEnv), ssh, "dotnet", ct).ConfigureAwait(false) is { Found: { } dotnet })
+            && await FindToolchain(AdHocMachine(target, os, p.KeyEnv), ssh, "dotnet", ct).ConfigureAwait(false) is { } search)
         {
-            WithToolchain(item, "dotnet", dotnet.Dir, dotnet.What);
+            if (search.Found is { } dotnet)
+            {
+                WithToolchain(item, "dotnet", dotnet.Dir, dotnet.What);
+            }
+            else if (search.Open is { } open)
+            {
+                await stderr.WriteLineAsync($"note: a .NET SDK in {open} is not proposed for path_prepend: other local users can write there.").ConfigureAwait(false);
+            }
         }
 
         // The report comes from the worker: a value with a line break or another control character is never written to machines.yml.

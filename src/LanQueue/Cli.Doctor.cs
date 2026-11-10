@@ -512,7 +512,9 @@ public static partial class Cli
                     continue;
                 }
 
-                text = failed;
+                text = search.Open is { } open
+                    ? $"{failed}; a {cap} in {open} is not proposed: other local users can write there (let only administrators or root and the build account write to it)"
+                    : failed;
             }
 
             lines.Add(code == "0"
@@ -535,9 +537,10 @@ public static partial class Cli
     /// <summary>
     /// After a failed tool check: searches the worker's usual and private install folders (<see cref="RemoteScripts.FindToolchain"/>, one more
     /// read-only ssh call). Found is the best folder (highest version) with the path_prepend: line to suggest, or null; Runtime the version of a
-    /// runtime-only dotnet on PATH, or null. Null when the search could not run. lanq never edits the config itself.
+    /// runtime-only dotnet on PATH, or null; Open, when nothing was found, a folder skipped because other local users could write there. Null
+    /// when the search could not run. lanq never edits the config itself.
     /// </summary>
-    internal static async Task<((string Dir, string What, string Fix)? Found, string? Runtime)?> FindToolchain(Machine m, ISshClient ssh, string tool, CancellationToken ct)
+    internal static async Task<((string Dir, string What, string Fix)? Found, string? Runtime, string? Open)?> FindToolchain(Machine m, ISshClient ssh, string tool, CancellationToken ct)
     {
         SshResult r;
         try
@@ -554,7 +557,8 @@ public static partial class Cli
             : null;
         if (RemoteScripts.ParseFound(r.Output, tool) is not [var best, ..])
         {
-            return (null, runtime);
+            var open = RemoteScripts.ParseFound(r.Output, tool, "open") is [var o, ..] ? JobRunner.SafeLine(o.Dir) : null;
+            return (null, runtime, open);
         }
 
         var dir = JobRunner.SafeLine(best.Dir);
@@ -562,7 +566,7 @@ public static partial class Cli
         var what = tool.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? $".NET SDK {version}" : $"{tool} {version}";
         var fix = $"add `path_prepend: [{dir}]` to {m.Name} in machines.yml (found {what} there)"
             + (tool.Equals("dotnet", StringComparison.OrdinalIgnoreCase) ? $", and `DOTNET_ROOT: {dir}` under its env: so the SDK's tools find the runtimes next to it" : "");
-        return ((dir, what, fix), runtime);
+        return ((dir, what, fix), runtime, null);
     }
 
     /// <summary>Why the Windows ssh user may not use WMI/CIM (one more small ssh call), or null when it may (or the check did not answer).</summary>
