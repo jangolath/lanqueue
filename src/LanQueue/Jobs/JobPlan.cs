@@ -39,8 +39,11 @@ public sealed record JobPlan(string Status, int ExitCode, string Message)
     /// <summary>--shards: true for --shards auto; null without --shards.</summary>
     public bool? ShardCountAuto { get; init; }
 
-    /// <summary>--shards auto: why that N ("free slots: build-01 2, micro-02 1"), or null.</summary>
+    /// <summary>--shards auto: the free slots behind that N ("free slots: build-01 2, micro-02 1"), or null.</summary>
     public string? AutoWhy { get; init; }
+
+    /// <summary>--shards auto --target-minutes: how N was picked from earlier runs (<see cref="ShardTiming.Pick"/>); null otherwise.</summary>
+    public ShardTimingResult? Timing { get; init; }
 
     /// <summary>--shards: where the shards would start now, in rank order (empty when none could); null without --shards.</summary>
     public IReadOnlyList<ShardPlacement>? Placement { get; init; }

@@ -17,7 +17,8 @@ JSON field is in [JSON.md](JSON.md).
 | Workers (OpenSSH, tools, `PAUSE` files) | sets up, or asks each PC's owner | never touches |
 | `lanq makeready --setup`, `lanq makeready --add` (and its `--yes`), `lanq init` | runs | never |
 | `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake` | runs | only when asked |
-| `lanq health --json` (also `--needs`), `lanq run --json` (also `--dry-run`), `lanq doctor` | runs | runs |
+| `lanq health --json` (also `--needs`), `lanq run --json` (also `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
+| `jobs.jsonl`, `jobs.1.jsonl` and `logs/` in lanq's state folder | owns (lanq writes them) | never touches (reads them through `lanq stats --json` and `logPath`) |
 | `nextSteps` with `safeToRunUnattended: true` | | runs, at most once |
 
 The hard stops are in lanq, not in the agent's instructions: it refuses commands outside your allowlist,
@@ -50,13 +51,17 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
   The JSON has logTail (the last 60 lines) and logPath (the whole log). Never paste a whole log.
 - stdout is one JSON object. Act on "status": Completed = passed; Failed = summarise the failures from logTail;
   Rejected = report and stop; NoCapacity = if retryable is false, stop and ask; if true, run the wait step once,
-  then ask; InfraError = run lanq doctor --remote and report; TimedOut / WindowClosed = report; Cancelled = stop.
+  then ask; InfraError = run lanq doctor --remote --json and report the "fail" checks with their "fix";
+  TimedOut / WindowClosed = report; Cancelled = stop.
 - nextSteps: run a step's argv only if safeToRunUnattended is true, at most once. Otherwise report its reason.
   An unknown action means ask the developer.
 - Never edit lanq's machines.yml, allowlists or SSH keys. Never pass permission-skipping flags.
 - Never run lanq makeready --setup, lanq makeready --add, any --yes, or lanq init.
 - Do not run lanq wake, lanq health --wake, lanq makeready, lanq unlock unless asked.
 - Never shard a command that is not idempotent. Retry at most once.
+- Long suites: --shards auto --target-minutes 10 once lanq stats --json shows a "timing" for the command; preview
+  with --dry-run.
+- Never edit or delete lanq's jobs.jsonl or logs/ folder.
 ```
 
 ## The standard loop
@@ -67,7 +72,8 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
    run would take, and why the others are out, without sending anything.
 2. `lanq run --json --log-tail 60 --no-wake --needs <caps> [--dir D] [--fetch PATTERN] -- <command>`, with stderr
    dropped (the log is in `logTail` and at `logPath`). A long suite that splits: `--shards auto` (see
-   [SHARDING.md](SHARDING.md)).
+   [SHARDING.md](SHARDING.md)); once `lanq stats --json` shows a `timing` for the command,
+   `--shards auto --target-minutes 10`, previewed with `--dry-run`.
 3. Read the exit code, then `status`, then `nextSteps`. Read `logTail` only to explain a failure.
 4. Report in a line or two: status, machine, and the failing tests or the message.
 
@@ -79,7 +85,7 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload, a config error. | Report the message. Stop. | Whether to allowlist the command or fix the config. |
 | `NoCapacity`, `retryable: true` | 75 | Every machine busy, held (hours, pause, memory, load), asleep or unreachable. | Run the `wait` step from `nextSteps` once (the same run with `--wait 120`). | Whether to wait, wake a machine, or run locally. |
 | `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, `--mem` is above every machine's RAM, git or tar is missing. lanq ended at once. | Stop. Report `excluded`. | Whether to add the capability or a machine, or run locally. |
-| `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote`; report its FAIL lines. No retry loop. | To fix the worker or the key setup. |
+| `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote --json`; report the `fail` checks with their `fix`. No retry loop. | To fix the worker or the key setup. |
 | `TimedOut` | 124 | The job ran past `--timeout` (default 240 minutes). | Report it. | Whether a longer `--timeout` is fine. |
 | `WindowClosed` | 124 | The machine's allowed hours ended while the job ran. | Report it. | Whether to run it again later or elsewhere. |
 | `Cancelled` | 130 | Ctrl+C. | Stop. | Nothing. |
@@ -132,4 +138,14 @@ $r = lanq run --json --log-tail 60 --no-wake --needs dotnet -- dotnet test 2>$nu
 if ($code -ne 0) { $r.logTail; "log: $($r.logPath)"; $r.nextSteps | ForEach-Object { "next: $($_.action): $($_.reason)" } }
 ```
 
-More parsing examples (shards, `--fetch`, `makeready --all`) are in [JSON.md](JSON.md#parsing-tips).
+Setup checks as data:
+
+```bash
+lanq doctor --remote --json 2>/dev/null | jq -r '.checks[] | select(.level == "fail") | "\(.machine // "local") \(.name): \(.fix // .detail)"'
+```
+
+```powershell
+(lanq doctor --remote --json 2>$null | Out-String | ConvertFrom-Json).checks | Where-Object level -eq 'fail' | ForEach-Object { "$($_.machine) $($_.name): $($_.fix)" }
+```
+
+More parsing examples (shards, `--fetch`, `makeready --all`, `lanq stats`) are in [JSON.md](JSON.md#parsing-tips).

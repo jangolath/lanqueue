@@ -184,6 +184,33 @@ public sealed class NextStepsTests : IDisposable
             yield return ($"makeready --all {status}", NextSteps.ForMakereadyAll(status, [Row("OK"), Row(verdict)], "fleet.yml"));
         }
 
+        DoctorCheck[] ok = [DoctorCheck.Local("ssh", "ok", "ssh: OpenSSH_9.6p1"), new("machine", "big-01", "known_hosts", "ok", "known_hosts has big-01", null)];
+        DoctorCheck[] problems =
+        [
+            .. ok,
+            new("machine", "big-01", "key_env", "warn", "the key file named by K has no passphrase", "use a key with a passphrase"),
+            new("remote", "big-01", "capability", "fail", "node: 'node --version' failed", "add the tool's folder to path_prepend for this machine", "node"),
+        ];
+        DoctorCheck[] held = [.. ok, new("remote", "big-02", "held", "hold", "outside allowed hours; not checked", "the developer can add --force to check it anyway")];
+        DoctorCheck[] config = [.. ok.Take(1), DoctorCheck.Local("config", "fail", "config: Config file not found: fleet.yml.")];
+        foreach (var remote in new[] { false, true })
+        {
+            yield return ("doctor Ok", NextSteps.ForDoctor("Ok", ok, remote, "fleet.yml", "2 checks"));
+            yield return ("doctor Ok held", NextSteps.ForDoctor("Ok", held, remote, "fleet.yml", "3 checks"));
+            yield return ("doctor Warnings", NextSteps.ForDoctor("Warnings", [.. ok, problems[2]], remote, "fleet.yml", "3 checks"));
+            yield return ("doctor Failing", NextSteps.ForDoctor("Failing", problems, remote, "fleet.yml", "4 checks"));
+            yield return ("doctor Failing held", NextSteps.ForDoctor("Failing", [.. problems, held[^1]], remote, null, "5 checks"));
+            yield return ("doctor Failing config", NextSteps.ForDoctor("Failing", config, remote, "fleet.yml", "config: Config file not found: fleet.yml."));
+            yield return ("doctor Rejected", NextSteps.ForDoctor("Rejected", [], remote, null, "Unknown or incomplete option '--bogus'."));
+            yield return ("doctor InfraError", NextSteps.ForDoctor("InfraError", ok, remote, "fleet.yml", "unexpected error: IOException: x"));
+            yield return ("doctor Cancelled", NextSteps.ForDoctor("Cancelled", ok, remote, "fleet.yml", "cancelled (Ctrl+C)"));
+        }
+
+        foreach (var status in new[] { "Ok", "Rejected", "InfraError", "Cancelled" })
+        {
+            yield return ($"stats {status}", NextSteps.ForStats(status, "message"));
+        }
+
         yield return ("arguments", NextSteps.ArgumentsError("Unknown or incomplete option '--bogus'."));
         yield return ("config", NextSteps.ConfigError("fleet.yml", "Config file not found: fleet.yml."));
     }
@@ -208,11 +235,53 @@ public sealed class NextStepsTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Owner decision (0.7.0): a lanq doctor suggestion carries --json exactly when the command that made it was run with --json, so an agent
+    /// reading JSON gets doctor's JSON and people get the text. Every factory and mapping that suggests doctor is checked both ways.
+    /// </summary>
+    [Fact]
+    public void DoctorSuggestionCarriesJsonOnlyWhenTheCallerUsedIt()
+    {
+        Assert.Equal(["lanq", "doctor"], SuggestedCommand.Doctor(remote: false, null)!.Argv);
+        Assert.Equal(["lanq", "doctor", "--remote", "--json", "--config", "fleet.yml"], SuggestedCommand.Doctor(remote: true, "fleet.yml", json: true)!.Argv);
+
+        var m = Machine();
+        var down = Down("ssh: connect to host big-01 port 22: Connection refused");
+        var tool = Up(HoldKind.ToolMissing, "dotnet missing");
+        var setup = SuggestedCommand.Setup("build@10.20.30.40", MachineOs.Linux, null);
+        IEnumerable<NextStepJson> Doctors(bool json) =>
+            new[]
+            {
+                NextSteps.ForRun(Args([.. new[] { "run" }, .. json ? ["--json"] : (string[])[], "--", "npx", "jest"]), Outcome("InfraError", 70, infra: InfraKind.Prepare)),
+                NextSteps.ForRun(Args([.. new[] { "run" }, .. json ? ["--json"] : (string[])[], "--", "npx", "jest"]), Outcome("InfraError", 70, infra: InfraKind.Snapshot)),
+                NextSteps.ForRun(Args([.. new[] { "run" }, .. json ? ["--json"] : (string[])[], "--", "npx", "jest"]), Outcome("Rejected", 2, reject: RejectKind.Config)),
+                NextSteps.ForRun(
+                    Args([.. new[] { "run" }, .. json ? ["--json"] : (string[])[], "--", "npx", "jest"]),
+                    Outcome("NoCapacity", 75, retryable: true, excluded: [new ExcludedMachine("big-01", "unreachable", "refused", false)])),
+                NextSteps.ConfigError("fleet.yml", "not found", json),
+                NextSteps.ForHealthRow(m, down, null, "fleet.yml", json),
+                NextSteps.ForHealthRow(m, tool, null, "fleet.yml", json),
+                NextSteps.ForHealthError("Rejected", "message", [], null, "fleet.yml", json),
+                NextSteps.ForInit("Created", "/home/dev/machines.yml", "Wrote it", false, json),
+                NextSteps.ForMakereadyError(NextSteps.MakereadyFailure.Unreachable, "message", null, "fleet.yml", setup, json),
+                NextSteps.ForMakereadyAdd(NextSteps.AddOutcome.Added, "message", "fleet.yml", null, null, json: json),
+                NextSteps.ForMakereadyRow("big-01", "unreachable", "problem", "fleet.yml", json),
+                NextSteps.ForMakereadyAll("InfraError", [new("big-01", "linux", "unreachable", 0, 0, 70, "problem", null)], "fleet.yml", json),
+            }.SelectMany(s => s).Where(s => s.Argv is { Count: > 1 } a && a[1] == "doctor");
+
+        Assert.Equal(13, Doctors(json: true).Count());
+        Assert.All(Doctors(json: true), s => Assert.Contains("--json", s.Argv!));
+        Assert.Equal(13, Doctors(json: false).Count());
+        Assert.All(Doctors(json: false), s => Assert.DoesNotContain("--json", s.Argv!));
+        Assert.All(Doctors(json: true).Concat(Doctors(json: false)), s => Assert.True(s.SafeToRunUnattended));
+    }
+
     [Fact]
     public void EverySuggestedCommandParsesAndIsOnTheSafeList()
     {
         var suggested = EveryStep().Where(s => s.Argv is not null).ToList();
         Assert.NotEmpty(suggested);
+        Assert.Contains(suggested, s => s.Argv![1] == "doctor" && s.Argv.Contains("--json")); // since 0.7.0, from --json commands
         foreach (var s in suggested)
         {
             Assert.Equal("lanq", s.Argv![0]);
@@ -339,7 +408,7 @@ public sealed class NextStepsTests : IDisposable
         var health = Assert.Single(NextSteps.ForRun(p, Outcome("NoCapacity", 75, retryable: true, excluded: [])), s => s.Action == "run_health");
         Assert.Equal(["lanq", "health", "--needs", "dotnet,linux", "--mem", "2.5", "--json", "--config", "C:/fleet/machines.yml"], health.Argv);
         var doctor = Assert.Single(NextSteps.ForRun(p, Outcome("Rejected", 2, reject: RejectKind.Config)), s => s.Action == "run_doctor");
-        Assert.Equal(["lanq", "doctor", "--config", "C:/fleet/machines.yml"], doctor.Argv);
+        Assert.Equal(["lanq", "doctor", "--json", "--config", "C:/fleet/machines.yml"], doctor.Argv); // the run had --json (0.7.0)
 
         // --timeout never goes past a week.
         var week = Args("run", "--timeout", "6000", "--", "npx", "jest");
@@ -619,7 +688,7 @@ public sealed class NextStepsTests : IDisposable
         List<string?[]> actions = [.. doc.RootElement.EnumerateArray().Select(r => r.GetProperty("nextSteps").EnumerateArray().Select(s => s.GetProperty("action").GetString()).ToArray())];
         Assert.Equal([["none"], ["wait"], ["ask_developer", "run_doctor"]], actions);
         var doctor = doc.RootElement[2].GetProperty("nextSteps")[1];
-        Assert.Equal("lanq doctor --config fleet.yml", doctor.GetProperty("command").GetString());
+        Assert.Equal("lanq doctor --json --config fleet.yml", doctor.GetProperty("command").GetString()); // health had --json (0.7.0)
         Assert.True(doctor.GetProperty("safeToRunUnattended").GetBoolean());
 
         // With --needs every row carries them too: a machine that lacks a capability is for the developer, whatever its state.
@@ -646,6 +715,8 @@ public sealed class NextStepsTests : IDisposable
     [InlineData("makeready", "--json", "--bogus")]
     [InlineData("wake", "--json", "--bogus")]
     [InlineData("init", "--json", "--bogus")]
+    [InlineData("doctor", "--json", "--bogus")]
+    [InlineData("stats", "--json", "--bogus")]
     public async Task EveryErrorObjectCarriesNextSteps(params string[] args)
     {
         var o = new StringWriter();
@@ -703,5 +774,25 @@ public sealed class NextStepsTests : IDisposable
         Assert.All(all, s => Assert.Equal(JobRunner.SafeLine(s.Reason), s.Reason));
         Assert.All(all, s => Assert.DoesNotContain(s.Reason, c => char.IsControl(c) || c == '\u202e'));
         Assert.All(NextSteps.Lines(all), l => Assert.Equal(JobRunner.SafeLine(l), l));
+    }
+
+    /// <summary>A rerun is an edit of the raw command line, so --shards auto --target-minutes stays as typed (and parses back the same).</summary>
+    [Fact]
+    public void RetryKeepsTargetMinutes()
+    {
+        var p = Args("run", "--json", "--shards", "auto", "--target-minutes", "10", "--needs", "node", "--", "npx", "jest", "--shard={shard}/{shards}");
+        var lost = new ShardRunResult("InfraError", 70, 4, [Shard(1, "InfraError", 70, InfraKind.Connection)], "lost") { InfraKind = InfraKind.Connection };
+        var retry = Assert.Single(NextSteps.ForShards(p, lost));
+        Assert.Equal("retry", retry.Action);
+        Assert.Equal(
+            ["lanq", "run", "--json", "--shards", "auto", "--target-minutes", "10", "--needs", "node", "--shard-retries", "1", "--no-wake", "--", "npx", "jest", "--shard={shard}/{shards}"],
+            retry.Argv);
+        Assert.Equal(new ShardOptions(null, 1, false, 10), ParsedArgs.Parse([.. retry.Argv!.Skip(1)]).Shards);
+
+        // Every other rerun keeps it too (the wait step, and the dry run's proceed).
+        var wait = Assert.Single(NextSteps.ForRun(p, Outcome("NoCapacity", 75, retryable: true, excluded: [])), s => s.Action == "wait");
+        Assert.Equal(10, ParsedArgs.Parse([.. wait.Argv!.Skip(1)]).Shards!.TargetMinutes);
+        var dry = Args(["run", "--dry-run", .. p.Raw.Skip(1)]);
+        Assert.Equal(10, ParsedArgs.Parse([.. SuggestedCommand.Rerun(dry, dropDryRun: true)!.Argv.Skip(1)]).TargetMinutes);
     }
 }

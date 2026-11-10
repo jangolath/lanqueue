@@ -554,4 +554,98 @@ public sealed class DryRunTests : IDisposable
             Assert.Throws<ArgumentException>(() => ParsedArgs.Parse([command, "--dry-run"]));
         }
     }
+
+    private static readonly string[] JestAuto = ["--needs", "node", "--", "npx", "jest", "--shard={shard}/{shards}"];
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task DryRunShowsTheTimingLineAndShardTimingJson()
+    {
+        ShardTimingTests.SeedHistory(Log, DateTimeOffset.UtcNow);
+        var (code, stdout, _) = await Cli(ConfigLoader.Parse(ShardTests.PoolYaml), new PoolSsh(), ["--shards", "auto", "--target-minutes", "5", .. JestAuto]);
+        Assert.Equal(0, code);
+        var lines = Lines(stdout);
+        var auto = Array.FindIndex(lines, l => l.StartsWith("--shards auto would pick", StringComparison.Ordinal));
+        Assert.Equal("--shards auto would pick 4 (free slots: big-01 4, tiny-01 1)", lines[auto]);
+        Assert.Equal("Timing:   " + ShardTimingTests.SeededWhy, lines[auto + 1]);
+
+        var (_, json, _) = await Cli(ConfigLoader.Parse(ShardTests.PoolYaml), new PoolSsh(), ["--json", "--shards", "auto", "--target-minutes", "5", .. JestAuto]);
+        var r = Json(json);
+        Assert.Equal((4, true), (r.GetProperty("shardCount").GetInt32(), r.GetProperty("shardCountAuto").GetBoolean()));
+        Assert.Equal(ShardTimingTests.SeededWhy + "; free slots: big-01 4, tiny-01 1", r.GetProperty("shardCountWhy").GetString());
+        var t = r.GetProperty("shardTiming");
+        Assert.Equal(
+            ["targetMinutes", "command", "dir", "basis", "runsUsed", "lastRunUtc", "workMinutes", "overheadSeconds", "slowestMachine", "speedFactor", "wanted",
+                "freeSlots", "capped", "picked", "expectedShardMinutes", "why"],
+            t.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(
+            (5, ShardTimingTests.JestKey, ".", "history", 3, 10.7, 30.0, "tiny-01", 1.62, 4, 5, 4, 4.8),
+            (t.GetProperty("targetMinutes").GetInt32(), t.GetProperty("command").GetString(), t.GetProperty("dir").GetString(), t.GetProperty("basis").GetString(),
+                t.GetProperty("runsUsed").GetInt32(), t.GetProperty("workMinutes").GetDouble(), t.GetProperty("overheadSeconds").GetDouble(),
+                t.GetProperty("slowestMachine").GetString(), t.GetProperty("speedFactor").GetDouble(), t.GetProperty("wanted").GetInt32(),
+                t.GetProperty("freeSlots").GetInt32(), t.GetProperty("picked").GetInt32(), t.GetProperty("expectedShardMinutes").GetDouble()));
+        Assert.Equal(JsonValueKind.Null, t.GetProperty("capped").ValueKind);
+        Assert.EndsWith("Z", t.GetProperty("lastRunUtc").GetString(), StringComparison.Ordinal);
+        Assert.Equal(ShardTimingTests.SeededWhy, t.GetProperty("why").GetString());
+
+        // The suggested real run keeps --target-minutes, so it picks the same way.
+        var proceed = Assert.Single(r.GetProperty("nextSteps").EnumerateArray());
+        Assert.Contains("--target-minutes", proceed.GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task DryRunShardTimingIsNullWithoutTargetMinutes()
+    {
+        ShardTimingTests.SeedHistory(Log, DateTimeOffset.UtcNow);
+        var (_, text, _) = await Cli(ConfigLoader.Parse(ShardTests.PoolYaml), new PoolSsh(), ["--shards", "auto", .. JestAuto]);
+        Assert.Contains("--shards auto would pick 5 (free slots: big-01 4, tiny-01 1)", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Timing:", text, StringComparison.Ordinal);
+
+        var auto = Json((await Cli(ConfigLoader.Parse(ShardTests.PoolYaml), new PoolSsh(), ["--json", "--shards", "auto", .. JestAuto])).Stdout);
+        Assert.Equal("free slots: big-01 4, tiny-01 1", auto.GetProperty("shardCountWhy").GetString());
+        Assert.Equal(JsonValueKind.Null, auto.GetProperty("shardTiming").ValueKind);
+
+        var fixedN = Json((await Cli(ConfigLoader.Parse(ShardTests.PoolYaml), new PoolSsh(), ["--json", "--shards", "3", .. JestAuto])).Stdout);
+        Assert.Equal(JsonValueKind.Null, fixedN.GetProperty("shardCountWhy").ValueKind);
+        Assert.Equal(JsonValueKind.Null, fixedN.GetProperty("shardTiming").ValueKind);
+    }
+
+    [Theory(Timeout = TestTimeout)]
+    [InlineData(5)]
+    [InlineData(2)]
+    [InlineData(30)]
+    public async Task DryRunAndRunPickTheSameNFromTheSameHistoryAndProbe(int minutes)
+    {
+        ShardTimingTests.SeedHistory(Log, DateTimeOffset.UtcNow);
+        var options = new ShardOptions(null, TargetMinutes: minutes);
+        var plan = await Pool().Runner.PlanAsync(Jest(), options, CancellationToken.None);
+        var (runner, _) = Pool();
+        var run = await runner.RunShardsAsync(Jest(), options, CancellationToken.None);
+
+        Assert.Equal(nameof(JobStatus.Completed), run.Status);
+        Assert.Equal(run.Count, plan.ShardCount);
+        Assert.Equal(run.Timing, plan.Timing);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task DryRunReadsButNeverWritesTheJobLog()
+    {
+        ShardTimingTests.SeedHistory(Log, DateTimeOffset.UtcNow);
+        var state = Path.Combine(_dir, "state");
+        string[] Files() => [.. Directory.GetFiles(_dir, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal)];
+        var before = Files();
+        var bytes = File.ReadAllBytes(Path.Combine(state, "jobs.jsonl"));
+
+        var ssh = new PoolSsh();
+        var o = new StringWriter();
+        var code = await LanQueue.Cli.Run(
+            ParsedArgs.Parse(["run", "--dry-run", "--json", "--shards", "auto", "--target-minutes", "5", .. JestAuto]),
+            ConfigLoader.Parse(ShardTests.PoolYaml), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, _dir, _dir, o, new StringWriter(), CancellationToken.None);
+
+        Assert.Equal(0, code);
+        Assert.Equal("history", Json(o.ToString()).GetProperty("shardTiming").GetProperty("basis").GetString()); // it did read the history
+        Assert.Equal(before, Files());
+        Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(state, "jobs.jsonl")));
+        Assert.False(Directory.Exists(Path.Combine(state, "logs")));
+        Assert.Empty(ssh.Executes);
+    }
 }

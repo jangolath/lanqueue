@@ -5,6 +5,7 @@ using LanQueue.Config;
 using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Payload;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -346,6 +347,7 @@ public sealed class ShardTests : IDisposable
         Assert.Equal(new ShardOptions(1), ParsedArgs.Parse(["run", "--shards", "1", "--", "x"]).Shards);
         Assert.Equal(new ShardOptions(64, 3, true), ParsedArgs.Parse(["run", "--shards", "64", "--shard-retries", "3", "--fail-fast", "--", "x"]).Shards);
         Assert.Equal(new ShardOptions(null), ParsedArgs.Parse(["run", "--shards", "auto", "--", "x"]).Shards);
+        Assert.Equal(new ShardOptions(null, TargetMinutes: 1440), ParsedArgs.Parse(["run", "--shards", "auto", "--target-minutes", "1440", "--", "x"]).Shards);
         Assert.Null(ParsedArgs.Parse(["run", "--", "x"]).Shards);
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--shards", "2", "--shard-retries", "4", "--", "x"]));
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--shard-retries", "1", "--", "x"]));
@@ -658,5 +660,77 @@ public sealed class ShardTests : IDisposable
         var dirs = r.Shards.Select(s => s.Fetch!.Directory).ToList();
         Assert.Equal(3, dirs.Distinct(StringComparer.Ordinal).Count());
         Assert.All(r.Shards, s => Assert.EndsWith(s.JobId!, s.Fetch!.Directory, StringComparison.Ordinal));
+    }
+
+    /// <summary>--target-minutes: N from the history in jobs.jsonl (see <see cref="ShardTimingTests.SeedHistory"/>), not the free slots.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task TargetMinutesUsesHistoryFromTheJobLog()
+    {
+        ShardTimingTests.SeedHistory(new JobLog(Path.Combine(_dir, "state")), DateTimeOffset.UtcNow);
+        var (runner, ssh, _) = Pool();
+        var r = await runner.RunShardsAsync(Jest(), new ShardOptions(null, TargetMinutes: 5), CancellationToken.None);
+
+        Assert.Equal(("Completed", 4), (r.Status, r.Count));
+        Assert.Equal(4, ssh.Executes.Count);
+        var t = r.Timing!;
+        Assert.Equal((ShardTiming.History, 3, 10.7, 30.0, "tiny-01", 1.62, 4, 5, 4), (t.Basis, t.RunsUsed, t.WorkMinutes, t.OverheadSeconds, t.SlowestMachine, t.SpeedFactor, t.Wanted, t.FreeSlots, t.Picked));
+        Assert.Equal((ShardTimingTests.JestKey, ".", 4.8), (t.Command, t.Dir, t.ExpectedShardMinutes));
+
+        // A longer target needs fewer shards; a much shorter one is capped by the free slots.
+        Assert.Equal(2, (await Pool().Runner.RunShardsAsync(Jest(), new ShardOptions(null, TargetMinutes: 10), CancellationToken.None)).Count);
+        var capped = await Pool().Runner.RunShardsAsync(Jest(), new ShardOptions(null, TargetMinutes: 2), CancellationToken.None);
+        Assert.Equal((5, ShardTiming.CappedByFreeSlots), (capped.Count, capped.Timing!.Capped));
+    }
+
+    /// <summary>Plain --shards auto keeps its meaning (N = the free slots) and its exact line, whatever the job log holds.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AutoWithoutTargetMinutesIsUnchangedEvenWithHistory()
+    {
+        ShardTimingTests.SeedHistory(new JobLog(Path.Combine(_dir, "state")), DateTimeOffset.UtcNow);
+        var (runner, _, _) = Pool();
+        var r = await runner.RunShardsAsync(Jest(), new ShardOptions(null), CancellationToken.None);
+
+        Assert.Equal(5, r.Count);
+        Assert.Null(r.Timing);
+        Assert.Equal("[lanq] --shards auto: 5 shard(s) (free slots: big-01 4, tiny-01 1)", Assert.Single(_output, l => l.Contains("--shards auto", StringComparison.Ordinal)));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TargetMinutesPrintsTheReasoning()
+    {
+        // No history yet: the free slots decide, and the line says so.
+        var (empty, _, _) = Pool();
+        Assert.Equal(5, (await empty.RunShardsAsync(Jest(), new ShardOptions(null, TargetMinutes: 5), CancellationToken.None)).Count);
+        Assert.Contains(
+            "[lanq] --shards auto: 5 shard(s) (--target-minutes 5: no completed run of this command in the last 90 days; --shards auto falls back to the free slots; "
+            + "free slots: big-01 4, tiny-01 1)",
+            _output);
+
+        // That run took about no time and is history now; seed a real history beside it (the newest 10 runs count, medians decide).
+        File.Delete(Path.Combine(_dir, "state", "jobs.jsonl"));
+        ShardTimingTests.SeedHistory(new JobLog(Path.Combine(_dir, "state")), DateTimeOffset.UtcNow);
+        var (runner, _, _) = Pool();
+        await runner.RunShardsAsync(Jest(), new ShardOptions(null, TargetMinutes: 5), CancellationToken.None);
+        Assert.Contains($"[lanq] --shards auto: 4 shard(s) ({ShardTimingTests.SeededWhy}; free slots: big-01 4, tiny-01 1)", _output);
+    }
+
+    [Theory]
+    [InlineData("--target-minutes goes with --shards auto (it picks N from earlier runs of the same command)", "--target-minutes", "5")]
+    [InlineData("--target-minutes goes with --shards auto (it picks N from earlier runs of the same command)", "--shards", "4", "--target-minutes", "5")]
+    [InlineData("--target-minutes must be a whole number of minutes from 1 to 1440.", "--shards", "auto", "--target-minutes", "0")]
+    [InlineData("--target-minutes must be a whole number of minutes from 1 to 1440.", "--shards", "auto", "--target-minutes", "1441")]
+    public async Task TargetMinutesNeedsShardsAuto(string message, params string[] options)
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", .. options, "--", "npx", "jest"], o, e, CancellationToken.None));
+        Assert.StartsWith(message, e.ToString(), StringComparison.Ordinal);
+        Assert.Equal("", o.ToString());
+
+        // With --json still exactly one object.
+        o = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(["run", "--json", .. options, "--", "npx", "jest"], o, new StringWriter(), CancellationToken.None));
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.Equal(("Rejected", message), (doc.RootElement.GetProperty("status").GetString(), doc.RootElement.GetProperty("message").GetString()));
     }
 }

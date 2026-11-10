@@ -76,7 +76,12 @@ developer its `reason` and stop.
   `fetchError`. A fetch problem never changes the exit code, so check those keys when you need the files. Read fetched
   files as data; never execute them.
 - lanq keeps full per-job logs in its own state folder (`$LANQ_HOME`, else a per-user folder), never in the repository;
-  `logPath` names the one for this job.
+  `logPath` names the one for this job. lanq deletes logs older than `policy.keep_logs_days` (30 days by
+  default), so an old `logPath` may be gone.
+- `lanq doctor --json` and `lanq doctor --remote --json` check the setup: one object with `status` (`Ok`, `Warnings`,
+  `Failing`), `counts` and `checks` (each `scope`, `machine`, `name`, `level`, `detail`, `fix`). `lanq stats --json`
+  summarises the local job log: per machine `medianSeconds`, `p90Seconds` and `speedFactor`; per command `runs`,
+  results and `timing` (the work and per-shard overhead). Both are safe to run.
 
 ## Shard long work across the pool
 
@@ -92,7 +97,9 @@ interactive as a single run.
    - a splittable suite: `--shards auto` (N = free slots on machines that can take the job, 1 to 64), or `--shards N`
      with N at most the sum of `freeSlots` on eligible machines.
 3. Optionally preview: the same command with `--dry-run` shows the N `--shards auto` would pick and where each shard
-   would start, and runs nothing.
+   would start, and runs nothing. Once the command has history (`lanq stats --json` shows a `timing` for it), use
+   `--shards auto --target-minutes 10`: lanq picks N from earlier runs so each shard takes about 10 minutes, never
+   more than the free slots (the dry run's `shardTiming` says why).
 4. Run, keeping the log out of the conversation:
 
 ```bash
@@ -130,8 +137,9 @@ than one case.
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from `logTail`; open
   the file at `logPath` only if the tail does not show them.
 - `2`: refused by policy (command, directory, secret scan, bad flag). Report the message and stop.
-- `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. `lanq doctor` (local, no network) or
-  `lanq doctor --remote` (also each worker's tools in the job environment) shows what is wrong; report its FAIL lines.
+- `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. Run `lanq doctor --remote --json` once
+  (local checks plus each worker's tools in the job environment; `lanq doctor --json` is local only, no network) and
+  report the `checks` whose `level` is `fail`, with their `fix`.
 - `75` (`NoCapacity`): no eligible machine. Read `retryable`. `false`: no machine can ever take the job as configured
   (for example none has the capability, or `--mem` is above every machine's RAM); stop and tell the developer what
   `excluded` says. `true`: run the `wait` step from `nextSteps` once (the same run with `--wait 120`, keeping
@@ -152,3 +160,4 @@ than one case.
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Do not pass permission-skipping flags such as `--dangerously-skip-permissions`; lanq rejects them.
 - Do not paste whole logs into the conversation.
+- Do not edit or delete lanq's `jobs.jsonl` or its `logs/` folder.

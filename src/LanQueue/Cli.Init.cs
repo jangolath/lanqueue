@@ -98,7 +98,7 @@ public static partial class Cli
             }
 
             // A regular file already there: check it with lanq doctor --config (a link or folder needs another --config path).
-            var next = NextSteps.ForInit(status, path, JobRunner.SafeLine(message), fileExists: message == exists && File.Exists(path) && LinkTarget(path) is null);
+            var next = NextSteps.ForInit(status, path, JobRunner.SafeLine(message), fileExists: message == exists && File.Exists(path) && LinkTarget(path) is null, p.Json);
             await NextSteps.WriteAsync(stderr, next).ConfigureAwait(false);
             if (p.Json)
             {

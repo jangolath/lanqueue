@@ -4,8 +4,8 @@
 which keys it has, and what each status and exit code means.
 
 These commands take `--json`: `lanq run` (also with `--shards` and `--dry-run`), `lanq health` (also with `--needs`),
-`lanq makeready` (one machine, `--ssh`, `--all` or `--add`), `lanq init` and `lanq wake`. `lanq doctor`, `lanq stats`,
-`lanq unlock` and `lanq makeready --setup` have no JSON output.
+`lanq makeready` (one machine, `--ssh`, `--all` or `--add`), `lanq init`, `lanq wake`, `lanq doctor` (also with
+`--remote`) and `lanq stats` (the last two since 0.7.0). `lanq unlock` and `lanq makeready --setup` have no JSON output.
 
 Every object lanq prints carries [`nextSteps`](#nextsteps): what to do next, as data. The one exception is the
 single-machine `lanq makeready --json` report, which is the lanq-makeready script's own report.
@@ -26,8 +26,9 @@ single-machine `lanq makeready --json` report, which is the lanq-makeready scrip
 - **Null versus absent.** In lanq's own objects a key that is listed below is always there; when it has no value it is
   `null` (for example `machine` when no machine took the job). The exceptions are marked "conditional": they are left
   out entirely when they do not apply (`shard`, `attempts`, `retryable`, `excluded`, `logTail` and the `--fetch` keys
-  on a run, `command` and `argv` in a next step, `problem` and `report` in `makeready --all`). Inside a makeready
-  report, keys without a value are left out, never `null`.
+  on a run, `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
+  `makeready --all`, `commandsMore` in `lanq stats`). In a dry run, `shardCountWhy` and `shardTiming` are always
+  there and `null` when they do not apply. Inside a makeready report, keys without a value are left out, never `null`.
 - **Key order is not part of the contract.** Look keys up by name.
 - **Strings are sanitised.** Messages and anything that came from a worker have control, bidi and zero-width
   characters replaced by `?`. The serializer may also escape characters such as `<`, `>`, `&` and `'` as `<` and
@@ -74,6 +75,16 @@ error and do not guess the result.
 | `wake` | `Sent` | 0 | The magic packet was sent (no `--wait`). |
 | `wake` | `Awake` | 0 | Sent, and the machine answered ssh (`--wait`). |
 | `wake` | `NoAnswer` | 1 | Sent, but no ssh answer within `wake.wait_seconds` (`--wait`). |
+| `doctor` | `Ok` | 0 | No check is `warn` or `fail` (`hold` and `skip` are fine). |
+| `doctor` | `Warnings` | 1 | At least one `warn`, no `fail`. |
+| `doctor` | `Failing` | 1 | At least one `fail`, a config that does not load included. |
+| `doctor` | `Rejected` | 2 | Bad arguments. `checks` is empty. |
+| `doctor` | `InfraError` | 70 | An unexpected error. `checks` has the checks that had finished. |
+| `doctor` | `Cancelled` | 130 | Ctrl+C. `checks` has the checks that had finished. |
+| `stats` | `Ok` | 0 | The job log was read. No job log at all is `Ok` with 0 jobs. |
+| `stats` | `Rejected` | 2 | Bad arguments. |
+| `stats` | `InfraError` | 70 | The job log exists but could not be read, or an unexpected error. |
+| `stats` | `Cancelled` | 130 | Ctrl+C. |
 | error object | `Rejected` | 2 | `health`, `makeready`, `wake`: bad arguments or config; `wake`: unknown machine or no `wake:` setting. |
 | error object | `InfraError` | 70 | `health`, `makeready`, `wake`: an unexpected error; `wake`: the packet could not be sent; `makeready <machine>`: ssh failed or the report was unusable. |
 | error object | `Held` | 75 | `makeready <machine>` only: the machine is paused or outside its allowed hours (`--force` scans anyway). |
@@ -85,7 +96,8 @@ Several exit codes cover more than one case, so read `status`, not only the exit
 - **75** is `NoCapacity` (run and dry run), `Held` (makeready) or `Held` (makeready --all), or no eligible machine
   (an array) from `health --needs`.
 - **70** is `InfraError` everywhere; for `makeready --all` the full object has `machines` and the error object does not.
-- **1** is a failed job, a NOT READY machine, `NotAdded` from `makeready --add`, or `NoAnswer` from `wake`.
+- **1** is a failed job, a NOT READY machine, `NotAdded` from `makeready --add`, `NoAnswer` from `wake`, or
+  `Warnings` or `Failing` from `doctor`.
 - A job's own exit code can be any number, including 2, 70, 75, 124 or 130. `Failed` with exit 2 is the job's own
   failure, not a refusal.
 
@@ -113,8 +125,9 @@ The job's output streams to stderr. When the run is over, stdout gets one object
 | `nextSteps` | array | Always there (at least one entry). See [nextSteps](#nextsteps). |
 
 The state folder is `$LANQ_HOME`, else `%LOCALAPPDATA%\lanq` on Windows, else `$XDG_STATE_HOME/lanq`, else
-`~/.local/state/lanq`. lanq never deletes these logs. `logTail` puts the job's own output on stdout inside the JSON, so
-ask for it only when you want to read it; it is sanitised like every other string.
+`~/.local/state/lanq`. Since 0.7.0 lanq deletes its own job logs there after `policy.keep_logs_days` (default 30; 0
+keeps them for ever), so a `logPath` from an old run may no longer exist. `logTail` puts the job's own output on stdout
+inside the JSON, so ask for it only when you want to read it; it is sanitised like every other string.
 
 A refused command line:
 
@@ -219,6 +232,7 @@ One object for the whole run, with one entry per shard in index order:
 | `message` | string | A summary such as `3 of 4 shard(s) completed; shard 2/4: ...`. |
 | `shards` | array | One run object per shard (the keys of [lanq run](#lanq-run---json)), plus `shard` and `attempts`. Empty when nothing ran (refused before anything was sent, bad arguments or config). |
 | `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, at the top level, as for [one run](#nocapacity-retryable-and-excluded). |
+| `shardTiming` | object | Conditional: only with `--shards auto --target-minutes M`, and only once N was picked: how N came from earlier runs ([shardTiming](#shardtiming)). Left out otherwise, also on a refused command line. |
 | `nextSteps` | array | Always there, for the whole run. See [nextSteps](#nextsteps). |
 
 Conditional keys, only inside `shards` entries:
@@ -246,7 +260,7 @@ stdout gets one object, also for bad arguments or config:
 
 ```json
 {"status":"WouldRun","exitCode":0,"dryRun":true,"message":"would run on build-01","machine":"build-01","ranked":["build-01","micro-02"],
- "shardCount":null,"shardCountAuto":null,"placement":null,
+ "shardCount":null,"shardCountAuto":null,"shardCountWhy":null,"shardTiming":null,"placement":null,
  "machines":[{"machine":"build-01","eligible":true,"reason":null,"why":null,"permanent":false,"freeSlots":2,"jobSlots":2},
   {"machine":"micro-02","eligible":true,"reason":null,"why":null,"permanent":false,"freeSlots":1,"jobSlots":1},
   {"machine":"win-01","eligible":false,"reason":"missing_capability","why":"lacks linux (capabilities: dotnet, windows)","permanent":true,"freeSlots":1,"jobSlots":0}],
@@ -266,6 +280,8 @@ Every key is always there (`null` where it does not apply), except `logTail`.
 | `ranked` | array of string | The machines that could take the job now, in the order `lanq run` would try them. Empty when none could. |
 | `shardCount` | number or null | `--shards` only: N (the choice for `auto`). |
 | `shardCountAuto` | boolean or null | `--shards` only: `true` for `--shards auto`. |
+| `shardCountWhy` | string or null | `--shards auto` only: why that N, as the `[lanq] --shards auto:` line of `lanq run` says it (with `--target-minutes`, the timing reasoning first, then the free slots). `null` for `--shards N` and without `--shards`. |
+| `shardTiming` | object or null | `--shards auto --target-minutes M` only: how N was picked from earlier runs ([shardTiming](#shardtiming)). `null` otherwise. |
 | `placement` | array or null | `--shards` only: where the shards would start now, each `{"machine", "shards": [numbers]}`; empty when none could start. |
 | `machines` | array | Every machine as judged for the job, in config order: `{machine, eligible, reason, why, permanent, freeSlots, jobSlots}` ([reason codes](#reason-codes)). Empty when the run was refused before any machine was looked at. |
 | `wouldWake` | string or null | The sleeping machine `lanq run` would wake (with `--wait` above 0, no `--no-wake`, and no awake machine able to take the job). |
@@ -275,6 +291,38 @@ Every key is always there (`null` where it does not apply), except `logTail`.
 
 A dry run cannot foresee an archive that fails to build or a slot another run takes between the probe and a real
 start. In text mode the plan goes to stdout, and the last stderr line is `[lanq] WouldRun: ...` (or the other status).
+A dry run reads `jobs.jsonl` for `--target-minutes` and never writes it.
+
+### shardTiming
+
+With `--shards auto --target-minutes M`, the dry run (always) and the `--shards` run (conditional) carry how N was
+picked. Every key is always there, `null` when it does not apply. [SHARDING.md](SHARDING.md#choosing-n-from-history---target-minutes)
+explains the rule.
+
+```json
+{"targetMinutes":5,"command":"npx jest --shard={shard}/{shards}","dir":".","basis":"history","runsUsed":3,"lastRunUtc":"2026-11-08T10:04:00Z",
+ "workMinutes":10.7,"overheadSeconds":30,"slowestMachine":"tiny-01","speedFactor":1.62,"wanted":4,"freeSlots":5,"capped":null,"picked":4,
+ "expectedShardMinutes":4.8,"why":"--target-minutes 5: 3 earlier runs, about 10.7 min of work + 30 s per shard, slowest machine tiny-01 x1.62: about 4.8 min each"}
+```
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `targetMinutes` | number | M (1 to 1440). |
+| `command` | string | The command's key in `jobs.jsonl`: its arguments with `{shard}` and `{shards}` kept as they are. |
+| `dir` | string | The `--dir`, normalised (`/` separators, `.` for the repository root). |
+| `basis` | string | `history` (N from earlier runs), `no_history` (no usable run: N is the free slots, as plain `--shards auto`) or `overhead` (the per-shard overhead leaves less than a tenth of M for the work: every free slot). Values may be added. |
+| `runsUsed` | number | How many earlier runs the estimate comes from: at most the newest 10 of the last 90 days. 0 with `no_history`. |
+| `lastRunUtc` | string or null | The start of the newest job of those runs, UTC. |
+| `workMinutes` | number or null | The whole command's own run time on a machine of speed factor 1, one decimal. |
+| `overheadSeconds` | number or null | Per shard: wall-clock minus the command's own run time (slot, upload, prepare, fetch, cleanup), one decimal. |
+| `slowestMachine` | string or null | The slowest machine the N shards would be dealt to now; it decides N. |
+| `speedFactor` | number or null | Its speed factor (1.62 means 62% slower than typical). |
+| `wanted` | number or null | The N that M needs before any cap. `null` with `no_history` and `overhead`. |
+| `freeSlots` | number | The free slots that can take the job now. |
+| `capped` | string or null | `free_slots` or `max_shards` (64) when that cap made N lower than `wanted` (with `no_history` or `overhead`: `max_shards` when over 64 slots were free); else `null`. |
+| `picked` | number | N, the same as `shardCount`. |
+| `expectedShardMinutes` | number or null | About how long each shard takes on the slowest machine: (overhead + factor x work / N) / 60, one decimal. |
+| `why` | string | The reasoning for people, starting with `--target-minutes M:`. |
 
 ## lanq health --json
 
@@ -395,7 +443,7 @@ prints one object on every path. Every key is always there, `null` when it has n
  "entry":["  - name: micro-01","    os: windows","    ssh: build@10.20.30.21","    work_root: C:/lq","..."],"afterLine":24,
  "health":{"name":"micro-01","state":"ok","...":"..."},"report":{"schema":"lanq-makeready/v1","...":"..."},
  "message":"Added micro-01 to /home/me/.config/lanq/machines.yml.",
- "nextSteps":[{"action":"run_doctor","reason":"check the new machine and this computer's setup","command":"lanq doctor --remote","argv":["lanq","doctor","--remote"],"safeToRunUnattended":true}]}
+ "nextSteps":[{"action":"run_doctor","reason":"check the new machine and this computer's setup","command":"lanq doctor --remote --json","argv":["lanq","doctor","--remote","--json"],"safeToRunUnattended":true}]}
 ```
 
 | Key | Type | Notes |
@@ -409,7 +457,7 @@ prints one object on every path. Every key is always there, `null` when it has n
 | `health` | object or null | One read-only probe of the added machine, as a [`lanq health --json`](#lanq-health---json) row; `null` unless `Added`. |
 | `report` | object or null | The validated `lanq-makeready/v1` report, as `lanq makeready --json` prints it; `null` when there was none. |
 | `message` | string | One line. |
-| `nextSteps` | array | `Added` suggests `lanq doctor --remote` (and asks the developer to delete `example-01` when `lanq init`'s placeholder is still there). A NOT READY PC asks the developer, with `lanq makeready --ssh ...` for the details. Never `--add` or `--yes`. |
+| `nextSteps` | array | `Added` suggests `lanq doctor --remote --json` (and asks the developer to delete `example-01` when `lanq init`'s placeholder is still there). A NOT READY PC asks the developer, with `lanq makeready --ssh ...` for the details. Never `--add` or `--yes`. |
 
 ## lanq init --json
 
@@ -423,7 +471,7 @@ prints one object on every path. Every key is always there, `null` when it has n
 | `exitCode` | number | 0, 2 or 70. |
 | `path` | string or null | Full path of the config file; `null` only when the arguments were refused. |
 | `message` | string | One line. The next steps for people go to stderr. |
-| `nextSteps` | array | `Created`: replace `example-01` (for the developer) and `lanq doctor --config <path>`. |
+| `nextSteps` | array | `Created`: replace `example-01` (for the developer) and `lanq doctor --json --config <path>`. |
 
 ## lanq wake --json
 
@@ -445,6 +493,135 @@ prints one object on every path. Every key is always there, `null` when it has n
 When nothing was sent, stdout gets an [error object](#error-object): `Rejected` (2), `InfraError` (70) or `Cancelled`
 (130).
 
+## lanq doctor --json
+
+`lanq doctor --json` and `lanq doctor --remote [--force] --json` run the same checks as the text command. The text
+lines go to stderr as they are found, then the `Next:` lines; stdout gets one object on every path. Without `--json`,
+doctor prints exactly what it printed before 0.7.0 (one more line, `logs`, after `config`), on stdout, with no
+`Next:` lines.
+
+```json
+{"status":"Failing","exitCode":1,"message":"13 checks: 11 ok, 1 warn, 1 fail, 0 skip, 0 hold","remote":true,
+ "counts":{"ok":11,"warn":1,"fail":1,"skip":0,"hold":0},
+ "checks":[{"scope":"local","machine":null,"name":"ssh","level":"ok","detail":"ssh: OpenSSH_9.6p1, OpenSSL 3.0.13","fix":null,"capability":null},
+  {"...":"..."},
+  {"scope":"remote","machine":"build-01","name":"git_version","level":"warn","detail":"git older than 2.32: global config not isolated (...)","fix":"update git on that machine to 2.32 or later","capability":null},
+  {"scope":"remote","machine":"build-01","name":"capability","level":"fail","detail":"npm: 'npm --version' failed in the job environment (sh: 1: npm: not found). ...","fix":"add the tool's folder to path_prepend for this machine","capability":"npm"}],
+ "nextSteps":[{"action":"ask_developer","reason":"lanq doctor found 1 fail and 1 warn check(s): build-01 git_version, build-01 capability npm; each check's fix (checks[].fix) says what to do, and the developer or the machine's owner does it","safeToRunUnattended":false}]}
+```
+
+Every key is always there.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `status` | string | `Ok`, `Warnings`, `Failing`, `Rejected`, `InfraError` or `Cancelled` (see the [table](#status-and-exit-codes)). |
+| `exitCode` | number | 0, 1, 2, 70 or 130. |
+| `message` | string | The counts (`13 checks: 11 ok, 1 warn, 1 fail, 0 skip, 0 hold`); the config's error when it does not load; the argument or unexpected error otherwise. |
+| `remote` | boolean or null | Whether `--remote` was given; `null` when the command line did not parse. |
+| `counts` | object | `{ok, warn, fail, skip, hold}`: how many checks have each level. |
+| `checks` | array | One entry per text line, in the same order: local checks, then each machine's settings, then (with `--remote`) each machine's remote checks, in config order. Empty on `Rejected`. |
+| `checks[].scope` | string | `local` (this computer), `machine` (a machine's settings, checked on this computer) or `remote` (checked on the machine over ssh). |
+| `checks[].machine` | string or null | The machine's name; `null` for a `local` check. |
+| `checks[].name` | string | What was checked (table below). Names may be added. |
+| `checks[].level` | string | `ok`, `warn`, `fail`, `skip` or `hold`. |
+| `checks[].detail` | string | The text line after its level and machine prefix, sanitised. |
+| `checks[].fix` | string or null | A short remedy, for the developer or the machine's owner; `null` when there is none. |
+| `checks[].capability` | string or null | The capability a `capability` check is about; `null` for every other check. |
+| `nextSteps` | array | See below and [nextSteps](#nextsteps). |
+
+The check names, with the levels each can have:
+
+| `name` | `scope` | Levels | What it checks |
+| --- | --- | --- | --- |
+| `ssh`, `scp`, `git`, `ssh_keygen` | `local` | `ok`, `fail` | The program is on PATH (`ssh` and `git` with their version). |
+| `state_folder` | `local` | `ok`, `fail` | The state folder is writable. |
+| `config` | `local` | `ok`, `fail` | The config loads. A `fail` here is the last check: nothing after it runs. |
+| `logs` | `local` | `ok`, `warn`, `skip` | lanq's job logs in `logs/`: count and size. `warn` over 2 GB with `policy.keep_logs_days` 0; `skip` when the folder could not be read. |
+| `known_hosts` | `machine` | `ok`, `fail` | A `known_hosts` entry for the machine's host (and port). |
+| `key_env` | `machine` | `ok`, `warn`, `fail` | Only with `key_env`: `fail` when the variable is not set or the key file is missing; `warn` when the key has no passphrase. |
+| `work_root` | `machine` | `ok` | The `work_root`, OS and transfer mode, as configured. |
+| `wake` | `machine` | `ok` | Only with `wake:`: the Wake-on-LAN setting. |
+| `held` | `remote` | `hold` | Paused or outside its allowed hours, so not checked (without `--force`). |
+| `script_size` | `remote` | `fail` | The doctor script is over the Windows command-line limit; nothing else is checked there. |
+| `reachable` | `remote` | `fail` | ssh failed; nothing else is checked there. |
+| `work_root_writable` | `remote` | `ok`, `warn`, `fail` | `warn` when `work_root` does not exist yet. |
+| `transfer_tool` | `remote` | `ok`, `fail` | git (or tar with `transfer: archive`) in a non-login ssh session. |
+| `git_version` | `remote` | `warn` | Only on a git machine with git older than 2.32. |
+| `capability` | `remote` | `ok`, `fail`, `skip` | One per capability: its tool answers in the job environment; `skip` for a name lanq has no check for. |
+
+`nextSteps` for doctor:
+
+- `Ok` with nothing held: `none`.
+- Any `warn` or `fail`: one `ask_developer` step naming up to five `machine name` pairs (`local` for a local check)
+  and pointing to `checks[].fix`. Never a command: only the developer or the machine's owner fixes keys,
+  `known_hosts`, the config or a worker's tools.
+- Machines held with `--remote`: also a `wait` step without a command. `--force` is never suggested.
+- The config does not load: one `ask_developer` step.
+- `Rejected`: `fix_command`. `InfraError`: `retry`, the same `lanq doctor --json` (with `--remote` if given), safe to
+  run once. `Cancelled`: `none`.
+
+## lanq stats --json
+
+`lanq stats --json` reads the local job log (`jobs.1.jsonl`, then `jobs.jsonl`) and prints one object. It reads no
+config except for `policy.keep_logs_days`, and never connects to anything. Times are UTC (ISO 8601); the text output
+shows local time.
+
+```json
+{"status":"Ok","exitCode":0,"message":"412 jobs","files":["/home/me/.local/state/lanq/jobs.1.jsonl","/home/me/.local/state/lanq/jobs.jsonl"],
+ "jobs":412,"wallMinutes":1830.4,"skippedLines":0,"oldestUtc":"2026-08-14T19:02:11Z","newestUtc":"2026-11-08T21:40:05Z",
+ "logs":{"files":388,"megabytes":96.2,"keepDays":30},
+ "machines":[{"machine":"big-01","jobs":290,"completed":271,"failed":15,"other":4,"wallMinutes":1214.7,"medianSeconds":182.4,"p90Seconds":410.2,
+   "lastRunUtc":"2026-11-08T21:40:05Z","speedFactor":1,"speedSamples":244},
+  {"machine":"tiny-01","jobs":122,"completed":117,"failed":5,"other":0,"wallMinutes":615.7,"medianSeconds":271.9,"p90Seconds":402.6,
+   "lastRunUtc":"2026-11-08T21:39:58Z","speedFactor":1.62,"speedSamples":37}],
+ "commands":[{"command":"npx jest --shard={shard}/{shards}","dir":".","runs":31,"jobs":124,"completed":118,"failed":5,"other":1,
+   "medianSeconds":176.3,"p90Seconds":240.8,"lastRunUtc":"2026-11-08T21:40:05Z","lastShards":4,
+   "timing":{"runsUsed":10,"workMinutes":10.7,"overheadSeconds":30,"suggestedShards":null}},
+  {"command":"dotnet test","dir":null,"runs":40,"jobs":40,"completed":36,"failed":4,"other":0,"medianSeconds":95.2,"p90Seconds":130.5,
+   "lastRunUtc":"2026-10-30T18:12:44Z","lastShards":null,"timing":null}],
+ "nextSteps":[{"action":"none","reason":"lanq stats only reads the local job log; nothing to do","safeToRunUnattended":false}]}
+```
+
+Every key is always there except `commandsMore`.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `status` | string | `Ok`, `Rejected`, `InfraError` or `Cancelled` (see the [table](#status-and-exit-codes)). |
+| `exitCode` | number | 0, 2, 70 or 130. |
+| `message` | string | `412 jobs`, or what went wrong. |
+| `files` | array of string | The job log files read, full paths, oldest first. Empty when there is no job log. |
+| `jobs` | number | Every job in the log, old lines included. |
+| `wallMinutes` | number | Their wall-clock time, one decimal. |
+| `skippedLines` | number | Lines that were not a job record (a torn line, a hand edit): skipped and counted. stderr then has `[lanq] stats: N unreadable line(s) in jobs.jsonl skipped`. |
+| `oldestUtc`, `newestUtc` | string or null | When the oldest and newest job started; `null` with no jobs. |
+| `logs` | object | `{files, megabytes, keepDays}`: lanq's own job logs in `logs/` (count, size in MB with one decimal) and `policy.keep_logs_days` (0 = kept for ever; 30 when the config does not load; null in the `Rejected` object for bad arguments, where the config is never read). |
+| `machines` | array | One entry per machine, by name (`-` for jobs that never got a machine). |
+| `machines[].machine` | string | The name. |
+| `machines[].jobs`, `.completed`, `.failed`, `.other` | number | Every job, and how many were `Completed`, `Failed` or anything else (`Rejected`, `TimedOut`, `InfraError`, ...). |
+| `machines[].wallMinutes` | number | Wall-clock minutes, one decimal. |
+| `machines[].medianSeconds`, `.p90Seconds` | number or null | Median and 90th percentile of the wall-clock seconds of its `Completed` jobs, by nearest rank (the median of an even count is the lower middle value), one decimal; `null` when none completed. |
+| `machines[].lastRunUtc` | string | When its newest job started. |
+| `machines[].speedFactor` | number or null | How much longer it takes than is typical for the same command (1.62 means 62% slower, 0.5 twice as fast), from its completed jobs of the last 90 days that ran 30 s or more, clamped to 0.25 to 4, two decimals. `null` under 5 such jobs. |
+| `machines[].speedSamples` | number | How many such jobs it has (0 for none). |
+| `commands` | array | One entry per command, newest first (by the start of its newest job); at most 500. |
+| `commands[].command` | string | The command's key (its arguments; for `--shards` with `{shard}` and `{shards}` kept). A line written before 0.7.0 has no key and groups by its recorded command. |
+| `commands[].dir` | string or null | The normalised `--dir`; `null` for lines written before 0.7.0. The same command in another `--dir` is another entry. |
+| `commands[].runs` | number | Distinct runs: every shard (and retried attempt) of one `--shards` run is one run. |
+| `commands[].jobs` | number | Every job: each shard and each retried attempt is one. |
+| `commands[].completed`, `.failed`, `.other`, `.medianSeconds`, `.p90Seconds`, `.lastRunUtc` | | As for a machine. |
+| `commands[].lastShards` | number or null | The newest job's shard count N (1 for a single run); `null` for lines written before 0.7.0. |
+| `commands[].timing` | object or null | What earlier runs say: `{runsUsed, workMinutes, overheadSeconds, suggestedShards}`, the estimate `--shards auto --target-minutes` uses. stats probes nothing, so a machine without its own speed factor counts as 1. `null` for lines without a key, and until a run has completed with a recorded run time in the last 90 days. |
+| `commands[].timing.runsUsed` | number | The runs it comes from (the newest 10 of the last 90 days in which at least half the shards completed). |
+| `commands[].timing.workMinutes` | number | The whole command's own run time on a machine of speed factor 1, one decimal. |
+| `commands[].timing.overheadSeconds` | number | Per shard: wall-clock minus the command's own run time, one decimal. |
+| `commands[].timing.suggestedShards` | number or null | With `lanq stats --target-minutes M`: the shards M needs on a machine of speed factor 1, before any free-slot cap. `null` without `--target-minutes`, or when the per-shard overhead leaves less than a tenth of M for the work. |
+| `commandsMore` | number | Conditional: only when there are more than 500 commands; how many more. |
+| `nextSteps` | array | `Ok`: `none`. stats never suggests a command. `Rejected`: `fix_command`; `InfraError`: `ask_developer`; `Cancelled`: `none`. |
+
+On `Rejected`, `InfraError` and `Cancelled` the object has the same keys, with zeros, `null` and empty lists. Exit 70
+means the job log exists but could not be read (permissions, or another program holds it locked); without `--json`
+stats then prints the message on stderr and exits 70 too.
+
 ## Error object
 
 `health`, `makeready` (one machine or `--all`) and `wake` print this when they have no normal result:
@@ -452,7 +629,7 @@ When nothing was sent, stdout gets an [error object](#error-object): `Rejected` 
 ```json
 {"status":"Rejected","exitCode":2,"message":"No config found. Pass --config FILE, set LANQ_CONFIG, or create ...",
  "nextSteps":[{"action":"ask_developer","reason":"the config could not be loaded (No config found. ...); the developer owns machines.yml","safeToRunUnattended":false},
-  {"action":"run_doctor","reason":"check this computer's lanq setup","command":"lanq doctor","argv":["lanq","doctor"],"safeToRunUnattended":true}]}
+  {"action":"run_doctor","reason":"check this computer's lanq setup","command":"lanq doctor --json","argv":["lanq","doctor","--json"],"safeToRunUnattended":true}]}
 ```
 
 | Key | Type | Notes |
@@ -462,8 +639,9 @@ When nothing was sent, stdout gets an [error object](#error-object): `Rejected` 
 | `message` | string | One line saying what went wrong. |
 | `nextSteps` | array | See [nextSteps](#nextsteps). |
 
-`run`, `run --dry-run`, `init` and `makeready --add` never print this shape: their errors use their own object with the
-same `status`, `exitCode` and `nextSteps` (and `null` where there is no value).
+`run`, `run --dry-run`, `init`, `makeready --add`, `doctor` and `stats` never print this shape: their errors use their
+own object with the same `status`, `exitCode` and `nextSteps` (and `null`, zeros or empty lists where there is no
+value).
 
 ## nextSteps
 
@@ -512,6 +690,9 @@ What a suggestion can be, by construction:
   developer and the PC's owner.
 - `lanq health ... --json`, `lanq doctor` and `lanq doctor --remote` are read-only and safe. So is your own `lanq run`
   with `--dry-run` added.
+- A `lanq doctor` suggestion carries `--json` when the command that produced it was run with `--json` (since 0.7.0):
+  a `--json` caller gets `lanq doctor --json` or `lanq doctor --remote --json`, a person reading text gets plain
+  `lanq doctor`.
 - **A suggestion never does more than the command that produced it.** A retry edits your own command line: the job's
   arguments, `--dir`, `--mem`, `--fetch` and `--config` stay as you typed them. It adds `--no-wake` when the original
   could not wake a machine (`--wait 0`) and never drops `--no-wake`. The `wait` step suggests `--wait 120` only when
@@ -540,6 +721,8 @@ What lanq suggests, by result:
 | `makeready --add` | `Added`: `run_doctor` (`lanq doctor --remote`); NOT READY: `ask_developer`; declined: `none`; a duplicate: `fix_command` |
 | `wake` | `Sent`: `run_health`; `Awake`: `none`; `NoAnswer`: `ask_developer` |
 | `init` | `Created`: `ask_developer` + `run_doctor` |
+| `doctor` | `Ok`: `none`; any `warn` or `fail`: `ask_developer` (points to `checks[].fix`); held machines: also `wait`, no command; config: `ask_developer`; `InfraError`: `retry` (the same doctor with `--json`) |
+| `stats` | `Ok`, `Cancelled`: `none`; `InfraError`: `ask_developer`; never a command |
 
 For an agent: run only steps with `safeToRunUnattended: true`, at most once each; for anything else, report the
 `reason` to the developer and stop.
@@ -579,6 +762,17 @@ echo "$out" | jq -r '.fetched[]?.path, (.fetchSkipped[]? | "skipped \(.path): \(
 
 # makeready --all: machines that need attention
 lanq makeready --all --json | jq -r '.machines[]? | select(.verdict != "OK") | "\(.machine) \(.verdict) \(.problem // "")"'
+
+# doctor: the failing checks and their fix (the text lines go to stderr)
+lanq doctor --remote --json 2>/dev/null | jq -r '.checks[] | select(.level == "fail") | "\(.machine // "local") \(.name): \(.fix // .detail)"'
+lanq doctor --json 2>/dev/null | jq '.checks[] | select(.level=="fail")'
+
+# stats: each command's timing, and the slowest machines
+lanq stats --json | jq -r '.commands[] | select(.timing) | "\(.command) [\(.dir)]: \(.timing.workMinutes) min + \(.timing.overheadSeconds) s/shard from \(.timing.runsUsed) runs"'
+lanq stats --json | jq -r '.machines[] | select(.speedFactor) | "\(.machine) x\(.speedFactor) (\(.speedSamples) jobs)"'
+
+# dry run: how --target-minutes would pick N
+lanq run --dry-run --json --needs node --shards auto --target-minutes 10 -- npx jest --shard={shard}/{shards} 2>/dev/null | jq -r '.shardTiming.why // .shardCountWhy'
 ```
 
 PowerShell (Windows PowerShell 5.1 or PowerShell 7). Join the output with `Out-String` before `ConvertFrom-Json`, so
@@ -606,6 +800,12 @@ $r.fetched | ForEach-Object path; $r.fetchSkipped | ForEach-Object { "skipped $(
 
 # makeready --all: machines that need attention
 (lanq makeready --all --json | Out-String | ConvertFrom-Json).machines | Where-Object verdict -ne 'OK' | ForEach-Object { "$($_.machine) $($_.verdict) $($_.problem)" }
+
+# doctor: the failing checks and their fix (the text lines go to stderr)
+(lanq doctor --remote --json 2>$null | Out-String | ConvertFrom-Json).checks | Where-Object level -eq 'fail' | ForEach-Object { "$($_.machine) $($_.name): $($_.fix)" }
+
+# stats: each command's timing
+(lanq stats --json | Out-String | ConvertFrom-Json).commands | Where-Object timing | ForEach-Object { "$($_.command): $($_.timing.workMinutes) min + $($_.timing.overheadSeconds) s/shard" }
 ```
 
 In Windows PowerShell 5.1, `2>` on a native command wraps stderr lines as error records, so a log file written with

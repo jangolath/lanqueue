@@ -41,7 +41,7 @@ public static partial class Cli
                 await stderr.WriteLineAsync(message).ConfigureAwait(false);
             }
 
-            var steps = NextSteps.ForMakereadyAdd(outcome, message, p.ConfigPath, rescan, setup, placeholder);
+            var steps = NextSteps.ForMakereadyAdd(outcome, message, p.ConfigPath, rescan, setup, placeholder, p.Json);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
@@ -251,7 +251,7 @@ public static partial class Cli
                 .ConfigureAwait(false);
         }
 
-        state.Health = HealthRow(added, health) with { NextSteps = NextSteps.ForHealthRow(added, health, null, p.ConfigPath) };
+        state.Health = HealthRow(added, health) with { NextSteps = NextSteps.ForHealthRow(added, health, null, p.ConfigPath, p.Json) };
         await people.WriteLineAsync("health: " + JobRunner.SafeLine(HealthLine(added, health))).ConfigureAwait(false);
         var placeholder = after.Machines.Any(IsInitPlaceholder);
         if (placeholder)

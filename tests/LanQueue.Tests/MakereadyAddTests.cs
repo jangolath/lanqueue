@@ -454,7 +454,7 @@ public sealed class MakereadyAddTests : IDisposable
             var doctor = root.GetProperty("nextSteps").EnumerateArray().First();
             Assert.Equal("run_doctor", doctor.GetProperty("action").GetString());
             Assert.True(doctor.GetProperty("safeToRunUnattended").GetBoolean());
-            Assert.Equal(["lanq", "doctor", "--remote", "--config", ConfigPath], doctor.GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+            Assert.Equal(["lanq", "doctor", "--remote", "--json", "--config", ConfigPath], doctor.GetProperty("argv").EnumerateArray().Select(a => a.GetString())); // --add had --json (0.7.0)
         }
 
         Assert.DoesNotContain("lanq makeready", r.Out.Split('\n')[1..].Aggregate("", string.Concat), StringComparison.Ordinal); // only the object on stdout

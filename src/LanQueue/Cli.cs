@@ -88,8 +88,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --dry-run: say what the run would do now (see Cli.DryRun.cs), and send, claim, log and wake nothing.</summary>
     public bool DryRun { get; init; }
 
-    /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast (see Cli.Shards.cs); null without --shards.</summary>
+    /// <summary>lanq run --shards N|auto, --shard-retries R, --fail-fast, --target-minutes M (see Cli.Shards.cs); null without --shards.</summary>
     public ShardOptions? Shards { get; init; }
+
+    /// <summary>--target-minutes M (1 to 1440): lanq run --shards auto picks N for it; lanq stats adds suggestedShards. Null without it.</summary>
+    public int? TargetMinutes { get; init; }
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -101,10 +104,10 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     private static readonly Dictionary<string, string[]> Allowed = new(StringComparer.Ordinal)
     {
         ["health"] = ["--json", "--wake", "--needs", "--mem"],
-        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--log-tail", "--dry-run"],
-        ["stats"] = [],
+        ["run"] = ["--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards", "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run"],
+        ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
-        ["doctor"] = ["--remote", "--force"],
+        ["doctor"] = ["--remote", "--force", "--json"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
@@ -148,6 +151,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         long? fetchMax = null;
         int? fetchMaxFiles = null;
         int? logTail = null;
+        int? targetMinutes = null;
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -229,6 +233,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--fail-fast":
                     shards.FailFast = true;
+                    break;
+                case "--target-minutes" when i + 1 < own.Length:
+                    targetMinutes = Cli.ParseTargetMinutes(own[++i]);
+                    if (command == "run")
+                    {
+                        shards.Target(targetMinutes.Value);
+                    }
+
                     break;
                 case "--all":
                     all = true;
@@ -345,6 +357,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
             Shards = shards.Build(),
+            TargetMinutes = targetMinutes,
             LogTail = logTail,
             Raw = [.. args],
         };
@@ -405,12 +418,12 @@ public static partial class Cli
           lanq health --needs dotnet,linux [--mem 4] [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
-          lanq run ... --shards N|auto [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
+          lanq run ... --shards N|auto [--target-minutes M] [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
-          lanq stats
+          lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
-          lanq doctor [--remote [--force]] [--config FILE]
+          lanq doctor [--remote [--force]] [--json] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
           lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]
@@ -428,9 +441,18 @@ public static partial class Cli
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
-        doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder); --remote also checks
+        doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder, job logs); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
-        allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise.
+        allowed hours is left alone (HOLD) unless --force. Exit 0 when no line is WARN or FAIL, 1 otherwise. --json: the lines go to stderr and
+        stdout gets one object (status Ok, Warnings, Failing, Rejected, InfraError or Cancelled, exitCode, message, remote, counts, checks: scope,
+        machine, name, level, detail, fix, capability; nextSteps); 2 bad arguments, 70 unexpected error, 130 Ctrl+C, each with that object.
+        stats summarises this computer's job log (nothing leaves it): the totals and one line per machine, then per machine the median and p90
+        of completed jobs, the last run and its speed factor (from 5 jobs), the newest 20 commands (runs, jobs: each shard is one job, passed,
+        failed, median, p90, and timing: the work and per-shard overhead --target-minutes would use) and the size of logs/. --target-minutes M
+        adds the shards M needs on a typical machine (no probe, before any free-slot cap). Unreadable lines are skipped with a warning. --json
+        prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
+        newestUtc, logs, machines, commands, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad arguments, 70
+        the job log could not be read, 130 Ctrl+C.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
         such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
@@ -465,7 +487,8 @@ public static partial class Cli
         of every machine and the same choice (machine, --shards N or auto and placement, every excluded machine and why, the sleeper it would
         wake); it claims no slot, sends, logs, fetches and wakes nothing (the snapshot's git objects are written as for a run). Every run option
         is accepted. Exit 0 would start now, 75 no machine could take it now, 2 refused, 70 the snapshot failed, 130 Ctrl+C; --json prints one
-        object with status WouldRun (or the status run would end with), machine, ranked, machines, placement, wouldWake and retryable.
+        object with status WouldRun (or the status run would end with), machine, ranked, machines, placement, shardCountWhy, shardTiming,
+        wouldWake and retryable.
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
@@ -478,7 +501,9 @@ public static partial class Cli
         same steps are "Next: ..." lines on stderr ("[lanq] Next: ..." in run), never for none, always before the final status line.
         --shards runs N copies of the command at once (1 to 64; auto = the free slots that can take it now), {shard} and {shards} substituted
         in its arguments and LANQ_SHARD / LANQ_SHARDS set; see docs/SHARDING.md. Exit 0 only when every shard passed; 130 Ctrl+C (every
-        started shard is cleaned up).
+        started shard is cleaned up). --target-minutes M (1 to 1440, with --shards auto only) picks N from earlier completed runs of the same
+        command and --dir (the newest 10 of the last 90 days) so each shard takes about M minutes on the slowest machine it would go to,
+        never more than the free slots; with no such run it is plain auto. The --shards auto line says why (--json adds shardTiming).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
@@ -512,7 +537,7 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && own.Contains("--dry-run")
@@ -537,10 +562,10 @@ public static partial class Cli
         }
 
         var home = ResolveHome(Environment.GetEnvironmentVariable, OperatingSystem.IsWindows());
-        var log = new JobLog(home);
+        var log = new JobLog(home, line => stderr.WriteLine(line));
         if (p.Command == "stats")
         {
-            return Stats(log, stdout);
+            return await Stats(p, log, StatsKeepDays(p, loadConfig), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake"))
@@ -555,7 +580,7 @@ public static partial class Cli
         if (p.Command == "doctor")
         {
             var doctorSsh = new ProcessSshClient(Environment.GetEnvironmentVariable);
-            return await Doctor(p, LoadConfig, DoctorHost.Real(home), doctorSsh, new HealthProbe(doctorSsh, TimeProvider.System), stdout, ct).ConfigureAwait(false);
+            return await Doctor(p, LoadConfig, DoctorHost.Real(home), doctorSsh, new HealthProbe(doctorSsh, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         if (p.Command == "makeready")
@@ -573,7 +598,7 @@ public static partial class Cli
         catch (Exception ex) when (ex is ConfigException or IOException or UnauthorizedAccessException)
         {
             var message = JobRunner.SafeLine(ex.Message);
-            var steps = NextSteps.ConfigError(p.ConfigPath, message);
+            var steps = NextSteps.ConfigError(p.ConfigPath, message, p.Json);
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
@@ -634,7 +659,7 @@ public static partial class Cli
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
         if (p.Shards is { } shards)
         {
-            return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct).ConfigureAwait(false);
+            return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct, () => PruneLogs(log, config, stderr)).ConfigureAwait(false);
         }
 
         var started = System.Diagnostics.Stopwatch.StartNew();
@@ -663,6 +688,8 @@ public static partial class Cli
             await WriteJsonError("run", "InfraError", 70, message, stdout, steps, started.Elapsed, fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
             return 70;
         }
+
+        PruneLogs(log, config, stderr);
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
         var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
@@ -694,6 +721,13 @@ public static partial class Cli
     }
 
     /// <summary>
+    /// After a run's result is decided and before its Next and status lines (the status line stays the last stderr line): deletes old job logs
+    /// (<see cref="LogPrune"/>, policy.keep_logs_days). Never throws and never changes the result; a problem is one warning line.
+    /// </summary>
+    internal static void PruneLogs(JobLog log, FleetConfig config, TextWriter stderr) =>
+        LogPrune.AfterRun(log.LogsFolder, config.Policy.KeepLogsDays, line => stderr.WriteLine(line));
+
+    /// <summary>
     /// The one JSON object --json promises on stdout when no normal result exists: for run the usual RunJson shape (no machine or job id),
     /// for health an object with status, exitCode and message instead of the array.
     /// </summary>
@@ -707,6 +741,9 @@ public static partial class Cli
                 WithFetch(WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps }, logPath, logTail), fetch, null),
                 LanqJson.Default.RunJson),
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
+            "doctor" => JsonSerializer.Serialize(
+                new DoctorJson(status, exitCode, message, null, new DoctorCountsJson(0, 0, 0, 0, 0), []) { NextSteps = steps }, LanqJson.Default.DoctorJson),
+            "stats" => JsonSerializer.Serialize(StatsError(status, exitCode, message, null, steps), LanqJson.Default.StatsJson),
             _ => JsonSerializer.Serialize(new ErrorJson(status, exitCode, message) { NextSteps = steps }, LanqJson.Default.ErrorJson),
         });
 
@@ -865,7 +902,7 @@ public static partial class Cli
     {
         async Task<int> Error(string status, int code, string message)
         {
-            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath);
+            var steps = NextSteps.ForHealthError(status, message, needs?.Capabilities ?? [], needs?.MemGb, configPath, json);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             await WriteJsonError("health", status, code, message, stdout, steps).ConfigureAwait(false);
             return code;
@@ -895,7 +932,7 @@ public static partial class Cli
         var exitCode = assessed is null || assessed.Any(a => a.Eligible) ? 0 : 75;
 
         // What to do about each machine: in every JSON row, and for people one "Next:" line per step on stderr (stdout is unchanged).
-        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath)).ToList();
+        var next = config.Machines.Zip(results).Select((x, i) => NextSteps.ForHealthRow(x.First, x.Second, assessed?[i], configPath, json)).ToList();
         await NextSteps.WriteAsync(stderr, next.SelectMany(s => s)).ConfigureAwait(false);
         if (json)
         {
@@ -966,16 +1003,4 @@ public static partial class Cli
     private static string Memory(MachineHealth h) =>
         (h.MemFreeGb is { } mem ? string.Create(CultureInfo.InvariantCulture, $"mem free {mem:0.0} GB") : "mem free ?")
         + (h.SwapFreeGb is { } swap ? string.Create(CultureInfo.InvariantCulture, $" (swap {swap:0.0} GB)") : "");
-
-    private static int Stats(JobLog log, TextWriter stdout)
-    {
-        var all = log.ReadAll();
-        stdout.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{all.Count} jobs, {all.Sum(r => r.WallSeconds) / 60:0.#} min total wall-clock"));
-        foreach (var g in all.GroupBy(r => r.Machine ?? "-").OrderBy(g => g.Key, StringComparer.Ordinal))
-        {
-            stdout.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  {g.Key}: {g.Count()} jobs, {g.Sum(r => r.WallSeconds) / 60:0.#} min"));
-        }
-
-        return 0;
-    }
 }

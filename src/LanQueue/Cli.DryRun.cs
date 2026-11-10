@@ -105,6 +105,11 @@ public static partial class Cli
             Line(string.Create(CultureInfo.InvariantCulture, $"--shards auto would pick {plan.ShardCount} ({JobRunner.SafeLine(why)})"));
         }
 
+        if (plan.Timing is { } timing)
+        {
+            Line("Timing:   " + JobRunner.SafeLine(timing.Why));
+        }
+
         if (plan.Placement is { } placement)
         {
             Line(string.Create(CultureInfo.InvariantCulture, $"Placement now: {(placement.Count > 0 ? JobRunner.SafeLine(JobRunner.PlacementText(placement)) : "none")}; {plan.Waiting} waiting"));
@@ -173,6 +178,8 @@ public static partial class Cli
         Ranked = [.. plan.Ranked.Select(a => JobRunner.SafeLine(a.Machine.Name))],
         ShardCount = plan.ShardCount,
         ShardCountAuto = plan.ShardCountAuto,
+        ShardCountWhy = plan.ShardCountAuto is true && plan.AutoWhy is { } why ? JobRunner.SafeLine(ShardTiming.ShardCountWhy(plan.Timing, why)) : null,
+        ShardTiming = TimingJson(plan.Timing),
         Placement = plan.Placement?.Select(x => new PlacementJson(JobRunner.SafeLine(x.Machine.Name), x.Shards)).ToList(),
         Machines = [.. plan.Assessed.Select(a => new PlanMachineJson(
             JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, a.JobSlots))],

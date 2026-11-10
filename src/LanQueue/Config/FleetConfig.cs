@@ -42,6 +42,10 @@ public sealed class PolicyConfig
 
     /// <summary>A machine whose allowed hours end sooner than this does not start a new job ("window closing").</summary>
     public int MinWindowMinutes { get; set; } = 10;
+
+    /// <summary>Per-job logs in the state folder's logs/ older than this many days are deleted after a run (at most once a day); 0 keeps them for ever.</summary>
+    public int KeepLogsDays { get; set; } = 30;
+
     public List<string> AllowedCommands { get; set; } = [];
     public List<string> AllowedDirectories { get; set; } = [];
 }

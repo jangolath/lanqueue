@@ -1,6 +1,7 @@
 using System.Text.Json;
 using LanQueue.Health;
 using LanQueue.Jobs;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -28,8 +29,28 @@ public sealed class JsonOutputTests : IDisposable
         Assert.True(ParsedArgs.Parse(["health", "--json"]).Json);
         Assert.True(ParsedArgs.Parse(["run", "--json", "--", "dotnet", "test"]).Json);
         Assert.False(ParsedArgs.Parse(["health"]).Json);
-        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["stats", "--json"]));
+        Assert.True(ParsedArgs.Parse(["doctor", "--json"]).Json); // since 0.7.0
+        Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["unlock", "build-01", "--json"]));
+        Assert.True(ParsedArgs.Parse(["stats", "--json"]).Json); // since 0.7.0
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["health", "--dir", "x"])); // health takes --needs since 0.6.0, never --dir
+    }
+
+    /// <summary>lanq doctor --json with a command line that does not parse: still one doctor object (no checks, remote null), exit 2.</summary>
+    [Theory]
+    [InlineData("doctor", "--json", "--bogus")]
+    [InlineData("doctor", "--json", "--needs", "node")]
+    [InlineData("doctor", "--json", "--", "x")]
+    public async Task DoctorBadArgumentStillPrintsOneJsonObject(params string[] args)
+    {
+        var o = new StringWriter();
+        var e = new StringWriter();
+        Assert.Equal(2, await Cli.RunAsync(args, o, e, CancellationToken.None));
+        var r = OneObject(o.ToString(), "Rejected", 2);
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("remote").ValueKind);
+        Assert.Equal(0, r.GetProperty("checks").GetArrayLength());
+        Assert.Equal(["ok", "warn", "fail", "skip", "hold"], r.GetProperty("counts").EnumerateObject().Select(p => p.Name));
+        Assert.Equal("fix_command", r.GetProperty("nextSteps")[0].GetProperty("action").GetString());
+        Assert.Contains("Next: fix the command line: ", e.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -356,5 +377,28 @@ public sealed class JsonOutputTests : IDisposable
         var code = await Cli.Health(T.Config(), new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), cts.Token, json: true);
         Assert.Equal(130, code);
         OneObject(o.ToString(), "Cancelled", 130);
+    }
+
+    /// <summary>lanq run --shards --json: shardTiming only with --target-minutes (left out otherwise), with every member, nulls included.</summary>
+    [Fact]
+    public void ShardRunJsonCarriesShardTimingOnlyWithTargetMinutes()
+    {
+        var shards = new ShardRunResult("Completed", 0, 1, [new ShardResult(1, "Completed", 0, "build-01", "j1", TimeSpan.FromSeconds(3), 1, "ok")], "1 of 1 shard(s) completed");
+        var plain = JsonSerializer.Serialize(Cli.ShardJson(shards, TimeSpan.FromSeconds(4), fetch: false), Output.LanqJson.Default.ShardRunJson);
+        Assert.DoesNotContain("shardTiming", plain, StringComparison.Ordinal);
+
+        var timing = new ShardTimingResult(
+            5, "npx jest '--shard={shard}/{shards}'", ".", ShardTiming.NoHistory, 0, null, null, null, null, null, null, 1, null, 1, null,
+            "--target-minutes 5: no completed run of this command in the last 90 days; --shards auto falls back to the free slots");
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(Cli.ShardJson(shards with { Timing = timing }, TimeSpan.FromSeconds(4), fetch: false), Output.LanqJson.Default.ShardRunJson));
+        var r = doc.RootElement;
+        Assert.Equal(["status", "exitCode", "shardCount", "durationSeconds", "message", "shards", "shardTiming", "nextSteps"], r.EnumerateObject().Select(p => p.Name));
+        var t = r.GetProperty("shardTiming");
+        Assert.Equal(16, t.EnumerateObject().Count());
+        Assert.Equal(("no_history", 1, 1), (t.GetProperty("basis").GetString(), t.GetProperty("picked").GetInt32(), t.GetProperty("freeSlots").GetInt32()));
+        foreach (var name in new[] { "lastRunUtc", "workMinutes", "overheadSeconds", "slowestMachine", "speedFactor", "wanted", "capped", "expectedShardMinutes" })
+        {
+            Assert.Equal(JsonValueKind.Null, t.GetProperty(name).ValueKind);
+        }
     }
 }

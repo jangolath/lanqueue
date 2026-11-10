@@ -33,8 +33,14 @@ manifest: https://github.com/jangolath/lanqueue#install
 Onboarding a PC: `lanq makeready --ssh user@old-pc.lan --os windows` runs the read-only
 [lanq-makeready](https://github.com/jangolath/lanq-makeready) check over SSH (built in, sent on stdin, nothing written to
 the PC) and suggests a `machines.yml` entry; `lanq makeready --all` checks every configured machine and prints one
-summary table (`--json` for one object). `lanq unlock <machine>` clears slots left by a crashed run. `lanq health
---json` and `lanq run --json` print machine-readable results for scripts and coding agents.
+summary table (`--json` for one object). `lanq unlock <machine>` clears slots left by a crashed run.
+
+For scripts and coding agents, `run`, `health`, `doctor`, `stats`, `makeready`, `init` and `wake` take `--json` and
+print one object with suggested `nextSteps`. `lanq run --dry-run` shows where a job would go without sending it,
+`lanq doctor --json` lists each check with its fix, `lanq stats --json` gives pass rates and run times per machine and
+per command, and `--shards auto --target-minutes 10` sizes shards from earlier runs. See
+[docs/JSON.md](https://github.com/jangolath/lanqueue/blob/main/docs/JSON.md) and
+[AGENTS.md](https://github.com/jangolath/lanqueue/blob/main/AGENTS.md).
 
 `lanq` picks the least loaded machine that has what the job needs, ships your current git state (including
 uncommitted changes) to a throw-away worktree, runs the one allowlisted command, streams the log back and cleans up.

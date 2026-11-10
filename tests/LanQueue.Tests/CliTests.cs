@@ -37,6 +37,8 @@ public class CliTests
     [InlineData("[--no-wake]")]
     [InlineData("[--log-tail 60]")]
     [InlineData("lanq run ... --dry-run [--json]")]
+    [InlineData("--shards N|auto [--target-minutes M]")]
+    [InlineData("--target-minutes M (1 to 1440, with --shards auto only) picks N from earlier completed runs")]
     [InlineData("run --dry-run says what lanq run would do now")]
     [InlineData("lanq health [--json] [--wake]")]
     [InlineData("lanq health --needs dotnet,linux [--mem 4] [--json]")]
@@ -49,7 +51,12 @@ public class CliTests
     [InlineData("--setup prints that PC's full one-time setup and connects to nothing")]
     [InlineData("--add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml")]
     [InlineData("lanq unlock <machine>")]
+    [InlineData("lanq stats [--json] [--target-minutes M]")]
+    [InlineData("adds the shards M needs on a typical machine (no probe, before any free-slot cap)")]
+    [InlineData("stats summarises this computer's job log")]
     [InlineData("lanq doctor [--remote")]
+    [InlineData("lanq doctor [--remote [--force]] [--json] [--config FILE]")]
+    [InlineData("--json: the lines go to stderr and")]
     public async Task UsageListsEveryCommandAndOption(string text)
     {
         var o = new StringWriter();

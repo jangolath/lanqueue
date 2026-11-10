@@ -980,7 +980,7 @@ public sealed class WakeTests
             Path.GetTempPath());
         var o = new StringWriter();
         var ssh = new FakeSsh();
-        await Cli.Doctor(ParsedArgs.Parse(["doctor"]), () => config, host, ssh, new HealthProbe(ssh, TimeProvider.System), o, CancellationToken.None);
+        await Cli.Doctor(ParsedArgs.Parse(["doctor"]), () => config, host, ssh, new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), CancellationToken.None);
         return o.ToString();
     }
 
