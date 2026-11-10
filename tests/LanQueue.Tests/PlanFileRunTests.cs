@@ -458,6 +458,24 @@ public sealed partial class PlanFileRunTests : IDisposable
         Assert.Equal(["lanq", "run", "--plan", "--json", "--only", "only", "--wait", "120", "--no-wake"], json.GetProperty("nextSteps")[0].GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
     }
 
+    /// <summary>
+    /// Two jobs failed: the plan's exit code is the first failed job's own code in lanq.yml order, whatever order run history launched them in
+    /// (here b ran first because history said it takes longer).
+    /// </summary>
+    [Fact]
+    public void FailedJobsTieByTheirPlaceInLanqYmlNotByLaunchOrder()
+    {
+        var launchOrder = new[]
+        {
+            new PlanJobOutcome("b", "Failed", 5, "m", []) { FileOrder = 1 },
+            new PlanJobOutcome("a", "Failed", 3, "m", []) { FileOrder = 0 },
+            new PlanJobOutcome("c", "Rejected", 2, "m", []) { FileOrder = 2 },
+        };
+        var r = JobRunner.AggregatePlan(launchOrder, false);
+        Assert.Equal(("Failed", 3, "a"), (r.Status, r.ExitCode, r.Decided));
+        Assert.Equal(["b", "a", "c"], r.Jobs.Select(j => j.Name)); // the jobs keep their launch order for the table
+    }
+
     [Fact]
     public void StatusAndExitFollowTheWorstJob()
     {

@@ -55,7 +55,7 @@ public static partial class Cli
 
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
         var ordered = PlanGraph.Order(selection, expected);
-        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name])).ToList();
+        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name]) { FileOrder = j.Index }).ToList();
         var jobArgs = ordered.ToDictionary(j => j.Name, j => j.Args, StringComparer.Ordinal);
         if (p.DryRun)
         {

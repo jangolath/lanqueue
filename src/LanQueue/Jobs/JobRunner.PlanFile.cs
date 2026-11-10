@@ -96,7 +96,11 @@ public sealed class PlanProgress
 
 /// <summary>One job of lanq run --plan, ready to run: its lanq.yml name, the request its lanq run line makes, --shards (or null), and the jobs it starts after.</summary>
 /// <param name="After">The selected jobs it waits for (edges to jobs left out by --only are already dropped).</param>
-public sealed record PlanJobSpec(string Name, JobRequest Request, ShardOptions? Shards, IReadOnlyList<string> After);
+public sealed record PlanJobSpec(string Name, JobRequest Request, ShardOptions? Shards, IReadOnlyList<string> After)
+{
+    /// <summary>The job's place in lanq.yml (0 for the first job in the file): breaks ties in <see cref="JobRunner.AggregatePlan"/>.</summary>
+    public int FileOrder { get; init; }
+}
 
 /// <summary>
 /// How one plan job ended. <see cref="Status"/> is a run status (Completed, Failed, Rejected, NoCapacity, InfraError, TimedOut, WindowClosed),
@@ -107,6 +111,9 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
 {
     /// <summary>A plan job that never started.</summary>
     public const string Skipped = "Skipped";
+
+    /// <summary>The job's place in lanq.yml (<see cref="PlanJobSpec.FileOrder"/>).</summary>
+    public int FileOrder { get; init; }
 
     /// <summary>A single job's machine (null for a sharded job, or when it never ran).</summary>
     public string? Machine { get; init; }
@@ -235,8 +242,8 @@ public sealed partial class JobRunner
 
         var first = ordered.First(j => never.ContainsKey(j.Name)).Name;
         List<PlanJobOutcome> jobs = [.. ordered.Select(j => never.TryGetValue(j.Name, out var r)
-            ? new PlanJobOutcome(j.Name, r.Status.ToString(), r.CliExitCode, r.Message, j.After) { Retryable = r.Retryable, Excluded = r.Excluded }
-            : SkippedJob(j, $"not started: job '{first}' can never run as configured, so the plan did not start"))];
+            ? new PlanJobOutcome(j.Name, r.Status.ToString(), r.CliExitCode, r.Message, j.After) { Retryable = r.Retryable, Excluded = r.Excluded, FileOrder = j.FileOrder }
+            : SkippedJob(j, $"not started: job '{first}' can never run as configured, so the plan did not start") with { FileOrder = j.FileOrder })];
         return AggregatePlan(jobs, cancelled: false);
     }
 
@@ -367,12 +374,12 @@ public sealed partial class JobRunner
         }
 
         var userCancelled = ct.IsCancellationRequested;
-        List<PlanJobOutcome> jobs = [.. ordered.Select(j => outcomes.TryGetValue(j.Name, out var o)
+        List<PlanJobOutcome> jobs = [.. ordered.Select(j => (outcomes.TryGetValue(j.Name, out var o)
             ? o
             : SkippedJob(j, failedFast is not null ? $"not started: --fail-fast after {failedFast}"
                 : loopError is not null ? SafeLine($"not started: unexpected error: {loopError.GetType().Name}: {loopError.Message}")
                 : userCancelled ? "not started: cancelled (Ctrl+C)"
-                : "not started"))];
+                : "not started")) with { FileOrder = j.FileOrder })];
         var result = AggregatePlan(jobs, userCancelled && jobs.Any(j => j.Status is Cancelled or PlanJobOutcome.Skipped));
         return loopError is not null && result.Status != nameof(JobStatus.Failed)
             ? result with { Status = nameof(JobStatus.InfraError), ExitCode = 70, InfraKind = Jobs.InfraKind.Unexpected, Message = SafeLine($"{result.Message}; unexpected error: {loopError.GetType().Name}: {loopError.Message}") }
@@ -452,7 +459,8 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// The overall result of a plan. Every job completed: Completed, 0. Cancelled by the caller (Ctrl+C) while jobs were unfinished: Cancelled,
-    /// 130. Otherwise the job with the most telling status decides, earliest in launch order first: Failed (its own exit code, as for shards)
+    /// 130. Otherwise the job with the most telling status decides, the first in lanq.yml among equals (<see cref="PlanJobOutcome.FileOrder"/>,
+    /// never the launch order, which follows run history): Failed (its own exit code, as for shards)
     /// before Rejected (2), TimedOut and WindowClosed (124), InfraError (70), NoCapacity (75), Cancelled by --fail-fast (130) and Skipped.
     /// </summary>
     internal static PlanRunResult AggregatePlan(IReadOnlyList<PlanJobOutcome> jobs, bool cancelled)
@@ -464,7 +472,7 @@ public sealed partial class JobRunner
             return new PlanRunResult(Cancelled, 130, summary + "; cancelled (Ctrl+C), every started job was cleaned up", jobs);
         }
 
-        var worst = jobs.Select((j, i) => (j, i)).Where(x => x.j.Status != nameof(JobStatus.Completed)).OrderBy(x => PlanRank(x.j.Status)).ThenBy(x => x.i).Select(x => x.j).FirstOrDefault();
+        var worst = jobs.Select((j, i) => (j, i)).Where(x => x.j.Status != nameof(JobStatus.Completed)).OrderBy(x => PlanRank(x.j.Status)).ThenBy(x => x.j.FileOrder).ThenBy(x => x.i).Select(x => x.j).FirstOrDefault();
         if (worst is null)
         {
             return new PlanRunResult(nameof(JobStatus.Completed), 0, summary, jobs);
