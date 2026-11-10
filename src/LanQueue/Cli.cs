@@ -49,6 +49,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>makeready --key-env VAR, with --ssh: the NAME of an environment variable holding the private key file's path (as key_env).</summary>
     public string? KeyEnv { get; init; }
 
+    /// <summary>makeready --ssh ... --setup: print the worker's one-time setup and connect to nothing (see Cli.MakereadySetup.cs).</summary>
+    public bool Setup { get; init; }
+
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
@@ -96,7 +99,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["stats"] = [],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
@@ -130,6 +133,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         string? sshTarget = null;
         MachineOs? os = null;
         string? keyEnv = null;
+        var setup = false;
         string? target = null;
         var fetch = new List<string>();
         string? fetchDir = null;
@@ -250,6 +254,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     }
 
                     break;
+                case "--setup":
+                    setup = true;
+                    break;
                 case "--os" when i + 1 < own.Length:
                     os = own[++i] switch
                     {
@@ -291,7 +298,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
         if (command == "makeready")
         {
-            CheckMakereadyOptions(seen);
+            CheckMakereadyOptions(seen, json, setup);
         }
 
         if (split >= 0 && command != "run")
@@ -316,6 +323,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             SshTarget = sshTarget,
             Os = os,
             KeyEnv = keyEnv,
+            Setup = setup,
             Fetch = FetchPatterns.Validate(fetch),
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
@@ -327,13 +335,19 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     }
 
     /// <summary>
-    /// The makeready options that only make sense together: --key-env only with --ssh.
+    /// The makeready options that only make sense together: --key-env only with --ssh; --setup only prints text (no --json, --all or
+    /// --force).
     /// </summary>
-    private static void CheckMakereadyOptions(List<string> seen)
+    private static void CheckMakereadyOptions(List<string> seen, bool json, bool setup)
     {
         if (seen.Contains("--key-env") && !seen.Contains("--ssh"))
         {
             throw new ArgumentException("--key-env goes with --ssh user@host (a configured machine uses its key_env from machines.yml).");
+        }
+
+        if (setup && (json || seen.Contains("--all") || seen.Contains("--force")))
+        {
+            throw new ArgumentException("--setup only prints the one-time setup for people; it takes no --json, --all or --force.");
         }
     }
 
@@ -377,6 +391,7 @@ public static partial class Cli
           lanq doctor [--remote [--force]] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
+          lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]
           lanq makeready --all [--json] [--force] [--config FILE]
           lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
@@ -402,7 +417,11 @@ public static partial class Cli
         capability diff and a suggested machines.yml entry. Exit 0 ready, 1 not ready, 2 bad arguments, 70 ssh failed or the report was
         unusable, 75 the machine is paused or outside its allowed hours (--force scans anyway), 130 Ctrl+C. lanq never changes a worker.
         makeready --ssh user@host scans a PC that is not in the config yet, with the keys in ssh-agent or, with --key-env VAR, the key file
-        whose path is in $VAR (the NAME of the variable, as key_env).
+        whose path is in $VAR (the NAME of the variable, as key_env). --setup prints that PC's full one-time setup and connects to nothing: the
+        build user (from user@host), your public key in its authorized_keys (Windows: icacls by SID; Linux: chmod 700/600), the work folder,
+        firewall scoping, password logins off, the host key fingerprint to compare and the first connection; only .pub files are read (the
+        first key ssh-agent lists; with --key-env the .pub beside that key; else ~/.ssh/lanq_ed25519.pub or ~/.ssh/id_ed25519.pub). Text only,
+        exit 0.
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
@@ -513,8 +532,9 @@ public static partial class Cli
 
         if (p.Command == "makeready")
         {
+            // No waker: makeready never wakes a machine. --setup connects to nothing at all.
             var client = new ProcessSshClient(Environment.GetEnvironmentVariable);
-            return await Makeready(p, LoadConfig, client, new HealthProbe(client, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
+            return await Makeready(p, LoadConfig, client, new HealthProbe(client, TimeProvider.System), stdout, stderr, ct, MakereadyHost.Real(stderr)).ConfigureAwait(false);
         }
 
         FleetConfig config;

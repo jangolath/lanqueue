@@ -54,9 +54,16 @@ public static partial class Cli
     /// every configured machine) and reads its report. One machine: exit 0 worker-ready, 1 not ready, 2 bad arguments, 70 ssh or an unusable
     /// report, 75 machine paused or outside its allowed hours (unless --force). --all: see <see cref="MakereadyAll"/>.
     /// </summary>
+    /// <param name="host">This computer's environment and ssh-agent for --setup (tests replace it); null: the real one.</param>
     internal static async Task<int> Makeready(
-        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+        ParsedArgs p, Func<FleetConfig> loadConfig, ISshClient ssh, HealthProbe probe, TextWriter stdout, TextWriter stderr, CancellationToken ct,
+        MakereadyHost? host = null)
     {
+        if (p.Setup)
+        {
+            return await MakereadySetup(p, host ?? MakereadyHost.Real(stderr), stdout, stderr).ConfigureAwait(false);
+        }
+
         var failed = new MakereadyFailed();
         var again = SuggestedCommand.Makeready(p.Target, p.ConfigPath, p.SshTarget, p.Os, p.KeyEnv);
         if (!p.Json)
@@ -290,7 +297,7 @@ public static partial class Cli
         new() { Name = target, Os = os, Ssh = target, KeyEnv = keyEnv, WorkRoot = os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
 
     private const string MakereadyUsage =
-        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] "
+        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--setup] "
         + "| lanq makeready --all [--json] [--force]";
 
     /// <summary>How many machines lanq makeready --all scans at once.</summary>
