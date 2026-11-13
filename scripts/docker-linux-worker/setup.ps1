@@ -249,17 +249,39 @@ function Test-MachinesFile([string[]]$lines) {
     return $null
 }
 
-# True when lanq doctor says the config loads and this machine has checks and none of them fails.
+# A shell started before setup.ps1 set the user variable -KeyEnv does not have it yet, and lanq doctor would then fail
+# its key_env check: take it from the User scope into this process (only the path; the key is never read).
+function Import-KeyEnv {
+    if (-not [Environment]::GetEnvironmentVariable($KeyEnv, 'Process')) {
+        $user = [Environment]::GetEnvironmentVariable($KeyEnv, 'User')
+        if ($user) {
+            Set-Item -Path "env:$KeyEnv" -Value $user
+            Write-Host "env: $KeyEnv loaded from your user variables"
+        }
+    }
+}
+
+# True when lanq doctor says the config loads and this machine has checks and none of them fails. On a refusal it
+# prints each failing check's name and level only: its detail can hold paths and fingerprints.
 function Test-DoctorPasses([string]$file) {
+    Import-KeyEnv
     try {
         $r = Invoke-Native 'lanq' @('doctor', '--config', $file, '--remote', '--json') 300000
-        if ($r.ExitCode -eq -1) { return $false }
+        if ($r.ExitCode -eq -1) { Write-Host '  doctor: timed out after 5 minutes'; return $false }
         $doc = $r.Out | ConvertFrom-Json
         $bad = @($doc.checks | Where-Object { $_.level -eq 'fail' -and ($_.machine -eq $Name -or ($_.scope -eq 'local' -and $_.name -eq 'config')) })
         $ours = @($doc.checks | Where-Object { $_.machine -eq $Name })
+        foreach ($c in $bad) {
+            $checkName = if ("$($c.name)" -match '^[a-z0-9_]{1,64}$') { $c.name } else { '(unnamed)' }
+            Write-Host "  doctor: $($c.scope) check $checkName is $($c.level)"
+        }
+        if ($ours.Count -eq 0) { Write-Host "  doctor: no check for $Name (the config did not load it)" }
         return ($bad.Count -eq 0 -and $ours.Count -gt 0)
     }
-    catch { return $false }
+    catch {
+        Write-Host '  doctor: its output was not the expected JSON'
+        return $false
+    }
 }
 
 function Invoke-Register {
@@ -267,6 +289,7 @@ function Invoke-Register {
         Stop-Refused '-Register edits your lanq config, which an AI agent must not do (AGENTS.md, Hard rules). The owner runs it, or OKs it in this session and the agent passes -OwnerApproved.'
     }
     if (-not (Get-Command lanq -ErrorAction SilentlyContinue)) { Stop-Refused 'lanq is not on PATH' }
+    Import-KeyEnv
     $files = $MachinesFile
     if ($files.Count -eq 0) {
         $real = if ($env:LANQ_CONFIG) { Resolve-FullPath $env:LANQ_CONFIG } else { Join-Path $env:APPDATA 'lanq\machines.yml' }
