@@ -435,7 +435,8 @@ internal static class NextSteps
                 return
                 [
                     Step(NextAction.AskDeveloper, $"job '{r.Decided}' can never run on these machines as configured, so waiting will not help ({ExcludedText(r.Excluded)}); "
-                        + "a machine needs the capability, the size or the memory, or that job's needs, size, min_size, mem or on in lanq.yml must change (the developer decides)"),
+                        + "a machine needs the capability, the size or the memory, or that job's needs, size, min_size, mem or on in lanq.yml must change (the developer decides)"
+                        + EnvConflictAdvice(r.Excluded ?? [], plan: true)),
                     Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health),
                 ];
             case nameof(JobStatus.NoCapacity):
@@ -489,7 +490,8 @@ internal static class NextSteps
             ],
             nameof(JobStatus.NoCapacity) =>
             [
-                Step(NextAction.AskDeveloper, message + "; a machine needs the capability, the size or the memory, or that job's settings in lanq.yml must change (the developer decides)"),
+                Step(NextAction.AskDeveloper, message + "; a machine needs the capability, the size or the memory, or that job's settings in lanq.yml must change (the developer decides)"
+                    + (message.Contains(EnvConflictWhy, StringComparison.Ordinal) ? "; for an env clash, drop the variable from that job's env: or remove it from the machine's env (fix lanq.yml or machines.yml)" : "")),
                 Step(NextAction.RunHealth, "see how each machine is judged for that job", health),
             ],
             nameof(JobStatus.Rejected) => Rejected(p, reject, message),
@@ -497,6 +499,28 @@ internal static class NextSteps
             JobRunner.Cancelled => Nothing("cancelled (Ctrl+C)"),
             _ => [Step(NextAction.AskDeveloper, "unexpected status " + status)],
         };
+    }
+
+    /// <summary>The words every env_conflict reason carries ("env NAME is set by this machine's env in machines.yml").</summary>
+    private const string EnvConflictWhy = "is set by this machine's env in machines.yml";
+
+    /// <summary>
+    /// For machines ruled out because their env: sets one of the job's variables (env_conflict): "; drop --env NAME or remove it from the
+    /// machine's env (build-01, big-01)", naming each variable and machine; a plan job is told to fix lanq.yml or machines.yml. Empty when none.
+    /// </summary>
+    private static string EnvConflictAdvice(IReadOnlyList<ExcludedMachine> excluded, bool plan)
+    {
+        var clashes = excluded.Where(x => x.Reason == Eligibility.Code(Exclusion.EnvConflict)).ToList();
+        if (clashes.Count == 0)
+        {
+            return "";
+        }
+
+        var names = string.Join(", ", clashes.Select(x => x.Why.Split(' ') is { Length: > 1 } w ? w[1] : "?").Distinct(StringComparer.OrdinalIgnoreCase));
+        var machines = string.Join(", ", clashes.Select(x => x.Machine));
+        return plan
+            ? $"; drop {names} from that job's env: in lanq.yml or remove it from the machine's env ({machines}): fix lanq.yml or machines.yml"
+            : $"; drop --env {names} or remove it from the machine's env ({machines})";
     }
 
     private static string ExcludedText(IReadOnlyList<ExcludedMachine>? excluded) =>
@@ -514,6 +538,8 @@ internal static class NextSteps
         RejectKind.Policy => [Step(NextAction.AskDeveloper, $"refused by policy, not allowlisted ({message}); do not work around it, ask the developer")],
         RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes, the command line or --env values; nothing was sent")],
         RejectKind.Config => ConfigError(p.ConfigPath, message, p.Json),
+        RejectKind.JobEnv when p.Plan => [Step(NextAction.FixCode, "fix lanq.yml or machines.yml: " + message + "; shorten or drop that job's env: values, or the developer changes the machines")],
+        RejectKind.JobEnv => [Step(NextAction.FixCommand, "fix the --env values: " + message + "; shorten or drop them, or the developer changes the machines")],
         _ => [Step(NextAction.FixCommand, "fix the command line: " + message)],
     };
 
@@ -535,7 +561,8 @@ internal static class NextSteps
             var lacks = string.Join("; ", excluded.Select(x => $"{x.Machine}: {x.Why}"));
             return
             [
-                Step(NextAction.AskDeveloper, $"--on {string.Join(',', on)} cannot ever take this job" + (lacks.Length > 0 ? ": " + lacks : "") + "; pick another machine or drop --on"),
+                Step(NextAction.AskDeveloper, $"--on {string.Join(',', on)} cannot ever take this job" + (lacks.Length > 0 ? ": " + lacks : "") + "; pick another machine or drop --on"
+                    + EnvConflictAdvice(excluded, plan: false)),
                 Step(NextAction.RunHealth, "see how each machine is judged for this job", health),
             ];
         }
@@ -546,7 +573,8 @@ internal static class NextSteps
             return
             [
                 Step(NextAction.AskDeveloper, "no machine can ever take this job as configured, so waiting will not help" + (why.Length > 0 ? " (" + why + ")" : "")
-                    + "; a machine needs the capability, the size or the memory, or the job needs other --needs, --size / --min-size or --mem"),
+                    + "; a machine needs the capability, the size or the memory, or the job needs other --needs, --size / --min-size or --mem"
+                    + EnvConflictAdvice(excluded, plan: false)),
                 Step(NextAction.RunHealth, "see how each machine is judged for this job", health),
             ];
         }
@@ -606,7 +634,7 @@ internal static class NextSteps
     {
         var name = m.Name;
         if (a is { Eligible: false } job && job.Reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal
-            or Exclusion.MemUnknown or Exclusion.SizeUnknown)
+            or Exclusion.MemUnknown or Exclusion.SizeUnknown or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong)
         {
             return [Step(NextAction.AskDeveloper, $"{name} can never take such a job as configured: {job.Why}")];
         }

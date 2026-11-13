@@ -14,6 +14,12 @@ public sealed record JobNeeds(IReadOnlyCollection<string> Capabilities, double? 
     /// with any slot in use is <see cref="Exclusion.Busy"/> (retryable: it waits like any busy machine, with no reservation).
     /// </summary>
     public bool Exclusive { get; init; }
+
+    /// <summary>
+    /// lanq run --env: the machines the job's variables rule out, by name, judged from the config alone (<see cref="Jobs.JobRunner.EnvExclusion"/>):
+    /// <see cref="Exclusion.EnvConflict"/> or <see cref="Exclusion.WindowsCommandTooLong"/>, each with its reason for people. Empty without --env.
+    /// </summary>
+    public IReadOnlyDictionary<string, (Exclusion Reason, string Why)> EnvRuledOut { get; init; } = new Dictionary<string, (Exclusion Reason, string Why)>();
 }
 
 /// <summary>
@@ -110,6 +116,12 @@ public enum Exclusion
     /// <summary>--size / --min-size: the machine's class (declared size:, or probed) is not one the job allows.</summary>
     WrongSize,
     WindowsUnsafeArgs,
+
+    /// <summary>lanq run --env: the machine's env: in machines.yml sets one of the job's variables too (which one would win is a guess).</summary>
+    EnvConflict,
+
+    /// <summary>lanq run --env: on this Windows machine the job's variables make the encoded command longer than the Windows limit.</summary>
+    WindowsCommandTooLong,
     MemExceedsTotal,
     MemUnknown,
 
@@ -161,6 +173,8 @@ public static class Eligibility
         Exclusion.WrongSize => "wrong_size",
         Exclusion.SizeUnknown => "size_unknown",
         Exclusion.WindowsUnsafeArgs => "windows_unsafe_args",
+        Exclusion.EnvConflict => "env_conflict",
+        Exclusion.WindowsCommandTooLong => "windows_command_too_long",
         Exclusion.MemExceedsTotal => "mem_exceeds_total",
         Exclusion.MemUnknown => "mem_unknown",
         Exclusion.ToolMissing => "tool_missing",
@@ -180,9 +194,10 @@ public static class Eligibility
         _ => "held",
     };
 
-    /// <summary>True for the reasons waiting can never cure: the config (capabilities, size:, Windows) or the machine itself (its RAM, its size, its tools).</summary>
+    /// <summary>True for the reasons waiting can never cure: the config (capabilities, size:, Windows, env:) or the machine itself (its RAM, its size, its tools).</summary>
     public static bool IsPermanent(Exclusion reason) =>
-        reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal or Exclusion.MemUnknown
+        reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
+            or Exclusion.MemExceedsTotal or Exclusion.MemUnknown
             or Exclusion.SizeUnknown or Exclusion.ToolMissing;
 
     /// <summary>

@@ -238,7 +238,7 @@ public sealed partial class JobRunner
     }
 
     /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, its size rule, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
-    private static JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
+    private JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
         NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
 
     /// <summary>

@@ -44,6 +44,12 @@ public enum RejectKind
     /// <summary>The config could not be found or loaded.</summary>
     Config,
 
+    /// <summary>
+    /// lanq run --env: every capable machine is ruled out by the job's variables, at least one because they make its Windows command too
+    /// long. The variables (lanq.yml env: for a plan job) or the machines must change.
+    /// </summary>
+    JobEnv,
+
     /// <summary>lanq run --plan: the plan file (lanq.yml) is missing or not valid.</summary>
     PlanFile,
 }
@@ -118,8 +124,9 @@ public sealed record JobRequest(
 
     /// <summary>
     /// lanq run --env (lanq.yml env:): the job's own variables, in the order given (parsed and deny-checked by <see cref="JobEnv.Parse"/>;
-    /// policy.allowed_env, the secret scan and clashes with a machine's env: are checked in <see cref="JobRunner"/>'s precheck). Shards and
-    /// plan jobs carry their template's. Only the names are ever logged.
+    /// policy.allowed_env and the secret scan are checked in <see cref="JobRunner"/>'s precheck; a machine whose env: sets one too is ruled
+    /// out, see <see cref="JobRunner.EnvExclusion"/>). Shards and plan jobs carry their template's. jobs.jsonl and the JSON env field carry
+    /// the names only.
     /// </summary>
     public IReadOnlyList<JobEnvVar> Env { get; init; } = [];
 
@@ -248,9 +255,6 @@ public sealed partial class JobRunner(
     /// </summary>
     private List<Machine> Candidates(JobRequest req) => Pinning.Candidates(config, req.On);
 
-    /// <summary>What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>).</summary>
-    private static JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe) { Size = req.Size, Exclusive = req.Exclusive };
-
     /// <summary>
     /// The checks on the command line alone (--on names, policy, secrets in it, --env (<see cref="PrecheckEnv"/>), Windows-safe arguments), before
     /// any network or git work; null when it may run.
@@ -295,8 +299,9 @@ public sealed partial class JobRunner(
     /// <summary>
     /// The checks on the job's --env (<see cref="JobRequest.Env"/>), after the command line's: the hard deny table again (Policy), then
     /// policy.allowed_env (Policy), the secret scan of each NAME=VALUE (Secret; the value is never shown), a name that a candidate machine's
-    /// env: in machines.yml sets too (Arguments: which one wins would be a guess), and the Windows command-line cap with the job's variables
-    /// on each Windows candidate (Arguments). The last two look only at candidates with the job's capabilities. Null when the job sets none or every check passes.
+    /// env: in machines.yml sets too, and the Windows command-line cap with the job's variables. Those two rule out a machine, not the job
+    /// (<see cref="EnvExclusion"/>), except that a job whose capable machines are all ruled out by --env, at least one by the cap, is refused
+    /// here (<see cref="RejectKind.JobEnv"/>). Null when the job sets none or every check passes.
     /// </summary>
     private JobResult? PrecheckEnv(string jobId, JobRequest req)
     {
@@ -331,37 +336,91 @@ public sealed partial class JobRunner(
             return Rejected(jobId, findings);
         }
 
-        // Only machines with the job's capabilities: one that could never take the job must not block it.
-        var candidates = Candidates(req).Where(m => HasCapabilities(m, req.Needs)).ToList();
-        foreach (var m in candidates)
+        // A machine's env: clash or a Windows command too long rules out that machine only (EnvExclusion, judged again per machine when the
+        // job is placed), and NeverByConfig ends the job when that leaves no capable machine. The one refusal here: every capable machine
+        // not already ruled out is ruled out by --env, at least one of them because the values make its Windows command too long (the
+        // values themselves must change).
+        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var judged = Candidates(req)
+            .Where(m => HasCapabilities(m, req.Needs) && !(windowsUnsafe && m.Os == MachineOs.Windows))
+            .Select(m => (Machine: m, Rule: EnvExclusion(m, req.Env, windowsUnsafe)))
+            .ToList();
+        if (judged.Count > 0 && judged.All(j => j.Rule is not null)
+            && judged.FirstOrDefault(j => j.Rule?.Reason == Exclusion.WindowsCommandTooLong).Machine is { } tooLong)
         {
-            if (req.Env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase)) is { } clash)
-            {
-                return Refused($"--env {clash.Name}: {m.Name}'s env in machines.yml sets it too; drop one", Jobs.RejectKind.Arguments);
-            }
-        }
-
-        foreach (var m in candidates.Where(m => m.Os == MachineOs.Windows))
-        {
-            var size = RemoteScripts.WorstCaseWindowsCommandLength(m, req.Env);
-            if (size > RemoteScripts.MaxWindowsCommandLength)
-            {
-                return Refused(
-                    string.Create(CultureInfo.InvariantCulture, $"the --env values make the Windows command {size:N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {m.Name}"),
-                    Jobs.RejectKind.Arguments);
-            }
+            return Refused(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"the --env values make the Windows command {WindowsLength(tooLong, req.Env):N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {tooLong.Name}"),
+                Jobs.RejectKind.JobEnv);
         }
 
         return null;
     }
 
     /// <summary>
-    /// When the config alone rules out every candidate machine (<see cref="Candidates"/>): each lacks a capability the job needs or has a
-    /// declared size: outside --size / --min-size. Each judged from the config alone (never probed), all permanently ruled out. Null when at
+    /// What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>, and
+    /// the candidates its --env rules out).
+    /// </summary>
+    private JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe)
+    {
+        Size = req.Size,
+        Exclusive = req.Exclusive,
+        EnvRuledOut = EnvRuledOut(Candidates(req), req.Env, windowsUnsafe),
+    };
+
+    /// <summary>The candidates the job's --env rules out (<see cref="EnvExclusion"/>), by name; empty without --env.</summary>
+    private static Dictionary<string, (Exclusion Reason, string Why)> EnvRuledOut(IEnumerable<Machine> candidates, IReadOnlyList<JobEnvVar> env, bool windowsUnsafe)
+    {
+        var ruled = new Dictionary<string, (Exclusion Reason, string Why)>(StringComparer.Ordinal);
+        foreach (var m in env.Count == 0 ? [] : candidates)
+        {
+            if (EnvExclusion(m, env, windowsUnsafe) is { } rule)
+            {
+                ruled[m.Name] = rule;
+            }
+        }
+
+        return ruled;
+    }
+
+    /// <summary>
+    /// Whether the job's --env rules out a machine, judged from the config alone: its env: in machines.yml sets one of the variables too
+    /// (<see cref="Exclusion.EnvConflict"/>), or it is a Windows machine on which the variables make the encoded job command longer than the
+    /// Windows limit (<see cref="Exclusion.WindowsCommandTooLong"/>; not judged when <paramref name="windowsUnsafe"/> rules Windows out already).
+    /// Both are permanent. Null when the machine can take the job as far as --env goes.
+    /// </summary>
+    internal static (Exclusion Reason, string Why)? EnvExclusion(Machine m, IReadOnlyList<JobEnvVar> env, bool windowsUnsafe)
+    {
+        if (env.Count == 0)
+        {
+            return null;
+        }
+
+        if (env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase)) is { } clash)
+        {
+            return (Exclusion.EnvConflict, $"env {clash.Name} is set by this machine's env in machines.yml");
+        }
+
+        if (m.Os == MachineOs.Windows && !windowsUnsafe && WindowsLength(m, env) is var size && size > RemoteScripts.MaxWindowsCommandLength)
+        {
+            return (Exclusion.WindowsCommandTooLong, string.Create(
+                CultureInfo.InvariantCulture, $"with these --env values the Windows command is {size:N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0})"));
+        }
+
+        return null;
+    }
+
+    private static int WindowsLength(Machine m, IReadOnlyList<JobEnvVar> env) => RemoteScripts.WorstCaseWindowsCommandLength(m, env);
+
+    /// <summary>
+    /// When the config alone rules out every candidate machine (<see cref="Candidates"/>): each lacks a capability the job needs, has a
+    /// declared size: outside --size / --min-size, or is ruled out by the job's --env (<see cref="EnvExclusion"/>). Each judged from the config alone (never probed), all permanently ruled out. Null when at
     /// least one candidate could take the job as far as the config says.
     /// </summary>
     private List<Assessment>? NeverByConfig(JobRequest req)
     {
+        var windowsUnsafe = req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok;
         var judged = new List<Assessment>();
         foreach (var m in Candidates(req))
         {
@@ -373,6 +432,10 @@ public sealed partial class JobRunner(
             else if (Eligibility.DeclaredSizeMismatch(m, req.Size) is { } wrongSize)
             {
                 judged.Add(new Assessment(m, Unprobed(m), Exclusion.WrongSize, wrongSize, true, 0, 0));
+            }
+            else if (EnvExclusion(m, req.Env, windowsUnsafe) is { } env)
+            {
+                judged.Add(new Assessment(m, Unprobed(m), env.Reason, env.Why, true, 0, 0));
             }
             else
             {
@@ -411,10 +474,11 @@ public sealed partial class JobRunner(
 
     /// <summary>
     /// How many candidate machines (<see cref="Candidates"/>) could ever take the job as far as the config says: every capability it needs and
-    /// no declared size: outside --size / --min-size (as <see cref="NeverByConfig"/> judges them).
+    /// no declared size: outside --size / --min-size, and not ruled out by its --env (as <see cref="NeverByConfig"/> judges them).
     /// </summary>
     private int ExclusiveMachines(JobRequest req) =>
-        Candidates(req).Count(m => Eligibility.Missing(m, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(m, req.Size) is null);
+        Candidates(req).Count(m => Eligibility.Missing(m, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(m, req.Size) is null
+            && EnvExclusion(m, req.Env, req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok) is null);
 
     /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
     private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
@@ -782,7 +846,7 @@ public sealed partial class JobRunner(
     internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
         m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
         && Eligibility.DeclaredSizeMismatch(m, needs.Size) is null
-        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !needs.EnvRuledOut.ContainsKey(m.Name) && !(m.Transfer == TransferMode.Archive && archiveFailed);
 
     /// <summary>
     /// Wakes at most one machine: the first by name among those <see cref="CouldWakeFor"/> allows that are inside their hours. The decision uses

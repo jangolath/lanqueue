@@ -126,7 +126,7 @@ public static partial class Cli
             var whyWidth = Math.Max(53, excluded.Max(a => JobRunner.SafeLine(JobRunner.WhyNot(a)).Length) + 2);
             foreach (var a in excluded)
             {
-                var byConfig = a.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs
+                var byConfig = a.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
                     || (a.Reason == Exclusion.WrongSize && MachineSize.Declared(a.Machine) is not null);
                 var when = !a.Permanent ? "can change" : byConfig ? "never (config)" : "never (machine)";
                 Line($"  {JobRunner.SafeLine(a.Machine.Name).PadRight(nameWidth)}{JobRunner.SafeLine(JobRunner.WhyNot(a)).PadRight(whyWidth)}{when}");

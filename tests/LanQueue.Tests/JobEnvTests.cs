@@ -5,6 +5,7 @@ using LanQueue.Jobs;
 using LanQueue.Output;
 using LanQueue.Plan;
 using LanQueue.Policy;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 using Xunit;
 
@@ -296,56 +297,258 @@ public sealed class JobEnvTests : IDisposable
         }
     }
 
-    [Fact]
-    public async Task MachineEnvConflictRejected()
-    {
-        var config = Mixed("CONFIGURATION");
-        config.Machines[0].Env["Configuration"] = "Debug";
-        var ssh = new FakeSsh();
-        var r = await Runner(config, ssh).RunAsync(Req(V("CONFIGURATION", "Release")), CancellationToken.None);
-        Assert.Equal((JobStatus.Rejected, RejectKind.Arguments, 2), (r.Status, r.RejectKind, r.CliExitCode));
-        Assert.Equal("--env CONFIGURATION: build-01's env in machines.yml sets it too; drop one", r.Message);
-        Assert.Empty(ssh.Calls);
+    /// <summary>Three Linux machines with node, one slot each, and allowed_env: CONFIGURATION.</summary>
+    private const string Three = """
+        policy:
+          load_threshold: 0.8
+          allowed_commands: ["npx jest"]
+          allowed_directories: ["."]
+          allowed_env: [CONFIGURATION, BIG]
+        machines:
+          - name: build-01
+            os: linux
+            ssh: user@10.20.30.11
+            work_root: /srv/lanq
+            capabilities: [node]
+          - name: big-01
+            os: linux
+            ssh: user@10.20.30.12
+            work_root: /srv/lanq
+            capabilities: [node]
+          - name: micro-01
+            os: linux
+            ssh: user@10.20.30.13
+            work_root: /srv/lanq
+            capabilities: [node]
+        """;
 
-        // Only candidates count: --on another machine has no clash.
-        var pinned = await Runner(config, new FakeSsh()).RunAsync(Req(V("CONFIGURATION", "Release")) with { On = ["build-02"] }, CancellationToken.None);
-        Assert.NotEqual(JobStatus.Rejected, pinned.Status);
+    private async Task<(int Code, JsonElement Json, PoolSsh Ssh)> RunThree(FleetConfig config, params string[] args)
+    {
+        var ssh = new PoolSsh();
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", .. args, "--needs", "node", "--", "npx", "jest"]), config, ssh, new RunnerTests.FakePayloads(""),
+            new HealthProbe(ssh, TimeProvider.System), Log, _root, Repo, o, new StringWriter(), CancellationToken.None);
+        return (code, Json(o.ToString()), ssh);
     }
 
-    /// <summary>A candidate that lacks the job's capabilities can never take it, so its env: does not block the job; a capable one still does.</summary>
+    /// <summary>A machine whose env: sets the job's variable is ruled out (env_conflict, permanent); the job runs on the others.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task OneClashingMachineOfThreeLetsTheJobRunOnTheOthers()
+    {
+        var config = ConfigLoader.Parse(Three);
+        config.Machines[0].Env["Configuration"] = "Debug";
+        var (code, json, ssh) = await RunThree(config, "--env", "CONFIGURATION=Release");
+        Assert.Equal((0, "Completed"), (code, json.GetProperty("status").GetString()));
+        var exec = Assert.Single(ssh.Executes);
+        Assert.NotEqual("build-01", exec.Machine.Name);
+
+        // The dry run lists it, by its own reason code, as never (config).
+        var (dryCode, dry, _) = await RunThree(config, "--dry-run", "--env", "CONFIGURATION=Release");
+        Assert.Equal(0, dryCode);
+        var row = dry.GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("machine").GetString() == "build-01");
+        Assert.Equal(("env_conflict", "env CONFIGURATION is set by this machine's env in machines.yml", true), (row.GetProperty("reason").GetString(), row.GetProperty("why").GetString(), row.GetProperty("permanent").GetBoolean()));
+    }
+
+    /// <summary>
+    /// When every capable machine's env: sets the variable, the job ends NoCapacity 75, not retryable, before the snapshot, with a step for
+    /// the developer naming the variable and the machines.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AllClashingEndsNoCapacityPermanent()
+    {
+        var config = ConfigLoader.Parse(Three);
+        config.Machines.ForEach(m => m.Env["CONFIGURATION"] = "Debug");
+        var payloads = new RunnerTests.FakePayloads("");
+        var ssh = new PoolSsh();
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--env", "CONFIGURATION=Release", "--needs", "node", "--", "npx", "jest"]), config, ssh, payloads,
+            new HealthProbe(ssh, TimeProvider.System), Log, _root, Repo, o, new StringWriter(), CancellationToken.None);
+        var json = Json(o.ToString());
+        Assert.Equal((75, "NoCapacity", false), (code, json.GetProperty("status").GetString(), json.GetProperty("retryable").GetBoolean()));
+        Assert.All(json.GetProperty("excluded").EnumerateArray(), x => Assert.Equal(("env_conflict", true), (x.GetProperty("reason").GetString(), x.GetProperty("permanent").GetBoolean())));
+        Assert.Equal(0, payloads.Built);
+        Assert.Empty(ssh.Calls);
+        var step = json.GetProperty("nextSteps")[0];
+        Assert.Equal("ask_developer", step.GetProperty("action").GetString());
+        Assert.Contains("drop --env CONFIGURATION or remove it from the machine's env (build-01, big-01, micro-01)", step.GetProperty("reason").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>A plan job whose env: clashes with every machine is told to fix lanq.yml or machines.yml, not the command line.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task APlanJobsClashPointsAtLanqYmlOrMachinesYml()
+    {
+        File.WriteAllText(Path.Combine(Repo, "lanq.yml"), "version: 1\njobs:\n  unit:\n    command: npx jest\n    needs: [node]\n    env: {CONFIGURATION: Release}\n");
+        var config = ConfigLoader.Parse(Three);
+        config.Machines.ForEach(m => m.Env["CONFIGURATION"] = "Debug");
+        foreach (var dry in new[] { false, true })
+        {
+            var ssh = new PoolSsh();
+            var o = new StringWriter();
+            var code = await Cli.RunPlanFile(
+                ParsedArgs.Parse(["run", "--plan", "--json", .. (dry ? new[] { "--dry-run" } : [])]), config, ssh, new RunnerTests.FakePayloads(""),
+                new HealthProbe(ssh, TimeProvider.System), Log, _root, Repo, o, new StringWriter(), CancellationToken.None);
+            var json = Json(o.ToString());
+            Assert.Equal((75, "NoCapacity"), (code, json.GetProperty("status").GetString()));
+            var reason = json.GetProperty("nextSteps")[0].GetProperty("reason").GetString()!;
+            Assert.Contains("fix lanq.yml or machines.yml", reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("fix the command line", reason, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>A candidate that lacks the job's capabilities can never take it, so its env: does not matter; a capable one is ruled out.</summary>
     [Fact]
     public async Task AMachineThatCannotTakeTheJobDoesNotBlockItWithAClash()
     {
         var config = Mixed("CONFIGURATION");
         config.Machines[1].Env["CONFIGURATION"] = "Debug"; // build-02: dotnet only, no node
-        var ssh = new FakeSsh();
-        var node = await Runner(config, ssh).RunAsync(Req(V("CONFIGURATION", "Release")) with { Needs = ["node"] }, CancellationToken.None);
+        var node = await Runner(config, new FakeSsh()).RunAsync(Req(V("CONFIGURATION", "Release")) with { Needs = ["node"] }, CancellationToken.None);
         Assert.NotEqual(JobStatus.Rejected, node.Status);
+        Assert.DoesNotContain(node.Excluded ?? [], x => x.Reason == "env_conflict");
 
-        var dotnet = await Runner(config, new FakeSsh()).RunAsync(Req(V("CONFIGURATION", "Release")), CancellationToken.None);
-        Assert.Equal((JobStatus.Rejected, RejectKind.Arguments), (dotnet.Status, dotnet.RejectKind));
-        Assert.Equal("--env CONFIGURATION: build-02's env in machines.yml sets it too; drop one", dotnet.Message);
+        var pinned = await Runner(config, new FakeSsh()).RunAsync(Req(V("CONFIGURATION", "Release")) with { On = ["build-02"] }, CancellationToken.None);
+        Assert.Equal((JobStatus.NoCapacity, false), (pinned.Status, pinned.Retryable));
+        Assert.Equal("env_conflict", Assert.Single(pinned.Excluded!).Reason);
     }
 
+    /// <summary>
+    /// A Windows machine whose command the values make too long is ruled out (windows_command_too_long, permanent) and the job runs elsewhere;
+    /// only when no other capable machine is left is the job refused, with the variables to change.
+    /// </summary>
     [Fact]
     public async Task WindowsLengthGuardCountsJobEnv()
     {
         var config = Mixed("BIG");
-        var big = V("BIG", new string('x', 6000));
+        var big = V("BIG", new string('x', 4000));
+        var ok = new FakeSsh { Handler = (m, cmd) => cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok") };
+        var r = await Runner(config, ok).RunAsync(Req(big), CancellationToken.None);
+        Assert.Equal((JobStatus.Completed, "build-01"), (r.Status, r.Machine));
+
         var ssh = new FakeSsh();
-        var r = await Runner(config, ssh).RunAsync(Req(big), CancellationToken.None);
-        Assert.Equal((JobStatus.Rejected, RejectKind.Arguments), (r.Status, r.RejectKind));
-        Assert.Matches("^the --env values make the Windows command [0-9]{1,3},[0-9]{3} characters \\(limit 8,000\\) on build-02$", r.Message);
+        var only = await Runner(config, ssh).RunAsync(Req(big) with { On = ["build-02"] }, CancellationToken.None);
+        Assert.Equal((JobStatus.Rejected, RejectKind.JobEnv), (only.Status, only.RejectKind));
+        Assert.Matches("^the --env values make the Windows command [0-9]{1,3},[0-9]{3} characters \\(limit 8,000\\) on build-02$", only.Message);
         Assert.Empty(ssh.Calls);
+        Assert.Equal("fix_command", Assert.Single(NextSteps.ForRun(ParsedArgs.Parse(["run", "--", "dotnet", "test"]), NextSteps.Outcome(only))).Action);
 
-        // The same variable fits on Linux, and a short one fits on Windows; the machine-only check at load is unchanged.
-        Assert.NotEqual(JobStatus.Rejected, (await Runner(config, new FakeSsh()).RunAsync(Req(big) with { On = ["build-01"] }, CancellationToken.None)).Status);
-        Assert.NotEqual(JobStatus.Rejected, (await Runner(config, new FakeSsh()).RunAsync(Req(V("BIG", "x")), CancellationToken.None)).Status);
-        Assert.True(RemoteScripts.WorstCaseWindowsCommandLength(T.Windows(), [big]) > RemoteScripts.MaxWindowsCommandLength);
+        // build-01 ruled out by a clash and build-02 by the length: refused (the values must change), not NoCapacity.
+        config.Machines[0].Env["BIG"] = "1";
+        Assert.Equal(RejectKind.JobEnv, (await Runner(config, new FakeSsh()).RunAsync(Req(big), CancellationToken.None)).RejectKind);
+
+        // The rule for one machine, and the load-time check without --env is unchanged.
+        var (reason, why) = JobRunner.EnvExclusion(T.Windows(), [big], windowsUnsafe: false)!.Value;
+        Assert.Equal(Exclusion.WindowsCommandTooLong, reason);
+        Assert.Matches("^with these --env values the Windows command is [0-9]{1,3},[0-9]{3} characters \\(limit 8,000\\)$", why);
+        Assert.True(Eligibility.IsPermanent(reason));
+        Assert.Null(JobRunner.EnvExclusion(T.Windows(), [big], windowsUnsafe: true)); // Windows is ruled out by its arguments already
+        Assert.Null(JobRunner.EnvExclusion(T.Linux(), [big], windowsUnsafe: false));
+        Assert.Null(JobRunner.EnvExclusion(T.Windows(), [V("BIG", "x")], windowsUnsafe: false));
         Assert.True(RemoteScripts.WorstCaseWindowsCommandLength(T.Windows()) < RemoteScripts.MaxWindowsCommandLength);
+    }
 
-        // A Windows machine without the job's capabilities (build-02 has no node) can never take it, so its length does not count.
-        Assert.NotEqual(JobStatus.Rejected, (await Runner(config, new FakeSsh()).RunAsync(Req(big) with { Needs = ["node"] }, CancellationToken.None)).Status);
+    [Fact]
+    public void TheEnvReasonCodesArePermanentConfigReasons()
+    {
+        Assert.Equal("env_conflict", Eligibility.Code(Exclusion.EnvConflict));
+        Assert.Equal("windows_command_too_long", Eligibility.Code(Exclusion.WindowsCommandTooLong));
+        Assert.True(Eligibility.IsPermanent(Exclusion.EnvConflict));
+        Assert.True(Eligibility.IsPermanent(Exclusion.WindowsCommandTooLong));
+    }
+
+    // ---- size caps ----
+
+    [Fact]
+    public void ValuesAreCappedWithoutEchoingThem()
+    {
+        Assert.Single(ParsedArgs.Parse(["run", "--env", "A=" + new string('v', JobEnv.MaxValueLength), "--", "dotnet", "test"]).Env);
+        var one = Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--env", "A=" + new string('v', JobEnv.MaxValueLength + 1), "--", "dotnet", "test"]));
+        Assert.Equal("--env A: the value is 4,097 characters; at most 4,096.", one.Message);
+
+        string[] five = [.. Enumerable.Range(0, 5).SelectMany(i => new[] { "--env", "V" + i + "=" + new string('v', 4000) })];
+        var total = Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", .. five, "--", "dotnet", "test"]));
+        Assert.Contains("at most 16,384 in all", total.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("vvvv", total.Message, StringComparison.Ordinal);
+
+        // The same from lanq.yml, through the parity path.
+        var plan = Assert.Throws<PlanFileException>(() => PlanFileLoader.Parse($"version: 1\njobs:\n  unit:\n    command: dotnet test\n    env:\n      A: {new string('v', 5000)}\n"));
+        Assert.StartsWith("lanq.yml: job 'unit' (line 3): --env A: the value is 5,000 characters; at most 4,096.", plan.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("vvvv", plan.Message, StringComparison.Ordinal);
+    }
+
+    // ---- what a re-run keeps ----
+
+    /// <summary>A real run that ends TimedOut suggests the same run with a longer --timeout: the --env flags (with their values) stay in its argv.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ATimedOutRunsRerunKeepsTheEnv()
+    {
+        var ssh = new PoolSsh { OnExecute = (e, _) => Task.FromResult(new SshResult(124, "[lanq] timed out", TimedOut: true)) };
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--timeout", "5", "--env", "CONFIGURATION=Release", "--needs", "node", "--", "npx", "jest"]), ConfigLoader.Parse(Pool()), ssh,
+            new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, _root, Repo, o, new StringWriter(), CancellationToken.None);
+        var json = Json(o.ToString());
+        Assert.Equal((124, "TimedOut"), (code, json.GetProperty("status").GetString()));
+        var argv = json.GetProperty("nextSteps").EnumerateArray().Select(s => s.TryGetProperty("argv", out var a) ? a.EnumerateArray().Select(x => x.GetString()!).ToList() : null)
+            .First(a => a is not null && a.Contains("--timeout"))!;
+        Assert.Equal("CONFIGURATION=Release", argv[argv.IndexOf("--env") + 1]);
+        Assert.Equal("10", argv[argv.IndexOf("--timeout") + 1]);
+    }
+
+    /// <summary>A shard re-run after a lost connection (--shard-retries 1) carries the same variables.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AShardRetryCarriesTheSameEnv()
+    {
+        var lost = 0;
+        var ssh = new PoolSsh
+        {
+            OnExecute = (e, _) => Task.FromResult(e.Shard == 2 && Interlocked.Increment(ref lost) == 1 ? new SshResult(255, "Connection to 10.20.30.12 closed by remote host.") : e.Exit(0)),
+        };
+        var o = new StringWriter();
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--shards", "2", "--shard-retries", "1", "--env", "CONFIGURATION=Release", "--needs", "node", "--", "npx", "jest"]),
+            ConfigLoader.Parse(Pool()), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, _root, Repo, o, new StringWriter(), CancellationToken.None);
+        Assert.Equal(0, code);
+        var second = ssh.Executes.Where(x => x.Shard == 2).ToList();
+        Assert.Equal(2, second.Count);
+        Assert.All(ssh.Executes, x => Assert.True(Before(x.Command, "CONFIGURATION=Release", "LANQ_JOB=")));
+        Assert.Equal(2, Json(o.ToString()).GetProperty("shards")[1].GetProperty("attempts").GetInt32());
+    }
+
+    /// <summary>Common settings near the deny table stay allowed when listed: NODE_ENV, GOOS, GOARCH.</summary>
+    [Fact]
+    public async Task BenignNamesNearTheDenyTablePassWhenAllowed()
+    {
+        var ssh = new FakeSsh { Handler = (m, cmd) => cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok") };
+        var p = ParsedArgs.Parse(["run", "--env", "NODE_ENV=test", "--env", "GOOS=linux", "--env", "GOARCH=arm64", "--", "dotnet", "test"]);
+        Assert.Equal(3, p.Env.Count);
+        var r = await Runner(Mixed("NODE_ENV", "GOOS", "GOARCH"), ssh).RunAsync(Req([.. p.Env]) with { On = ["build-01"] }, CancellationToken.None);
+        Assert.Equal(JobStatus.Completed, r.Status);
+    }
+
+    [Theory]
+    [InlineData("GIT_*", false)]
+    [InlineData("git_*", false)]
+    [InlineData("LD_*", false)]
+    [InlineData("CGO_*", false)]
+    [InlineData("GIT_SSH*", false)]
+    [InlineData("MSBUILD*", false)]
+    [InlineData("NODE_*", true)]
+    [InlineData("MY*", true)]
+    [InlineData("GO*", true)]
+    [InlineData("LD*", true)]
+    public void APrefixPatternFullyCoveredByTheDenyTableIsRefused(string pattern, bool accepted)
+    {
+        var yaml = Pool($"[\"{pattern}\"]");
+        if (accepted)
+        {
+            Assert.Equal([pattern], ConfigLoader.Parse(yaml).Policy.AllowedEnv);
+        }
+        else
+        {
+            var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(yaml));
+            Assert.Contains($"policy.allowed_env entry '{pattern}' is on lanq's deny list", ex.Message, StringComparison.Ordinal);
+        }
     }
 
     // ---- injection ----

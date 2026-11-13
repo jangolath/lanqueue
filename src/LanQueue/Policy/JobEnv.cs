@@ -1,12 +1,14 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using LanQueue.Config;
 
 namespace LanQueue.Policy;
 
 /// <summary>
-/// One variable a job sets (lanq run --env NAME=VALUE, lanq.yml env:). The value may be anything a developer would rather not see in a
-/// log, so <see cref="ToString"/> gives the name only, and lanq logs and prints names only (the dry run's run line is the one exception: it
-/// shows the --env flags as typed, after the secret scan).
+/// One variable a job sets (lanq run --env NAME=VALUE, lanq.yml env:). <see cref="ToString"/> gives the name only, and the JSON env field
+/// and jobs.jsonl list names only. The values are not secret-safe: the dry run shows the --env flags as typed (after the secret scan),
+/// suggested commands in nextSteps repeat the command line with them, and on the worker they are in the job's process environment, visible
+/// to other users of that machine.
 /// </summary>
 public sealed record JobEnvVar(string Name, string Value)
 {
@@ -52,18 +54,35 @@ public static partial class JobEnv
         "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH",
 
         // Python, Perl, Ruby
-        "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PERL5OPT", "PERL5LIB", "PERLLIB", "RUBYOPT", "RUBYLIB",
+        "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONWARNINGS", "PYTHONBREAKPOINT", "PYTHONPLATLIBDIR",
+        "PERL5OPT", "PERL5LIB", "PERLLIB", "RUBYOPT", "RUBYLIB",
 
-        // Profiles and system folders
-        "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR", "SYSTEMROOT", "WINDIR",
+        // Go (toolchain, module sources and the C compilers cgo runs; GOOS and GOARCH stay allowed)
+        "GOFLAGS", "GOROOT", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOENV", "GOPATH", "GOBIN", "CC", "CXX",
+
+        // Rust
+        "RUSTFMT", "RUSTUP_TOOLCHAIN",
+
+        // Native libraries that load modules from a path (OpenSSL, glibc iconv)
+        "OPENSSL_CONF", "OPENSSL_ENGINES", "OPENSSL_MODULES", "GCONV_PATH",
+
+        // Profiles and system folders (git and other tools read their config from these)
+        "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR", "SYSTEMROOT", "WINDIR", "XDG_CONFIG_HOME", "HOMEDRIVE", "HOMEPATH",
+        "HOMESHARE",
 
         // Shell
         "IFS", "CDPATH",
     ];
 
-    /// <summary>The prefixes on the hard deny table: the loader ones, .NET profilers, git, ssh, npm and yarn settings, MSBuild, and lanq's own.</summary>
+    /// <summary>The prefixes on the hard deny table: the loader ones, .NET profilers, git, ssh, npm and yarn settings, MSBuild, cgo, and lanq's own.</summary>
     internal static readonly string[] JobDeniedPrefixes =
-        [.. MachineDeniedPrefixes, "CORECLR_", "COR_", "GIT_", "SSH_", "NPM_CONFIG_", "YARN_", "MSBUILD", "LANQ_"];
+        [.. MachineDeniedPrefixes, "CORECLR_", "COR_", "GIT_", "SSH_", "NPM_CONFIG_", "YARN_", "MSBUILD", "CGO_", "LANQ_"];
+
+    /// <summary>The longest value one --env may have (characters).</summary>
+    public const int MaxValueLength = 4096;
+
+    /// <summary>The most all of a job's --env may add up to (the sum of NAME=VALUE lengths, in characters).</summary>
+    public const int MaxTotalLength = 16384;
 
     // \z, not $: "$" would also match just before a trailing newline.
     [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*\*?\z", RegexOptions.None, 1000)]
@@ -125,6 +144,11 @@ public static partial class JobEnv
             throw new ArgumentException($"--env {name} needs a value without control characters (no newlines, tabs or escapes).");
         }
 
+        if (value.Length > MaxValueLength)
+        {
+            throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"--env {name}: the value is {value.Length:N0} characters; at most {MaxValueLength:N0}."));
+        }
+
         return new JobEnvVar(name, value);
     }
 
@@ -142,6 +166,13 @@ public static partial class JobEnv
             }
 
             list.Add(v);
+        }
+
+        var total = list.Sum(v => v.Name.Length + 1 + v.Value.Length);
+        if (total > MaxTotalLength)
+        {
+            throw new ArgumentException(string.Create(
+                CultureInfo.InvariantCulture, $"--env: the variables add up to {total:N0} characters (NAME=VALUE each); at most {MaxTotalLength:N0} in all."));
         }
 
         return list;
@@ -163,7 +194,12 @@ public static partial class JobEnv
             return $"policy.allowed_env entry '{pattern}' is refused: names starting with LANQ_ are reserved for lanq itself.";
         }
 
-        if (!pattern.EndsWith('*') && IsJobDenied(pattern))
+        // An exact denied name, or a prefix every name of which a deny prefix covers (GIT_*, LD_*, GIT_SSH*): a job could never set any of
+        // them. A broader prefix that only partly overlaps (NODE_*, MY*) is fine: the deny table still wins for the names it covers.
+        var fullyDenied = pattern.EndsWith('*')
+            ? JobDeniedPrefixes.Any(p => pattern[..^1].StartsWith(p, StringComparison.OrdinalIgnoreCase))
+            : IsJobDenied(pattern);
+        if (fullyDenied)
         {
             return $"policy.allowed_env entry '{pattern}' is on lanq's deny list (it can make a command run other code or move where tools keep their files), so a job can never set it; remove it.";
         }

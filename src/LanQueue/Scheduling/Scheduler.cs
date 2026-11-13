@@ -30,7 +30,7 @@ public static class Scheduler
     /// <summary>
     /// Judges every machine for one job from its probe result (pure: no network). Each machine gets the first reason it cannot take the
     /// job, in this order: the permanent ones (a missing capability, a declared size: outside --size / --min-size, Windows for arguments
-    /// unsafe there, --mem above its total memory or a machine that never reports memory, a probed size outside the rule or unknown, git or
+    /// unsafe there, the job's --env (a machine env: that sets one too, a Windows command too long), --mem above its total memory or a machine that never reports memory, a probed size outside the rule or unknown, git or
     /// tar missing), then unreachable or asleep, then the probe's hold, then --mem above its free
     /// memory, then <paramref name="avoid"/>, then no free slot. The result keeps the input order.
     /// </summary>
@@ -42,7 +42,7 @@ public static class Scheduler
     private static Assessment AssessOne(Machine m, MachineHealth h, JobNeeds needs, IReadOnlySet<string>? avoid)
     {
         var (reason, why) = Judge(m, h, needs, avoid);
-        var jobHold = reason is Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal or Exclusion.MemUnknown or Exclusion.MemBelowRequest
+        var jobHold = reason is Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong or Exclusion.MemExceedsTotal or Exclusion.MemUnknown or Exclusion.MemBelowRequest
             or Exclusion.WrongSize or Exclusion.SizeUnknown;
         var health = jobHold ? h with { Hold = why, HoldKind = HoldKind.Job } : h;
         return new Assessment(
@@ -72,6 +72,12 @@ public static class Scheduler
         if (needs.WindowsUnsafe && m.Os == MachineOs.Windows)
         {
             return (Exclusion.WindowsUnsafeArgs, WindowsUnsafeHold);
+        }
+
+        // --env: a machine whose env: sets one of the job's variables, or a Windows machine whose command the variables make too long.
+        if (needs.EnvRuledOut.TryGetValue(m.Name, out var env))
+        {
+            return env;
         }
 
         // --mem: a reachable machine whose total memory is below it, or that never reports memory, can never take the job. (A machine whose

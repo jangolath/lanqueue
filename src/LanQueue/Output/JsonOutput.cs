@@ -150,7 +150,7 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<NextStepJson>? NextSteps { get; init; }
 
-    /// <summary>--env only, on a single run's object (the top level of --shards carries it for every shard) (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    /// <summary>--env only, on a single run's object (the top level of --shards carries it for every shard) (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
 
@@ -181,7 +181,7 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>What to do next for the whole run (see <see cref="NextStepJson"/>).</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 
-    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
 
@@ -214,9 +214,9 @@ internal sealed record ShardTimingJson(
 
 /// <summary>One machine in excluded (NoCapacity only).</summary>
 /// <param name="Reason">
-/// missing_capability, wrong_size, size_unknown, windows_unsafe_args, mem_exceeds_total, mem_unknown, tool_missing (permanent); unreachable,
-/// asleep, unreadable, paused, outside_hours, window_closing, low_disk, low_memory, memory_pressure, load, mem_below_request, busy, avoided,
-/// held (waiting may help).
+/// missing_capability, wrong_size, size_unknown, windows_unsafe_args, env_conflict, windows_command_too_long, mem_exceeds_total, mem_unknown,
+/// tool_missing (permanent); unreachable, asleep, unreadable, paused, outside_hours, window_closing, low_disk, low_memory, memory_pressure,
+/// load, mem_below_request, busy, avoided, held (waiting may help).
 /// </param>
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
@@ -271,7 +271,7 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>What to do next (see <see cref="NextStepJson"/>): WouldRun proceeds with the same command without --dry-run.</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 
-    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
 
@@ -358,7 +358,7 @@ internal sealed record PlanFileJobJson(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ShardTimingJson? ShardTiming { get; init; }
 
-    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
 
@@ -432,7 +432,7 @@ internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> Aft
     /// <summary>NoCapacity only: false when the job can never run as configured.</summary>
     public bool? Retryable { get; init; }
 
-    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
 

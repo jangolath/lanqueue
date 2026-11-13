@@ -117,8 +117,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
     /// <summary>
     /// lanq run --env NAME=VALUE (repeatable): the job's own variables, in the order given (<see cref="Policy.JobEnv.Parse"/>: split at the first
-    /// '=', a valid name not on the hard deny table, a non-empty value without control characters, no name twice). policy.allowed_env, the
-    /// secret scan and clashes with a machine's env: are checked when the job is (JobRunner's precheck). Shards inherit them.
+    /// '=', a valid name not on the hard deny table, a non-empty value of at most 4,096 characters without control characters, no name twice,
+    /// at most 16,384 characters in all). policy.allowed_env and the secret scan are checked when the job is (JobRunner's precheck); a machine
+    /// whose env: sets the same name is not used for it. Shards inherit them.
     /// </summary>
     public IReadOnlyList<Policy.JobEnvVar> Env { get; init; } = [];
 
@@ -586,9 +587,11 @@ public static partial class Cli
         allowed hours, slots, wake). On health, --size / --min-size judge each machine like --needs and --on shows only those machines.
         --env NAME=VALUE (repeatable; lanq.yml env:) sets a variable for the job only (shards too): the name must be in machines.yml
         policy.allowed_env (exact, or a prefix ending in *) and not on lanq's deny list (loader, runtime and shell startup variables such as
-        NODE_OPTIONS, DOTNET_STARTUP_HOOKS, GIT_*, HOME, TEMP, LANQ_*), the value non-empty, free of control characters and secrets, and no
-        candidate machine's env: may set the same name. Settings only, never secrets: the value is in the job's environment on the worker. The
-        JSON and jobs.jsonl carry the names only. Refused with exit 2 otherwise.
+        NODE_OPTIONS, DOTNET_STARTUP_HOOKS, GIT_*, GOFLAGS, HOME, TEMP, LANQ_*), the value non-empty, at most 4,096 characters (16,384 in all),
+        free of control characters and secrets; refused with exit 2 otherwise. A machine whose env: sets the same name, or a Windows machine
+        whose command the values make too long, is not used for the job (env_conflict, windows_command_too_long). Settings only: values are
+        visible to other users of the worker (its process list) and are not secret-safe; never pass secrets. The JSON env field and jobs.jsonl
+        list names only; suggested commands in nextSteps repeat your command line, values included.
         --exclusive (lanq.yml exclusive: true) takes every slot of the machine, so no other lanq job runs there while it does. It waits, like a
         busy machine, until every slot is free (busy, retryable; no reservation, so a machine that is never idle never takes it: use --on with
         an idle machine). With --shards each shard takes a whole machine: auto counts the idle machines, and a fixed N above the machines
