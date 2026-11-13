@@ -226,28 +226,34 @@ What `setup.ps1` does (its header has the details):
   - the container is published only on `127.0.0.1`, so nothing else on the network can reach it;
   - the key line inside carries `restrict`: no pty and no forwarding of any kind.
 
-  An existing key is reused, never overwritten.
-- **Host key.** It is made on your PC, under `%LOCALAPPDATA%\lanq-docker-worker\<name>`, and mounted read-only. The
-  container keeps the same host key across rebuilds, and it is known before the first login.
+  An existing key is reused, never overwritten. An existing `LANQ_KEY_LINUX01` that points elsewhere is never
+  changed unless you add `-ReplaceKeyEnv` (`-Force` does not).
+- **Host key.** It is made on your PC, under `%LOCALAPPDATA%\lanq-docker-worker\<name>`, and mounted read-only under
+  `/root` (0700) in the container, so job code running as `lanq` cannot read it. The container keeps the same host key
+  across rebuilds, and it is known before the first login.
 - **Limits.**
   - `--memory`/`--memory-swap` 8 GB;
   - `--cpus 4` with a `--cpuset-cpus` of the same size, the last 4 CPUs by default, so `nproc` inside says 4;
-  - `--pids-limit`, `no-new-privileges` and `--restart unless-stopped`.
+  - `--pids-limit`, `no-new-privileges`, `--init` and `--restart unless-stopped`;
+  - `--cap-drop ALL`, keeping only the six capabilities sshd and the entrypoint need: CHOWN, DAC_OVERRIDE, FOWNER,
+    SETUID, SETGID and SYS_CHROOT.
 - **ssh.** It writes `~\.ssh\config.d\lanq-<name>`:
   - `HostName 127.0.0.1`, the port, `HostKeyAlias lanq-<name>`;
   - a private `UserKnownHostsFile` `~\.ssh\known_hosts.d\lanq-<name>`, with an owner-only ACL (Windows OpenSSH checks
     included files).
 
-  It adds an `Include` line at the **top** of `~\.ssh\config` after a backup, then checks it with `ssh -G` and one
-  login. The machine's `ssh:` is `lanq@lanq-<name>`, because lanq's `ssh:` has no port field.
+  It adds an `Include` line at the **top** of `~\.ssh\config` after a backup. The line goes in front of the file's
+  bytes as they are, and the file's ACL is not changed; a UTF-16 file is refused. It then checks the result with
+  `ssh -G` and one login, and prints the steps to undo the setup when either fails. The machine's `ssh:` is `lanq@lanq-<name>`, because lanq's `ssh:` has no port field.
 - **`-Register`.** It is separate, and the owner runs it. For your `machines.yml`, and `machines.smoke.yml` when there
   is one, it:
-  - backs the file up;
-  - refuses a file it cannot edit safely: flow style, `machines:` not last, or the name already there;
+  - checks every file first, and refuses them all when one cannot be edited safely: flow style, `machines:` not last,
+    or the name already there;
+  - backs each file up;
   - appends the entry: `os: linux`, `capabilities: [dotnet, linux]`, `max_jobs: 1`, `transfer: git`, **`size:
     medium`**, and `DOTNET_CLI_TELEMETRY_OPTOUT`/`DOTNET_NOLOGO` under `env:`;
-  - runs `lanq doctor --config <file> --remote --json`;
-  - restores the backup unless the config loads and this machine has no failing check.
+  - runs `lanq doctor --config <file> --remote --json`, for 5 minutes at most;
+  - restores **every** file from its backup unless each config loads and this machine has no failing check.
 
   It prints only "added" or "refused". Job settings belong under the machine's `env:`: sshd does not pass `docker -e`
   or the image's `ENV` on to a login.
@@ -289,7 +295,10 @@ To remove the worker:
 1. Run `docker rm -f lanq-linux-01`.
 2. Run `docker volume rm lanq-linux-01-work lanq-linux-01-nuget`.
 3. Delete the Include line, `config.d\lanq-linux-01`, `known_hosts.d\lanq-linux-01`, the key, the user variable and
-   the `machines.yml` entry.
+   the entry in `machines.yml` (and `machines.smoke.yml`).
+4. Delete the host key folder `%LOCALAPPDATA%\lanq-docker-worker\linux-01`.
+5. Delete the backups once you no longer need them: `~\.ssh\config.bak-*` and the `machines*.yml.bak-*` files next to
+   your lanq config.
 
 ## Then, on your PC
 

@@ -1,21 +1,23 @@
 #!/bin/sh
 # Entrypoint of the lanq Docker worker (see Dockerfile). setup.ps1 mounts, read-only:
-#   /run/lanq/hostkey          the sshd host key (ed25519, private), generated on the PC so it survives rebuilds
+#   /root/lanq/hostkey         the sshd host key (ed25519, private), generated on the PC so it survives rebuilds; under
+#                              /root (0700) because a Windows bind mount is 0777 and job code must not read it
 #   /run/lanq/authorized_keys  the public key lanq logs in with (one line)
 # Windows bind mounts show up as 0777 and owned by root, which sshd refuses (StrictModes), so both are copied into
 # place with the right owner and modes. The key line gets the "restrict" option (no pty, no forwarding of any kind).
 set -eu
 
 src=/run/lanq
+hostkey=/root/lanq/hostkey
 home=/home/lanq
 
-if [ ! -s "$src/hostkey" ] || [ ! -s "$src/authorized_keys" ]; then
-  echo "lanq worker: $src/hostkey and $src/authorized_keys must be mounted (run setup.ps1)" >&2
+if [ ! -s "$hostkey" ] || [ ! -s "$src/authorized_keys" ]; then
+  echo "lanq worker: $hostkey and $src/authorized_keys must be mounted (run setup.ps1)" >&2
   exit 64
 fi
 
 install -d -m 0755 /run/sshd
-install -m 0600 -o root -g root "$src/hostkey" /etc/ssh/ssh_host_ed25519_key
+install -m 0600 -o root -g root "$hostkey" /etc/ssh/ssh_host_ed25519_key
 
 install -d -m 0700 -o lanq -g lanq "$home/.ssh"
 tmp=$(mktemp)

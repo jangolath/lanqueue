@@ -9,13 +9,16 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0-noble@sha256:fe0fd4e93bd2fbb47c883b7a6369
 # openssh-server: the only way in. procps: pgrep/ps (lanq-makeready and job scripts). tar/gzip: transfer: archive.
 # The image keeps no host keys: the entrypoint installs the one setup.ps1 generated, so it survives rebuilds.
 # The user lanq has no password ('*': no password login, key login still works) and no sudo.
+# The packages are not version-pinned: noble's archive drops superseded versions, so a pin would break the next build,
+# and the digest-pinned base already fixes the release. A rebuild takes that release's current security updates.
+# /root/lanq (inside /root, 0700) is where setup.ps1 mounts the host key, so job code running as lanq cannot read it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-server git procps ca-certificates tar gzip \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/ssh/ssh_host_* \
  && useradd --create-home --shell /bin/bash lanq \
  && usermod -p '*' lanq \
- && install -d -m 0700 -o lanq -g lanq /home/lanq/.ssh /home/lanq/.nuget /srv/lq
+ && install -d -m 0700 -o lanq -g lanq /home/lanq/.ssh /home/lanq/.nuget /srv/lq \n && install -d -m 0700 -o root -g root /root/lanq
 
 COPY 10-lanq.conf /etc/ssh/sshd_config.d/10-lanq.conf
 COPY entrypoint.sh /usr/local/sbin/lanq-worker-entrypoint
