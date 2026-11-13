@@ -216,6 +216,15 @@ public static partial class Cli
 
         // What to do next, then the logs of the jobs that did not complete (--json carries every logPath); all before the status line.
         var next = NextSteps.ForPlanFile(p, result, jobArgs);
+
+        // results: (0.11.0): every completed job whose results show no test executed, whatever the plan's status.
+        var noTests = result.Jobs.Select(j => (j.Name, Results: NoTestsRan(j.Status, PlanJobResults(j)))).Where(x => x.Results is not null).ToList();
+        next = WithNoTestsStep(next, [.. noTests.Select(x => x.Name)]);
+        foreach (var (name, r) in noTests)
+        {
+            await stderr.WriteLineAsync(NoTestsLine(name, r!)).ConfigureAwait(false);
+        }
+
         await WriteBaselineLines(stderr, PlanBaselines(result)).ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json)
@@ -235,6 +244,7 @@ public static partial class Cli
                 ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
                 PlanTimeoutMinutes = planTimeout,
                 PlanTimedOut = Flag(result.PlanTimedOut),
+                ResultsTotal = ResultsTotalOf(result),
             };
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.PlanFileRunJson)).ConfigureAwait(false);
         }
@@ -430,6 +440,7 @@ public static partial class Cli
             FetchError = single?.FetchError,
             ShardTiming = TimingJson(j.Sharded?.Timing),
             Baseline = BaselineJsonOf(j.Baseline),
+            Results = ResultsJsonOf(PlanJobResults(j)),
         };
     }
 

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="4f8a2c1e-0000-4000-8000-000000000001" name="worker@build-01 2026-11-13 10:00:00" runUser="worker" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Times creation="2026-11-13T10:00:00.0000000+00:00" start="2026-11-13T10:00:00.0000000+00:00" finish="2026-11-13T10:00:02.0000000+00:00" />
+  <Results>
+    <UnitTestResult executionId="e1" testId="00000000-0000-0000-0000-00000000a001" testName="Sample.MathTests.Adds" computerName="build-01" duration="00:00:00.0012000" outcome="Passed" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" />
+    <UnitTestResult executionId="e2" testId="00000000-0000-0000-0000-00000000a002" testName="Sample.MathTests.Divides(by: 0)" computerName="build-01" duration="00:00:00.2500000" outcome="Failed" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b">
+      <Output>
+        <ErrorInfo>
+          <Message>Assert.Equal() Failure</Message>
+          <StackTrace>at Sample.MathTests.Divides() in /home/worker/src/MathTests.cs:line 12</StackTrace>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+    <UnitTestResult executionId="e3" testId="00000000-0000-0000-0000-00000000a003" testName="Sample.MathTests.Later" computerName="build-01" duration="00:00:00" outcome="NotExecuted" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" />
+  </Results>
+  <TestDefinitions>
+    <UnitTest name="Sample.MathTests.Adds" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000a001">
+      <Execution id="e1" />
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner2/netcoreapp" className="Sample.MathTests" name="Sample.MathTests.Adds" />
+    </UnitTest>
+    <UnitTest name="Sample.MathTests.Divides(by: 0)" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000a002">
+      <Execution id="e2" />
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner2/netcoreapp" className="Sample.MathTests" name="Sample.MathTests.Divides(by: 0)" />
+    </UnitTest>
+    <UnitTest name="Sample.MathTests.Later" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000a003">
+      <Execution id="e3" />
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://xunit/VsTestRunner2/netcoreapp" className="Sample.MathTests" name="Sample.MathTests.Later" />
+    </UnitTest>
+  </TestDefinitions>
+  <ResultSummary outcome="Failed">
+    <Counters total="3" executed="2" passed="1" failed="1" error="0" timeout="0" aborted="0" inconclusive="0" passedButRunAborted="0" notRunnable="0" notExecuted="1" disconnected="0" warning="0" completed="0" inProgress="0" pending="0" />
+  </ResultSummary>
+</TestRun>

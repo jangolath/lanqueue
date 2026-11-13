@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="4f8a2c1e-0000-4000-8000-000000000002" name="worker@build-01" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <TestDefinitions>
+    <UnitTest name="Fails" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000b001">
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://nunit3testexecutor/" className="Sample.Outer+Inner" name="Fails" />
+    </UnitTest>
+    <UnitTest name="Passes" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000b002">
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://nunit3testexecutor/" className="Sample.Outer+Inner" name="Passes" />
+    </UnitTest>
+  </TestDefinitions>
+  <Results>
+    <UnitTestResult executionId="n1" testId="00000000-0000-0000-0000-00000000b001" testName="Fails" computerName="build-01" duration="00:00:01.5000000" outcome="Failed" />
+    <UnitTestResult executionId="n2" testId="00000000-0000-0000-0000-00000000b002" testName="Passes" computerName="build-01" duration="00:00:00.5000000" outcome="Passed" />
+  </Results>
+  <ResultSummary outcome="Failed">
+    <Counters total="2" executed="2" passed="1" failed="1" />
+  </ResultSummary>
+</TestRun>

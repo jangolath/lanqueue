@@ -292,6 +292,18 @@ internal static class NextSteps
     public static List<NextStepJson> Nothing(string reason) => [Step(NextAction.None, reason)];
 
     /// <summary>
+    /// A completed run whose results show no test executed (0.11.0): an ask_developer step (no command, so never run unattended) is added
+    /// after <paramref name="steps"/>, replacing a lone none step. <paramref name="jobs"/> names them ("the job", "job unit", "jobs a, b").
+    /// </summary>
+    public static List<NextStepJson> WithNoTests(List<NextStepJson> steps, string jobs)
+    {
+        var step = Step(
+            NextAction.AskDeveloper,
+            $"no tests ran in {jobs}: results show 0 tests executed; check the test filter, the test project and results.path; making this fail is the developer's choice (docs/PLANS.md#make-no-tests-ran-fail)");
+        return steps is [{ } only] && only.Action == Name(NextAction.None) ? [step] : [.. steps, step];
+    }
+
+    /// <summary>
     /// The lines for people: "Next: reason: command" per step (none left out), "(for the developer)" before a command that is not safe to run
     /// unattended, and only the reason when there is no command line. <paramref name="prefix"/> is "[lanq] " inside lanq run.
     /// </summary>

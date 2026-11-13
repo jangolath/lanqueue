@@ -43,7 +43,7 @@ public sealed partial class PlanFileRunTests
         Assert.Equal(["run", "--fetch", "*.trx", "--fetch-max", "100M", "--fetch-max-files", "10", "--", "dotnet", "test"], plan.Job("unit")!.RunArgs);
         Assert.Equal(["run", "--", "dotnet", "build"], plan.Job("lint")!.RunArgs);
         var alone = Assert.Throws<PlanFileException>(() => PlanFileLoader.Parse(Job("fetch_max: 50M")));
-        Assert.Equal("lanq.yml: job 'unit' (line 3): --fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.", alone.Message);
+        Assert.Equal("lanq.yml: job 'unit' (line 3): --fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern or --results.", alone.Message);
         Assert.Contains("--fetch-max must be a size from 1K to 2G", Assert.Throws<PlanFileException>(() => PlanFileLoader.Parse(Job("fetch: x\n    fetch_max: lots"))).Message, StringComparison.Ordinal);
     }
 

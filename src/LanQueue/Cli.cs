@@ -7,6 +7,7 @@ using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Output;
 using LanQueue.Payload;
+using LanQueue.Results;
 using LanQueue.Scheduling;
 using LanQueue.Ssh;
 
@@ -103,6 +104,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>--size C[,C] or --min-size C (run and health): the machine size classes a job may run on. Null without either.</summary>
     public SizeRule? Size { get; init; }
 
+    /// <summary>
+    /// lanq run --results FORMAT:PATTERN (lanq.yml results:, 0.11.0): the test results files to count after the job. Its pattern is also in
+    /// <see cref="Fetch"/> (added unless a --fetch names it). Null without it.
+    /// </summary>
+    public ResultsSpec? Results { get; init; }
+
     /// <summary>lanq run --plan (or --plan-file PATH, which implies it): run the jobs of the repository's lanq.yml.</summary>
     public bool Plan { get; init; }
 
@@ -149,7 +156,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     internal static readonly string[] PlanFileOptions =
     [
         "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--env", "--exclusive", "--baseline",
-        "--baseline-ref",
+        "--baseline-ref", "--results",
     ];
 
     /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
@@ -170,7 +177,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout",
+            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -217,6 +224,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         string? name = null;
         string? target = null;
         var fetch = new List<string>();
+        ResultsSpec? results = null;
         string? fetchDir = null;
         long? fetchMax = null;
         int? fetchMaxFiles = null;
@@ -277,6 +285,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--fetch" when i + 1 < own.Length:
                     fetch.Add(own[++i]);
+                    break;
+                case "--results" when i + 1 < own.Length:
+                    results = results is null ? ResultsSpec.Parse(own[++i]) : throw new ArgumentException("--results can be given once.");
                     break;
                 case "--env" when i + 1 < own.Length:
                     env.Add(own[++i]);
@@ -459,9 +470,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         }
 
         // With --plan these apply to the plan's fetching jobs (fetch: in lanq.yml); the plan refuses them when none of its jobs fetches.
-        if (!plan && fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
+        if (!plan && fetch.Count == 0 && results is null && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
         {
-            throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
+            throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern or --results.");
         }
 
         if (command == "makeready")
@@ -497,7 +508,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             Setup = setup,
             Add = add,
             Name = name,
-            Fetch = FetchPatterns.Validate(fetch),
+            Fetch = FetchPatterns.Validate(fetch, results?.Path),
+            Results = results,
             FetchDir = fetchDir,
             FetchMaxBytes = fetchMax,
             FetchMaxFiles = fetchMaxFiles,
@@ -616,6 +628,7 @@ public static partial class Cli
           lanq health --needs dotnet,linux [--mem 4] [--json] [--wake] [--config FILE]
           lanq run --needs dotnet,linux [--dir src] [--wait 120] [--timeout 240] [--mem 4] [--no-wake] [--json] [--config FILE] -- dotnet test
           lanq run ... [--fetch 'TestResults/**/*.trx' ...] [--fetch-dir DIR] [--fetch-max 200M] [--fetch-max-files 500] -- dotnet test
+          lanq run ... --results trx:TestResults/*.trx | junit:PATTERN -- dotnet test --logger trx
           lanq run ... --shards N|auto [--target-minutes M] [--shard-retries R] [--fail-fast] -- npx jest --shard={shard}/{shards}
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
@@ -668,6 +681,10 @@ public static partial class Cli
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
+        --results trx:PATTERN or junit:PATTERN (lanq.yml results: { format:, path: }) fetches the results files too (the pattern joins --fetch)
+        and counts their tests: "[lanq] results:" with up to 10 failed names, and --json results (counts, at most 50 failedTests, warnings).
+        When the job completed but no test was executed, lanq warns "no tests ran" and adds an ask_developer step; information only, the status
+        and exit code never change. Test names are data the worker wrote: never run them.
         unlock removes slot files past their recorded deadline (left by a crashed lanq); --all --yes removes every slot file on that machine.
         doctor checks this machine's setup without any network (ssh, git, config, known_hosts, keys, state folder, job logs); --remote also checks
         each worker over ssh (work_root, git or tar, and each capability's tool in the job environment); a paused machine or one outside its
@@ -795,7 +812,7 @@ public static partial class Cli
                     ? WritePlanJsonError("Rejected", 2, message, stdout, logTail: own.Contains("--log-tail"), steps)
                     : own[0] == "run" && own.Contains("--shards")
                     ? WriteShardsJsonError("Rejected", 2, message, stdout, steps)
-                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, steps, fetch: own.Contains("--fetch"), logTail: own.Contains("--log-tail") ? 1 : null)).ConfigureAwait(false);
+                    : WriteJsonError(own[0], "Rejected", 2, message, stdout, steps, fetch: own.Contains("--fetch") || own.Contains("--results"), logTail: own.Contains("--log-tail") ? 1 : null)).ConfigureAwait(false);
             }
 
             return 2;
@@ -953,6 +970,12 @@ public static partial class Cli
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
         var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        if (NoTestsRan(result.Status.ToString(), result.Results) is { } noTests)
+        {
+            next = NextSteps.WithNoTests(next, "the job");
+            await stderr.WriteLineAsync(NoTestsLine(null, noTests)).ConfigureAwait(false);
+        }
+
         await WriteBaselineLines(stderr, result.Baseline is { } b ? [("", b)] : []).ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json && result.LogPath is { } logPath)
@@ -978,7 +1001,10 @@ public static partial class Cli
                     result.LogPath,
                     p.LogTail),
                 fetch is not null,
-                result.Fetch);
+                result.Fetch) with
+            {
+                Results = ResultsJsonOf(result.Results),
+            };
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.RunJson)).ConfigureAwait(false);
         }
 
@@ -1031,6 +1057,7 @@ public static partial class Cli
             Exclusive = p.Exclusive,
             Baseline = p.Baseline,
             BaselineRef = p.BaselineRef,
+            Results = p.Results,
         };
 
     /// <summary>

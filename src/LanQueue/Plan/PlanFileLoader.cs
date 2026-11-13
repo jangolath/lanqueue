@@ -47,12 +47,12 @@ public static partial class PlanFileLoader
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
     internal static readonly string[] DefaultKeys =
-        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files"];
+        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
         ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "fetch_max",
-        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref"];
+        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -544,9 +544,17 @@ public static partial class PlanFileLoader
             }
         }
 
+        // results: { format:, path: } (0.11.0) is --results FORMAT:PATH (the CLI's parser judges the path and adds it to the fetch); a job's
+        // own value replaces the defaults' as a whole, and results: false on a job drops the defaults' value.
+        var results = values.TryGetValue("results", out var resultsNode) ? ResultsValue(resultsNode, Error) : null;
+        if (results is not null)
+        {
+            args.AddRange(["--results", results]);
+        }
+
         // fetch_max and fetch_max_files (0.10.0) are --fetch-max and --fetch-max-files. A job's own value is passed as written (without fetch:
-        // the CLI's own rule refuses it); one from defaults: applies only to the jobs that fetch.
-        var fetches = values.ContainsKey("fetch");
+        // or results: the CLI's own rule refuses it); one from defaults: applies only to the jobs that fetch (results: fetches its path).
+        var fetches = values.ContainsKey("fetch") || results is not null;
         foreach (var (key, option) in new[] { ("fetch_max", "--fetch-max"), ("fetch_max_files", "--fetch-max-files") })
         {
             if (values.TryGetValue(key, out var limit) && (fetches || own.ContainsKey(key)))
@@ -641,6 +649,63 @@ public static partial class PlanFileLoader
             : throw error($"fetch: each entry must be a single pattern (line {item.Start.Line}).")).ToList(),
         _ => throw error($"fetch: must be a pattern or a list of patterns (line {node.Start.Line})."),
     };
+
+    /// <summary>
+    /// results: (0.11.0): a mapping of format: (trx or junit) and path: (a fetch pattern, judged by --results' own parser), as
+    /// "FORMAT:PATH"; or false, which drops a defaults: value (null).
+    /// </summary>
+    private static string? ResultsValue(YamlNode node, Func<string, PlanFileException> error)
+    {
+        if (node is YamlScalarNode { Value: { } flag } && bool.TryParse(flag, out var on) && !on)
+        {
+            return null;
+        }
+
+        if (node is not YamlMappingNode map)
+        {
+            throw error($"results: must be a mapping with format: and path:, or false to drop the defaults: value (line {node.Start.Line}).");
+        }
+
+        string? format = null;
+        string? path = null;
+        var formatLine = node.Start.Line;
+        foreach (var (k, v) in map.Children)
+        {
+            var key = (k as YamlScalarNode)?.Value;
+            if (key is not ("format" or "path"))
+            {
+                throw error($"results: unknown key '{key}' (line {k.Start.Line}); results: takes format: and path:.");
+            }
+
+            if (v is not YamlScalarNode { Value: { } value })
+            {
+                throw error($"results: format: and path: must each be a single value (line {v.Start.Line}).");
+            }
+
+            if (key == "format")
+            {
+                (format, formatLine) = (value, v.Start.Line);
+            }
+            else
+            {
+                path = value;
+            }
+        }
+
+        if (format is null)
+        {
+            throw error($"results: format: is required: trx or junit (line {node.Start.Line}).");
+        }
+
+        if (format is not ("trx" or "junit"))
+        {
+            throw error($"results: format: must be trx or junit (line {formatLine}).");
+        }
+
+        return path is null
+            ? throw error($"results: path: is required: the fetch pattern of the results files, for example path: TestResults/*.trx (line {node.Start.Line}).")
+            : format + ":" + path;
+    }
 
     /// <summary>
     /// env: of defaults: and of the job, merged by name ignoring case (the job's value wins and its spelling of the name is kept), defaults'

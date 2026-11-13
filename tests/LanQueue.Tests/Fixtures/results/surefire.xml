@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="com.example.AllTests" tests="3">
+    <testsuite name="com.example.AppTest" tests="3" failures="0" errors="1" skipped="1" time="1,235">
+      <properties>
+        <property name="java.version" value="21"/>
+      </properties>
+      <testcase classname="com.example.AppTest" name="slow" time="1,234.5"/>
+      <testcase classname="com.example.AppTest" name="broken" time="0.5">
+        <error type="java.lang.IllegalStateException" message="boom">java.lang.IllegalStateException: boom</error>
+      </testcase>
+      <testcase classname="com.example.AppTest" name="ignored" time="0">
+        <skipped/>
+      </testcase>
+    </testsuite>
+  </testsuite>
+</testsuites>

@@ -18,7 +18,9 @@
      runs on each OS, refusals (not allowlisted, an env name not allowed, a secret in --env, a secret in a -diff file),
      env values byte-exact, exclusive, baseline new and preexisting, --shards 2, a plan (run and dry run), the 0.10
      items when this binary has them (--plan-timeout 1 gives TimedOut 124, --on narrows every plan job, and a narrowing
-     that leaves a job no machine is NoCapacity 75 with a rerun --only), and no leftover slots. Every job runs with --timeout 5; every lanq call is
+     that leaves a job no machine is NoCapacity 75 with a rerun --only), the 0.11 test results when this binary has them
+     (--results junit counts a fixed file and names its failure; no file is noTests with ask_developer), and no leftover
+     slots. Every job runs with --timeout 5; every lanq call is
      stopped after 15 minutes.
   4. Prints a PASS/FAIL/SKIP/N/A table. N/A: the smoke config has no machine of that kind (it never fails). SKIP: the
      scenario could run but did not (a machine down); it fails the smoke unless -AllowSkip. A configured machine that is
@@ -552,7 +554,7 @@ try {
     $repo = Join-Path $script:SmokeTemp 'repo'
     $checkSh = @'
 #!/bin/sh
-# lanq smoke check (scripts/smoke-workers.ps1): run SECONDS CODE|file [LABEL], or list-slots.
+# lanq smoke check (scripts/smoke-workers.ps1): run SECONDS CODE|file [LABEL], list-slots, or results 0 junit|trx|none.
 set -eu
 case "${1:-}" in
 run)
@@ -570,11 +572,22 @@ list-slots)
   [ -d "$d/locks" ] || { echo "SMOKE_NO_LOCKS"; exit 0; }
   for f in "$d"/locks/slot-*; do [ -f "$f" ] || continue; echo "SMOKE_SLOT $(head -n 1 "$f")"; done
   echo "SMOKE_SELF ${LANQ_JOB:-}" ;;
-*) echo "usage: check.sh run SECONDS CODE [LABEL] | list-slots" >&2; exit 2 ;;
+results)
+  mkdir -p TestResults
+  case "${3:-}" in
+  junit) printf '%s
+' '<?xml version="1.0" encoding="UTF-8"?><testsuites><testsuite name="smoke" tests="2"><testcase classname="Smoke" name="Passes" time="0.01"/><testcase classname="Smoke" name="Fails" time="0.02"><failure message="smoke">expected</failure></testcase></testsuite></testsuites>' > TestResults/smoke.xml ;;
+  trx) printf '%s
+' '<?xml version="1.0" encoding="UTF-8"?><TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results><UnitTestResult testId="00000000-0000-0000-0000-000000000001" testName="Passes" outcome="Passed" duration="00:00:00.0100000"/><UnitTestResult testId="00000000-0000-0000-0000-000000000002" testName="Fails" outcome="Failed" duration="00:00:00.0200000"/></Results><TestDefinitions><UnitTest name="Passes" id="00000000-0000-0000-0000-000000000001"><TestMethod className="Smoke" name="Passes"/></UnitTest><UnitTest name="Fails" id="00000000-0000-0000-0000-000000000002"><TestMethod className="Smoke" name="Fails"/></UnitTest></TestDefinitions></TestRun>' > TestResults/smoke.trx ;;
+  none) ;;
+  *) echo "usage: check.sh results 0 junit|trx|none" >&2; exit 2 ;;
+  esac
+  echo "SMOKE_RESULTS ${3:-}" ;;
+*) echo "usage: check.sh run SECONDS CODE [LABEL] | list-slots | results 0 junit|trx|none" >&2; exit 2 ;;
 esac
 '@
     $checkPs = @'
-# lanq smoke check (scripts/smoke-workers.ps1): run SECONDS CODE|file [LABEL], or list-slots.
+# lanq smoke check (scripts/smoke-workers.ps1): run SECONDS CODE|file [LABEL], list-slots, or results 0 junit|trx|none.
 param([string]$Mode, [int]$Seconds = 0, [string]$Code = '0', [string]$Label = '')
 switch ($Mode) {
     'run' {
@@ -593,7 +606,18 @@ switch ($Mode) {
         foreach ($f in Get-ChildItem "$d/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue) { "SMOKE_SLOT $(([IO.File]::ReadAllText($f.FullName) -split "`n")[0].Trim())" }
         "SMOKE_SELF $env:LANQ_JOB"
     }
-    default { 'usage: check.ps1 run SECONDS CODE [LABEL] | list-slots'; exit 2 }
+    'results' {
+        [void](New-Item -ItemType Directory -Force -Path 'TestResults')
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        switch ($Code) {
+            'junit' { [IO.File]::WriteAllText((Join-Path (Get-Location).Path 'TestResults/smoke.xml'), '<?xml version="1.0" encoding="UTF-8"?><testsuites><testsuite name="smoke" tests="2"><testcase classname="Smoke" name="Passes" time="0.01"/><testcase classname="Smoke" name="Fails" time="0.02"><failure message="smoke">expected</failure></testcase></testsuite></testsuites>' + "`n", $utf8) }
+            'trx' { [IO.File]::WriteAllText((Join-Path (Get-Location).Path 'TestResults/smoke.trx'), '<?xml version="1.0" encoding="UTF-8"?><TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results><UnitTestResult testId="00000000-0000-0000-0000-000000000001" testName="Passes" outcome="Passed" duration="00:00:00.0100000"/><UnitTestResult testId="00000000-0000-0000-0000-000000000002" testName="Fails" outcome="Failed" duration="00:00:00.0200000"/></Results><TestDefinitions><UnitTest name="Passes" id="00000000-0000-0000-0000-000000000001"><TestMethod className="Smoke" name="Passes"/></UnitTest><UnitTest name="Fails" id="00000000-0000-0000-0000-000000000002"><TestMethod className="Smoke" name="Fails"/></UnitTest></TestDefinitions></TestRun>' + "`n", $utf8) }
+            'none' { }
+            default { 'usage: check.ps1 results 0 junit|trx|none'; exit 2 }
+        }
+        "SMOKE_RESULTS $Code"
+    }
+    default { 'usage: check.ps1 run SECONDS CODE [LABEL] | list-slots | results 0 junit|trx|none'; exit 2 }
 }
 '@
     [void](Write-SmokeFile 'repo/smoke/check.sh' $checkSh)
@@ -790,6 +814,33 @@ switch ($Mode) {
                 if (-not $rerun -or (@($rerun.argv) -join ' ') -notmatch '--only small') { throw "no rerun with --only small: $(@($j.nextSteps | ForEach-Object { $_.action }) -join ', ')" }
             } finally { Remove-SmokeFile 'repo/lanq.yml' }
             'NoCapacity 75, rerun --only small'
+        }
+    }
+
+    # 10. 0.11.0 test results, when this binary has them (probed without any network: a binary before 0.11.0 does not take --results).
+    #     --results junit counts the fixed file (two tests, Smoke.Fails failed) and names the failure; with no file at all the job still
+    #     completes 0, and the results say noTests (no_results_files) with an ask_developer step.
+    $probe10 = Lanq @('run', '--plan', '--dry-run', '--json', '--no-wake', '--results', 'junit:TestResults/*.xml')
+    if ($probe10.Stdout -match 'does not take --results') {
+        Add-Result '10 test results' 'N/A' 'this binary has no --results (before 0.11.0)'
+    } else {
+        OnMachine '10a results counted' $main 'machine' {
+            $j = Assert-LanqResult (Lanq (@('run') + $common + @('--on', $main, '--results', 'junit:TestResults/*.xml', '--') + (Check $mainOs) + @('results', '0', 'junit'))) 0 'Completed'
+            if (-not $j.results) { throw 'no results object' }
+            if ($j.results.total -ne 2 -or $j.results.passed -ne 1 -or $j.results.failed -ne 1 -or $j.results.noTests -ne $false) {
+                throw "counts: total $($j.results.total), passed $($j.results.passed), failed $($j.results.failed), noTests $($j.results.noTests)"
+            }
+            $names = @($j.results.failedTests | ForEach-Object { $_.name })
+            if (($names -join ',') -ne 'Smoke.Fails') { throw "failed tests: $($names -join ',')" }
+            '2 tests, 1 failed (Smoke.Fails)'
+        }
+        OnMachine '10b no tests ran' $main 'machine' {
+            $j = Assert-LanqResult (Lanq (@('run') + $common + @('--on', $main, '--results', 'junit:TestResults/*.xml', '--') + (Check $mainOs) + @('results', '0', 'none'))) 0 'Completed'
+            if (-not $j.results -or $j.results.noTests -ne $true -or $j.results.noTestsReason -ne 'no_results_files') {
+                throw "noTests $($j.results.noTests), noTestsReason $($j.results.noTestsReason)"
+            }
+            if (@($j.nextSteps | Where-Object { $_.action -eq 'ask_developer' }).Count -eq 0) { throw 'no ask_developer next step' }
+            'noTests, ask_developer, still Completed 0'
         }
     }
 

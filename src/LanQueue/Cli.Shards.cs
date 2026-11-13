@@ -124,6 +124,13 @@ public static partial class Cli
         // What to do next, then the logs of the shards that did not complete (--json carries every shard's logPath); all before the status
         // line, which stays last.
         var next = NextSteps.ForShards(p, result);
+        var merged = MergedResults(result);
+        if (NoTestsRan(result.Status, merged) is { } noTests)
+        {
+            next = NextSteps.WithNoTests(next, "the job");
+            await stderr.WriteLineAsync(NoTestsLine(null, noTests)).ConfigureAwait(false);
+        }
+
         await WriteBaselineLines(stderr, result.Shards.Where(s => s.Baseline is not null).Select(s => (string.Create(CultureInfo.InvariantCulture, $"shard {s.Index}/{result.Count} "), s.Baseline!)))
             .ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
@@ -157,6 +164,7 @@ public static partial class Cli
                     Shard = s.Index,
                     Attempts = s.Attempts,
                     Baseline = BaselineJsonOf(s.Baseline),
+                    Results = ResultsJsonOf(s.Results),
                 },
                 s.LogPath,
                 logTail),
@@ -167,6 +175,7 @@ public static partial class Cli
         Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
         ShardTiming = TimingJson(result.Timing),
         NextSteps = nextSteps ?? [],
+        Results = ResultsJsonOf(MergedResults(result)),
     };
 
     /// <summary>The shardTiming object of --shards auto --target-minutes (sanitised: the key, dir and machine come from the job log); null without it.</summary>

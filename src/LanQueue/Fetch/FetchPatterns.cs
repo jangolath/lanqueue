@@ -83,11 +83,23 @@ public static partial class FetchPatterns
     }
 
     /// <summary>Validates a list of patterns; throws <see cref="ArgumentException"/> naming the first bad one (sanitised by the caller).</summary>
-    public static IReadOnlyList<string> Validate(IReadOnlyList<string> patterns)
+    /// <param name="extra">
+    /// --results' pattern (0.11.0, already valid): added at the end unless a pattern equals it (ordinal); it counts toward
+    /// <see cref="MaxPatterns"/>.
+    /// </param>
+    public static IReadOnlyList<string> Validate(IReadOnlyList<string> patterns, string? extra = null)
     {
-        if (patterns.Count > MaxPatterns)
+        var adds = extra is not null && !patterns.Contains(extra, StringComparer.Ordinal);
+        if (patterns.Count + (adds ? 1 : 0) > MaxPatterns)
         {
-            throw new ArgumentException($"--fetch can be given at most {MaxPatterns} times.");
+            throw new ArgumentException(extra is null
+                ? $"--fetch can be given at most {MaxPatterns} times."
+                : $"--fetch can be given at most {MaxPatterns} times (--results adds its path unless a --fetch names it).");
+        }
+
+        if (adds)
+        {
+            patterns = [.. patterns, extra!];
         }
 
         foreach (var p in patterns)

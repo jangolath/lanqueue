@@ -5,6 +5,7 @@ using LanQueue.Fetch;
 using LanQueue.Health;
 using LanQueue.Payload;
 using LanQueue.Policy;
+using LanQueue.Results;
 using LanQueue.Scheduling;
 using LanQueue.Ssh;
 
@@ -155,6 +156,13 @@ public sealed record JobRequest(
     /// <summary>--baseline-ref: the branch, tag or commit to compare with (its merge-base with HEAD); null means the default branch.</summary>
     public string? BaselineRef { get; init; }
 
+    /// <summary>
+    /// lanq run --results (lanq.yml results:, 0.11.0): after the fetch, the fetched files that match its pattern are counted
+    /// (<see cref="TestResultsParser"/>) into <see cref="JobResult.Results"/>. Its pattern is among <see cref="Fetch"/>'s; without a fetch
+    /// nothing is counted. Information only.
+    /// </summary>
+    public ResultsSpec? Results { get; init; }
+
     /// <summary>A baseline rerun only: the id of the failed job it reruns (jobs.jsonl baselineOf; timing history leaves such records out).</summary>
     public string? BaselineOf { get; init; }
 
@@ -176,6 +184,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
 {
     /// <summary>What --fetch brought back; null when no fetch was asked for or the job never ran. Never changes <see cref="CliExitCode"/>.</summary>
     public FetchReport? Fetch { get; init; }
+
+    /// <summary>--results (0.11.0): what lanq counted in the fetched results files; null without results or when nothing was fetched. Never changes <see cref="CliExitCode"/>.</summary>
+    public TestResults? Results { get; init; }
 
     /// <summary>
     /// True when the job ended InfraError because the machine stopped answering ssh (exit 255) while the job was uploaded, prepared or run:
@@ -1436,14 +1447,49 @@ public sealed partial class JobRunner(
             {
                 var lost = new FetchReport(Path.GetFullPath(Path.Combine(req.Fetch.OutputRoot, jobId)), [], [], "not fetched: the SSH connection failed during the job, and the machine did not answer afterwards");
                 Summarise(lost, result, onLine);
-                return result with { Fetch = lost };
+                return result with { Fetch = lost, Results = CountResults(req, lost, machine, onLine) };
             }
         }
 
         // The job ran (completed, failed, or was stopped): bring back what it produced, before the caller's cleanup deletes the job folder.
-        return req.Fetch is { } fetch
-            ? result with { Fetch = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false) }
-            : result;
+        if (req.Fetch is not { } fetch)
+        {
+            return result;
+        }
+
+        var report = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false);
+        return result with { Fetch = report, Results = CountResults(req, report, machine, onLine) };
+    }
+
+    /// <summary>
+    /// --results (0.11.0): counts the fetched results files (never throws) and prints, after the fetch summary, the reader's warnings, one
+    /// "[lanq] results:" line and up to 10 failed names. Null without --results.
+    /// </summary>
+    private static TestResults? CountResults(JobRequest req, FetchReport report, Machine machine, Action<string> onLine)
+    {
+        if (req.Results is not { } spec)
+        {
+            return null;
+        }
+
+        var r = TestResultsParser.Parse(spec, report, ignoreCase: machine.Os == MachineOs.Windows);
+        foreach (var w in r.Warnings)
+        {
+            onLine(SafeLine("[lanq] results warning: " + w));
+        }
+
+        onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq] results: {r.Total} tests, {r.Passed} passed, {r.Failed} failed, {r.Skipped} skipped"));
+        foreach (var f in r.FailedTests.Take(10))
+        {
+            onLine("[lanq]   failed " + TestResultsParser.SafeName(f.Name));
+        }
+
+        if (r.FailedKnown > 10)
+        {
+            onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq]   ... and {r.FailedKnown - 10} more failed"));
+        }
+
+        return r;
     }
 
     /// <summary>

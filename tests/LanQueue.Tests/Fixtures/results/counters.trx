@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="4f8a2c1e-0000-4000-8000-000000000004" name="worker@build-01" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Results>
+    <UnitTestResult executionId="k1" testId="00000000-0000-0000-0000-00000000d001" testName="Sample.OneTests.Passes" duration="00:00:00.0100000" outcome="Passed" />
+    <UnitTestResult executionId="k2" testId="00000000-0000-0000-0000-00000000d002" testName="Sample.OneTests.AlsoPasses" duration="00:00:00.0100000" outcome="Passed" />
+  </Results>
+  <ResultSummary outcome="Completed">
+    <Counters total="5" executed="5" passed="5" failed="0" />
+  </ResultSummary>
+</TestRun>
