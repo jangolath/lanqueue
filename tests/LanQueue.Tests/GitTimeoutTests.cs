@@ -84,6 +84,34 @@ public class GitTimeoutTests
     public void EachGitCallHasALimitByWhatItDoes(string subcommand, int seconds) =>
         Assert.Equal(TimeSpan.FromSeconds(seconds), GitPayloadBuilder.TimeoutFor(subcommand));
 
+    /// <summary>
+    /// Cleanup after a killed git is best effort: a delete that fails (here a missing folder; on Windows a file a killed git still holds) never
+    /// throws, so it cannot replace the GitTimeoutException that ends the build's retries.
+    /// </summary>
+    [Fact]
+    public void ACleanupThatFailsNeverReplacesTheError()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "lanq-none-" + Guid.NewGuid().ToString("N"), "x.bundle.lock");
+        Assert.ThrowsAny<IOException>(() => File.Delete(missing));
+        GitPayloadBuilder.TryDelete(missing);
+
+        if (OperatingSystem.IsWindows())
+        {
+            var held = Path.GetTempFileName();
+            try
+            {
+                using (new FileStream(held, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    GitPayloadBuilder.TryDelete(held);
+                }
+            }
+            finally
+            {
+                File.Delete(held);
+            }
+        }
+    }
+
     /// <summary>The archive's long-lived cat-file --batch stream has its own limit: on expiry it fails as a timeout and leaves no archive.</summary>
     [Fact]
     public async Task TheArchiveStreamTimesOutAndLeavesNoArchive()

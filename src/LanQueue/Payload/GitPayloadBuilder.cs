@@ -85,9 +85,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         }
         finally
         {
-            // A git killed mid-write (timeout, Ctrl+C) can leave the index lock behind.
-            File.Delete(tmpIndex);
-            File.Delete(tmpIndex + ".lock");
+            // A git killed mid-write (timeout, Ctrl+C) can leave the index lock behind. Best effort: the real error must win.
+            TryDelete(tmpIndex);
+            TryDelete(tmpIndex + ".lock");
         }
     }
 
@@ -142,8 +142,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         }
         catch
         {
-            // A failed or killed bundle create (timeout, Ctrl+C) can leave its lock file; the next try must not trip over it.
-            File.Delete(bundle + ".lock");
+            // A failed or killed bundle create (timeout, Ctrl+C) can leave its lock file; the next try must not trip over it. Best effort:
+            // a delete that fails (Windows, a handle still open) must not replace the GitTimeoutException, which ends the retries.
+            TryDelete(bundle + ".lock");
             throw;
         }
         finally
@@ -327,13 +328,14 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             finally
             {
                 Kill(p);
+                WaitBriefly(p);
             }
 
             return new ArchiveBuild(archivePath, symlinks, submodules);
         }
         catch
         {
-            File.Delete(archivePath);
+            TryDelete(archivePath); // best effort: the real error (a GitTimeoutException ends the retries) must win
             throw;
         }
     }
@@ -551,6 +553,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         catch (OperationCanceledException)
         {
             Kill(p);
+            WaitBriefly(p); // so its file handles (index, locks) are released before the caller cleans up
             try
             {
                 await Task.WhenAll(output, err).ConfigureAwait(false);
@@ -588,11 +591,38 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         return psi;
     }
 
+    /// <summary>Waits at most 5 s for a killed process to be gone.</summary>
+    private static void WaitBriefly(Process p)
+    {
+        try
+        {
+            p.WaitForExit(5000);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // nothing to wait for
+        }
+    }
+
+    /// <summary>Deletes a leftover file, best effort: a cleanup failure never replaces the error being reported.</summary>
+    internal static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // still held by a process that was just killed, or not ours to delete: left behind
+        }
+    }
+
     private static void Kill(Process p)
     {
         try
         {
-            // Always the whole tree, even when git itself has exited: a child it started may still hold the pipes.
+            // Always the whole tree, even when git itself has exited: on Windows a child it started may still run and hold the pipes (on
+            // Linux an orphan is reparented and outside the tree, so there this only reaches children of a git still running).
             p.Kill(entireProcessTree: true);
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
