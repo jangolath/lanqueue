@@ -33,8 +33,15 @@ internal record HealthJson(
     /// </summary>
     public bool LoadKnown { get; init; } = true;
 
-    /// <summary>max_jobs minus the slots in use (0 for a machine that is down).</summary>
+    /// <summary>max_jobs minus the slots in use, stale ones not counted (0 for a machine that is down).</summary>
     public int FreeSlots { get; init; }
+
+    /// <summary>
+    /// Of slotsUsed, the slot files left by a crashed run (more than 30 minutes past their deadline): they do not count against freeSlots,
+    /// and the next claim reclaims them. Only when above 0 (0.9.0).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SlotsStale { get; init; }
 
     /// <summary>
     /// light, medium, heavy or unknown: the machine's effective size (its size: in machines.yml when it has one, else the probed class; see

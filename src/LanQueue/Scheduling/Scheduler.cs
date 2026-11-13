@@ -24,7 +24,7 @@ public static class Scheduler
         [.. assessed
             .Where(a => a.Eligible)
             .OrderBy(a => a.Health.LoadRatio)
-            .ThenBy(a => a.Health.SlotsUsed)
+            .ThenBy(a => a.Health.SlotsLive)
             .ThenBy(a => a.Machine.Name, StringComparer.Ordinal)];
 
     /// <summary>
@@ -51,7 +51,7 @@ public static class Scheduler
             reason,
             why,
             Eligibility.IsPermanent(reason),
-            Math.Max(0, m.MaxJobs - h.SlotsUsed),
+            Math.Max(0, m.MaxJobs - h.SlotsLive),
             reason == Exclusion.None ? Math.Max(0, FreeFor(m, h, needs.MemGb, 0, 0, needs.Exclusive)) : 0);
     }
 
@@ -152,19 +152,25 @@ public static class Scheduler
             return (Exclusion.Avoided, "avoided: an earlier attempt of the waiting shard(s) lost the connection there and may still be running");
         }
 
-        if (needs.Exclusive && h.SlotsUsed > 0)
+        // Stale slots (a crashed run's, past their deadline plus the grace) do not count: the claim reclaims each one it passes.
+        if (needs.Exclusive && h.SlotsLive > 0)
         {
             // --exclusive takes every slot: any slot in use rules the machine out for now (busy, retryable; no reservation).
-            return (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}; --exclusive needs all {m.MaxJobs} free)"));
+            return (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}{StaleNote(h)}; --exclusive needs all {m.MaxJobs} free)"));
         }
 
-        return h.SlotsUsed >= m.MaxJobs
-            ? (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs})"))
+        return h.SlotsLive >= m.MaxJobs
+            ? (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}{StaleNote(h)})"))
             : (Exclusion.None, null);
     }
 
+    /// <summary>", 1 stale: reclaimed by the next claim" when the probe saw stale slots; empty otherwise (the text stays as before).</summary>
+    internal static string StaleNote(MachineHealth h) =>
+        h.SlotsStale > 0 ? string.Create(CultureInfo.InvariantCulture, $", {h.SlotsStale} stale: reclaimed by the next claim") : "";
+
     /// <summary>
-    /// How many copies of a job a machine can take now: max_jobs minus the slots in use (or this run's own shards there, if more), and with --mem
+    /// How many copies of a job a machine can take now: max_jobs minus the slots in use (stale ones, <see cref="MachineHealth.SlotsStale"/>,
+    /// not counted: the claim reclaims them) (or this run's own shards there, if more), and with --mem
     /// no more than its free memory covers: floor((free memory - --mem for each of this run's shards placed there but not running yet) / --mem).
     /// A placed shard still uploading or preparing uses no memory yet, so the probe cannot see what it will need. A machine that does not
     /// report memory is already excluded under --mem. An <paramref name="exclusive"/> job takes every slot of its machine: 1 when no slot
@@ -173,8 +179,8 @@ public static class Scheduler
     public static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours, int oursNotRunning, bool exclusive = false)
     {
         var slots = exclusive
-            ? (h.SlotsUsed == 0 && ours == 0 && machine.MaxJobs > 0 ? 1 : 0)
-            : machine.MaxJobs - Math.Max(h.SlotsUsed, ours);
+            ? (h.SlotsLive == 0 && ours == 0 && machine.MaxJobs > 0 ? 1 : 0)
+            : machine.MaxJobs - Math.Max(h.SlotsLive, ours);
         return memGb is { } need && h.MemFreeGb is { } free ? Math.Min(slots, Math.Max(0, (int)Math.Floor((free - (oursNotRunning * need)) / need))) : slots;
     }
 

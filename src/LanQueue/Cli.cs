@@ -1251,7 +1251,7 @@ public static partial class Cli
     {
         var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
         var detail = h.Reachable
-            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
+            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}{StaleText(h)}")
                 + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                 + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores) + DeclaredSizeNote(m, h)
             : h.Error ?? "";
@@ -1282,8 +1282,13 @@ public static partial class Cli
             Size = MachineSize.Word(MachineSize.Effective(m, h.MemTotalGb, h.Cores)),
             SizeSource = MachineSize.Declared(m) is null ? "probe" : "config",
             SuitedFor = MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores),
+            SlotsStale = h.Reachable && h.SlotsStale > 0 ? h.SlotsStale : null,
         };
     }
+
+    /// <summary>" (1 stale: reclaimed by the next claim)" after a health row's slots when the probe saw stale slots; empty otherwise.</summary>
+    private static string StaleText(MachineHealth h) =>
+        h.SlotsStale > 0 ? string.Create(CultureInfo.InvariantCulture, $" ({h.SlotsStale} stale: reclaimed by the next claim)") : "";
 
     /// <summary>With a size: in machines.yml, " (size: heavy in machines.yml; probe: medium)" after the suited text; empty without one (the line stays as before).</summary>
     private static string DeclaredSizeNote(Machine m, MachineHealth h) =>
@@ -1291,8 +1296,8 @@ public static partial class Cli
             ? $" (size: {MachineSize.Word(declared)} in machines.yml; probe: {MachineSize.Word(MachineSize.Classify(h.MemTotalGb, h.Cores))})"
             : "";
 
-    /// <summary>Slots a job could take now: max_jobs minus the slots in use (never below 0).</summary>
-    private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsUsed);
+    /// <summary>Slots a job could take now: max_jobs minus the slots in use, stale ones not counted (never below 0).</summary>
+    private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsLive);
 
     private static string Load(MachineHealth h) => h.LoadKnown ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}") : "load ?";
 

@@ -53,7 +53,7 @@ public static partial class RemoteScripts
             } catch { } }
             if ($null -eq $cpu) { $cpu = 0 }
             $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
-            $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }).Count
+            $sf = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }); $slots = $sf.Count
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
             'load_source=' + $ls
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
@@ -67,6 +67,7 @@ public static partial class RemoteScripts
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
             $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $s = $e - ($e % 900)
+            {{WindowsStaleSlotCount}}
             'now_epoch=' + $e
             'tz_start=' + $s
             'tz_offsets=' + ((0..144 | ForEach-Object { [int][TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds($s + 900 * $_)).TotalMinutes }) -join ',')
@@ -82,6 +83,7 @@ public static partial class RemoteScripts
             echo "load=$(awk -v l="$l" -v c="$cpus" 'BEGIN{printf "%.3f", l/c}')"
             echo "disk_free_gb=$(df -Pk "$d" | awk 'NR==2{printf "%.1f", $4/1048576}')"
             echo "slots_used=$(ls "$R/locks" 2>/dev/null | grep -c '^slot-[0-9][0-9]*$')"
+            {{LinuxStaleSlotCount}}
             awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^MemTotal:/{print "mem_total_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
             if [ -n "$n" ]; then echo "cores=$n"; fi
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
@@ -240,6 +242,21 @@ public static partial class RemoteScripts
     internal const int StaleSlotGraceSeconds = 1800;
 
     /// <summary>
+    /// The probe's <c>slots_stale=</c> on Windows (needs $sf, the probe's slot-N files, and $e, the worker's epoch now): how many slot-N files a claim would reclaim now, by the reclaim's own rules in
+    /// <see cref="AcquireSlot"/> (a second line of 1 to 18 digits, and the worker's epoch now more than <see cref="StaleSlotGraceSeconds"/>
+    /// past it). A slot without a deadline, with a malformed one, or still inside the grace is not stale.
+    /// </summary>
+    internal static string WindowsStaleSlotCount =>
+        "'slots_stale='+@($sf|?{try{$x=[IO.File]::ReadAllText($_.FullName) -split \"`n\";$x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\\z' -and $e -gt [long]$x[1].Trim()+"
+        + StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture) + "}catch{}}).Count";
+
+    /// <summary>The probe's <c>slots_stale=</c> on Linux (needs $R): as <see cref="WindowsStaleSlotCount"/>, with deadline_of's rules (leading zeros stripped).</summary>
+    internal static string LinuxStaleSlotCount =>
+        "sn=0; ne=$(date +%s); for sf in \"$R\"/locks/slot-*; do case \"${sf##*/}\" in slot-|slot-*[!0-9]*) continue ;; esac; [ -f \"$sf\" ] || continue; "
+        + "dl=$(sed -n 2p \"$sf\" 2>/dev/null); case \"$dl\" in ''|*[!0-9]*) continue ;; esac; [ ${#dl} -le 18 ] || continue; dl=$(printf '%s' \"$dl\" | sed 's/^0*//'); "
+        + "if [ \"$ne\" -gt $((${dl:-0} + " + StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture) + ")) ]; then sn=$((sn+1)); fi; done; echo \"slots_stale=$sn\"";
+
+    /// <summary>
     /// Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback), the --fetch step
     /// (<see cref="JobRunner.FetchTimeout"/>) and cleanup.
     /// </summary>
@@ -307,26 +324,38 @@ public static partial class RemoteScripts
     }
 
     /// <summary>
+    /// <see cref="WindowsSlotFunctions"/> (lanq's own constant text) deflated and dot-sourced, so <see cref="AcquireAll"/> with its extra
+    /// back-out and higher-slot checks stays under the Windows command-line cap; it defines the same functions and variables in the same scope.
+    /// </summary>
+    private static readonly string WindowsSlotFunctionsPacked =
+        ". ([scriptblock]::Create((New-Object IO.StreamReader (New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('"
+        + Deflated(WindowsSlotFunctions) + "')), ([IO.Compression.CompressionMode]::Decompress))).ReadToEnd()))";
+
+    /// <summary>
     /// lanq run --exclusive: claims EVERY slot file, slot-1 to slot-max_jobs in ascending order, each exactly as <see cref="AcquireSlot"/>
     /// claims one (the same atomic create, the same content: job id and deadline, and the same stale reclaim under the slot's lock file).
     /// Prints <c>SLOTS=1,2,...,n</c> when it holds them all. At the first slot it cannot create it removes the slots this attempt created
     /// (each only if its first line is still this job id) and prints <c>SLOT=FULL</c>: all or nothing. The ascending order means two
     /// exclusive claims never deadlock; at worst both back off and one wins on a later look. Each slot file is an ordinary slot, so the
     /// probe, <see cref="Unlock"/> and a later stale reclaim (slot by slot) treat them as they treat any other.
+    /// Once it holds them all it also looks above max_jobs: a live slot-N with N above max_jobs (another lanq with a higher max_jobs for the
+    /// same work_root runs a job there; one past its deadline plus the grace does not count) makes it back out and print <c>SLOT=FULL</c> too.
     /// </summary>
     public static string AcquireAll(Machine m, string jobId, TimeSpan jobTimeout)
     {
         var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
         var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
         var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
-        // The sh loop keeps its own names (sf, n, got): stop_job's kill_recorded uses f and g as globals.
+        // The sh loop keeps its own names (sf, n, nn, got): stop_job's kill_recorded used f and g as globals once.
         return m.Os == MachineOs.Windows
             ? $$"""
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
                 [void][IO.Directory]::CreateDirectory("$root/locks")
                 $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
-                {{WindowsSlotFunctions}}
+                {{WindowsSlotFunctionsPacked}}
                 $jid={{ShellQuote.PowerShell(jobId)}};$got=@()
+                function BO{foreach($n in $got){$g="$root/locks/slot-$n";try{if(($IOFile::ReadAllText($g) -split "`n")[0].Trim() -ceq $jid){$IOFile::Delete($g)} }catch{} };'SLOT=FULL';exit 0}
+                function HL{foreach($h in (gci "$root/locks" -Filter slot-* -EA 0)){if($h.Name -notmatch '^slot-0*([0-9]+)\z' -or ($Matches[1].Length -lt 10 -and [long]$Matches[1] -le {{max}})){continue};try{$x=$IOFile::ReadAllText($h.FullName) -split "`n"}catch{continue};if(!($x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$x[1].Trim()+{{grace}}))){return 1} };0}
                 for($i=1;$i -le {{max}};$i++){
                   $f="$root/locks/slot-$i"
                   try {
@@ -341,9 +370,9 @@ public static partial class RemoteScripts
                     $b=[Text.Encoding]::UTF8.GetBytes($jid+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close();$ok=$true
                   }catch [IO.IOException]{}
                   if($ok){$got+=$i;continue}
-                  foreach($n in $got){$g="$root/locks/slot-$n";try{if(($IOFile::ReadAllText($g) -split "`n")[0].Trim() -ceq $jid){$IOFile::Delete($g)} }catch{} }
-                  'SLOT=FULL';exit 0
+                  BO
                 }
+                if(HL){BO}
                 'SLOTS='+($got -join ',')
                 """
             : $$"""
@@ -352,6 +381,26 @@ public static partial class RemoteScripts
                 now=$(date +%s); D=$((now + {{lease}}))
                 {{LinuxSlotFunctions}}
                 J={{ShellQuote.Posix(jobId)}}; got=
+                back_out() {
+                  n=1
+                  while [ "$n" -lt "$i" ]; do
+                    sf="$R/locks/slot-$n"
+                    if [ "$(sed -n 1p "$sf" 2>/dev/null)" = "$J" ]; then rm -f "$sf"; fi
+                    n=$((n+1))
+                  done
+                  echo "SLOT=FULL"; exit 0
+                }
+                higher_live() {
+                  for sf in "$R"/locks/slot-*; do
+                    case "${sf##*/}" in slot-|slot-*[!0-9]*) continue ;; esac
+                    [ -f "$sf" ] || continue
+                    nn=$(printf '%s' "${sf##*/slot-}" | sed 's/^0*//')
+                    if [ ${#nn} -le 9 ] && [ "${nn:-0}" -le {{max}} ]; then continue; fi
+                    if d=$(deadline_of "$(cat "$sf" 2>/dev/null)") && [ "$now" -gt $((d + {{grace}})) ]; then continue; fi
+                    return 0
+                  done
+                  return 1
+                }
                 i=1
                 while [ "$i" -le {{max}} ]; do
                   sf="$R/locks/slot-$i"
@@ -366,14 +415,9 @@ public static partial class RemoteScripts
                     fi
                   fi
                   if ( set -C; printf '%s\n%s\n' "$J" "$D" > "$sf" ) 2>/dev/null; then got="$got${got:+,}$i"; i=$((i+1)); continue; fi
-                  n=1
-                  while [ "$n" -lt "$i" ]; do
-                    sf="$R/locks/slot-$n"
-                    if [ "$(sed -n 1p "$sf" 2>/dev/null)" = "$J" ]; then rm -f "$sf"; fi
-                    n=$((n+1))
-                  done
-                  echo "SLOT=FULL"; exit 0
+                  back_out
                 done
+                if higher_live; then back_out; fi
                 echo "SLOTS=$got"
                 """;
     }

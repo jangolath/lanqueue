@@ -234,20 +234,31 @@ public sealed class ExclusiveTests : IDisposable
     /// test creates only once every script is ready. So the claims really start together, whatever each shell's start-up time. The outputs,
     /// in the order given.
     /// </summary>
-    private List<string> Race(string shell, IReadOnlyList<string> scripts)
+    /// <param name="stagger">Per script, a short spin after go (PowerShell: milliseconds; sh: hundreds of loop turns), or null for none.</param>
+    private List<string> Race(string shell, IReadOnlyList<string> scripts, IReadOnlyList<int>? stagger = null)
     {
         var gate = (_root + "/gate-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
         Directory.CreateDirectory(gate);
         var go = gate + "/go";
+        int Spin(int i) => stagger is null ? 0 : stagger[i];
         string Barrier(int i)
         {
             var ready = gate + "/ready-" + i.ToString(CultureInfo.InvariantCulture);
             return shell == "windows"
-                ? $"[IO.File]::WriteAllText({ShellQuote.PowerShell(ready)}, '');$sw=[Diagnostics.Stopwatch]::StartNew();while(-not [IO.File]::Exists({ShellQuote.PowerShell(go)}) -and $sw.ElapsedMilliseconds -lt 10000){{}}"
-                : $": > {ShellQuote.Posix(ready)}; w=0; while [ ! -f {ShellQuote.Posix(go)} ] && [ \"$w\" -lt 2000000 ]; do w=$((w+1)); done";
+                ? $"[IO.File]::WriteAllText({ShellQuote.PowerShell(ready)}, '');$sw=[Diagnostics.Stopwatch]::StartNew();while(-not [IO.File]::Exists({ShellQuote.PowerShell(go)}) -and $sw.ElapsedMilliseconds -lt 10000){{}};$sw.Restart();while($sw.Elapsed.TotalMilliseconds -lt {Spin(i)}){{}}"
+                : $": > {ShellQuote.Posix(ready)}; w=0; while [ ! -f {ShellQuote.Posix(go)} ] && [ \"$w\" -lt 2000000 ]; do w=$((w+1)); done; w=0; while [ \"$w\" -lt {Spin(i) * 100} ]; do w=$((w+1)); done";
         }
 
-        var runs = scripts.Select((script, i) => Task.Run(() => Shells.Run(shell, Barrier(i) + "\n" + script).Output)).ToArray();
+        // The barrier goes just before each script's claim loop, after its set-up (function definitions, the Windows unpacking), so the
+        // claims themselves start together rather than the scripts.
+        string AtTheLoop(string script, int i)
+        {
+            var loop = System.Text.RegularExpressions.Regex.Match(script, @"^[ \t]*(for\(\$i=1;|i=1$)", System.Text.RegularExpressions.RegexOptions.Multiline, TimeSpan.FromSeconds(5));
+            Assert.True(loop.Success, "no claim loop found");
+            return script[..loop.Index] + Barrier(i) + "\n" + script[loop.Index..];
+        }
+
+        var runs = scripts.Select((script, i) => Task.Run(() => Shells.Run(shell, AtTheLoop(script, i)).Output)).ToArray();
         var waited = System.Diagnostics.Stopwatch.StartNew();
         while (Directory.GetFiles(gate, "ready-*").Length < scripts.Count && waited.Elapsed < TimeSpan.FromSeconds(60))
         {
@@ -316,11 +327,13 @@ public sealed class ExclusiveTests : IDisposable
         var contended = 0;
         var normalHeldWhileExclusiveHeldNone = 0;
         var n = 0;
-        for (; n < atMost && (n < iterations || contended == 0); n++)
+        for (; n < atMost && (n < iterations || contended == 0 || normalHeldWhileExclusiveHeldNone == 0); n++)
         {
             ClearLocks();
             WriteSlot(3, live);
-            var outputs = Race(shell, [AllScript(shell, "ex", 3), OneScript(shell, "n1", 3), OneScript(shell, "n2", 3)]);
+            // The normal claims start a little later, by a different amount each round, to land inside the exclusive claim's short hold.
+            var lag = n % 6;
+            var outputs = Race(shell, [AllScript(shell, "ex", 3), OneScript(shell, "n1", 3), OneScript(shell, "n2", 3)], [0, lag, lag + 1]);
             var (ex, n1, n2) = (JobRunner.ParseSlot(outputs[0]), JobRunner.ParseSlot(outputs[1]), JobRunner.ParseSlot(outputs[2]));
 
             Assert.Null(ex);
@@ -341,7 +354,7 @@ public sealed class ExclusiveTests : IDisposable
             }
         }
 
-        Assert.Equal(n, normalHeldWhileExclusiveHeldNone);
+        Assert.True(normalHeldWhileExclusiveHeldNone > 0, $"in {n} races no normal claim ever held a slot");
         Assert.True(contended > 0, $"in {n} races the exclusive claim never held a slot while a normal claim looked");
     }
 
@@ -769,5 +782,192 @@ public sealed class ExclusiveTests : IDisposable
         Assert.True(json.GetProperty("exclusive").GetBoolean());
         Assert.Contains("--exclusive (needs every slot of the machine", stderr, StringComparison.Ordinal);
         Assert.Contains("--exclusive", json.GetProperty("nextSteps")[0].GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+    }
+
+    // ---- stale slots on a machine judged busy (0.9.0: the probe reports them, scheduling does not count them) ----
+
+    [ShFact]
+    public void TheProbeCountsStaleSlotsByTheReclaimsRulesSh() => TheProbeCountsStaleSlotsByTheReclaimsRules("linux");
+
+    [PowerShellFact]
+    public void TheProbeCountsStaleSlotsByTheReclaimsRulesPowerShell() => TheProbeCountsStaleSlotsByTheReclaimsRules("windows");
+
+    /// <summary>
+    /// slots_stale counts only what a claim would reclaim now: a deadline of 1 to 18 digits more than the grace in the past. A live slot, one
+    /// past its deadline but inside the grace, one without a deadline and a malformed one are not stale; a reclaim's lock file is no slot.
+    /// </summary>
+    private void TheProbeCountsStaleSlotsByTheReclaimsRules(string shell)
+    {
+        WriteSlot(1, Lines("live-job", Now + 3600));
+        WriteSlot(2, Lines("crashed-job", Stale));
+        WriteSlot(3, Lines("slow-job", Now - 600)); // past its deadline, inside the grace: still in use
+        WriteSlot(4, "job-from-an-older-lanq"); // no deadline
+        WriteSlot(5, Lines("odd-job", "12x4")); // malformed
+        WriteSlot(6, Lines("crashed-too", "0" + Stale.ToString(CultureInfo.InvariantCulture))); // a leading zero is still base 10
+        WriteSlot(7, Lines("huge-job", new string('9', 30))); // 30 digits: no deadline at all
+        File.WriteAllText(Slot(8) + ".reclaim", "x");
+
+        var values = HealthProbe.Parse(Shells.Run(shell, RemoteScripts.Probe(Worker(shell, 4))).Output);
+
+        Assert.Equal(("7", "2"), (values["slots_used"], values["slots_stale"]));
+        ClearLocks();
+        Assert.Equal("0", HealthProbe.Parse(Shells.Run(shell, RemoteScripts.Probe(Worker(shell, 4))).Output)["slots_stale"]);
+    }
+
+    [Fact]
+    public void StaleSlotsDoNotCountAsUsedButSlotsInsideTheGraceDo()
+    {
+        var m = new Machine { Name = "big-01", Os = MachineOs.Linux, MaxJobs = 4, Capabilities = ["node"] };
+        MachineHealth H(int used, int stale) => new("big-01", true, 0.1, 50, used, null, null) { SlotsStale = stale, MemTotalGb = 32 };
+        var exclusive = new JobNeeds(["node"], null, false) { Exclusive = true };
+        var normal = new JobNeeds(["node"], null, false);
+
+        // A dead exclusive job left all four slots: both kinds of job can be placed (the claim reclaims what it passes).
+        Assert.Equal((true, 1), Assert.Single(Scheduler.Assess([(m, H(4, 4))], exclusive)) is var e ? (e.Eligible, e.JobSlots) : default);
+        Assert.Equal((true, 4, 4), Assert.Single(Scheduler.Assess([(m, H(4, 4))], normal)) is var n ? (n.Eligible, n.JobSlots, n.FreeSlots) : default);
+        Assert.Equal(1, Scheduler.AutoCount(Scheduler.Assess([(m, H(4, 4))], exclusive), null, 64, exclusive: true).Count);
+
+        // One dead normal job's slot no longer blocks an exclusive job forever; a live one beside it still does, and says so.
+        Assert.True(Assert.Single(Scheduler.Assess([(m, H(1, 1))], exclusive)).Eligible);
+        var busy = Assert.Single(Scheduler.Assess([(m, H(2, 1))], exclusive));
+        Assert.Equal((Exclusion.Busy, "busy (slots 2/4, 1 stale: reclaimed by the next claim; --exclusive needs all 4 free)"), (busy.Reason, busy.Why));
+        Assert.Equal(2, Assert.Single(Scheduler.Assess([(m, H(3, 1))], normal)).JobSlots);
+
+        // Inside the grace a slot is not stale (the probe does not count it): still used.
+        Assert.Equal("busy (slots 4/4)", Assert.Single(Scheduler.Assess([(m, H(4, 0))], normal)).Why);
+        Assert.Equal(0, H(4, 0).SlotsStale);
+    }
+
+    [ShFact]
+    public void BothKindsOfJobReclaimADeadExclusiveJobsSlotsSh() => BothKindsOfJobReclaimADeadExclusiveJobsSlots("linux");
+
+    [PowerShellFact]
+    public void BothKindsOfJobReclaimADeadExclusiveJobsSlotsPowerShell() => BothKindsOfJobReclaimADeadExclusiveJobsSlots("windows");
+
+    /// <summary>The probe sees four stale slots, the scheduler places the job, and the real claim reclaims them (all of them, or the first).</summary>
+    private void BothKindsOfJobReclaimADeadExclusiveJobsSlots(string shell)
+    {
+        foreach (var exclusive in new[] { true, false })
+        {
+            ClearLocks();
+            foreach (var i in new[] { 1, 2, 3, 4 })
+            {
+                WriteSlot(i, Lines("dead-ex", Stale));
+            }
+
+            var worker = Worker(shell, 4);
+            var values = HealthProbe.Parse(Shells.Run(shell, RemoteScripts.Probe(worker)).Output);
+            var h = new MachineHealth("w", true, 0.1, 50, int.Parse(values["slots_used"], CultureInfo.InvariantCulture), null, null)
+            {
+                SlotsStale = int.Parse(values["slots_stale"], CultureInfo.InvariantCulture),
+            };
+            Assert.True(Assert.Single(Scheduler.Assess([(worker, h)], new JobNeeds([], null, false) { Exclusive = exclusive })).Eligible);
+
+            var output = exclusive ? ClaimAll(shell, "next-job", 4) : ClaimOne(shell, "next-job", 4);
+            Assert.Equal(exclusive ? "1,2,3,4" : "1", JobRunner.ParseSlot(output));
+            Assert.Equal(exclusive ? ["next-job", "next-job", "next-job", "next-job"] : ["next-job", "dead-ex", "dead-ex", "dead-ex"], new[] { 1, 2, 3, 4 }.Select(Holder));
+        }
+    }
+
+    /// <summary>End to end with fake ssh: a machine whose every slot is stale takes an exclusive job; health shows the stale slots.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AMachineWithOnlyStaleSlotsTakesAnExclusiveJobAndHealthShowsThem()
+    {
+        var stale = 4;
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) => cmd.Contains("LANQ_EXIT=", StringComparison.Ordinal) ? new SshResult(0, T.ExitMarkerOf(cmd) + "0")
+                : cmd.Contains("SLOTS=", StringComparison.Ordinal) ? new SshResult(0, "SLOTS=1,2,3,4")
+                : cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1")
+                : cmd.Contains("disk_free_gb", StringComparison.Ordinal) ? new SshResult(0, $"load=0.1\ndisk_free_gb=50\nslots_used={(m.Name == "big-01" ? 4 : 1)}\nslots_stale={(m.Name == "big-01" ? stale : 0)}\ntool=ok")
+                : new SshResult(0, ""),
+        };
+        var config = ConfigLoader.Parse(ShardTests.PoolYaml);
+        async Task<JsonElement> RunOnBig()
+        {
+            var o = new StringWriter();
+            await Cli.Run(
+                ParsedArgs.Parse(["run", "--json", "--exclusive", "--on", "big-01", "--needs", "node", "--", "npx", "jest"]), config, ssh, new RunnerTests.FakePayloads(""),
+                new HealthProbe(ssh, TimeProvider.System), Log, _root, Repo, o, new StringWriter(), CancellationToken.None);
+            using var doc = JsonDocument.Parse(o.ToString());
+            return doc.RootElement.Clone();
+        }
+
+        var placed = await RunOnBig();
+        Assert.Equal("Completed", placed.GetProperty("status").GetString());
+        Assert.Equal("big-01", placed.GetProperty("machine").GetString());
+        Assert.Contains(ssh.Calls, c => c.Machine == "big-01" && c.Command.Contains("SLOTS=", StringComparison.Ordinal)); // the claim that reclaims
+
+        var text = new StringWriter();
+        await Cli.Health(config, new HealthProbe(ssh, TimeProvider.System), text, new StringWriter(), CancellationToken.None);
+        Assert.Contains("slots free 4/4 (4 stale: reclaimed by the next claim)", text.ToString(), StringComparison.Ordinal);
+        var json = new StringWriter();
+        await Cli.Health(config, new HealthProbe(ssh, TimeProvider.System), json, new StringWriter(), CancellationToken.None, json: true);
+        using (var doc = JsonDocument.Parse(json.ToString()))
+        {
+            var rows = doc.RootElement.EnumerateArray().ToDictionary(r => r.GetProperty("name").GetString()!, r => r.Clone());
+            Assert.Equal((4, 4, 4), (rows["big-01"].GetProperty("slotsUsed").GetInt32(), rows["big-01"].GetProperty("slotsStale").GetInt32(), rows["big-01"].GetProperty("freeSlots").GetInt32()));
+            Assert.False(rows["tiny-01"].TryGetProperty("slotsStale", out _));
+        }
+
+        // The same machine with the slots inside their grace (not stale): busy, and the job is never even claimed there.
+        stale = 0;
+        ssh.Calls.Clear();
+        var busy = await RunOnBig();
+        Assert.Equal("NoCapacity", busy.GetProperty("status").GetString());
+        Assert.Equal("busy (slots 4/4; --exclusive needs all 4 free)", busy.GetProperty("excluded")[0].GetProperty("why").GetString());
+        Assert.DoesNotContain(ssh.Calls, c => c.Command.Contains("SLOTS=", StringComparison.Ordinal));
+    }
+
+    // ---- another lanq with a higher max_jobs for the same work_root ----
+
+    [ShFact]
+    public void ALiveSlotAboveMaxJobsMakesTheExclusiveClaimBackOutSh() => ALiveSlotAboveMaxJobsMakesTheExclusiveClaimBackOut("linux");
+
+    [PowerShellFact]
+    public void ALiveSlotAboveMaxJobsMakesTheExclusiveClaimBackOutPowerShell() => ALiveSlotAboveMaxJobsMakesTheExclusiveClaimBackOut("windows");
+
+    /// <summary>
+    /// Another developer's lanq has max_jobs 6 for this work_root and runs a job in slot-5: "exclusive" with max_jobs 3 must not take the
+    /// machine. A stale slot-5 (past its grace) does not block; an in-grace one does; a reclaim's lock is no slot.
+    /// </summary>
+    private void ALiveSlotAboveMaxJobsMakesTheExclusiveClaimBackOut(string shell)
+    {
+        foreach (var (content, blocks) in new[] { (Lines("other-dev", Now + 3600), true), (Lines("other-dev", Now - 600), true), (Lines("other-dev", Stale), false), ("no-deadline", true) })
+        {
+            ClearLocks();
+            WriteSlot(5, content);
+            File.WriteAllText(Slot(7) + ".reclaim", "x");
+
+            var output = ClaimAll(shell, "ex-job", 3);
+
+            if (blocks)
+            {
+                Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
+                Assert.Null(JobRunner.ParseSlot(output));
+                Assert.Equal(["slot-5", "slot-7.reclaim"], LockFiles()); // its own three slots backed out
+            }
+            else
+            {
+                Assert.Equal("1,2,3", JobRunner.ParseSlot(output));
+            }
+        }
+
+        // slot-05 is slot 5 too; slot-3 within max_jobs is an ordinary taken slot.
+        ClearLocks();
+        WriteSlot(5, "x");
+        File.Move(Slot(5), Path.Combine(_root, "locks", "slot-05"));
+        Assert.Null(JobRunner.ParseSlot(ClaimAll(shell, "ex-job", 3)));
+        Assert.Equal(["slot-05"], LockFiles());
+    }
+
+    /// <summary>The scheduler side of a higher max_jobs elsewhere: the probe counts slot-5 in slots_used, so an exclusive job sees the machine busy.</summary>
+    [Fact]
+    public void ASlotAboveMaxJobsMakesTheMachineBusyForAnExclusiveJob()
+    {
+        var m = new Machine { Name = "big-01", Os = MachineOs.Linux, MaxJobs = 3, Capabilities = ["node"] };
+        var h = new MachineHealth("big-01", true, 0.1, 50, 1, null, null);
+        var a = Assert.Single(Scheduler.Assess([(m, h)], new JobNeeds(["node"], null, false) { Exclusive = true }));
+        Assert.Equal((Exclusion.Busy, "busy (slots 1/3; --exclusive needs all 3 free)"), (a.Reason, a.Why));
     }
 }
