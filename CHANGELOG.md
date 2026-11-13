@@ -1,22 +1,119 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (unreleased)
 
-### Dependencies
+### Per-job environment variables
 
-- The native binaries carry the .NET 10.0.15 runtime (was 10.0.14).
+- `lanq run --env NAME=VALUE` (repeatable; single runs, `--shards`, `--dry-run`) sets a variable for this job only.
+  Shards get it too. The split is at the first `=`, and a name may be given only once (names are compared ignoring
+  case).
+- The developer decides which names jobs may set: machines.yml `policy.allowed_env`, exact names or prefixes ending in
+  `*` (`[CONFIGURATION, TEST_FILTER, "MYAPP_*"]`). It is empty by default, so every `--env` is refused until the
+  developer lists names. A name not listed is `Rejected` (2) with an `ask_developer` step.
+- A hard deny table applies on top, even to listed names, because these variables can make an allowlisted command run
+  other code or move where tools keep their files: the loader and shell startup names machines.yml already refused,
+  `PATH`, Node (`NODE_OPTIONS`, `NODE_PATH`), .NET (`DOTNET_STARTUP_HOOKS`, `DOTNET_ROOT*`, `CORECLR_*`, `COR_*`, ...),
+  Java, Python, Perl and Ruby startup and path variables, the Go toolchain and module settings and `CC`/`CXX`/`CGO_*`,
+  `RUSTFMT` and `RUSTUP_TOOLCHAIN`, OpenSSL and glibc module paths, profile and system folders (`HOME`, `USERPROFILE`,
+  `APPDATA`, `TEMP`, `TMP`, `XDG_CONFIG_HOME`, ...), `IFS`, `CDPATH`, and every name starting `GIT_`, `SSH_`,
+  `NPM_CONFIG_`, `YARN_`, `MSBUILD`, `LD_`, `DYLD_` or `LANQ_`. `NODE_ENV`, `GOOS` and `GOARCH` stay allowed. An
+  `allowed_env` entry the table fully covers (`GIT_*`, `HOME`) makes the config fail to load.
+- Each value must be non-empty and free of control characters, at most 4,096 characters, and 16,384 for all of a job's
+  variables together (`NAME=VALUE` each). Values are never echoed in a refusal.
+- A machine whose own `env:` in machines.yml sets the same name is not used for the job (`env_conflict`), and neither
+  is a Windows machine on which the values make the job's command longer than 8,000 characters
+  (`windows_command_too_long`). Both are permanent. When every capable machine clashes, the run ends at once with
+  `NoCapacity` (75, `retryable: false`) and an `ask_developer` step naming the variables and machines; when the
+  length rules out the last ones, it is `Rejected` (2).
+- `lanq.yml` gains `env:` in a job and in `defaults:`, a mapping of `NAME: value`. It is merged by name, the job's value
+  winning: the one exception to "a job's value replaces the default". Each entry becomes an `--env` flag.
+- Variables go after the machine's `env:` and before lanq's own `LANQ_*`, quoted as data like the machine's.
+
+### Exclusive jobs
+
+- `lanq run --exclusive` (lanq.yml `exclusive: true`) takes every slot of the machine (`max_jobs`), all or nothing, so
+  no other lanq job, from you or anyone else, runs there while it does.
+- It waits while any slot is in use (`busy`, retryable: "busy (slots 1/4; --exclusive needs all 4 free)"). There is no
+  reservation, so on a machine that is never idle it waits out `--wait` and ends `NoCapacity` (75). Use `--on` with a
+  machine that is idle, or run it in quiet hours.
+- `--exclusive --shards N` puts one shard on each machine; `--shards auto` counts the idle machines. A fixed N above the
+  machines that can take the job by config (capabilities, `size:`, `--env`) is refused (2) before any network.
+  `--mem` and Windows arguments are not part of that count, so extra shards wait for a machine that is idle.
+- In a plan, the dry run marks an exclusive job's machine full, so a sibling job waits.
+- `lanq unlock`, the probe and the stale-slot reclaim are unchanged: each slot of an exclusive job is an ordinary slot
+  file.
+
+### Baseline rerun: is this failure new?
+
+- `lanq run --baseline` (lanq.yml `baseline: true`): when a job, a shard or a plan job ends `Failed` (its own non-zero
+  exit), lanq runs the same request again at the base commit, a clean tree, and says whether the failure is new.
+  Never after `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Rejected` or `Cancelled`.
+- The base is the merge-base of HEAD and the default branch (`origin/HEAD`, else `origin/main`, `origin/master`,
+  `main`, `master`). `--baseline-ref REF` (lanq.yml `baseline_ref:`, implies `--baseline`) uses the merge-base of HEAD
+  and REF instead. On the base commit with uncommitted changes, the base is HEAD without them; with none, the baseline
+  is `skipped`. A REF that is not a commit, no default branch, or unrelated history is `Rejected` (2) before anything
+  is sent. A shallow clone that lacks the merge-base is not refused: the baseline is `inconclusive`.
+- The verdict is `new` (the base completed), `preexisting` (the base failed too, any exit code), `inconclusive`
+  (anything else: timed out, no machine, the base could not be read or sent, Ctrl+C) or `skipped`. It is information
+  only: the run's status and exit code never change.
+- Shards: only the failed shards rerun, with the same `LANQ_SHARD`/`LANQ_SHARDS`. Plans: only the failed jobs that
+  asked for it, after the whole plan has ended. Reruns prefer the machine that failed and get their own `--wait`.
+- Output: a `[lanq] baseline: ...` line per rerun before the status line, a `baseline` object in `--json` (run, each
+  shard, each plan job), and the verdict in the `fix_code` reason. `--dry-run` prints the base (`Baseline: on failure,
+  rerun at 1a2b3c4 (merge-base with origin/main)`).
+- The base commit's payload gets the same committed-name and package-config secret scans as any snapshot.
+- A red run costs about twice as long with `--baseline`.
+
+### JSON and records
+
+- Run, shard and plan job objects (and the dry runs) gain `env` (the variable names only, never values),
+  `exclusive: true` and `baseline` (`{ref, sha, status, exitCode, machine, jobId, logPath, durationSeconds, verdict,
+  message}`). Each is left out when it does not apply.
+- New permanent reason codes `env_conflict` and `windows_command_too_long`.
+- `jobs.jsonl` gains optional `envNames`, `exclusive`, and on baseline reruns `baselineOf` (the failed job's id) and
+  `commit` (the base's short id); `v` stays 2. `lanq stats`, `--target-minutes` and the plan's history order leave
+  baseline reruns out.
+- Like the other job options, `--env`, `--exclusive`, `--baseline` and `--baseline-ref` are refused with `--plan`
+  (set them in `lanq.yml`).
+
+### Security
+
+- `--env` is gated by `policy.allowed_env` (empty by default) and the hard deny table, and each `NAME=VALUE` goes
+  through the secret scan (`Rejected` 2, value never echoed). A repository's `lanq.yml` can set only names the
+  developer allowed. The table is a guard against the obvious ways a variable can turn an allowlisted command into
+  other code; it is not a sandbox.
+- Values are visible to other users of the worker (its process list) and appear in the dry run and in suggested
+  commands in `nextSteps`, which repeat your command line. Never pass secrets with `--env`.
+- Slot release now checks the holder: cleanup removes each slot (a normal job's single slot too) only while its first
+  line is still this job's id, so a late cleanup can no longer delete a slot another job reclaimed meanwhile.
+- A claim that did not report back (timed out, lost connection, unreadable output, Ctrl+C mid-claim) is followed by a
+  best-effort release of the slots that hold this job's id (15 seconds, never fails the job).
 
 ### Fixes
 
 - `--shards` with `--mem`: a shard that started while lanq was probing the machines was counted as running, as if its
   memory showed in the probe's answer, although the machine answered before it ran. The next round could then place
   one shard too many on that machine. Which shards are not running yet is now taken before the probe.
+- Linux workers: stopping a stale job from inside the stale-slot reclaim or `lanq unlock` overwrote the loop's own
+  variables, which could miss the reclaim, leave a `.reclaim` lock behind and report a slot as `REMOVED=` that was not.
 
 ### Tests
 
 - Two tests that failed now and then on GitHub's Windows runner are now deterministic. The `--mem` placement test's
   fake machine now reports less free memory once a shard's upload is done, as a real job would use it. The newline-free flood test now measures the reader's
   memory on one thread, not process-wide, where work left by earlier tests counted too.
+- The exclusive-claim race tests run the real sh scripts behind a ready/go barrier, including an exclusive claim that
+  must back out while two normal claims race it.
+
+### Dependencies
+
+- The native binaries carry the .NET 10.0.15 runtime (was 10.0.14).
+
+### Docs
+
+- README sections for `--env`, `--exclusive` and `--baseline`; docs/PLANS.md, docs/JSON.md, docs/SHARDING.md,
+  AGENTS.md, docs/AGENTS-GUIDE.md, the agent snippets, the skill and llms.txt cover them, including what an agent may
+  and may not do with each. `machines.example.yml` shows a commented `policy.allowed_env`.
 
 ## 0.8.1 (2026-11-10)
 
