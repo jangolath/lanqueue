@@ -312,6 +312,21 @@ public sealed class JobEnvTests : IDisposable
         Assert.NotEqual(JobStatus.Rejected, pinned.Status);
     }
 
+    /// <summary>A candidate that lacks the job's capabilities can never take it, so its env: does not block the job; a capable one still does.</summary>
+    [Fact]
+    public async Task AMachineThatCannotTakeTheJobDoesNotBlockItWithAClash()
+    {
+        var config = Mixed("CONFIGURATION");
+        config.Machines[1].Env["CONFIGURATION"] = "Debug"; // build-02: dotnet only, no node
+        var ssh = new FakeSsh();
+        var node = await Runner(config, ssh).RunAsync(Req(V("CONFIGURATION", "Release")) with { Needs = ["node"] }, CancellationToken.None);
+        Assert.NotEqual(JobStatus.Rejected, node.Status);
+
+        var dotnet = await Runner(config, new FakeSsh()).RunAsync(Req(V("CONFIGURATION", "Release")), CancellationToken.None);
+        Assert.Equal((JobStatus.Rejected, RejectKind.Arguments), (dotnet.Status, dotnet.RejectKind));
+        Assert.Equal("--env CONFIGURATION: build-02's env in machines.yml sets it too; drop one", dotnet.Message);
+    }
+
     [Fact]
     public async Task WindowsLengthGuardCountsJobEnv()
     {
@@ -328,6 +343,9 @@ public sealed class JobEnvTests : IDisposable
         Assert.NotEqual(JobStatus.Rejected, (await Runner(config, new FakeSsh()).RunAsync(Req(V("BIG", "x")), CancellationToken.None)).Status);
         Assert.True(RemoteScripts.WorstCaseWindowsCommandLength(T.Windows(), [big]) > RemoteScripts.MaxWindowsCommandLength);
         Assert.True(RemoteScripts.WorstCaseWindowsCommandLength(T.Windows()) < RemoteScripts.MaxWindowsCommandLength);
+
+        // A Windows machine without the job's capabilities (build-02 has no node) can never take it, so its length does not count.
+        Assert.NotEqual(JobStatus.Rejected, (await Runner(config, new FakeSsh()).RunAsync(Req(big) with { Needs = ["node"] }, CancellationToken.None)).Status);
     }
 
     // ---- injection ----

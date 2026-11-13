@@ -512,7 +512,7 @@ internal static class NextSteps
     {
         RejectKind.PlanFile => [Step(NextAction.FixCode, "fix lanq.yml: " + message)],
         RejectKind.Policy => [Step(NextAction.AskDeveloper, $"refused by policy, not allowlisted ({message}); do not work around it, ask the developer")],
-        RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes or the command line; nothing was sent")],
+        RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes, the command line or --env values; nothing was sent")],
         RejectKind.Config => ConfigError(p.ConfigPath, message, p.Json),
         _ => [Step(NextAction.FixCommand, "fix the command line: " + message)],
     };

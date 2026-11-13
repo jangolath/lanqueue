@@ -289,7 +289,7 @@ public sealed partial class JobRunner(
     /// The checks on the job's --env (<see cref="JobRequest.Env"/>), after the command line's: the hard deny table again (Policy), then
     /// policy.allowed_env (Policy), the secret scan of each NAME=VALUE (Secret; the value is never shown), a name that a candidate machine's
     /// env: in machines.yml sets too (Arguments: which one wins would be a guess), and the Windows command-line cap with the job's variables
-    /// on each Windows candidate (Arguments). Null when the job sets none or every check passes.
+    /// on each Windows candidate (Arguments). The last two look only at candidates with the job's capabilities. Null when the job sets none or every check passes.
     /// </summary>
     private JobResult? PrecheckEnv(string jobId, JobRequest req)
     {
@@ -324,7 +324,8 @@ public sealed partial class JobRunner(
             return Rejected(jobId, findings);
         }
 
-        var candidates = Candidates(req);
+        // Only machines with the job's capabilities: one that could never take the job must not block it.
+        var candidates = Candidates(req).Where(m => HasCapabilities(m, req.Needs)).ToList();
         foreach (var m in candidates)
         {
             if (req.Env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase)) is { } clash)
