@@ -467,7 +467,7 @@ bad `lanq.yml`, a refusal, Ctrl+C and an unexpected error included):
 | `nextSteps` | array | For the whole plan. A suggested re-run is the same command with `--only` set to the jobs that did not complete (after a narrowing: the jobs that can still run); it replaces any `--only` given. See [nextSteps](#nextsteps). |
 | `scanSkipped` | array | Conditional (0.9.2): for the plan's one snapshot, as for [a run](#scanskipped). |
 | `planTimeoutMinutes` | number | Conditional (0.10.0): the plan's limit (`--plan-timeout`, else `plan_timeout:`). Absent without one. |
-| `planTimedOut` | boolean | Conditional (0.10.0): `true` when the limit was reached before the plan ended (jobs and baselines). Absent otherwise. |
+| `planTimedOut` | boolean | Conditional (0.10.0): `true` whenever the limit came due before the plan finished its work: it stopped a job or baseline, or it came while `--fail-fast` (or an error) was stopping the jobs, with or without baselines to cut short, even if Ctrl+C came after. Absent when no limit was reached, and when it came only while the last job was cleaning up (nothing left to do; stderr then says `plan_timeout: nothing was stopped`). Information only: `Failed` and `Rejected` still decide `status` and `exitCode`. |
 
 Each entry in `jobs`:
 

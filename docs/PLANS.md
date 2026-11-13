@@ -278,6 +278,12 @@ running when the time ran out, for example between `after:` waves or while every
 while the jobs were already being stopped (--fail-fast or an error); no baseline rerun will start`, and every baseline
 is `inconclusive` ("plan_timeout reached before it started").
 
+`planTimedOut` is `true` whenever the limit came due before the plan finished its work: when it stopped a job or a
+baseline, and in every case where it came during a `--fail-fast` hold (with or without baselines to cut short). The
+one exception is a limit that came while the last job was only cleaning up: nothing was left to do, so the plan is
+not flagged and lanq adds the "nothing was stopped" line (never after a hold). The flag is information: `Failed` and
+`Rejected` still decide the status and exit code.
+
 `--json` adds `planTimeoutMinutes` (whenever a limit is set) and `planTimedOut: true` (when it was reached). The dry
 run shows the limit on a `Timeout:` line. It warns when history's expected critical path (the longest `after:` chain
 of expected work) is longer than the limit.

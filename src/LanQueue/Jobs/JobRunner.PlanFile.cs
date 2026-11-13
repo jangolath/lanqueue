@@ -120,6 +120,7 @@ public sealed class PlanDeadline(int minutes)
     private const int HeldDue = 4;
 
     private int _state;
+    private volatile bool _cameDuringHold;
     private int _running;
 
     /// <summary>The limit, in minutes (1 to 10080).</summary>
@@ -135,7 +136,55 @@ public sealed class PlanDeadline(int minutes)
     internal bool Hold() => Interlocked.CompareExchange(ref _state, Held, Open) == Open;
 
     /// <summary>The limit came while the plan was held: true when it was held (the limit is now due, for <see cref="Release"/> to apply).</summary>
-    internal bool MarkDue() => Interlocked.CompareExchange(ref _state, HeldDue, Held) == Held;
+    internal bool MarkDue()
+    {
+        if (Interlocked.CompareExchange(ref _state, HeldDue, Held) != Held)
+        {
+            return false;
+        }
+
+        _cameDuringHold = true;
+        return true;
+    }
+
+    /// <summary>True once the limit came while --fail-fast (or an error) held the plan: the plan is then flagged planTimedOut.</summary>
+    internal bool CameDuringHold => _cameDuringHold;
+
+    /// <summary>Tests only: called with the state the timer is about to act on, before its compare-and-swap (to interleave a Release or a Hold).</summary>
+    internal Action<string>? BeforeReach { get; set; }
+
+    /// <summary>
+    /// The limit is due: one compare-and-swap loop on the state, so a Hold or Release in between is never lost. Open: Expired (the caller says
+    /// so and cancels the plan). Held: HeldDue (the caller says so; <see cref="Release"/> applies it). Expired or Closed: nothing. A failed swap
+    /// (the state changed meanwhile) looks again.
+    /// </summary>
+    internal PlanReach Reach()
+    {
+        while (true)
+        {
+            switch (Volatile.Read(ref _state))
+            {
+                case Open:
+                    BeforeReach?.Invoke("Open");
+                    if (TryExpire())
+                    {
+                        return PlanReach.Expired;
+                    }
+
+                    break;
+                case Held:
+                    BeforeReach?.Invoke("Held");
+                    if (MarkDue())
+                    {
+                        return PlanReach.HeldDue;
+                    }
+
+                    break;
+                default:
+                    return PlanReach.None;
+            }
+        }
+    }
 
     /// <summary>
     /// The jobs have all ended after a hold, and the baselines may start: the limit applies again. True when it already came during the hold:
@@ -188,6 +237,19 @@ public sealed class PlanDeadline(int minutes)
 
     /// <summary>The line lanq prints when the limit is reached (started jobs: some may still be waiting for a slot).</summary>
     public string ReachedLine => string.Create(CultureInfo.InvariantCulture, $"[lanq] plan_timeout: {minutes} min reached; stopping {Running} started job(s)");
+}
+
+/// <summary>What reaching the plan's limit did (<see cref="PlanDeadline.Reach"/>).</summary>
+internal enum PlanReach
+{
+    /// <summary>The plan had ended (or the limit was reached already): nothing.</summary>
+    None,
+
+    /// <summary>The limit came first: the plan is to be stopped now.</summary>
+    Expired,
+
+    /// <summary>--fail-fast (or an error) was stopping the jobs: the limit is due when the hold is released.</summary>
+    HeldDue,
 }
 
 /// <summary>One job of lanq run --plan, ready to run: its lanq.yml name, the request its lanq run line makes, --shards (or null), and the jobs it starts after.</summary>
@@ -366,7 +428,13 @@ public sealed partial class JobRunner
                 }
 
                 deadline?.Close();
-                if (deadline is { Expired: true } && !result.PlanTimedOut)
+                if (deadline is { CameDuringHold: true })
+                {
+                    // The limit came due before the plan finished its work (while --fail-fast stopped the jobs): flagged, whether or not a
+                    // baseline was left to cut short. The status stays the deciding job's.
+                    result = result with { PlanTimedOut = true };
+                }
+                else if (deadline is { Expired: true } && !result.PlanTimedOut)
                 {
                     // The limit came while the last job was only cleaning up: the "stopping" line above stopped nothing; say so.
                     output("[lanq] plan_timeout: nothing was stopped; every job had already ended");
@@ -402,16 +470,14 @@ public sealed partial class JobRunner
             return;
         }
 
-        if (!deadline.TryExpire())
+        switch (deadline.Reach())
         {
-            // --fail-fast (or an error) is stopping the jobs: the limit is now due, and Release applies it before any baseline starts. Ended
-            // (Closed): nothing to do.
-            if (deadline.MarkDue())
-            {
+            case PlanReach.HeldDue:
+                // --fail-fast (or an error) is stopping the jobs: the limit is now due, and Release applies it before any baseline starts.
                 output(deadline.HeldLine);
-            }
-
-            return;
+                return;
+            case PlanReach.None:
+                return; // the plan ended first
         }
 
         output(deadline.ReachedLine);

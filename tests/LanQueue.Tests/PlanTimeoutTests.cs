@@ -576,8 +576,9 @@ public sealed partial class PlanFileRunTests
 
         Assert.Equal(3, code);
         var json = Json(stdout);
-        Assert.Equal("Failed", json.GetProperty("status").GetString());
-        Assert.False(json.TryGetProperty("planTimedOut", out _));
+        Assert.Equal("Failed", json.GetProperty("status").GetString()); // lint's failure still decides
+        Assert.True(json.GetProperty("planTimedOut").GetBoolean()); // the limit came due before the plan finished (during the hold)
+        Assert.DoesNotContain("nothing was stopped", stderr, StringComparison.Ordinal);
         var jobs = JobsOf(json);
         Assert.Equal("Cancelled", jobs["build"].GetProperty("status").GetString());
         Assert.Equal("Cancelled", jobs["unit"].GetProperty("status").GetString());
@@ -590,19 +591,11 @@ public sealed partial class PlanFileRunTests
     /// A plan of build (baseline: true, fails) and unit (hangs) with --fail-fast. build fails, so --fail-fast holds the deadline and stops unit.
     /// The second cleanup (unit's) blocks until the test lets it go, and returns a gate the test opens.
     /// </summary>
-    private (PoolSsh Ssh, BaselinePayloads Payloads, TaskCompletionSource FailBuild, ManualResetEventSlim InHold, ManualResetEventSlim Release) HeldByFailFast()
+    private (PoolSsh Ssh, BaselinePayloads Payloads, TaskCompletionSource FailBuild, ManualResetEventSlim InHold, ManualResetEventSlim Release) HeldByFailFast(
+        string buildKeys = "baseline: true", string unitKeys = "")
     {
-        Plan("""
-            version: 1
-            defaults:
-              needs: [node]
-            jobs:
-              build:
-                command: npm run build
-                baseline: true
-              unit:
-                command: npm run unit
-            """);
+        Plan($"version: 1\ndefaults:\n  needs: [node]\njobs:\n  build:\n    command: npm run build\n    {buildKeys}\n  unit:\n    command: npm run unit\n    {unitKeys}\n"
+            .Replace("\n    \n", "\n", StringComparison.Ordinal));
         var payloads = new BaselinePayloads(new RunnerTests.FakePayloads(""));
         var failBuild = new TaskCompletionSource();
         var inHold = new ManualResetEventSlim();
@@ -662,6 +655,88 @@ public sealed partial class PlanFileRunTests
         Assert.DoesNotContain(ssh.Executes, e => payloads.IsBase(ssh, e)); // applied at release, before any baseline started
         Assert.Contains("[lanq] plan_timeout: 1 min reached while the jobs were already being stopped", stderr, StringComparison.Ordinal);
         Assert.DoesNotContain(Log.ReadAll(), r => r.PlanJob == "unit"); // a job --fail-fast cancelled is not recorded
+        Assert.DoesNotContain("nothing was stopped", stderr, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The limit due during a --fail-fast hold, with baselines configured but none to run (the failing job has no baseline: true): flagged,
+    /// the failure still decides, no baseline object, and never "nothing was stopped".
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task HeldDueWithBaselinesButNoTargetsIsFlagged()
+    {
+        var (ssh, payloads, failBuild, inHold, release) = HeldByFailFast(buildKeys: "", unitKeys: "baseline: true");
+        var fire = new TaskCompletionSource();
+        var err = new LockedWriter();
+
+        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"], stderr: err);
+        await Until(() => ssh.Executes.Count == 2);
+        failBuild.SetResult();
+        Assert.True(inHold.Wait(TimeSpan.FromSeconds(30)));
+        fire.SetResult();
+        await Until(() => err.Text.Contains("reached while the jobs were already being stopped", StringComparison.Ordinal));
+        release.Set();
+        var (code, stdout, stderr) = await run;
+
+        Assert.Equal(2, code);
+        var json = Json(stdout);
+        Assert.Equal("Failed", json.GetProperty("status").GetString());
+        Assert.True(json.GetProperty("planTimedOut").GetBoolean());
+        var jobs = JobsOf(json);
+        Assert.Equal("Cancelled", jobs["unit"].GetProperty("status").GetString());
+        Assert.False(jobs["build"].TryGetProperty("baseline", out _));
+        Assert.False(jobs["unit"].TryGetProperty("baseline", out _));
+        Assert.DoesNotContain("nothing was stopped", stderr, StringComparison.Ordinal);
+        Assert.Empty(payloads.CommitIds); // no base was ever built
+    }
+
+    /// <summary>
+    /// The limit's compare-and-swap loop never loses it: a Release (or a Hold) that lands between the timer reading the state and acting on it
+    /// makes it look again (the BeforeReach seam interleaves them deterministically).
+    /// </summary>
+    [Fact]
+    public void ReachNeverLosesTheLimit()
+    {
+        // Held, then Release before the timer acts: the limit is reached on Open (the baselines are bounded), never dropped.
+        var released = new PlanDeadline(5);
+        Assert.True(released.Hold());
+        var seen = new List<string>();
+        released.BeforeReach = state =>
+        {
+            seen.Add(state);
+            if (seen.Count == 1)
+            {
+                Assert.False(released.Release()); // Held -> Open: nothing was due yet
+            }
+        };
+        Assert.Equal(PlanReach.Expired, released.Reach());
+        Assert.Equal(["Held", "Open"], seen);
+        Assert.True(released.Expired);
+        Assert.False(released.CameDuringHold);
+
+        // Open, then Hold before the timer acts: the limit becomes due during the hold, and Release applies it.
+        var held = new PlanDeadline(5);
+        var first = true;
+        held.BeforeReach = _ =>
+        {
+            if (first)
+            {
+                first = false;
+                Assert.True(held.Hold());
+            }
+        };
+        Assert.Equal(PlanReach.HeldDue, held.Reach());
+        Assert.True(held.CameDuringHold);
+        Assert.False(held.Expired);
+        Assert.True(held.Release());
+        Assert.True(held.Expired);
+
+        // Closed (or already expired): nothing.
+        var closed = new PlanDeadline(5);
+        Assert.True(closed.Close());
+        Assert.Equal(PlanReach.None, closed.Reach());
+        Assert.False(closed.Expired);
+        Assert.Equal(PlanReach.None, released.Reach());
     }
 
     /// <summary>Ctrl+C while --fail-fast holds the deadline (and the limit waits on it): no deadlock, and the plan ends Cancelled 130.</summary>
@@ -686,8 +761,9 @@ public sealed partial class PlanFileRunTests
         Assert.Equal(130, code);
         var json = Json(stdout);
         Assert.Equal("Cancelled", json.GetProperty("status").GetString());
-        Assert.False(json.TryGetProperty("planTimedOut", out _));
+        Assert.True(json.GetProperty("planTimedOut").GetBoolean()); // it came due during the hold, before Ctrl+C
         Assert.DoesNotContain("stopping", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing was stopped", stderr, StringComparison.Ordinal);
         Assert.DoesNotContain(ssh.Executes, e => payloads.IsBase(ssh, e)); // nothing reran after Ctrl+C
         Assert.Contains("cancelled (Ctrl+C)", JobsOf(json)["build"].GetProperty("baseline").GetProperty("message").GetString(), StringComparison.Ordinal);
     }

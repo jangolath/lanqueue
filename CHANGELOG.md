@@ -17,7 +17,8 @@
 
   The plan is `TimedOut` (124) unless a `Failed` or `Rejected` job decides it, also when nothing was running (between
   `after:` waves, or with every job waiting). A job's own `timeout:` still applies, and Ctrl+C before the limit still
-  ends the plan `Cancelled` (130). `--json` adds the conditional `planTimeoutMinutes` and `planTimedOut: true`. The dry
+  ends the plan `Cancelled` (130). `--json` adds the conditional `planTimeoutMinutes` and `planTimedOut: true` (whenever the limit came due before
+  the plan finished its work, a `--fail-fast` hold included; not when it came only during the last cleanup). The dry
   run shows the limit on a `Timeout:` line and warns when history's expected critical path is longer.
   `--plan-timeout` without `--plan` is refused (exit 2). The `fix_code` step says where to look and that raising
   the limit is the developer's decision. It never suggests a command.
