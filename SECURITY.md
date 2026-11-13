@@ -27,6 +27,18 @@ not be empty or contain control characters, and names that hijack the program lo
 `PATHEXT`) are refused. That list is best effort, a guard against mistakes rather than a complete one. `path_prepend` entries must be absolute. Both are written by you in your own config: they are a
 convenience for your machines, not a boundary against someone who can edit that file.
 
+A job's own variables (`lanq run --env NAME=VALUE`, or `env:` in a repository's `lanq.yml`, since 0.9.0) come from the
+command line or the repository, so they are not trusted the same way. A job can set only names listed in your
+`policy.allowed_env` (empty by default), and never a name on a hard deny table that wins over that list: the
+machine-level names above plus `PATH`, the runtime startup and module-path variables of Node, .NET, Java, Python, Perl
+and Ruby, the Go toolchain and module settings and `CC`/`CXX`/`CGO_*`, `RUSTFMT` and `RUSTUP_TOOLCHAIN`, OpenSSL and
+glibc module paths, profile and temp folders (`HOME`, `USERPROFILE`, `APPDATA`, `TEMP`, `XDG_CONFIG_HOME`, ...), `IFS`,
+`CDPATH`, and every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_`, `MSBUILD`, `CORECLR_`, `COR_` or `LANQ_`.
+Each `NAME=VALUE` is secret-scanned, values are capped (4,096 characters each, 16,384 in all) and quoted as data like
+machine values. The table guards against the obvious ways a variable can make an allowlisted command run other code;
+it is not a sandbox, and an allowlisted name can still change what a build does. Values are visible to other users of
+the worker (its process list) and are repeated in suggested commands, so they must never hold secrets.
+
 In git mode a worker receives the repository's history, not just the current files: the first job for a repository
 on a machine sends the full history of HEAD, later jobs only the new commits. The secret scan covers the command
 line, the uncommitted changes (content and names), the names of committed files in HEAD (`.env`, `id_rsa`,

@@ -26,11 +26,11 @@ single-machine `lanq makeready --json` report, which is the lanq-makeready scrip
 - **Null versus absent.** In lanq's own objects a key that is listed below is always there; when it has no value it is
   `null` (for example `machine` when no machine took the job). The exceptions are marked "conditional": they are left
   out entirely when they do not apply (`shard`, `attempts`, `retryable`, `excluded`, `logTail` and the `--fetch` keys
-  on a run, `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
+  on a run, `env`, `exclusive` and `baseline` wherever they appear (0.9.0), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
   `makeready --all`, `commandsMore` in `lanq stats`, and in a plan run `retryable` and `excluded` at the top and
   `logTail`, `retryable`, `excluded`, the `--fetch` keys and `shardTiming` on a job). In a dry run, `shardCountWhy` and
-  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail` is
-  always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
+  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail`, `env`
+  and `exclusive` is always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
   `startedSeconds`, `durationSeconds`, `message`, `logPath`, `shardCount` and `shards`, `null` where they do not apply
   (`exitCode` is `null` only for `Skipped`). Inside a makeready report, keys without a value are left out, never `null`.
 - **Key order is not part of the contract.** Look keys up by name.
@@ -129,6 +129,9 @@ The job's output streams to stderr. When the run is over, stdout gets one object
 | `logTail` | array of string | Conditional: only with `--log-tail N` (1 to 200, needs `--json`). The log's last N lines, sanitised, each at most 4000 characters, read from at most the last 256 KB of the file. Empty when no job started. |
 | `retryable` | boolean | Conditional: only when `status` is `NoCapacity`. See [NoCapacity](#nocapacity-retryable-and-excluded). |
 | `excluded` | array | Conditional: only when `status` is `NoCapacity`. See [NoCapacity](#nocapacity-retryable-and-excluded). |
+| `env` | array of string | Conditional (0.9.0): only with `--env`. The variable names, in the order given. Never the values (but a suggested command in `nextSteps` repeats your command line, values included). |
+| `exclusive` | boolean | Conditional (0.9.0): `true` with `--exclusive` (the job takes every slot of its machine); left out otherwise. |
+| `baseline` | object | Conditional (0.9.0): only with `--baseline` (or `--baseline-ref`), and only when the job ended `Failed`. See [baseline](#baseline). |
 | `nextSteps` | array | Always there (at least one entry). See [nextSteps](#nextsteps). |
 
 The state folder is `$LANQ_HOME`, else `%LOCALAPPDATA%\lanq` on Windows, else `$XDG_STATE_HOME/lanq`, else
@@ -180,6 +183,8 @@ added; judge an unknown one by `permanent`.
 | --- | --- | --- |
 | `missing_capability` | yes | The machine lacks a `--needs` capability (its config). |
 | `windows_unsafe_args` | yes | A Windows machine, and the job's arguments hold `"` `<` `>` `^` `%`, or `&` `|` for a program that is not a native `.exe` (a `.cmd`/`.bat` shim such as `npm` would re-parse them through cmd.exe). |
+| `env_conflict` | yes | With `--env` (or `lanq.yml` `env:`): the machine's own `env:` in `machines.yml` sets one of the job's variables too. Judged from the config alone (0.9.0). |
+| `windows_command_too_long` | yes | With `--env`: a Windows machine on which the job's variables make its command longer than the 8,000-character limit. Judged from the config alone (0.9.0). |
 | `mem_exceeds_total` | yes | `--mem` is above the machine's total memory. |
 | `mem_unknown` | yes | With `--mem`: the machine answers but does not report its memory. |
 | `wrong_size` | yes | With `--size` or `--min-size`: the machine's size (its `size:` in `machines.yml`, else the probed class) is not one the job allows. A declared size is judged from the config alone, without ssh (0.8.0). |
@@ -196,7 +201,7 @@ added; judge an unknown one by `permanent`.
 | `memory_pressure` | no | Linux memory pressure above `policy.max_mem_pressure`. |
 | `load` | no | Load above `policy.load_threshold`. |
 | `mem_below_request` | no | Available memory now is below `--mem`. |
-| `busy` | no | Every slot is taken. |
+| `busy` | no | Every slot is taken. For an `--exclusive` job, any slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). |
 | `avoided` | no | `--shards` only: an earlier attempt of the shard lost the connection there, and it may still be running. |
 | `held` | no | Any other hold. |
 
@@ -222,6 +227,43 @@ none of these keys appear.
 A fetch problem never changes `status` or `exitCode`. If you need the files, check `fetchError` and `fetchSkipped`.
 Fetched files come from another machine: read them as data, never run them.
 
+### baseline
+
+With `--baseline` (or `--baseline-ref REF`; lanq.yml `baseline:` and `baseline_ref:`), a job that ended `Failed` is run
+again at the base commit, and the run object (each failed shard's entry with `--shards`, each failed plan job with
+`--plan`) gets a `baseline` object. It is left out when the job did not fail or `--baseline` was not given.
+
+```json
+{"status":"Failed","exitCode":1,"machine":"build-01","jobId":"20261109-221503-a1b2c3","durationSeconds":212.4,"message":"exit 1",
+ "logPath":"/home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log",
+ "baseline":{"ref":"origin/main","sha":"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d","status":"Failed","exitCode":1,"machine":"build-01",
+  "jobId":"20261109-222004-d4e5f6","logPath":"/home/me/.local/state/lanq/logs/20261109-222004-d4e5f6.log","durationSeconds":75.2,
+  "verdict":"preexisting","message":"at 1a2b3c4 (merge-base with origin/main) the same command Failed (exit 1) on build-01 in 75.2s: this failure is pre-existing"},
+ "nextSteps":[{"action":"fix_code","reason":"the job exited 1; read logTail or the log (/home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log) and fix the code; pre-existing: it fails at the base commit too (log: /home/me/.local/state/lanq/logs/20261109-222004-d4e5f6.log)","safeToRunUnattended":false}]}
+```
+
+Every key of `baseline` is always there, `null` where it does not apply.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `ref` | string | What the base came from: the default branch found (`origin/main`), or `--baseline-ref` as given. |
+| `sha` | string or null | The base commit's full id; `null` when it could not be found (a shallow clone without the merge-base). |
+| `status` | string or null | The rerun's own status (`Completed`, `Failed`, `TimedOut`, `InfraError`, `NoCapacity`, `Cancelled`, ...); `null` when it never started. |
+| `exitCode` | number or null | The rerun's exit code as `lanq run` would exit with it; `null` when it never started. |
+| `machine`, `jobId`, `logPath` | string or null | The rerun's, as in [lanq run](#lanq-run---json); `null` when it never started. |
+| `durationSeconds` | number or null | How long the rerun's command ran; `null` when it never started. |
+| `verdict` | string or null | `new` (the base completed), `preexisting` (the base failed too, any exit code), `inconclusive` (anything else: it timed out, found no machine, the base could not be read or sent, Ctrl+C) or `skipped` (the snapshot is the base commit; nothing ran). Values may be added. `null` only in a dry run, where nothing ran. |
+| `message` | string | The same line lanq prints after `[lanq] baseline:`. |
+
+The verdict is information only: the run's `status` and `exitCode` stay the job's own. It also appears in the
+`fix_code` step's `reason`: `; new: the base commit passes`, `; pre-existing: it fails at the base commit too (log:
+PATH)`, `; baseline inconclusive: ...` or `; baseline skipped: the snapshot is the base commit`.
+
+A `--baseline-ref` that is not a commit, no default branch, or a history with no common commit is `Rejected` (2)
+before anything is sent. A plan's reruns run after the whole plan has ended, only for failed jobs that asked for one.
+The rerun is recorded in `jobs.jsonl` with `baselineOf` (the failed job's id) and `commit` (the base's short id);
+`lanq stats`, `--target-minutes` and a plan's order leave such records out.
+
 ## lanq run --shards --json
 
 One object for the whole run, with one entry per shard in index order:
@@ -242,6 +284,7 @@ One object for the whole run, with one entry per shard in index order:
 | `shards` | array | One run object per shard (the keys of [lanq run](#lanq-run---json)), plus `shard` and `attempts`. Empty when nothing ran (refused before anything was sent, bad arguments or config). |
 | `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, at the top level, as for [one run](#nocapacity-retryable-and-excluded). |
 | `shardTiming` | object | Conditional: only with `--shards auto --target-minutes M`, and only once N was picked: how N came from earlier runs ([shardTiming](#shardtiming)). Left out otherwise, also on a refused command line. |
+| `env`, `exclusive` | | Conditional (0.9.0): at the top level, as for [one run](#lanq-run---json); they apply to every shard. |
 | `nextSteps` | array | Always there, for the whole run. See [nextSteps](#nextsteps). |
 
 Conditional keys, only inside `shards` entries:
@@ -250,6 +293,8 @@ Conditional keys, only inside `shards` entries:
 - `attempts` (number): how many times the shard was started. More than 1 only after `--shard-retries` re-ran it
   because its machine stopped answering. 0 for a shard cancelled before it started.
 - With `--fetch`, each entry has the fetch keys, and each shard has its own `fetchDir`.
+- With `--baseline`, each shard that ended `Failed` has its own [`baseline`](#baseline): only failed shards rerun, all
+  at once, with the same `LANQ_SHARD` and `LANQ_SHARDS`.
 
 Each entry in `shards` has its own `logPath` (the log of its last attempt, `null` when it never started) and, with
 `--log-tail N`, its own `logTail`. The entries carry no `nextSteps`, `retryable` or `excluded`; the top level does. In
@@ -277,7 +322,7 @@ stdout gets one object, also for bad arguments or config:
  "nextSteps":[{"action":"proceed","reason":"lanq run would start now as shown; run it","command":"lanq run --json --no-wake --needs dotnet,linux -- dotnet test -m:1","argv":["lanq","run","--json","--no-wake","--needs","dotnet,linux","--","dotnet","test","-m:1"],"safeToRunUnattended":true}]}
 ```
 
-Every key is always there (`null` where it does not apply), except `logTail`.
+Every key is always there (`null` where it does not apply), except `logTail`, `env`, `exclusive` and `baseline`.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -296,6 +341,8 @@ Every key is always there (`null` where it does not apply), except `logTail`.
 | `wouldWake` | string or null | The sleeping machine `lanq run` would wake (with `--wait` above 0, no `--no-wake`, and no awake machine able to take the job). |
 | `retryable` | boolean or null | `NoCapacity` only, as for [a run](#nocapacity-retryable-and-excluded). |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty (a dry run starts no job). |
+| `env`, `exclusive` | | Conditional (0.9.0): as for [a run](#lanq-run---json). The text plan shows the `--env` flags with their values (after the secret scan) on its `Options:` line. |
+| `baseline` | object | Conditional (0.9.0): with `--baseline`, the base a failure would be rerun at: a [baseline](#baseline) object with `ref`, `sha` and `message` (`on failure, rerun at 1a2b3c4 (merge-base with origin/main)`), the rerun's keys `null`, and `verdict` `null`, or `skipped` when the snapshot is the base commit, or `inconclusive` when a shallow clone lacks it. |
 | `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. See [nextSteps](#nextsteps). |
 
 A dry run cannot foresee an archive that fails to build or a slot another run takes between the probe and a real
@@ -389,6 +436,8 @@ Each entry in `jobs`:
 | `retryable`, `excluded` | | Conditional: only on a `NoCapacity` job. |
 | `fetched`, `fetchSkipped`, `fetchDir`, `fetchError`, `fetchSkippedMore` | | Conditional: on a single job with `fetch:` in `lanq.yml`, as [with --fetch](#with---fetch-conditional). A sharded job has them per shard. |
 | `shardTiming` | object | Conditional: a job with `shards: auto` and `target_minutes:`, once N was picked ([shardTiming](#shardtiming)). |
+| `env`, `exclusive` | | Conditional (0.9.0): a job with `env:` (the merged names, never values) or `exclusive: true` in `lanq.yml`, as for [a run](#lanq-run---json). |
+| `baseline` | object | Conditional (0.9.0): a single job with `baseline: true` that ended `Failed` ([baseline](#baseline)). A sharded job has it on each failed shard. The reruns start after the whole plan has ended. |
 
 Jobs of a plan run are recorded in `jobs.jsonl` with `planJob` (the job's name) and `planRun` (one id shared by the
 plan run), and get `LANQ_PLAN_JOB=<name>` in their environment.
@@ -424,7 +473,8 @@ slot is claimed, nothing is woken, and `jobs.jsonl` is read, never written. stdo
  "nextSteps":[{"action":"proceed","reason":"lanq run --plan would start as shown; run it","command":"lanq run --plan --json --no-wake","argv":["lanq","run","--plan","--json","--no-wake"],"safeToRunUnattended":true}]}
 ```
 
-(`jobs` shortened to two entries.) Every key is always there (`null` where it does not apply), except `logTail`.
+(`jobs` shortened to two entries.) Every key is always there (`null` where it does not apply), except `logTail`, and
+`env` and `exclusive` on a job.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -455,6 +505,7 @@ Each entry in `jobs`:
 | `expectedMinutes` | number or null | The job's expected work from `jobs.jsonl` (minutes on a machine of speed factor 1); `null` without history. |
 | `machines` | array | Every machine the job could use, as judged for it ([reason codes](#reason-codes)); empty when it was not probed (`Pending`). |
 | `retryable` | boolean or null | `NoCapacity` only: `false` when the job can never run as configured. |
+| `env`, `exclusive` | | Conditional (0.9.0): as for a plan run. An exclusive job's machine counts as full for the jobs dealt after it. `baseline: true` shows only as `--baseline` (or `--baseline-ref REF`) in `runArgv`; a bad `baseline_ref:` refuses the plan. |
 
 In text mode the plan goes to stdout (each job's `lanq run` line and what it would do) and the last stderr line is
 `[lanq] WouldRun: ...` (or the other status).
@@ -839,7 +890,7 @@ What a suggestion can be, by construction:
   (at most 10080). A lost connection on `--shards` suggests `--shard-retries 1` only when no shard may still be running.
   A dry run that would start proceeds with the same command without `--dry-run`. A plan re-run only adds `--only`
   (and `--wait 120` or `--no-wake` for a wait). `--on`, `--size` and `--min-size` are kept as you typed them, never
-  added or dropped.
+  added or dropped, and so are `--env` (values included), `--exclusive`, `--baseline` and `--baseline-ref`.
 - `--config FILE` is carried into every suggestion.
 
 What lanq suggests, by result:
@@ -847,15 +898,15 @@ What lanq suggests, by result:
 | Result | Steps |
 | --- | --- |
 | run `Completed`, `Cancelled` | `none` |
-| run `Failed` | `fix_code` (the reason names the log) |
-| run `Rejected` | not allowlisted: `ask_developer` (do not work around it); a secret: `fix_code`; bad arguments or the Windows-arguments rule: `fix_command`; config: `ask_developer` + `run_doctor` |
+| run `Failed` | `fix_code` (the reason names the log; with `--baseline`, it adds the [verdict](#baseline)) |
+| run `Rejected` | not allowlisted, or an `--env` name not in `policy.allowed_env`: `ask_developer` (do not work around it); a secret (in the payload, the command line or an `--env` value): `fix_code`; bad arguments (an `--env` name on the deny table or a bad value included) or the Windows-arguments rule: `fix_command`; `--env` values too long for every Windows machine left: `fix_command` ("fix the --env values: ..."); config: `ask_developer` + `run_doctor` |
 | run `NoCapacity`, `retryable: true` | `wait` (the same run with `--wait 120`) + `run_health` (`lanq health --needs ... --json`), + `run_doctor` when every machine was unreachable |
-| run `NoCapacity`, `retryable: false` | `ask_developer` + `run_health` |
+| run `NoCapacity`, `retryable: false` | `ask_developer` + `run_health`; when machines were ruled out by `env_conflict`, the reason adds "drop --env NAME or remove it from the machine's env (build-01, ...)" |
 | run `InfraError` | a lost connection with the job not running: `retry`; the job may still be running: `ask_developer` + `run_health`; snapshot or bundle: `run_doctor` + `ask_developer`; prepare: `run_doctor` (`--remote`) + `ask_developer`; the archive could not be built: `fix_code`; otherwise `ask_developer` + `run_doctor` |
 | run `TimedOut` | `fix_code` + `retry` with double the `--timeout` |
 | run `WindowClosed` | `wait` |
 | `--shards` | by the overall status as above; `Failed` lists each failing shard and its log; lost connections: `retry` with `--shard-retries 1` |
-| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `WindowClosed`: `wait` with `--only` |
+| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log and, with `baseline: true`, its verdict; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); `env:` values too long for every Windows machine left: `fix_code` (`fix lanq.yml or machines.yml: ...`); an `env:` clash on every machine: `ask_developer` naming the variables and machines (fix `lanq.yml` or `machines.yml`) + `run_health`; a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `WindowClosed`: `wait` with `--only` |
 | `--plan --dry-run` | `WouldRun`: `proceed`; otherwise as for the plan, without `--only` edits |
 | dry run `WouldRun` | `proceed` |
 | dry run `NoCapacity`, retryable | `wait` (the same dry run, later) + `run_health` |
@@ -903,6 +954,9 @@ echo "$out" | jq -r '.shards[] | select(.status != "Completed") | "\(.shard) \(.
 # fetch: what came back, and anything that went wrong
 echo "$out" | jq -r '.fetched[]?.path, (.fetchSkipped[]? | "skipped \(.path): \(.reason)"), (.fetchError // empty)'
 
+# --baseline: is the failure new? (a single run, or each failed shard)
+echo "$out" | jq -r '(.baseline // empty | "\(.verdict): \(.message)"), (.shards[]? | select(.baseline) | "shard \(.shard) \(.baseline.verdict): \(.baseline.message)")'
+
 # makeready --all: machines that need attention
 lanq makeready --all --json | jq -r '.machines[]? | select(.verdict != "OK") | "\(.machine) \(.verdict) \(.problem // "")"'
 
@@ -948,6 +1002,9 @@ $r.shards | Where-Object status -ne 'Completed' | ForEach-Object { "$($_.shard) 
 
 # fetch: what came back, and anything that went wrong
 $r.fetched | ForEach-Object path; $r.fetchSkipped | ForEach-Object { "skipped $($_.path): $($_.reason)" }; $r.fetchError
+
+# --baseline: is the failure new? (a single run, or each failed shard)
+if ($r.baseline) { "$($r.baseline.verdict): $($r.baseline.message)" }; $r.shards | Where-Object baseline | ForEach-Object { "shard $($_.shard) $($_.baseline.verdict): $($_.baseline.message)" }
 
 # makeready --all: machines that need attention
 (lanq makeready --all --json | Out-String | ConvertFrom-Json).machines | Where-Object verdict -ne 'OK' | ForEach-Object { "$($_.machine) $($_.verdict) $($_.problem)" }

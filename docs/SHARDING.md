@@ -71,6 +71,17 @@ Linux workers, `lanq init`, `lanq makeready --all`) is in [TEAM-QUICKSTART.md](T
   re-run may use any machine.
 - **Ctrl+C** cancels every shard. Each started shard's cleanup still runs (its process is stopped, its worktree and
   slot removed), and lanq exits 130.
+- **`--env`** variables go to every shard, next to `LANQ_SHARD` and `LANQ_SHARDS`.
+- **One machine per shard: `--exclusive`.** Each shard takes every slot of its machine, so shards never share a
+  machine with each other or with other work (useful for suites that use fixed ports or a lot of memory).
+  `--shards auto` counts the idle machines that can take the job. A fixed `--shards N` above the machines that can
+  take it as configured (capabilities, `size:`, `--env`) is refused (2) before any network, for example
+  `--exclusive --shards 6: only 4 machines can take this job`. That count leaves out `--mem` and the Windows-arguments
+  rule, so when those rule out more machines the extra shards wait for one to be idle. There is no reservation: a
+  shard waits while any slot of a machine is in use.
+- **`--baseline`** reruns only the shards that ended `Failed`, together, at the base commit, with the same
+  `LANQ_SHARD` and `LANQ_SHARDS`. Each failed shard gets its own verdict (`baseline` in its `shards` entry). The base
+  commit may have other tests, so its split can differ: read a shard's verdict as a hint, and check its log.
 
 ### Output
 
@@ -643,6 +654,9 @@ would otherwise sit in a drawer add real test capacity, so the team buys fewer n
 6. Keep `--no-wake` unless the developer has said waking machines is fine.
 7. When the repository has a `lanq.yml`, `lanq run --plan --json --no-wake` (previewed with `--dry-run`) runs its jobs;
    report each job that is not `Completed` by name. Never edit `lanq.yml` or `machines.yml` to get around a refusal.
+8. `--baseline` on a sharded run tells you which failed shards also fail at the base commit. Report a `preexisting`
+   shard as such, and do not try to fix it unless that is your task. `--exclusive --shards` is fine when the developer
+   wants each shard on its own machine; expect it to wait on a busy pool.
 
 ## Flaky and order-dependent tests
 

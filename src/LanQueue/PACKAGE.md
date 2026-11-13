@@ -90,6 +90,15 @@ lists its jobs (build, unit tests, integration tests, a serial tail with `after:
 `lanq run --plan` runs them side by side on one snapshot with one result (`--only`, `--dry-run`, `--json`):
 [docs/PLANS.md](https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md).
 
+## Per-job options
+
+- `--env NAME=VALUE` sets a variable for one job, for names you list in `policy.allowed_env` (none by default); a deny
+  table (loader, runtime startup, toolchain, profile, `GIT_*` and `SSH_*` variables) wins over that list. Settings
+  only, never secrets.
+- `--exclusive` takes every slot of the machine, so nothing else runs there; it waits for an idle machine.
+- `--baseline` reruns a failed job at the base commit (the merge-base with the default branch, or `--baseline-ref`)
+  and says whether the failure is `new` or `preexisting`; the exit code stays the job's.
+
 ## Safe by default
 
 - Key-only SSH with strict host-key checking; there is no password option.

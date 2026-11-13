@@ -55,7 +55,7 @@ refused too: put values several jobs share under `defaults:`, or write them out.
 | Key | Required | Notes |
 | --- | --- | --- |
 | `version` | yes | The number `1`. A newer version is refused with "update lanq". |
-| `defaults` | no | Values every job gets unless it sets its own: `dir`, `needs`, `mem`, `size` or `min_size`, `on`, `timeout`. |
+| `defaults` | no | Values every job gets unless it sets its own: `dir`, `needs`, `mem`, `size` or `min_size`, `on`, `timeout`, `env`, `exclusive`, `baseline`, `baseline_ref`. |
 | `jobs` | yes | A mapping of job names to jobs, 1 to 32. |
 
 Job names start with a letter or digit and hold letters, digits, `_` and `-` (at most 32 characters); they must
@@ -80,14 +80,80 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `shard_retries` | `--shard-retries` | 0 to 3; only re-runs a shard whose machine stopped answering. |
 | `fail_fast` | `--fail-fast` | `true`: the first failing shard of this job cancels its other shards. Needs `shards`. |
 | `fetch` | `--fetch` | A pattern or a list of patterns, as `--fetch`. |
+| `env` | `--env NAME=VALUE` | A mapping of `NAME: value`, one `--env` per entry (0.9.0). Only names in your `policy.allowed_env`; see [Environment variables: env](#environment-variables-env). |
+| `exclusive` | `--exclusive` | `true`: the job takes every slot of its machine (0.9.0); see [Exclusive jobs](#exclusive-jobs). |
+| `baseline` | `--baseline` | `true`: if the job fails, rerun it at the base commit and report whether the failure is new (0.9.0); see [Baseline](#baseline-is-the-failure-new). |
+| `baseline_ref` | `--baseline-ref` | The branch, tag or commit to compare with (implies `baseline: true`). |
 | `after` | (none) | Job names this job starts after; see [Ordering](#ordering-after). |
 
 **Defaults are replaced, not merged.** A job's own value replaces the default as a whole: `needs: [node]` on a job
 drops `needs: [dotnet]` from `defaults:` (write `needs: [dotnet, node]` for both). `size` and `min_size` are one
-setting, so either one on a job drops both defaults.
+setting, so either one on a job drops both defaults. `baseline: false` on a job turns off both `baseline` and a
+`baseline_ref` from `defaults:`. **`env` is the exception:** it is merged by name (see below).
 
-**No machine settings.** `lanq.yml` has no keys for hosts, `ssh`, keys, `env`, `path_prepend`, `wake`, `priority`,
-`work_root`, `max_jobs` or `policy`. Writing one is an unknown-key error that points to `machines.yml`.
+**No machine settings.** `lanq.yml` has no keys for hosts, `ssh`, keys, `path_prepend`, `wake`, `priority`,
+`work_root`, `max_jobs` or `policy`. Writing one is an unknown-key error that points to `machines.yml`. `env:` here is
+the job's own variables, never a machine's.
+
+### Environment variables: env
+
+```yaml
+defaults:
+  env:
+    CONFIGURATION: Release
+    TEST_FILTER: Category=Unit
+jobs:
+  unit:
+    command: [dotnet, test, tests/Unit, -c, Release]
+  nightly:
+    command: [dotnet, test, tests/Unit, -c, Release]
+    env:
+      TEST_FILTER: Category=Slow
+```
+
+`unit` gets `--env CONFIGURATION=Release --env TEST_FILTER=Category=Unit`; `nightly` keeps `CONFIGURATION` from the
+defaults and gets its own `TEST_FILTER`. Names are compared ignoring case, and the job's spelling wins. Each value is
+taken as written (`3` is `"3"`, `true` is `"true"`); a list or mapping as a value is refused.
+
+Each entry is checked as an `--env` flag (see the README's
+[Job variables](../README.md#job-variables---env)):
+
+- The name must be in **your** `machines.yml` `policy.allowed_env`. A plan file comes with the repository, so it can
+  set only names you allowed; anything else refuses the plan (2), naming the job.
+- Names on lanq's deny table (`NODE_OPTIONS`, `DOTNET_STARTUP_HOOKS`, `GIT_*`, `HOME`, `TEMP`, `LANQ_*` and more) are
+  refused even when allowed.
+- A value must be non-empty, without control characters, at most 4,096 characters (16,384 for all of a job's
+  variables), and must not look like a secret. Never put secrets in `lanq.yml`.
+- A machine whose own `env:` sets the same name is not used for that job (`env_conflict`), and neither is a Windows
+  machine the values make the command too long for (`windows_command_too_long`).
+
+### Exclusive jobs
+
+```yaml
+  perf:
+    command: [dotnet, test, tests/Perf]
+    exclusive: true
+    on: [big-01]
+```
+
+The job takes every slot of its machine, so nothing else of the plan, or of anyone else, runs there meanwhile. It
+waits until the machine is idle; there is no reservation, so on a machine that is never idle it waits out `--wait`
+(`NoCapacity`, 75). The dry run counts the machine as full, so a sibling job is dealt elsewhere or waits. With
+`shards:` each shard takes a whole machine.
+
+### Baseline: is the failure new?
+
+```yaml
+defaults:
+  baseline: true          # or baseline_ref: origin/release-2.1
+```
+
+A job with `baseline: true` that ends `Failed` is run again at the base commit (the merge-base of HEAD and the default
+branch, or of HEAD and `baseline_ref`) once the whole plan has ended, and its result gets a verdict: `new`,
+`preexisting`, `inconclusive` or `skipped`. Only failed jobs rerun (for a sharded job, only its failed shards), never
+a job `Skipped` after them, and nothing reruns after Ctrl+C. The verdict never changes the plan's status or exit
+code. A `baseline_ref` that is not a commit refuses the plan (2) before anything is sent, in the dry run too. See the
+README's [Is this failure new?](../README.md#is-this-failure-new---baseline).
 
 ### Command: list or string
 
@@ -245,8 +311,9 @@ A job that runs zero tests usually exits 0 and shows `Completed`. Make it fail i
 | `--config FILE` | As for every command. |
 
 The options a job sets in `lanq.yml` are refused with `--plan` (exit 2): a command after `--`, `--needs`, `--dir`,
-`--mem`, `--timeout`, `--size`, `--min-size`, `--on`, `--shards`, `--shard-retries`, `--target-minutes` and the
-`--fetch` options. `--only` and `--plan-file` are refused without a plan.
+`--mem`, `--timeout`, `--size`, `--min-size`, `--on`, `--shards`, `--shard-retries`, `--target-minutes`, the
+`--fetch` options, `--env`, `--exclusive`, `--baseline` and `--baseline-ref`. `--only` and `--plan-file` are refused
+without a plan.
 
 ### --dry-run
 
@@ -292,7 +359,9 @@ complete; it never changes anything else.
 ## Environment
 
 Every job gets `LANQ_JOB` (its job id) and `LANQ_PLAN_JOB` (its name in `lanq.yml`); a sharded job also gets
-`LANQ_SHARD` and `LANQ_SHARDS`. Your `jobs.jsonl` records `planJob` and `planRun` (shared by the jobs of one plan run).
+`LANQ_SHARD` and `LANQ_SHARDS`. A job with `env:` gets those variables too, set after the machine's `env:` and before
+the `LANQ_*` ones. Your `jobs.jsonl` records `planJob` and `planRun` (shared by the jobs of one plan run), and the
+names (never the values) of a job's `env:` as `envNames`.
 
 ## lanq.yml and machines.yml
 
@@ -300,10 +369,12 @@ Every job gets `LANQ_JOB` (its job id) and `LANQ_PLAN_JOB` (its name in `lanq.ym
 | --- | --- | --- |
 | Where | the repository, committed | your per-user config folder, never committed |
 | Who writes it | the team (reviewed like code) | each developer |
-| Holds | jobs: commands, needs, sizes, timeouts, order | machines, hosts, keys, `env`, `path_prepend`, hours, the allowlists |
+| Holds | jobs: commands, needs, sizes, timeouts, order, the job's own `env`, `exclusive`, `baseline` | machines, hosts, keys, each machine's `env`, `path_prepend`, hours, the allowlists (`allowed_commands`, `allowed_directories`, `allowed_env`) |
 
 `lanq.yml` comes with the repository, so lanq treats it as untrusted input: it can only say what a `lanq run` line can
-say, and every job still has to pass your allowlist. A plan never adds machines, keys or commands.
+say, and every job still has to pass your allowlist. A plan never adds machines, keys or commands, and its `env:` can
+set only the names your `policy.allowed_env` lists. If a plan job is refused for an `env:` name, add the name to
+`allowed_env` yourself only if jobs may set it; a coding agent must never do that for you.
 
 Machine names are per person: `big-01` in your `machines.yml` may not exist in a colleague's. In a shared `lanq.yml`
 prefer `needs:` and `size:` / `min_size:`, which travel. `on:` is for a plan only you use; an unknown name refuses the
