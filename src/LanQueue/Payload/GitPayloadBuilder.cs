@@ -148,6 +148,11 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
+    /// <inheritdoc/>
+    public async Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) =>
+        IsObjectId(ancestor) && IsObjectId(descendant)
+        && (await GitRun(repoDir, null, ct, "merge-base", "--is-ancestor", ancestor, descendant).ConfigureAwait(false)).Code == 0;
+
     internal static bool IsObjectId(string s) =>
         s.Length is 40 or 64 && s.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
 

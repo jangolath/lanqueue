@@ -42,11 +42,24 @@ internal sealed class BaselinePayloads(RunnerTests.FakePayloads inner) : IPayloa
         return Resolution ?? await BaseRef.ResolveAsync(repoDir, named, ct);
     }
 
+    /// <summary>When set, base payloads come from this (real) builder.</summary>
+    public IPayloadBuilder? Real { get; set; }
+
+    /// <summary>The local ancestry answer (default: none is an ancestor, as the interface's default).</summary>
+    public Func<string, string, bool> Ancestor { get; set; } = (_, _) => false;
+
+    public Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) => Task.FromResult(Ancestor(ancestor, descendant));
+
     public Task<JobPayload> BuildCommitAsync(string jobId, string repoDir, string outputDir, string sha, PayloadKinds kinds, CancellationToken ct)
     {
         lock (CommitIds)
         {
             CommitIds.Add(jobId);
+        }
+
+        if (Real is not null)
+        {
+            return Real.BuildCommitAsync(jobId, repoDir, outputDir, sha, kinds, ct);
         }
 
         return Task.FromResult(new JobPayload(sha, [], "", RepoId: kinds.HasFlag(PayloadKinds.Bundle) ? T.RepoId : null, Head: sha, CommittedFiles: BaseFiles, CommittedConfigs: new Dictionary<string, string?>()));
@@ -422,7 +435,7 @@ public sealed class BaselineTests : IDisposable
         var json = doc.RootElement;
         Assert.Equal("Failed", json.GetProperty("status").GetString());
         var b = json.GetProperty("baseline");
-        string[] keys = ["ref", "sha", "status", "exitCode", "machine", "jobId", "logPath", "durationSeconds", "verdict", "message"];
+        string[] keys = ["ref", "sha", "status", "exitCode", "machine", "jobId", "logPath", "durationSeconds", "verdict", "message", "sameMachine"];
         Assert.Equal(keys, b.EnumerateObject().Select(p => p.Name));
         Assert.Equal("new", b.GetProperty("verdict").GetString());
         Assert.Equal("Completed", b.GetProperty("status").GetString());

@@ -960,7 +960,10 @@ public static partial class Cli
         b.LogPath is { } l ? JobRunner.SafeLine(l) : null,
         b.DurationSeconds,
         b.Verdict.Length == 0 ? null : b.Verdict,
-        JobRunner.SafeLine(b.Message));
+        JobRunner.SafeLine(b.Message))
+    {
+        SameMachine = b.SameMachine,
+    };
 
     /// <summary>An optional JSON flag such as exclusive: true when set, null (the key left out) when not.</summary>
     internal static bool? Flag(bool set) => set ? true : null;

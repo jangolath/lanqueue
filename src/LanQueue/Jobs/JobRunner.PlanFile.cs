@@ -10,8 +10,12 @@ namespace LanQueue.Jobs;
 /// waiting for a slot counts --wait only while no job of the plan holds one, so it waits behind its siblings even with --wait 0 and ends
 /// NoCapacity only when nothing of the plan runs (a job every machine rules out for good still ends at once).
 /// </summary>
-public sealed class PlanProgress
+/// <param name="holders">Who holds the slots a waiting job waits behind, in its waiting line ("this plan's other jobs hold some").</param>
+public sealed class PlanProgress(string holders = "this plan's other jobs")
 {
+    /// <summary>Who holds the slots a waiting job waits behind (see the constructor).</summary>
+    public string Holders => holders;
+
     private readonly Lock _gate = new();
     private int _holding;
     private long _idleSince = Stopwatch.GetTimestamp();
@@ -256,16 +260,12 @@ public sealed partial class JobRunner
     /// <summary>
     /// baseline: true in a plan: after every job has ended, the failed jobs that asked for it (a single job that ended Failed, or each Failed
     /// shard of a sharded job; never a job Skipped after them) are rerun at their base all at once. Each result goes on its job (or shard); the
-    /// plan's status, exit code and message stay as they are. Nothing reruns after Ctrl+C.
+    /// plan's status, exit code and message stay as they are. Nothing reruns after Ctrl+C: each such job's baseline is inconclusive, "cancelled
+    /// (Ctrl+C) before it started".
     /// </summary>
     private async Task<PlanRunResult> WithPlanBaselinesAsync(
         IReadOnlyList<PlanJobSpec> ordered, PlanRunResult result, Dictionary<string, BaseCommit> bases, string planRun, JobPayload snapshot, CancellationToken ct)
     {
-        if (result.Status == Cancelled || ct.IsCancellationRequested)
-        {
-            return result;
-        }
-
         var targets = new List<(string Name, int? Shard, BaselineTarget Target)>();
         foreach (var j in result.Jobs)
         {

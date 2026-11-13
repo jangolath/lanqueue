@@ -44,6 +44,18 @@ public sealed record BaselineResult(string Ref, string? Sha, string Verdict, str
 
     /// <summary>How long the base rerun's command ran (as <see cref="JobResult.RunSeconds"/>), or null when it never started.</summary>
     public double? DurationSeconds { get; init; }
+
+    /// <summary>The machine the job itself failed on, or null.</summary>
+    public string? FailedOn { get; init; }
+
+    /// <summary>
+    /// Whether the rerun ran on the machine the job failed on (<see cref="FailedOn"/>); null when it ran nowhere. False means the verdict may
+    /// reflect the machine rather than the commit (see <see cref="MachineCaveat"/>).
+    /// </summary>
+    public bool? SameMachine => Machine is null || FailedOn is null ? null : string.Equals(Machine, FailedOn, StringComparison.Ordinal);
+
+    /// <summary>" (on big-01, not build-01 where it failed: the result may reflect the machine)" when <see cref="SameMachine"/> is false, else "".</summary>
+    public string MachineCaveat => SameMachine == false ? $" (on {Machine}, not {FailedOn} where it failed: the result may reflect the machine)" : "";
 }
 
 /// <summary>lanq run --baseline: resolving the base commit and rerunning failed jobs there (see Item 3 of the 0.9.0 design).</summary>
@@ -97,7 +109,7 @@ public sealed partial class JobRunner
     /// </summary>
     private async Task<List<BaselineResult>> RunBaselinesAsync(IReadOnlyList<BaselineTarget> targets, JobPayload snapshot, CancellationToken ct)
     {
-        var gate = new PlanProgress();
+        var gate = new PlanProgress("the other baseline reruns");
         var anyGit = targets.Any(t => Candidates(t.Request).Any(m => m.Transfer == TransferMode.Git));
         var built = new Dictionary<string, Task<(PreparedPayload? Prepared, string? Failure)>>(StringComparer.Ordinal);
         var builtGate = new Lock();
@@ -220,8 +232,10 @@ public sealed partial class JobRunner
                 JobStatus.Failed => (BaselineVerdict.Preexisting, string.Create(CultureInfo.InvariantCulture, $"{at} the same command Failed (exit {r.ExitCode}){on}{took}: this failure is pre-existing")),
                 _ => (BaselineVerdict.Inconclusive, $"{at} the same command ended {r.Status}{on}: inconclusive ({r.Message})"),
             };
-            return Result(verdict, message) with
+            var done = Result(verdict, message) with { Machine = r.Machine, FailedOn = t.Machine };
+            return done with
             {
+                Message = SafeLine(message + done.MachineCaveat),
                 Status = r.Status.ToString(),
                 ExitCode = r.CliExitCode,
                 Machine = r.Machine,
@@ -235,6 +249,7 @@ public sealed partial class JobRunner
             var logPath = machine is null ? null : log.LogPathFor(jobId) is var path && File.Exists(path) ? Path.GetFullPath(path) : null;
             return Result(BaselineVerdict.Inconclusive, $"{at}: inconclusive: cancelled (Ctrl+C)" + (machine is null ? " before it started" : "; its cleanup ran")) with
             {
+                FailedOn = t.Machine,
                 Status = Cancelled,
                 ExitCode = 130,
                 Machine = machine,
@@ -246,6 +261,7 @@ public sealed partial class JobRunner
         {
             return Result(BaselineVerdict.Inconclusive, $"{at}: inconclusive: unexpected error: {ex.GetType().Name}: {ex.Message}") with
             {
+                FailedOn = t.Machine,
                 Status = nameof(JobStatus.InfraError),
                 ExitCode = 70,
                 Machine = machine,

@@ -175,7 +175,15 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
 /// <param name="Verdict">new (the base completed), preexisting (it failed there too), inconclusive (anything else) or skipped (the snapshot is the base commit; nothing ran). Values may be added. Null only in a dry run (nothing ran yet).</param>
 /// <param name="Message">The same line lanq prints after "[lanq] baseline: ".</param>
 internal sealed record BaselineJson(
-    string Ref, string? Sha, string? Status, int? ExitCode, string? Machine, string? JobId, string? LogPath, double? DurationSeconds, string? Verdict, string Message);
+    string Ref, string? Sha, string? Status, int? ExitCode, string? Machine, string? JobId, string? LogPath, double? DurationSeconds, string? Verdict, string Message)
+{
+    /// <summary>
+    /// True when the rerun ran on the machine the job failed on, false when on another (the verdict may then reflect the machine, and the
+    /// message says so). Absent when the rerun ran nowhere.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? SameMachine { get; init; }
+}
 
 /// <summary>
 /// The one object <c>lanq run --shards --json</c> prints on stdout: the overall status and exit code, N, and one <see cref="RunJson"/> per

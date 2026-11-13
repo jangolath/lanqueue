@@ -694,7 +694,11 @@ public sealed partial class JobRunner(
         [.. assessed.Select(a => new ExcludedMachine(a.Machine.Name, a.Code ?? Eligibility.Code(Exclusion.Busy)!, WhyNot(a), a.Permanent))];
 
     /// <param name="onSlot">Called with the machine's name once the job holds a slot there (a plan job reports where it ran when cancelled).</param>
-    /// <param name="prefer">A machine tried first whenever it can take the job (a baseline rerun prefers the machine the job failed on); null for none.</param>
+    /// <param name="prefer">
+    /// A machine tried first whenever it can take the job (a baseline rerun prefers the machine the job failed on); null for none. While it can
+    /// take the job but has no free slot (busy, or its slot was taken first), no other machine is tried for <see cref="PreferRounds"/> looks:
+    /// a rerun elsewhere could pass or fail because of the machine, not the commit.
+    /// </param>
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null, string? prefer = null)
     {
         var deadline = Stopwatch.StartNew();
@@ -704,12 +708,20 @@ public sealed partial class JobRunner(
         var candidates = Candidates(req);
         var say = Say(req);
         var relooked = 0L;
+        var preferLooks = 0;
         while (true)
         {
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
-            if (prefer is not null)
+            var holdForPreferred = prefer is not null && preferLooks < PreferRounds
+                && assessed.FirstOrDefault(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal)) is { } preferred
+                && (preferred.Eligible || preferred.Reason == Exclusion.Busy);
+            if (holdForPreferred)
+            {
+                ranked = [.. ranked.Where(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal))];
+            }
+            else if (prefer is not null)
             {
                 ranked = [.. ranked.OrderBy(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal) ? 0 : 1)]; // stable: the rest keep their rank
             }
@@ -744,6 +756,17 @@ public sealed partial class JobRunner(
                 }
             }
 
+            if (holdForPreferred)
+            {
+                // The preferred machine can take the job but has no free slot now: wait for it (at most PreferRounds looks), not for --wait.
+                preferLooks++;
+                say(req.Progress is { AnyHolding: true } busy
+                    ? $"[lanq] waiting for a slot on {prefer}, where the job failed ({busy.Holders} hold some)"
+                    : string.Create(CultureInfo.InvariantCulture, $"[lanq] waiting for a slot on {prefer}, where the job failed, before taking another machine (look {preferLooks} of {PreferRounds})"));
+                await PauseAsync(req, ct).ConfigureAwait(false);
+                continue;
+            }
+
             // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now.
             if (assessed.All(a => a.Permanent))
             {
@@ -768,11 +791,14 @@ public sealed partial class JobRunner(
                 continue; // a sibling gave back a slot after this look began: look again now, it may be free
             }
 
-            say(req.Progress is { AnyHolding: true } ? "[lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)" : "[lanq] no eligible machine; waiting 15s");
+            say(req.Progress is { AnyHolding: true } holding ? $"[lanq] no eligible machine; waiting for a slot ({holding.Holders} hold some)" : "[lanq] no eligible machine; waiting 15s");
             req.Placed?.Invoke();
             await PauseAsync(req, ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>How many looks a baseline rerun waits for the machine the job failed on (busy there) before it takes another machine.</summary>
+    internal const int PreferRounds = 2;
 
     /// <summary>
     /// Whether a job still waiting for a slot has used up --wait: from its own start, or in a plan (<see cref="JobRequest.Progress"/>) only
@@ -1303,11 +1329,12 @@ public sealed partial class JobRunner(
         var git = machine.Transfer == TransferMode.Git;
         var local = archivePath;
         string? incrementalBase = null;
+        string? known = null;
         if (git && payload.RepoId is not null)
         {
             try
             {
-                var known = await BaseStoreCall(() => bases.Get(machine.Name, payload.RepoId), "read", machine, onLine, ct).ConfigureAwait(false);
+                known = await BaseStoreCall(() => bases.Get(machine.Name, payload.RepoId), "read", machine, onLine, ct).ConfigureAwait(false);
                 var bundle = await bundles.GetAsync(known, ct).ConfigureAwait(false);
                 (local, incrementalBase) = (bundle.Path, bundle.Base);
             }
@@ -1344,11 +1371,13 @@ public sealed partial class JobRunner(
             step = await UploadAndPrepare(jobId, prepared, machine, local, onLine, ct).ConfigureAwait(false);
         }
 
-        if (step.Ok && git)
+        // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
+        // Not when HEAD is an ancestor of the recorded base (a lanq run --baseline rerun of an older commit): the worker kept its newer
+        // refs/lanq/base (see RemoteScripts.Prepare), and so does lanq, so the next run's bundle stays incremental on it.
+        var head = payload.Head ?? payload.Sha;
+        if (step.Ok && git && !(known is not null && await payloads.IsAncestorAsync(bundles.RepoDir, head, known, ct).ConfigureAwait(false)))
         {
-            // A baseline's base commit is recorded too: the worker's refs/lanq/base moved to it, so the next bundle is incremental on it.
-            // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
-            await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
+            await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, head); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
         }
 
         return (step, null);
@@ -1688,6 +1717,9 @@ public sealed partial class JobRunner(
     /// </summary>
     private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, SemaphoreSlim builds)
     {
+        /// <summary>The repository the bundles are built from (for local ancestry checks).</summary>
+        public string RepoDir => repoDir;
+
         private readonly Lock _gate = new();
         private readonly Dictionary<string, (Task<BundleBuild> Task, int Started)> _built = new(StringComparer.Ordinal);
 

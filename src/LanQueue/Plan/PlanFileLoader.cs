@@ -441,6 +441,12 @@ public static partial class PlanFileLoader
         // baseline: true is --baseline, baseline_ref: REF is --baseline-ref REF (which implies it, as on the command line). A job's own
         // baseline: false turns both off, even a baseline_ref: from defaults:.
         var baselineOff = values.TryGetValue("baseline", out var baselineNode) && !Flag(baselineNode, "baseline", Error);
+        if (baselineOff && own.ContainsKey("baseline") && own.ContainsKey("baseline_ref"))
+        {
+            // Both on the job itself: one of them is a mistake. (An inherited defaults: baseline_ref is turned off quietly.)
+            throw Error("baseline_ref has no effect with baseline: false; drop one.");
+        }
+
         if (!baselineOff && values.TryGetValue("baseline_ref", out var baselineRef))
         {
             args.AddRange(["--baseline-ref", Scalar(baselineRef, "baseline_ref")]);

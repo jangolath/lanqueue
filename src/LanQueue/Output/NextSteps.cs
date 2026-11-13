@@ -327,7 +327,7 @@ internal static class NextSteps
     internal static string BaselineSentence(BaselineResult? b) => b?.Verdict switch
     {
         null => "",
-        BaselineVerdict.New => "; new: the base commit passes",
+        BaselineVerdict.New => "; new: the base commit passes" + b.MachineCaveat,
         BaselineVerdict.Preexisting => $"; pre-existing: it fails at the base commit too (log: {b.LogPath ?? "none"})",
         BaselineVerdict.Skipped => "; baseline skipped: the snapshot is the base commit",
         _ => "; baseline inconclusive: " + b.Message,

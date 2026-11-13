@@ -62,4 +62,10 @@ public interface IPayloadBuilder
     /// </summary>
     Task<JobPayload> BuildCommitAsync(string jobId, string repoDir, string outputDir, string sha, PayloadKinds kinds, CancellationToken ct) =>
         throw new InvalidOperationException("this payload builder cannot build a commit's payload");
+
+    /// <summary>
+    /// Whether commit <paramref name="ancestor"/> is <paramref name="descendant"/> or an ancestor of it in the local repository (false when either
+    /// is unknown). A worker that fetched an older commit than its recorded base keeps that base (lanq run --baseline), and so does lanq.
+    /// </summary>
+    Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) => Task.FromResult(false);
 }

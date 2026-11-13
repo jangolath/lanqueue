@@ -223,12 +223,13 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// --baseline on a sharded run: the shards that ended Failed (their own exit, never another status), rerun at the base all at once; each
-    /// result goes on its shard. The run's status, exit code and message stay as they are. Nothing reruns after Ctrl+C.
+    /// result goes on its shard. The run's status, exit code and message stay as they are. Nothing reruns after Ctrl+C (each is inconclusive).
     /// </summary>
     private async Task<ShardRunResult> WithShardBaselinesAsync(JobRequest template, ShardRunResult result, BaseCommit baseCommit, JobPayload snapshot, CancellationToken ct)
     {
         var failed = result.Shards.Where(s => s.Status == nameof(JobStatus.Failed) && s.JobId is not null).ToList();
-        if (failed.Count == 0 || result.Status == Cancelled || ct.IsCancellationRequested)
+        // After Ctrl+C each failed shard still gets its baseline object: inconclusive, "cancelled (Ctrl+C) before it started" (nothing runs).
+        if (failed.Count == 0)
         {
             return result;
         }

@@ -523,7 +523,8 @@ public static partial class RemoteScripts
     /// <summary>
     /// Git mode: verifies the uploaded bundle against the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> (printing
     /// <see cref="BundleNotUsable"/> and failing if its prerequisites are missing), fetches it, moves <c>refs/lanq/base</c> to the snapshot
-    /// (keeping it alive as the next incremental base) and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
+    /// (keeping it alive as the next incremental base) unless the snapshot is an ancestor of the current base (a lanq run --baseline rerun of an
+    /// older commit: the newer base stays, so the next run's bundle stays small), and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
     /// </summary>
     /// <param name="bundleRef">The id the bundle carries the snapshot under (refs/lanq/&lt;bundleRef&gt;): the payload id shared by every shard of one
     /// run; null means <paramref name="jobId"/>. The job's own ref in the cache is always refs/lanq/&lt;jobId&gt;.</param>
@@ -605,7 +606,11 @@ public static partial class RemoteScripts
             $ErrorActionPreference = 'Stop'
             if (-not $ok) { '{{BundleNotUsable}}'; exit 3 }
             G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${b}:refs/lanq/${id}"
-            G -C $c update-ref refs/lanq/base "refs/lanq/$id"
+            $ErrorActionPreference = 'Continue'
+            Q -C $c merge-base --is-ancestor "refs/lanq/$id" refs/lanq/base 2>&1 | Out-Null
+            $older = $LASTEXITCODE -eq 0
+            $ErrorActionPreference = 'Stop'
+            if (-not $older) { G -C $c update-ref refs/lanq/base "refs/lanq/$id" }
             G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
@@ -622,7 +627,7 @@ public static partial class RemoteScripts
             rm -rf "$C/info/attributes"
             G -C "$C" bundle verify "$R/incoming/$ID.bundle" >/dev/null 2>&1 || { echo '{{BundleNotUsable}}'; exit 3; }
             G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$B:refs/lanq/$ID"
-            G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
+            G -C "$C" merge-base --is-ancestor "refs/lanq/$ID" refs/lanq/base >/dev/null 2>&1 || G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
             G -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
 
