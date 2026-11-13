@@ -48,7 +48,7 @@ public class ScriptTests
     {
         var s = RemoteScripts.Cleanup(T.Linux(), "j", "2", T.RepoId);
         Assert.Contains("worktree remove --force", s, StringComparison.Ordinal);
-        Assert.Contains("slot-2", s, StringComparison.Ordinal);
+        Assert.Contains("for n in 2; do", s, StringComparison.Ordinal);
         Assert.Contains(".bundle", s, StringComparison.Ordinal);
     }
 

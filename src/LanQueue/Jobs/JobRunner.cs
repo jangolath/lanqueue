@@ -929,12 +929,28 @@ public sealed partial class JobRunner(
         // --exclusive claims every slot of the machine, all or nothing (SLOTS=1,...,n or SLOT=FULL).
         var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
         var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout);
-        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, claim), null, TimeSpan.FromSeconds(30), ct)
-            .ConfigureAwait(false);
+        SshResult acquire;
+        try
+        {
+            acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, claim), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await ReleaseClaimAsync(machine, jobId).ConfigureAwait(false); // Ctrl+C mid-claim: it may have created slots
+            throw;
+        }
+
         var slot = ParseSlot(acquire.Output);
         if (!acquire.Ok || slot is null)
         {
-            return null; // unreachable or full: try the next machine
+            // A claim that did not report back (timed out, lost the connection, unreadable output) may still have created slot files; a
+            // clean SLOT=FULL created none. Either way: unreachable or full, try the next machine.
+            if (!acquire.Ok || !IsCleanFull(acquire.Output))
+            {
+                await ReleaseClaimAsync(machine, jobId).ConfigureAwait(false);
+            }
+
+            return null;
         }
 
         onSlot?.Invoke();
@@ -1459,6 +1475,31 @@ public sealed partial class JobRunner(
                 span[i] = Unsafe(src[i]) ? '?' : src[i];
             }
         });
+    }
+
+    /// <summary>How long the best-effort release after a claim that did not report back may take.</summary>
+    internal static readonly TimeSpan ReleaseClaimTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>True when a claim's output says SLOT=FULL (it created no slot file) and no slot.</summary>
+    internal static bool IsCleanFull(string output) =>
+        output.Split('\n', StringSplitOptions.TrimEntries).Any(l => l == "SLOT=FULL")
+        && !output.Split('\n', StringSplitOptions.TrimEntries).Any(l => l.StartsWith("SLOTS=", StringComparison.Ordinal) || (l.StartsWith("SLOT=", StringComparison.Ordinal) && l != "SLOT=FULL"));
+
+    /// <summary>
+    /// Best effort, never throws: removes the slot files this job's claim may have created on <paramref name="machine"/>
+    /// (<see cref="RemoteScripts.ReleaseClaim"/>: only files whose first line is this job's id), with a short timeout.
+    /// </summary>
+    private async Task ReleaseClaimAsync(Machine machine, string jobId)
+    {
+        try
+        {
+            await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.ReleaseClaim(machine, jobId)), null, ReleaseClaimTimeout, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Best effort: the slots then go stale and are reclaimed as any crashed run's are.
+        }
     }
 
     /// <summary>

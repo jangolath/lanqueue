@@ -1151,7 +1151,7 @@ public sealed class RunnerTests : IDisposable
         var r = await runner.RunAsync(Req(["dotnet", "test"], ".", "dotnet"), CancellationToken.None);
 
         Assert.Equal(JobStatus.InfraError, r.Status);
-        Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "locks/slot-1"));
+        Assert.Contains(ssh.Calls, c => DecodedContains(T.Windows(), c.Command, "foreach($n in @(1))"));
     }
 
     [Fact]
@@ -1160,7 +1160,7 @@ public sealed class RunnerTests : IDisposable
         foreach (var m in new[] { T.Linux(), T.Windows() })
         {
             var s = RemoteScripts.Cleanup(m, "j1", "1", null);
-            Assert.Contains("locks/slot-1", s, StringComparison.Ordinal);
+            Assert.Contains(m.Os == Config.MachineOs.Windows ? "foreach($n in @(1))" : "for n in 1; do", s, StringComparison.Ordinal);
             Assert.Contains("jobs/", s, StringComparison.Ordinal);
             Assert.DoesNotContain("repos/", s, StringComparison.Ordinal);
         }

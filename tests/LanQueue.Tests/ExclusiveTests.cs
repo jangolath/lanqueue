@@ -5,7 +5,9 @@ using LanQueue.Health;
 using LanQueue.Jobs;
 using LanQueue.Output;
 using LanQueue.Plan;
+using LanQueue.Policy;
 using LanQueue.Scheduling;
+using LanQueue.Ssh;
 using Xunit;
 
 namespace LanQueue.Tests;
@@ -227,12 +229,47 @@ public sealed class ExclusiveTests : IDisposable
 
     // ---- races, for real ----
 
-    /// <summary>Two exclusive claims at once on one machine, 50 times: never both win; the winner holds every slot, a loser none.</summary>
+    /// <summary>
+    /// Runs every script at once: each first creates its own ready file and then spins (bounded: 10 s in PowerShell, 2 million loops in sh) until a shared go file exists, which the
+    /// test creates only once every script is ready. So the claims really start together, whatever each shell's start-up time. The outputs,
+    /// in the order given.
+    /// </summary>
+    private List<string> Race(string shell, IReadOnlyList<string> scripts)
+    {
+        var gate = (_root + "/gate-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
+        Directory.CreateDirectory(gate);
+        var go = gate + "/go";
+        string Barrier(int i)
+        {
+            var ready = gate + "/ready-" + i.ToString(CultureInfo.InvariantCulture);
+            return shell == "windows"
+                ? $"[IO.File]::WriteAllText({ShellQuote.PowerShell(ready)}, '');$sw=[Diagnostics.Stopwatch]::StartNew();while(-not [IO.File]::Exists({ShellQuote.PowerShell(go)}) -and $sw.ElapsedMilliseconds -lt 10000){{}}"
+                : $": > {ShellQuote.Posix(ready)}; w=0; while [ ! -f {ShellQuote.Posix(go)} ] && [ \"$w\" -lt 2000000 ]; do w=$((w+1)); done";
+        }
+
+        var runs = scripts.Select((script, i) => Task.Run(() => Shells.Run(shell, Barrier(i) + "\n" + script).Output)).ToArray();
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (Directory.GetFiles(gate, "ready-*").Length < scripts.Count && waited.Elapsed < TimeSpan.FromSeconds(60))
+        {
+            Thread.Sleep(5);
+        }
+
+        File.WriteAllText(go, "");
+        Task.WaitAll(runs);
+        Directory.Delete(gate, recursive: true);
+        return [.. runs.Select(r => r.Result)];
+    }
+
+    private string AllScript(string shell, string jobId, int maxJobs) => RemoteScripts.AcquireAll(Worker(shell, maxJobs), jobId, TimeSpan.FromMinutes(10));
+
+    private string OneScript(string shell, string jobId, int maxJobs) => RemoteScripts.AcquireSlot(Worker(shell, maxJobs), jobId, TimeSpan.FromMinutes(10));
+
+    /// <summary>Two exclusive claims released together on one machine: never both win; the winner holds every slot, a loser none.</summary>
     [LinuxFact]
-    public void TwoExclusiveClaimsNeverBothWin() => TwoExclusiveClaims("linux", 50);
+    public void TwoExclusiveClaimsNeverBothWin() => TwoExclusiveClaims("linux", 30);
 
     [PowerShellFact]
-    public void TwoExclusiveClaimsNeverBothWinPowerShell() => TwoExclusiveClaims("windows", 50);
+    public void TwoExclusiveClaimsNeverBothWinPowerShell() => TwoExclusiveClaims("windows", 12);
 
     private void TwoExclusiveClaims(string shell, int iterations)
     {
@@ -240,9 +277,8 @@ public sealed class ExclusiveTests : IDisposable
         for (var n = 0; n < iterations; n++)
         {
             ClearLocks();
-            var results = new[] { "ex-a", "ex-b" }.AsParallel().WithDegreeOfParallelism(2)
-                .Select(job => (Job: job, Slots: JobRunner.ParseSlot(ClaimAll(shell, job, 3))))
-                .ToList();
+            var outputs = Race(shell, [AllScript(shell, "ex-a", 3), AllScript(shell, "ex-b", 3)]);
+            var results = new[] { "ex-a", "ex-b" }.Zip(outputs, (job, o) => (Job: job, Slots: JobRunner.ParseSlot(o))).ToList();
 
             var winners = results.Where(r => r.Slots is not null).ToList();
             Assert.True(winners.Count <= 1, $"iteration {n}: both exclusive claims won");
@@ -261,33 +297,52 @@ public sealed class ExclusiveTests : IDisposable
         Assert.True(won > 0, "no exclusive claim ever won");
     }
 
-    /// <summary>An exclusive claim against a normal claim on a max_jobs 2 machine: never both hold slots, and nothing is left half-claimed.</summary>
+    /// <summary>
+    /// An exclusive claim that must back out (slot-3 is another job's, live) released together with two normal claims on a max_jobs 3
+    /// machine. Every time: the exclusive claim is FULL and its id is in no slot file, the normal claims hold distinct slots, and nothing else
+    /// is left. At least once a normal claim must have been refused because the exclusive claim held slot-1 or slot-2 for a moment (both are
+    /// free again at the end): proof that the back-out ran while the others were claiming.
+    /// </summary>
     [LinuxFact]
-    public void AnExclusiveAndANormalClaimNeverBothHoldSlots() => MixedRace("linux", 30);
+    public void AnExclusiveClaimBacksOutUnderContention() => BackOutUnderContention("linux", 20, 120);
 
     [PowerShellFact]
-    public void AnExclusiveAndANormalClaimNeverBothHoldSlotsPowerShell() => MixedRace("windows", 20);
+    public void AnExclusiveClaimBacksOutUnderContentionPowerShell() => BackOutUnderContention("windows", 10, 80);
 
-    private void MixedRace(string shell, int iterations)
+    /// <param name="iterations">At least this many races; more, up to <paramref name="atMost"/>, until one was contended.</param>
+    private void BackOutUnderContention(string shell, int iterations, int atMost)
     {
-        for (var n = 0; n < iterations; n++)
+        var live = Lines("other-job", Now + 3600);
+        var contended = 0;
+        var normalHeldWhileExclusiveHeldNone = 0;
+        var n = 0;
+        for (; n < atMost && (n < iterations || contended == 0); n++)
         {
             ClearLocks();
-            var results = new[] { "ex", "normal" }.AsParallel().WithDegreeOfParallelism(2)
-                .Select(job => (Job: job, Slots: JobRunner.ParseSlot(job == "ex" ? ClaimAll(shell, job, 2) : ClaimOne(shell, job, 2))))
-                .ToDictionary(r => r.Job, r => r.Slots);
+            WriteSlot(3, live);
+            var outputs = Race(shell, [AllScript(shell, "ex", 3), OneScript(shell, "n1", 3), OneScript(shell, "n2", 3)]);
+            var (ex, n1, n2) = (JobRunner.ParseSlot(outputs[0]), JobRunner.ParseSlot(outputs[1]), JobRunner.ParseSlot(outputs[2]));
 
-            Assert.False(results["ex"] is not null && results["normal"] is not null, $"iteration {n}: an exclusive and a normal claim both hold slots");
-            if (results["ex"] is not null)
+            Assert.Null(ex);
+            Assert.Contains("SLOT=FULL", outputs[0], StringComparison.Ordinal);
+            Assert.DoesNotContain("ex", new[] { 1, 2, 3 }.Select(Holder));
+            Assert.Equal(live, File.ReadAllText(Slot(3)));
+            string[] held = [.. new[] { n1, n2 }.OfType<string>()];
+            Assert.Equal(held.Length, held.Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal([.. held.Select(h => "slot-" + h).Append("slot-3").Order(StringComparer.Ordinal)], LockFiles());
+            if (held.Length > 0)
             {
-                Assert.Equal(["ex", "ex"], new[] { 1, 2 }.Select(Holder));
+                normalHeldWhileExclusiveHeldNone++;
             }
-            else if (results["normal"] is { } slot)
+
+            if (held.Length < 2)
             {
-                Assert.Equal(["slot-" + slot], LockFiles()); // the exclusive claim backed out completely
-                Assert.Equal("normal", Holder(int.Parse(slot, CultureInfo.InvariantCulture)));
+                contended++; // a normal claim was refused while slot-1 or slot-2 was briefly the exclusive claim's
             }
         }
+
+        Assert.Equal(n, normalHeldWhileExclusiveHeldNone);
+        Assert.True(contended > 0, $"in {n} races the exclusive claim never held a slot while a normal claim looked");
     }
 
     // ---- the scripts and the parser ----
@@ -316,20 +371,134 @@ public sealed class ExclusiveTests : IDisposable
         }
     }
 
-    /// <summary>A normal job's claim and cleanup are what they were before 0.9: the exclusive path adds a script, it changes none.</summary>
+    /// <summary>A normal job's claim is unchanged; its cleanup, like an exclusive job's, removes its slot only while the slot holds its id.</summary>
     [Fact]
-    public void ANormalJobsClaimAndCleanupAreUnchanged()
+    public void ANormalJobsClaimIsUnchangedAndItsCleanupChecksTheHolder()
     {
         foreach (var m in new[] { T.Linux(), T.Windows() })
         {
             Assert.DoesNotContain("SLOTS=", RemoteScripts.AcquireSlot(m, "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
-            var cleanup = RemoteScripts.Cleanup(m, "j", "2", T.RepoId);
-            Assert.DoesNotContain("for n in", cleanup, StringComparison.Ordinal);
-            Assert.DoesNotContain("foreach($n", cleanup, StringComparison.Ordinal);
         }
 
-        Assert.Contains("rm -f \"$R/incoming/$ID.bundle\" \"$R/locks/slot-2\"", RemoteScripts.Cleanup(T.Linux(), "j", "2", T.RepoId), StringComparison.Ordinal);
-        Assert.Contains("Remove-Item -Force -ErrorAction SilentlyContinue \"$root/locks/slot-2\"", RemoteScripts.Cleanup(T.Windows(), "j", "2", T.RepoId), StringComparison.Ordinal);
+        var linux = RemoteScripts.Cleanup(T.Linux(), "j", "2", T.RepoId);
+        Assert.Contains("rm -f \"$R/incoming/$ID.bundle\"\nfor n in 2; do if [ \"$(sed -n 1p \"$R/locks/slot-$n\" 2>/dev/null)\" = \"$ID\" ]; then rm -f \"$R/locks/slot-$n\"; fi; done", linux, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"$R/locks/slot-2\"", linux, StringComparison.Ordinal);
+        var windows = RemoteScripts.Cleanup(T.Windows(), "j", "2", T.RepoId);
+        Assert.Contains("foreach($n in @(2)){$g=\"$root/locks/slot-$n\";try{if(([IO.File]::ReadAllText($g) -split \"`n\")[0].Trim() -ceq $id){[IO.File]::Delete($g)}}catch{}}", windows, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"$root/locks/slot-2\"", windows, StringComparison.Ordinal);
+    }
+
+    [ShFact]
+    public void ASingleSlotNowHeldByAnotherJobSurvivesCleanupSh() => ASingleSlotNowHeldByAnotherJobSurvivesCleanup("linux");
+
+    [PowerShellFact]
+    public void ASingleSlotNowHeldByAnotherJobSurvivesCleanupPowerShell() => ASingleSlotNowHeldByAnotherJobSurvivesCleanup("windows");
+
+    /// <summary>
+    /// A normal job's controller slept past its slot's deadline plus the grace; an exclusive job reclaimed the slot meanwhile. The late cleanup
+    /// must not delete the exclusive job's slot file (another job could then run beside it). Its own slot it still removes.
+    /// </summary>
+    private void ASingleSlotNowHeldByAnotherJobSurvivesCleanup(string shell)
+    {
+        foreach (var archive in new[] { false, true })
+        {
+            ClearLocks();
+            var exclusive = Lines("ex-job", Now + 3600);
+            WriteSlot(1, exclusive);
+            WriteSlot(2, Lines("sleepy-job", Now + 3600));
+            var worker = Worker(shell, 2);
+            worker.Transfer = archive ? TransferMode.Archive : TransferMode.Git;
+
+            Assert.Equal(0, Shells.Run(shell, RemoteScripts.Cleanup(worker, "sleepy-job", "1")).Code);
+            Assert.Equal(exclusive, File.ReadAllText(Slot(1)));
+
+            Assert.Equal(0, Shells.Run(shell, RemoteScripts.Cleanup(worker, "sleepy-job", "2")).Code);
+            Assert.Equal(["slot-1"], LockFiles());
+        }
+    }
+
+    [ShFact]
+    public void ReleaseClaimRemovesOnlyThisJobsSlotsSh() => ReleaseClaimRemovesOnlyThisJobsSlots("linux");
+
+    [PowerShellFact]
+    public void ReleaseClaimRemovesOnlyThisJobsSlotsPowerShell() => ReleaseClaimRemovesOnlyThisJobsSlots("windows");
+
+    /// <summary>The release after a claim that did not report back: every slot of this job goes, any other job's slot (and any other file) stays.</summary>
+    private void ReleaseClaimRemovesOnlyThisJobsSlots(string shell)
+    {
+        WriteSlot(1, Lines("lost-job", Now + 3600));
+        WriteSlot(2, Lines("lost-job", Now + 3600));
+        WriteSlot(3, Lines("other-job", Now + 3600));
+        WriteSlot(5, Lines("lost-job", Now + 3600)); // beyond max_jobs 4: not this machine's slot range
+        File.WriteAllText(Slot(4) + ".reclaim", "x");
+
+        var (code, output) = Shells.Run(shell, RemoteScripts.ReleaseClaim(Worker(shell, 4), "lost-job"));
+
+        Assert.True(code == 0, output);
+        Assert.Equal(["slot-3", "slot-4.reclaim", "slot-5"], LockFiles());
+        Assert.Equal("other-job", Holder(3));
+    }
+
+    /// <summary>
+    /// The claim timed out (it may have created slots before the connection or the clock ran out): the job tries the next look, and first
+    /// releases this job's slots on that machine. A clean SLOT=FULL created nothing, so nothing is released.
+    /// </summary>
+    [Theory(Timeout = TestTimeout)]
+    [InlineData(124, "", true)] // ssh timed out
+    [InlineData(255, "Connection reset by peer", true)] // the connection dropped
+    [InlineData(0, "SLOT=", true)] // unreadable output
+    [InlineData(0, "SLOT=FULL", false)]
+    public async Task AClaimThatDidNotReportBackIsReleased(int code, string output, bool released)
+    {
+        foreach (var exclusive in new[] { true, false })
+        {
+            var ssh = new FakeSsh
+            {
+                Handler = (_, cmd) => cmd.Contains(RemoteScripts.ReleaseClaimMarker, StringComparison.Ordinal) ? new SshResult(0, "")
+                    : cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(code, output)
+                    : new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok"),
+            };
+            var config = T.Config();
+            var runner = new JobRunner(config, ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, Path.Combine(_root, "tmp"), _ => { }, (_, _) => Task.CompletedTask);
+
+            var r = await runner.RunAsync(new JobRequest(["dotnet"], ["dotnet", "test"], ".", Repo, TimeSpan.Zero) { On = ["build-01"], Exclusive = exclusive }, CancellationToken.None);
+
+            Assert.Equal(JobStatus.NoCapacity, r.Status);
+            var releases = ssh.Calls.Where(c => c.Command.Contains(RemoteScripts.ReleaseClaimMarker, StringComparison.Ordinal)).ToList();
+            if (released)
+            {
+                var release = Assert.Single(releases);
+                Assert.Contains("for n in 1 2; do", release.Command, StringComparison.Ordinal); // build-01: max_jobs 2, every slot checked
+                Assert.Contains("= \"$ID\" ]", release.Command, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Empty(releases);
+            }
+        }
+    }
+
+    [Fact]
+    public void AReleaseThatFailsNeverFailsTheJob()
+    {
+        Assert.True(JobRunner.IsCleanFull("noise\nSLOT=FULL\n"));
+        Assert.False(JobRunner.IsCleanFull("SLOT=FULL\nSLOTS=1,2"));
+        Assert.False(JobRunner.IsCleanFull(""));
+        Assert.False(JobRunner.IsCleanFull("SLOT=3"));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Cleanup(T.Linux(), "j", ""));
+    }
+
+    /// <summary>
+    /// kill_recorded runs inside the slot claim's reclaim and inside unlock, which use f and g themselves: it must never assign either (it once
+    /// looped "for f in /proc/...", so a reclaim then renamed the wrong path and unlock reported a removal it had not done).
+    /// </summary>
+    [Fact]
+    public void KillRecordedNeverTouchesTheCallersFOrG()
+    {
+        var body = RemoteScripts.LinuxKillRecordedFunction;
+        Assert.DoesNotMatch(@"(^|[\s;(])(f|g)=", body);
+        Assert.DoesNotMatch(@"\bfor\s+(f|g)\s+in\b", body);
+        Assert.DoesNotMatch(@"\bread\b[^\n;]*\s(f|g)\b", body);
     }
 
     /// <summary>The all-slots claim fits the Windows command-line cap on a large machine, and leases its slots as a normal claim does.</summary>

@@ -920,8 +920,8 @@ public static partial class RemoteScripts
     internal const string LinuxKillRecordedFunction = """
         kill_recorded() {
           kp="$1"; [ -f "$kp" ] || return 0
-          g=$(sed -n 1p "$kp" 2>/dev/null); st=$(sed -n 2p "$kp" 2>/dev/null); bt=$(sed -n 3p "$kp" 2>/dev/null)
-          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
+          kg=$(sed -n 1p "$kp" 2>/dev/null); st=$(sed -n 2p "$kp" 2>/dev/null); bt=$(sed -n 3p "$kp" 2>/dev/null)
+          case "$kg" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
           case "$st" in *[!0-9]*) st= ;; esac
           case "$bt" in *[!0-9a-f-]*) bt= ;; esac
           case "$3" in ''|*[!A-Za-z0-9_-]*) rm -f "$kp"; return 0 ;; esac
@@ -929,21 +929,21 @@ public static partial class RemoteScripts
           if [ -n "$st" ] && [ -d /proc/self ]; then
             if [ -z "$bt" ] || [ "$bt" != "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
               :
-            elif [ -r "/proc/$g/stat" ]; then
-              [ "$(sed -n 's/.*) //p' "/proc/$g/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ] && mine=1
-            elif kill -s 0 -- "-$g" 2>/dev/null; then
-              for f in /proc/[0-9]*/stat; do
-                [ "$(sed -n 's/.*) //p' "$f" 2>/dev/null | cut -d' ' -f3)" = "$g" ] || continue
-                if { tr '\000' '\n' < "${f%/stat}/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
+            elif [ -r "/proc/$kg/stat" ]; then
+              [ "$(sed -n 's/.*) //p' "/proc/$kg/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ] && mine=1
+            elif kill -s 0 -- "-$kg" 2>/dev/null; then
+              for kf in /proc/[0-9]*/stat; do
+                [ "$(sed -n 's/.*) //p' "$kf" 2>/dev/null | cut -d' ' -f3)" = "$kg" ] || continue
+                if { tr '\000' '\n' < "${kf%/stat}/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
               done
             fi
           elif [ -e /proc/self/cwd ]; then
             jd=$(cd -P "$2" 2>/dev/null && pwd -P) || jd="$2"
-            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
-          elif [ "$(ps -o pgid= -p "$g" 2>/dev/null | tr -d ' ')" = "$g" ]; then
+            case "$(readlink "/proc/$kg/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
+          elif [ "$(ps -o pgid= -p "$kg" 2>/dev/null | tr -d ' ')" = "$kg" ]; then
             mine=1
           fi
-          if [ -n "$mine" ]; then kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null; fi
+          if [ -n "$mine" ]; then kill -s TERM -- "-$kg" 2>/dev/null; kill -s TERM "$kg" 2>/dev/null; sleep 2; kill -s KILL -- "-$kg" 2>/dev/null; kill -s KILL "$kg" 2>/dev/null; fi
           rm -f "$kp"
         }
         """;
@@ -1068,26 +1068,35 @@ public static partial class RemoteScripts
     private static List<string> SafeSlots(string slot) => [.. slot.Split(',').Select(SafeSlot)];
 
     /// <summary>
-    /// Cleanup's slot step on Windows (needs $root and $id): one slot is removed as it always was; an exclusive job's slots each only while
-    /// the file's first line is still this job's id (a slot reclaimed and claimed by another job in the meantime is left to that job).
+    /// Cleanup's slot step on Windows (needs $root and $id): each of the job's slots is removed only while the file's first line is still this
+    /// job's id. A slot that was reclaimed and claimed by another job in the meantime (for example by an exclusive job while this job's
+    /// controller was asleep past the stale grace) is left to that job.
     /// </summary>
-    private static string WindowsSlotRemoval(string slot)
-    {
-        var slots = SafeSlots(slot);
-        return slots.Count == 1
-            ? $"Remove-Item -Force -ErrorAction SilentlyContinue \"$root/locks/slot-{slots[0]}\""
-            : "foreach($n in @(" + string.Join(',', slots) + ")){$g=\"$root/locks/slot-$n\";try{if(([IO.File]::ReadAllText($g) -split \"`n\")[0].Trim() -ceq $id){[IO.File]::Delete($g)}}catch{}}";
-    }
+    private static string WindowsSlotRemoval(string slot) =>
+        "foreach($n in @(" + string.Join(',', SafeSlots(slot)) + ")){$g=\"$root/locks/slot-$n\";try{if(([IO.File]::ReadAllText($g) -split \"`n\")[0].Trim() -ceq $id){[IO.File]::Delete($g)}}catch{}}";
 
     /// <summary>
-    /// Cleanup's last rm on Linux (needs $R and $ID): <paramref name="rm"/> with the one slot appended, as it always was; for an exclusive
-    /// job's slots, <paramref name="rm"/> and then each slot only while its first line is still this job's id.
+    /// Cleanup's last step on Linux (needs $R and $ID): <paramref name="rm"/>, then each of the job's slots only while its first line is still
+    /// this job's id (as <see cref="WindowsSlotRemoval"/>).
     /// </summary>
-    private static string LinuxSlotRemoval(string slot, string rm)
+    private static string LinuxSlotRemoval(string slot, string rm) => rm + "\n" + LinuxCheckedSlotLoop(SafeSlots(slot));
+
+    private static string LinuxCheckedSlotLoop(IEnumerable<string> slots) =>
+        "for n in " + string.Join(' ', slots) + "; do if [ \"$(sed -n 1p \"$R/locks/slot-$n\" 2>/dev/null)\" = \"$ID\" ]; then rm -f \"$R/locks/slot-$n\"; fi; done";
+
+    /// <summary>The comment that starts <see cref="ReleaseClaim"/> (tests and logs recognise the call by it).</summary>
+    internal const string ReleaseClaimMarker = "# lanq: release the slots of a claim that did not report back";
+
+    /// <summary>
+    /// After a slot claim that never reported back (timed out, lost its connection, or printed something unreadable): removes every slot
+    /// file slot-1 to slot-max_jobs whose first line is this job's id, so slots the claim may have created do not block the machine until
+    /// their deadline plus the stale grace. Another job's slot is never touched (the same check as cleanup's).
+    /// </summary>
+    public static string ReleaseClaim(Machine m, string jobId)
     {
-        var slots = SafeSlots(slot);
-        return slots.Count == 1
-            ? $"{rm} \"$R/locks/slot-{slots[0]}\""
-            : rm + "\nfor n in " + string.Join(' ', slots) + "; do if [ \"$(sed -n 1p \"$R/locks/slot-$n\" 2>/dev/null)\" = \"$ID\" ]; then rm -f \"$R/locks/slot-$n\"; fi; done";
+        var slots = Enumerable.Range(1, Math.Max(m.MaxJobs, 1)).Select(i => i.ToString(CultureInfo.InvariantCulture)).ToList();
+        return m.Os == MachineOs.Windows
+            ? ReleaseClaimMarker + "\n$root = " + ShellQuote.PowerShell(m.WorkRoot) + "; $id = " + ShellQuote.PowerShell(jobId) + "\n" + WindowsSlotRemoval(string.Join(',', slots)) + "\nexit 0"
+            : ReleaseClaimMarker + "\nR=" + ShellQuote.Posix(m.WorkRoot) + "; ID=" + ShellQuote.Posix(jobId) + "\n" + LinuxCheckedSlotLoop(slots) + "\nexit 0";
     }
 }

@@ -67,7 +67,8 @@ public class ArchiveScriptTests
         Assert.DoesNotContain("git", l, StringComparison.Ordinal);
         Assert.True(l.IndexOf("kill -s KILL", StringComparison.Ordinal) < l.IndexOf("rm -rf", StringComparison.Ordinal));
         Assert.Contains("incoming/$ID.tar.gz", l, StringComparison.Ordinal);
-        Assert.Contains("locks/slot-1", l, StringComparison.Ordinal);
+        Assert.Contains("for n in 1; do", l, StringComparison.Ordinal);
+        Assert.Contains("locks/slot-$n", l, StringComparison.Ordinal);
 
         var w = RemoteScripts.Cleanup(Windows(), "j", "1");
         Assert.DoesNotContain("git", w, StringComparison.Ordinal);
