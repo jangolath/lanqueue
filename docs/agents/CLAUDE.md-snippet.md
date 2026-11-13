@@ -86,7 +86,9 @@
   or `skipped`: no answer. A `new` verdict with `sameMachine: false` ran on another machine: report it with that
   caveat (the failure may be machine-specific), not as certainly new. Status and exit code never change; a red run takes about twice as long.
 - `excluded` reason `env_conflict` (a machine's own `env:` sets the same variable) or `windows_command_too_long` (the
-  values are too long for a Windows machine): report it to the developer with the machines named.
+  values are too long for a Windows machine): report it to the developer with the machines named. An `ask_developer`
+  step for an env refusal means stop and report; never drop variables or edit the machines file or `lanq.yml` to get
+  through.
 
 ## Shard long work across the pool (lanq run --shards)
 

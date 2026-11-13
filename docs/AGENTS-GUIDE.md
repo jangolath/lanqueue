@@ -69,7 +69,8 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
   by name. Never edit lanq.yml or machines.yml to get around a refusal.
 - --env NAME=VALUE only for names already in policy.allowed_env; never edit allowed_env or machines.yml to get one
   through, and never put a secret in a value. excluded reasons env_conflict and windows_command_too_long: report them
-  to the developer.
+  to the developer. An ask_developer step for an env refusal means stop and report; never drop variables or edit
+  machines.yml or lanq.yml to get through.
 - --exclusive gives a job a whole machine; it waits for an idle one (no reservation).
 - --baseline reruns a Failed job at the base commit. baseline.verdict "preexisting": report the failure as
   pre-existing and do not fix it unless that is your task. "new" with sameMachine false ran on another machine:
@@ -98,7 +99,7 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 
 | Option | The agent may | Notes |
 | --- | --- | --- |
-| `--env NAME=VALUE` | use it with names already in `policy.allowed_env` | A name not listed is `Rejected` (2) with an `ask_developer` step. The agent never edits `allowed_env`, `machines.yml` or `lanq.yml` to get one through. Values are settings, not secrets: other users of a worker can see them, and `nextSteps` commands repeat them. |
+| `--env NAME=VALUE` | use it with names already in `policy.allowed_env` | A name not listed is `Rejected` (2) with an `ask_developer` step, and so are values too long for every Windows machine left and an `env_conflict` on every machine: the agent stops and reports. A deny-table name on its own command line is `fix_command` ("drop it or ask the developer"); from `lanq.yml` it is `ask_developer`. The agent never edits `allowed_env`, `machines.yml` or `lanq.yml` to get one through. Values are settings, not secrets: other users of a worker can see them, and `nextSteps` commands repeat them. |
 | `--exclusive` | use it when the job needs a whole machine | It waits for an idle machine (no reservation), so it may end `NoCapacity` (75, retryable) on a busy pool. |
 | `--baseline`, `--baseline-ref REF` | use them | After a `Failed` run, a rerun at the base commit adds `baseline.verdict`: `new`, `preexisting`, `inconclusive` or `skipped`. Status and exit code never change. It doubles the time of a red run. A `new` verdict with `sameMachine: false` ran on another machine: the agent reports it with that caveat, not as certainly new. |
 

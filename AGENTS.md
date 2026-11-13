@@ -76,13 +76,18 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
 - `--env NAME=VALUE` sets a variable for the job. Use only names the developer already lists in `machines.yml`
   `policy.allowed_env`; a name that is not there is `Rejected` (2). Values are settings (a configuration, a test
   filter), never secrets: other users of the worker can see them, and `nextSteps` commands repeat them.
-- `--exclusive` gives the job a whole machine. It waits until a machine is idle and has no reservation, so on a busy
+- `--exclusive` gives the job a whole machine. It waits for an idle machine; there is no reservation, so on a busy
   pool it can end `NoCapacity` after `--wait`. Use it only when the job needs it (benchmarks, fixed ports).
 - `--baseline` (or `--baseline-ref REF`) reruns a `Failed` job at the base commit and adds `baseline` to the JSON. It
   never changes `status` or the exit code. It doubles the time of a red run, so use it when the question matters.
 - `excluded` reason `env_conflict` (a machine's own `env:` sets the same variable) or `windows_command_too_long` (the
   values are too long for a Windows machine): report it to the developer with the machines named. Do not drop or
   shorten the variable to get through unless the developer says so.
+- Follow `nextSteps` for env refusals. An `ask_developer` step ("ask the developer: they can ...", "this variable can
+  never be set by a job; the developer drops it ...") means stop and report its `reason`: never edit `machines.yml` or
+  `lanq.yml`, and never drop or shorten variables yourself, to get through. A `fix_command` step for a deny-table name
+  on your own command line ("drop it or ask the developer") means the variable cannot be set; drop it only if the job
+  does not need it, otherwise ask.
 
 ## Hard rules
 
