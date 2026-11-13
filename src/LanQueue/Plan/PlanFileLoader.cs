@@ -578,7 +578,8 @@ public static partial class PlanFileLoader
         // A repository may only lower the fetch limits: a larger one is the developer's choice, on the command line (decision 16).
         if (parsed.FetchMaxBytes > Fetch.FetchLimits.DefaultMaxTotalBytes || parsed.FetchMaxFiles > Fetch.FetchLimits.DefaultMaxFiles)
         {
-            throw Error(PlanFetch.RaiseRefused);
+            var key = parsed.FetchMaxBytes > Fetch.FetchLimits.DefaultMaxTotalBytes ? "fetch_max" : "fetch_max_files";
+            throw Error($"{key} (line {values[key].Start.Line}): {PlanFetch.RaiseRefused}");
         }
 
         return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed);

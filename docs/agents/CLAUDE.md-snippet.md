@@ -78,8 +78,8 @@
 - `lanq.yml` is the team's file; do not edit it (or the machines file) to get around a refusal or a `NoCapacity`.
 - Since 0.10.0 `--on`, `--size` and `--min-size` work with `--plan` and narrow every job, never widen one. A job the
   narrowing leaves no machine ends the plan before anything is sent (`NoCapacity` 75, `retryable: false`):
-  `ask_developer`, then a `fix_command` rerun with `--only` set to the jobs that can still run; you may run it once
-  and must report the jobs it left out. Never edit `lanq.yml` to widen a job.
+  `ask_developer`, then a `fix_command` rerun with `--only` set to the jobs that can still run. It leaves jobs out,
+  so it is not `safeToRunUnattended`: run it only when the developer agrees, and report the jobs it left out. Never edit `lanq.yml` to widen a job.
 - `plan_timeout:` (or `--plan-timeout M`) limits the whole plan: on expiry it is `TimedOut` (124, `planTimedOut:
   true`) unless a `Failed` or `Rejected` job decides it. Report where it was slow; never raise the limit yourself.
 - `lanq.yml` may only lower fetch limits (`fetch_max`, `fetch_max_files`) and has no `fetch_dir`. Never raise

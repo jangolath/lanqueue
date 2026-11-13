@@ -13,16 +13,28 @@ public sealed partial class PlanFileRunTests
 {
     /// <summary>
     /// Runs the plan with a plan timer the test fires (<paramref name="fire"/>): the plan's limit is the only wait of <paramref name="minutes"/>
-    /// minutes; every other wait (the stagger, the 15 s looks) waits until cancelled, as in the other plan tests.
+    /// minutes; every other wait (the stagger, the 15 s looks) waits until cancelled, as in the other plan tests. Exactly one wait of that
+    /// length may be asked for (the plan timer's), so the stub can never fire anything else.
     /// </summary>
     private async Task<(int Code, string Stdout, string Stderr)> RunTimed(
         PoolSsh ssh, IPayloadBuilder payloads, TaskCompletionSource fire, string[] args, int minutes = 1, string fleet = Fleet, CancellationToken ct = default)
     {
         var o = new StringWriter();
         var e = new StringWriter();
+        var timers = 0;
         var code = await Cli.RunPlanFile(
             ParsedArgs.Parse(["run", .. args]), ConfigLoader.Parse(fleet), ssh, payloads, new HealthProbe(ssh, TimeProvider.System), Log, Home, Repo, o, e, ct,
-            (d, c) => d == TimeSpan.FromMinutes(minutes) ? fire.Task.WaitAsync(c) : Task.Delay(Timeout.InfiniteTimeSpan, c));
+            (d, c) =>
+            {
+                if (d != TimeSpan.FromMinutes(minutes))
+                {
+                    return Task.Delay(Timeout.InfiniteTimeSpan, c);
+                }
+
+                Interlocked.Increment(ref timers);
+                return fire.Task.WaitAsync(c);
+            });
+        Assert.Equal(1, timers); // only the plan timer waited this long
         return (code, o.ToString(), e.ToString());
     }
 
@@ -69,7 +81,7 @@ public sealed partial class PlanFileRunTests
             Assert.NotNull(j.GetProperty("machine").GetString());
         });
         Assert.Equal(0, ssh.Used("build-01") + ssh.Used("big-01")); // every slot given back: each job was cleaned up
-        Assert.Contains("[lanq] plan_timeout: 1 min reached; stopping 3 running job(s)", stderr, StringComparison.Ordinal);
+        Assert.Contains("[lanq] plan_timeout: 1 min reached; stopping 3 started job(s)", stderr, StringComparison.Ordinal);
         Assert.Contains("[lanq] plan_timeout: 1 min for the whole plan (--plan-timeout), from after the snapshot", stderr, StringComparison.Ordinal);
         var step = json.GetProperty("nextSteps")[0];
         Assert.Equal("fix_code", step.GetProperty("action").GetString());
@@ -182,7 +194,7 @@ public sealed partial class PlanFileRunTests
         Assert.Empty(ssh.Executes);
         Assert.All(JobsOf(json).Values, j => Assert.True(
             j.GetProperty("status").GetString() == "Skipped" || j.GetProperty("message").GetString() == PlanDeadline.WaitingMessage));
-        Assert.Contains("stopping 3 running job(s)", stderr, StringComparison.Ordinal);
+        Assert.Contains("stopping 3 started job(s)", stderr, StringComparison.Ordinal);
 
         // Between after: waves (nothing running, nothing waiting): still TimedOut 124, decided by no job.
         var between = JobRunner.PlanTimedOutResult(
@@ -406,5 +418,84 @@ public sealed partial class PlanFileRunTests
         Assert.Equal(90, Json(limited).GetProperty("planTimeoutMinutes").GetInt32());
         Assert.False(Json(limited).TryGetProperty("planTimedOut", out _)); // not reached
         Assert.False(Json(dry).TryGetProperty("planTimeoutMinutes", out _));
+    }
+
+    /// <summary>The limit reached while the last job only cleans up stops nothing: the plan stays Completed and is not flagged.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ExpiryDuringTheLastCleanupKeepsAGreenPlanGreen()
+    {
+        Plan("version: 1\njobs:\n  build:\n    command: npm run build\n    needs: [node]\n");
+        using var inCleanup = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var ssh = new PoolSsh
+        {
+            OnCleanup = _ =>
+            {
+                inCleanup.Set();
+                release.Wait(TimeSpan.FromSeconds(30));
+                return new SshResult(0, "");
+            },
+        };
+        var fire = new TaskCompletionSource();
+
+        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--plan-timeout", "1", "--json"]);
+        Assert.True(inCleanup.Wait(TimeSpan.FromSeconds(30)));
+        fire.SetResult();
+        await Task.Delay(200);
+        release.Set();
+        var (code, stdout, stderr) = await run;
+
+        Assert.Equal(0, code);
+        var json = Json(stdout);
+        Assert.Equal("Completed", json.GetProperty("status").GetString());
+        Assert.False(json.TryGetProperty("planTimedOut", out _));
+        Assert.Equal(1, json.GetProperty("planTimeoutMinutes").GetInt32());
+        Assert.Equal("Completed", Assert.Single(Log.ReadAll()).Status);
+        Assert.StartsWith("[lanq] Completed: ", Lines(stderr)[^1], StringComparison.Ordinal);
+
+        // And the rule itself: nothing TimedOut, Skipped or Cancelled means the result is returned as it is.
+        var green = JobRunner.AggregatePlan([new PlanJobOutcome("build", "Completed", 0, "exit 0", [])], cancelled: false);
+        var after = JobRunner.PlanTimedOutResult(green, new PlanDeadline(1));
+        Assert.Same(green, after);
+        Assert.False(after.PlanTimedOut);
+    }
+
+    /// <summary>--fail-fast first, then the limit: the stopped jobs are Cancelled by --fail-fast, never TimedOut, and the plan is not flagged.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task FailFastBeforeExpiryWins()
+    {
+        Plan(Three);
+        var failLint = new TaskCompletionSource();
+        var cleanups = 0;
+        var ssh = new PoolSsh
+        {
+            OnExecute = async (e, c) => JobOf(e) == "lint" ? await failLint.Task.ContinueWith(_ => e.Exit(3), TaskScheduler.Default) : await Hang(e, c),
+            OnCleanup = _ =>
+            {
+                Interlocked.Increment(ref cleanups);
+                return new SshResult(0, "");
+            },
+        };
+        var fire = new TaskCompletionSource();
+
+        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"]);
+        await Until(() => ssh.Executes.Count == 3);
+        failLint.SetResult();
+
+        // The other jobs' cleanups show --fail-fast has stopped them (it holds the deadline before it cancels anything); then the limit comes.
+        await Until(() => Volatile.Read(ref cleanups) >= 2);
+        fire.SetResult();
+        var (code, stdout, stderr) = await run;
+
+        Assert.Equal(3, code);
+        var json = Json(stdout);
+        Assert.Equal("Failed", json.GetProperty("status").GetString());
+        Assert.False(json.TryGetProperty("planTimedOut", out _));
+        var jobs = JobsOf(json);
+        Assert.Equal("Cancelled", jobs["build"].GetProperty("status").GetString());
+        Assert.Equal("Cancelled", jobs["unit"].GetProperty("status").GetString());
+        Assert.StartsWith("cancelled by --fail-fast", jobs["unit"].GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(Log.ReadAll(), r => r.Status == "TimedOut");
+        Assert.DoesNotContain("min reached", stderr, StringComparison.Ordinal);
     }
 }

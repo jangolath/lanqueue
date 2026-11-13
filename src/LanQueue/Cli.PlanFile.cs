@@ -73,7 +73,18 @@ public static partial class Cli
             var narrowed = new List<PlanJob>(selection.Jobs.Count);
             foreach (var j in selection.Jobs)
             {
-                var (job, why) = PlanNarrowing.Narrow(j, config, on, string.Join(',', p.On ?? []), p.Size);
+                (PlanJob Job, string? NoMachine) narrowing;
+                try
+                {
+                    narrowing = PlanNarrowing.Narrow(j, config, on, string.Join(',', p.On ?? []), p.Size);
+                }
+                catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
+                {
+                    // The narrowed line no longer parses: refused, never a crash.
+                    return await PlanRefused(p, $"job '{j.Name}': {ex.Message}", RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+                }
+
+                var (job, why) = narrowing;
                 narrowed.Add(job);
                 if (why is not null)
                 {
@@ -94,7 +105,20 @@ public static partial class Cli
             }
 
             var fetchDir = p.FetchDir is null ? null : Path.GetFullPath(p.FetchDir);
-            selection = selection with { Jobs = [.. selection.Jobs.Select(j => PlanFetch.Apply(j, fetchDir, p.FetchMaxBytes, p.FetchMaxFiles))] };
+            var fetching = new List<PlanJob>(selection.Jobs.Count);
+            foreach (var j in selection.Jobs)
+            {
+                try
+                {
+                    fetching.Add(PlanFetch.Apply(j, fetchDir, p.FetchMaxBytes, p.FetchMaxFiles));
+                }
+                catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
+                {
+                    return await PlanRefused(p, $"job '{j.Name}': {ex.Message}", RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+                }
+            }
+
+            selection = selection with { Jobs = fetching };
         }
 
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
@@ -244,12 +268,25 @@ public static partial class Cli
     internal static PlanRunResult NarrowedOut(IReadOnlyList<PlanJobSpec> ordered, IReadOnlyDictionary<string, string> noMachine)
     {
         var first = ordered.Where(j => noMachine.ContainsKey(j.Name)).MinBy(j => j.FileOrder)!.Name;
+
+        // A job that starts after a narrowed-out job, directly or through others, cannot run either: --only would drop its after: edge and
+        // start it without its prerequisite.
+        var blocked = new HashSet<string>(noMachine.Keys, StringComparer.Ordinal);
+        for (var grew = true; grew;)
+        {
+            grew = false;
+            foreach (var j in ordered.Where(j => !blocked.Contains(j.Name) && j.After.Any(blocked.Contains)))
+            {
+                grew |= blocked.Add(j.Name);
+            }
+        }
+
         List<PlanJobOutcome> jobs = [.. ordered.Select(j => noMachine.TryGetValue(j.Name, out var why)
             ? new PlanJobOutcome(j.Name, nameof(JobStatus.NoCapacity), 75, why, j.After) { Retryable = false, Excluded = [], FileOrder = j.FileOrder }
             : new PlanJobOutcome(j.Name, PlanJobOutcome.Skipped, 0, $"not started: {noMachine[first]}, so the plan did not start", j.After) { FileOrder = j.FileOrder })];
         return JobRunner.AggregatePlan(jobs, cancelled: false) with
         {
-            Runnable = [.. ordered.Where(j => !noMachine.ContainsKey(j.Name)).OrderBy(j => j.FileOrder).Select(j => j.Name)],
+            Runnable = [.. ordered.Where(j => !blocked.Contains(j.Name)).OrderBy(j => j.FileOrder).Select(j => j.Name)],
         };
     }
 

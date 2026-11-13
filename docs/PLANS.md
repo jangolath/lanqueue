@@ -259,7 +259,7 @@ jobs:
 ```
 
 The clock starts after the command-line checks and the snapshot. It covers waiting for slots, the jobs and the baseline
-reruns. When it runs out, lanq prints `[lanq] plan_timeout: 60 min reached; stopping 2 running job(s)` and then:
+reruns. When it runs out, lanq prints `[lanq] plan_timeout: 60 min reached; stopping 2 started job(s)` and then:
 
 - **Running jobs** are stopped and cleaned up, as `--fail-fast` stops them. Each one ends `TimedOut` (124) with "plan_timeout
   60 min reached; cancelled and cleaned up". `jobs.jsonl` records it as `TimedOut`.
@@ -304,11 +304,13 @@ The dry run prints each job's narrowed `lanq run` line. Without these options th
 - A job the narrowing leaves with no machine ends the whole plan before the snapshot, with nothing sent:
   `NoCapacity` (75, `retryable: false`), for example "--on big-01 leaves job 'unit-windows' no machine (its on:
   [micro-01])". The other jobs are `Skipped`. `nextSteps` are `ask_developer`, then `fix_command`: the same command
-  with `--only` set to the jobs that can still run. That `--only` replaces any `--only` you gave, and the narrowing
-  is kept.
+  with `--only` set to the jobs that can still run. A job that starts after a narrowed-out job (directly or not) is
+  left out too, so nothing runs without its prerequisite. That `--only` replaces any `--only` you gave, and the
+  narrowing is kept. Because it leaves jobs out, the step is not `safeToRunUnattended` (its `--dry-run` is).
 
 **Agents:** an agent may narrow a plan. It never edits lanq.yml (its `on:`, `size:` or `min_size:`) to widen a job so
-that a narrowed plan passes. When it runs the `fix_command` rerun, it reports that the left-out jobs did not run.
+that a narrowed plan passes. It asks the developer before running the `fix_command` rerun, and then reports that
+the left-out jobs did not run.
 
 ### Fetch limits and folder
 
@@ -498,7 +500,7 @@ the `LANQ_*` ones. Your `jobs.jsonl` records `planJob`, `planRun` (shared by the
 (the plan file's full path on your PC, 0.10.0), and the names (never the values) of a job's `env:` as `envNames`.
 
 `lanq stats` adds a "Plan jobs" table (`planJobs` in `--json`), one row per plan file and job name, one run per plan
-run: completed when every shard's last attempt completed, failed when any failed, other otherwise. A run's wall time
+run: completed when all its shards were recorded and each one's last attempt completed, failed when any failed, other otherwise. A run's wall time
 runs from its first start to its last end. The plan file is the full path, so clones of one repository in different
 folders are separate rows. Records written before 0.10.0 have no `planFile` and group under none.
 

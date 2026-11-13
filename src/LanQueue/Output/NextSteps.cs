@@ -145,7 +145,11 @@ internal sealed class SuggestedCommand
     /// --wait, and a run that could not wake a machine (--wait 0 without --no-wake) gets --no-wake, as <see cref="Rerun"/>. Nothing else
     /// changes. Safe (the developer already ran it, and lanq.yml is the same file).
     /// </summary>
-    public static SuggestedCommand? RerunPlan(ParsedArgs p, IReadOnlyCollection<string> only, int? waitSeconds = null)
+    /// <param name="safe">
+    /// Whether the rerun may run unattended (the default: it repeats the jobs that did not complete). False for a rerun that leaves jobs out
+    /// on purpose (after --on/--size/--min-size narrowing): the developer must agree to dropping them.
+    /// </param>
+    public static SuggestedCommand? RerunPlan(ParsedArgs p, IReadOnlyCollection<string> only, int? waitSeconds = null, bool safe = true)
     {
         if (p.Command != "run" || !p.Plan || only.Count == 0)
         {
@@ -159,7 +163,7 @@ internal sealed class SuggestedCommand
         }
 
         var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
-        return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: true);
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: safe);
     }
 
     /// <summary>
@@ -520,12 +524,17 @@ internal static class NextSteps
             Step(NextAction.AskDeveloper, why + "; --on, --size and --min-size only narrow a plan's jobs, never widen them: the developer decides whether to narrow less or to leave "
                 + "that job out (never edit lanq.yml to widen a job)"),
         ];
-        if (SuggestedCommand.RerunPlan(p, runnable) is { } rerun)
+        // It leaves jobs out on purpose, so it is never safe unattended (a dry run of it is: it runs nothing).
+        if (SuggestedCommand.RerunPlan(p, runnable, safe: p.DryRun) is { } rerun)
         {
-            var left = r.Jobs.Where(j => j.Status == nameof(JobStatus.NoCapacity)).Select(j => j.Name);
+            var noMachine = r.Jobs.Where(j => j.Status == nameof(JobStatus.NoCapacity)).Select(j => j.Name).ToList();
+            var after = r.Jobs.Where(j => j.Status == PlanJobOutcome.Skipped && !runnable.Contains(j.Name)).Select(j => j.Name).ToList();
             steps.Add(Step(
                 NextAction.FixCommand,
-                $"run only the job(s) the narrowing leaves a machine ({string.Join(", ", runnable)}); {string.Join(", ", left)} would not run, so report that it was left out",
+                $"only if the developer agrees to leave job(s) out: run only the job(s) the narrowing leaves a machine ({string.Join(", ", runnable)}); "
+                + $"{string.Join(", ", noMachine)} would not run"
+                + (after.Count > 0 ? $", nor {string.Join(", ", after)}, which start(s) after it" : "")
+                + "; report what was left out",
                 rerun));
         }
 

@@ -876,8 +876,9 @@ hours, slots, wake) still applies:
 - Since 0.10.0 `--on`, `--size` and `--min-size` also work with `--plan`. They narrow every job: a job's own `on:` is
   intersected with `--on`, and its size classes with yours. They never widen a job. A job they leave with no machine
   ends the plan before anything is sent (`NoCapacity`, 75, `retryable: false`). The suggested rerun's `--only` then
-  lists the jobs that can still run, replacing any `--only` you gave. A coding agent may narrow a plan, but never
-  edits `lanq.yml` to widen a job.
+  lists the jobs that can still run (never one whose `after:` prerequisite was narrowed out), replacing any `--only`
+  you gave; it leaves jobs out, so it is not safe for an agent to run unattended. A coding agent may narrow a plan,
+  asks you before such a rerun, and never edits `lanq.yml` to widen a job.
 
 ```bash
 lanq run --needs dotnet --size light,medium -- dotnet test tests/Unit -m:1

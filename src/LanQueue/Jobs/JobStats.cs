@@ -26,7 +26,7 @@ public sealed record CommandStats(
 /// (planRun) is one run, however many shards and attempts it had.
 /// </summary>
 /// <param name="PlanFile">The plan file's full path as recorded; null for lines written before 0.10.0.</param>
-/// <param name="Completed">Runs in which every shard's last attempt completed.</param>
+/// <param name="Completed">Runs in which every shard (all N of them recorded) has a last attempt that completed.</param>
 /// <param name="Failed">Runs in which some shard's last attempt failed (its own exit code).</param>
 /// <param name="Other">The other runs (timed out, infrastructure error, ...).</param>
 /// <param name="MedianSeconds">Median wall time of the completed runs (first start to last end; nearest rank, one decimal), or null.</param>
@@ -101,18 +101,27 @@ public static class JobStats
     /// every shard's last attempt completed, Failed when any failed, Other otherwise; its wall time runs from the first start to the last end.
     /// Baseline reruns are not in the history these records come from.
     /// </summary>
-    public static List<PlanJobStats> PlanJobsOf(IReadOnlyList<JobRecord> records) =>
+    public static List<PlanJobStats> PlanJobsOf(IReadOnlyList<JobRecord> records) => PlanJobsOf(records, OperatingSystem.IsWindows());
+
+    /// <inheritdoc cref="PlanJobsOf(IReadOnlyList{JobRecord})"/>
+    /// <param name="records">The job log's records, oldest first.</param>
+    /// <param name="ignoreCase">Compare plan file paths ignoring case (Windows paths do; the default there), shown as the newest run spelled them.</param>
+    public static List<PlanJobStats> PlanJobsOf(IReadOnlyList<JobRecord> records, bool ignoreCase) =>
         [.. records
             .Select((r, i) => (r, i))
             .Where(x => x.r.PlanJob is not null && x.r.BaselineOf is null)
-            .GroupBy(x => (x.r.PlanFile, Job: x.r.PlanJob!))
+            .GroupBy(x => (File: ignoreCase ? x.r.PlanFile?.ToUpperInvariant() : x.r.PlanFile, Job: x.r.PlanJob!))
             .Select(g =>
             {
+                var planFile = g.MaxBy(x => (x.r.StartedUtc, x.i)).r.PlanFile;
                 var runs = g.GroupBy(x => x.r.PlanRun ?? x.r.Id, StringComparer.Ordinal).Select(run =>
                 {
                     // Each shard's (or the single job's) last attempt: the latest start, and of equal starts the one written last.
                     var last = run.GroupBy(x => x.r.Shard ?? 0).Select(s => s.MaxBy(x => (x.r.StartedUtc, x.i)).r).ToList();
-                    var outcome = last.All(r => r.Status == nameof(JobStatus.Completed)) ? nameof(JobStatus.Completed)
+
+                    // Completed only when every shard of the run is there: a shard cancelled (--fail-fast, Ctrl+C) or never started left no record.
+                    var count = run.Max(x => x.r.Shards ?? 1);
+                    var outcome = last.Count == count && last.All(r => r.Status == nameof(JobStatus.Completed)) ? nameof(JobStatus.Completed)
                         : last.Any(r => r.Status == nameof(JobStatus.Failed)) ? nameof(JobStatus.Failed)
                         : "Other";
                     var start = run.Min(x => x.r.StartedUtc);
@@ -122,7 +131,7 @@ public static class JobStats
                 var times = runs.Where(r => r.Outcome == nameof(JobStatus.Completed)).Select(r => r.Seconds).ToList();
                 var newest = runs.MaxBy(r => r.Start);
                 return new PlanJobStats(
-                    g.Key.PlanFile, g.Key.Job, runs.Count, runs.Count(r => r.Outcome == nameof(JobStatus.Completed)), runs.Count(r => r.Outcome == nameof(JobStatus.Failed)),
+                    planFile, g.Key.Job, runs.Count, runs.Count(r => r.Outcome == nameof(JobStatus.Completed)), runs.Count(r => r.Outcome == nameof(JobStatus.Failed)),
                     runs.Count(r => r.Outcome == "Other"), Percentile(times, 50), Percentile(times, 90), newest.Start, newest.Shards);
             })
             .OrderByDescending(p => p.LastRunUtc)

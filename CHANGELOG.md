@@ -7,7 +7,7 @@
 - **Whole-plan timeout.** `lanq run --plan --plan-timeout M`, or a top-level `plan_timeout: M` in `lanq.yml` (1 to
   10080 minutes; the command line replaces the file's value; `plan_timeout:` is judged by `--plan-timeout`'s own
   parser). The clock starts after the command-line checks and the snapshot. It covers waiting for slots, the jobs and
-  the baseline reruns. When the time runs out lanq prints `[lanq] plan_timeout: 60 min reached; stopping N running
+  the baseline reruns. When the time runs out lanq prints `[lanq] plan_timeout: 60 min reached; stopping N started
   job(s)`, and then:
   - running jobs are stopped and cleaned up, and end `TimedOut` (124);
   - jobs waiting for a slot end `TimedOut`;
@@ -30,7 +30,9 @@
   2). A job the narrowing leaves with no machine ends the plan before the snapshot, with nothing sent: `NoCapacity`
   (75, `retryable: false`), for example "--on big-01 leaves job 'unit-windows' no machine (its on: [micro-01])". Its
   `nextSteps` are `ask_developer`, then `fix_command`: the same command with `--only` set to the jobs that can still
-  run. That `--only` replaces any `--only` given, and the narrowing is kept. Without these options a plan behaves
+  run, leaving out every job that starts after a narrowed-out job (directly or not), so no job runs without its
+  prerequisite. That `--only` replaces any `--only` given, the narrowing is kept, and the step is not safe to run
+  unattended (its dry run is). Without these options a plan behaves
   exactly as before.
 - **Plan fetch limits and folder.** `lanq.yml` gains `fetch_max` and `fetch_max_files`, on a job or in `defaults:`
   (where they apply to the jobs that fetch). They are `--fetch-max` and `--fetch-max-files`, and **may only lower** the
@@ -43,20 +45,23 @@
   defaults).
 - **`lanq stats` by plan job.** Plan jobs in `jobs.jsonl` now carry `planFile`, the plan file's full local path (`v`
   stays 2). `lanq stats` groups plan jobs by plan file and job name, with one run per plan run:
-  - completed when every shard's last attempt completed;
+  - completed when all N shards were recorded and each one's last attempt completed (a shard that `--fail-fast` or
+    Ctrl+C cancelled leaves no record, so such a run is other);
   - failed when any failed;
   - other otherwise.
 
   The wall time runs from the first start to the last end. `--json` always carries `planJobs` (`planFile`, `job`,
   `runs`, `completed`, `failed`, `other`, `medianSeconds`, `p90Seconds`, `lastRunUtc`, `lastShards`). It is capped at
   500 like `commands`, with the conditional `planJobsMore`. The text adds a "Plan jobs" table. Records written before
-  0.10.0 group under `planFile: null`. Clones of one repository in different folders count separately. Baseline
-  reruns are left out.
+  0.10.0 group under `planFile: null`. Clones of one repository in different folders count separately; on Windows a
+  path that differs only in case is the same plan file. Baseline reruns are left out.
 
 ### For coding agents
 
-- An agent may narrow a plan with `--on`/`--size`/`--min-size`, and may run the suggested `fix_command` rerun once,
-  reporting the jobs it left out. It never edits `lanq.yml` (`on:`, `size:`, `min_size:`) to widen a job.
+- An agent may narrow a plan with `--on`/`--size`/`--min-size`. The suggested `fix_command` rerun after a narrowing
+  leaves jobs out, so it is never `safeToRunUnattended` (only its dry run is): the agent asks the developer before
+  running it, and then reports the jobs it left out. It never edits `lanq.yml` (`on:`, `size:`, `min_size:`) to widen
+  a job.
 - A plan with `planTimedOut: true` is reported with where it was slow. Raising `--plan-timeout` or `plan_timeout:` is
   the developer's decision, never a way to make a plan pass.
 - An agent never raises `--fetch-max` or `--fetch-max-files`, never adds `fetch_max` to `lanq.yml` and never picks a

@@ -115,27 +115,44 @@ public static class PlanNarrowing
     /// A job's run line with every <paramref name="remove"/> option (each takes a value) taken out and <paramref name="insert"/> put where the
     /// first of them was, or just before "--" when the line had none. The job's command after "--" is never touched.
     /// </summary>
+    /// <remarks>
+    /// The line is walked as <see cref="ParsedArgs.Parse"/> reads it: an option that takes a value (<see cref="Output.CommandLine.TakesValue"/>)
+    /// owns the next token, whatever it looks like (dir: --on is the folder "--on"), and the first bare "--" that is not such a value starts
+    /// the command. Flags are kept as they are.
+    /// </remarks>
     internal static List<string> WithOptions(IReadOnlyList<string> runArgs, string[] remove, IReadOnlyList<string> insert)
     {
-        var split = runArgs.ToList().IndexOf("--");
-        var own = split >= 0 ? runArgs.Take(split).ToList() : [.. runArgs];
-        var command = split >= 0 ? runArgs.Skip(split).ToList() : [];
-        var edited = new List<string>(own.Count + insert.Count);
+        var edited = new List<string>(runArgs.Count + insert.Count);
         var at = -1;
-        for (var i = 0; i < own.Count; i++)
+        var i = 0;
+        for (; i < runArgs.Count; i++)
         {
-            if (i > 0 && remove.Contains(own[i], StringComparer.Ordinal) && i + 1 < own.Count)
+            var t = runArgs[i];
+            if (i > 0 && t == "--")
             {
-                at = at < 0 ? edited.Count : at;
+                break;
+            }
+
+            if (i > 0 && Output.CommandLine.TakesValue("run", t) && i + 1 < runArgs.Count)
+            {
+                if (remove.Contains(t, StringComparer.Ordinal))
+                {
+                    at = at < 0 ? edited.Count : at;
+                }
+                else
+                {
+                    edited.AddRange([t, runArgs[i + 1]]);
+                }
+
                 i++;
                 continue;
             }
 
-            edited.Add(own[i]);
+            edited.Add(t);
         }
 
         edited.InsertRange(at < 0 ? edited.Count : at, insert);
-        return [.. edited, .. command];
+        return [.. edited, .. runArgs.Skip(i)];
     }
 
     /// <summary>The job with <paramref name="args"/> as its run line, parsed again by the CLI's own parser so the arguments match the line exactly.</summary>

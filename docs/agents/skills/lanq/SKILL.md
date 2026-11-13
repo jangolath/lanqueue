@@ -132,7 +132,8 @@ Since 0.10.0:
   never widen one: `lanq run --plan --on big-01 --json --no-wake`. An unknown `--on` name is `Rejected` (2). A job the
   narrowing leaves no machine ends the plan before anything is sent: `NoCapacity` 75, `retryable: false`, then
   `ask_developer` and a `fix_command` rerun whose `--only` lists the jobs that can still run (it replaces your
-  `--only`). You may run that rerun once; report the jobs it leaves out. Never edit `lanq.yml` to widen a job.
+  `--only`, and leaves out jobs that start after a narrowed-out one). It is not `safeToRunUnattended`: ask the
+  developer before running it, then report the jobs it left out. Never edit `lanq.yml` to widen a job.
 - `plan_timeout:` in `lanq.yml` (or `--plan-timeout M`) limits the whole plan. When it is reached the plan is
   `TimedOut` (124, `planTimedOut: true`) unless a `Failed` or `Rejected` job decides it; running jobs were stopped and
   cleaned up. Report where it was slow; never raise the limit yourself.

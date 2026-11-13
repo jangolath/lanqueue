@@ -177,6 +177,8 @@ public sealed partial class PlanFileRunTests
         Assert.Equal("fix_command", steps[1].GetProperty("action").GetString());
         Assert.Equal(["lanq", "run", "--plan", "--on", "big-01", "--json", "--only", "build,lint", "--no-wake"], steps[1].GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
         Assert.Contains("unit-windows would not run", steps[1].GetProperty("reason").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith("only if the developer agrees to leave job(s) out", steps[1].GetProperty("reason").GetString(), StringComparison.Ordinal);
+        Assert.False(steps[1].GetProperty("safeToRunUnattended").GetBoolean()); // it leaves a job out: never unattended
         Assert.StartsWith("[lanq] NoCapacity: ", Lines(stderr)[^1], StringComparison.Ordinal);
     }
 
@@ -240,6 +242,7 @@ public sealed partial class PlanFileRunTests
         Assert.False(dry.GetProperty("retryable").GetBoolean());
         Assert.Equal("fix_command", dry.GetProperty("nextSteps")[1].GetProperty("action").GetString());
         Assert.Contains("--dry-run", dry.GetProperty("nextSteps")[1].GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+        Assert.True(dry.GetProperty("nextSteps")[1].GetProperty("safeToRunUnattended").GetBoolean()); // a dry run of it runs nothing
         Assert.Empty(none.Calls);
     }
 
@@ -273,5 +276,76 @@ public sealed partial class PlanFileRunTests
         Assert.Equal(["big-01", "build-01"], p.On);
         Assert.Equal("--min-size medium", p.Size!.Text);
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--plan", "--size", "light", "--min-size", "heavy"]));
+    }
+
+    /// <summary>The rerun never drops a job's prerequisite: a job that starts after a narrowed-out job (directly or not) is left out too, and named.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task NarrowingRerunKeepsPrerequisites()
+    {
+        Plan("""
+            version: 1
+            defaults:
+              needs: [node]
+            jobs:
+              build:
+                command: npm run build
+                on: [micro-01]
+              unit:
+                command: npm run unit
+                after: [build]
+              e2e:
+                command: npm run e2e
+                after: [unit]
+              lint:
+                command: npm run lint
+            """);
+        var ssh = new PoolSsh();
+
+        var (code, stdout, _) = await RunTrio(ssh, new RunnerTests.FakePayloads(""), "--plan", "--on", "big-01", "--wait", "5", "--json");
+
+        Assert.Equal(75, code);
+        var step = Json(stdout).GetProperty("nextSteps")[1];
+        Assert.Equal(["lanq", "run", "--plan", "--on", "big-01", "--wait", "5", "--json", "--only", "lint"], step.GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+        Assert.Contains("build would not run, nor unit, e2e, which start(s) after it", step.GetProperty("reason").GetString(), StringComparison.Ordinal);
+        Assert.False(step.GetProperty("safeToRunUnattended").GetBoolean());
+        Assert.Empty(ssh.Calls);
+    }
+
+    /// <summary>
+    /// Editing a run line knows which options take a value: dir: --on is the folder "--on", never an --on to replace, and --exclusive (a flag)
+    /// stays. The narrowed line is judged as usual, never a crash.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task NarrowingKnowsWhichOptionsTakeValues()
+    {
+        Assert.Equal(
+            ["run", "--dir", "--on", "--exclusive", "--on", "big-01", "--", "npm", "run", "x"],
+            PlanNarrowing.WithOptions(["run", "--dir", "--on", "--exclusive", "--", "npm", "run", "x"], ["--on"], ["--on", "big-01"]));
+        Assert.Equal(
+            ["run", "--exclusive", "--on", "micro-01", "--size", "light", "--", "--on", "x"],
+            PlanNarrowing.WithOptions(["run", "--exclusive", "--on", "big-01", "--size", "light", "--", "--on", "x"], ["--on"], ["--on", "micro-01"]));
+
+        Plan("""
+            version: 1
+            jobs:
+              odd:
+                command: npm run odd
+                needs: [node]
+                dir: --on
+                exclusive: true
+            """);
+        var plan = PlanFileLoader.Load(Path.Combine(Repo, "lanq.yml"));
+        var (job, why) = PlanNarrowing.Narrow(plan.Jobs[0], ConfigLoader.Parse(Trio), ["big-01"], "big-01", null);
+        Assert.Null(why);
+        Assert.Equal("--on", job.Args.Directory);
+        Assert.True(job.Args.Exclusive);
+        Assert.Equal(["big-01"], job.Args.On);
+
+        var ssh = new PoolSsh();
+        var (code, stdout, stderr) = await RunTrio(ssh, new RunnerTests.FakePayloads(""), "--plan", "--on", "big-01", "--json");
+        Assert.Equal(2, code); // the folder "--on" is not allowlisted: refused with one JSON object, nothing sent
+        Assert.Equal("Rejected", Json(stdout).GetProperty("status").GetString());
+        Assert.StartsWith("[lanq] Rejected: ", Lines(stderr)[^1], StringComparison.Ordinal);
+        Assert.Empty(ssh.Executes);
     }
 }

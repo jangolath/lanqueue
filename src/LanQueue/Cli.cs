@@ -681,7 +681,7 @@ public static partial class Cli
         prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
         newestUtc, logs, machines, commands, planJobs, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad
         arguments, 70 the job log could not be read, 130 Ctrl+C. Plan jobs (a "Plan jobs" table; planJobs, at most 500, then planJobsMore) are
-        grouped by plan file (its full path) and job name, one run per plan run (completed when every shard's last attempt completed, failed
+        grouped by plan file (its full path) and job name, one run per plan run (completed when all its shards' last attempts completed, failed
         when any failed, else other; wall time from the first start to the last end); clones in different folders are separate rows.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
@@ -744,7 +744,7 @@ public static partial class Cli
         run --plan --on / --size / --min-size narrow every job, never widen one: a job's own on: is intersected with --on (--on alone when it
         has none), its size classes with the command line's; the dry run prints each job's narrowed line. An unknown --on name is refused (2)
         before any network; a job left with no machine ends the plan before the snapshot (75, retryable: false; the suggested rerun's --only
-        lists the jobs that can still run and replaces any --only given).
+        lists the jobs that can still run, never one after a narrowed-out job, replaces any --only given and is not safe unattended).
         run --plan --plan-timeout M (lanq.yml plan_timeout: M; the command line wins; 1 to 10080 minutes, plan only) limits the whole plan, from
         after the snapshot to the last baseline: when it is reached the running jobs are stopped and cleaned up and end TimedOut, jobs waiting
         for a slot end TimedOut, jobs not started are Skipped, unfinished baselines are inconclusive, and the plan is TimedOut (124) unless a

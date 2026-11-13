@@ -95,7 +95,7 @@ internal static partial class CommandLine
     }
 
     /// <summary>The options that take a value (as <see cref="ParsedArgs.Parse"/> reads them); lanq wake's --wait is a flag.</summary>
-    private static bool TakesValue(string command, string option) => option switch
+    internal static bool TakesValue(string command, string option) => option switch
     {
         "--wait" => command != "wake",
         "--config" or "--needs" or "--dir" or "--timeout" or "--mem" or "--fetch" or "--fetch-dir" or "--fetch-max" or "--fetch-max-files"

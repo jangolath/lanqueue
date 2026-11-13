@@ -93,6 +93,38 @@ public sealed class PlanStatsTests : IDisposable
         Assert.Equal(2, unit.LastShards);
     }
 
+    /// <summary>A sharded run with shards missing (--fail-fast or Ctrl+C cancelled them, so they left no record) is never Completed.</summary>
+    [Fact]
+    public void PartialShardedRunIsNotCompleted()
+    {
+        var stats = JobStats.PlanJobsOf(
+        [
+            R(RepoA, "unit", "p1", "Completed", 0, shard: 1, shards: 3),
+            R(RepoA, "unit", "p1", "Completed", 0, shard: 2, shards: 3), // shard 3 never recorded
+            R(RepoA, "unit", "p2", "Completed", 10, shard: 1, shards: 2),
+            R(RepoA, "unit", "p2", "Completed", 10, shard: 2, shards: 2),
+        ]);
+
+        var unit = Assert.Single(stats);
+        Assert.Equal((2, 1, 0, 1), (unit.Runs, unit.Completed, unit.Failed, unit.Other));
+    }
+
+    /// <summary>On Windows paths that differ only in case are the same plan file; elsewhere they are not.</summary>
+    [Fact]
+    public void PlanFileCaseFollowsThePlatform()
+    {
+        IReadOnlyList<JobRecord> records =
+        [
+            R(@"C:\Src\App\lanq.yml", "unit", "p1", "Completed", 0),
+            R(@"c:\src\app\lanq.yml", "unit", "p2", "Completed", 10),
+        ];
+
+        var windows = Assert.Single(JobStats.PlanJobsOf(records, ignoreCase: true));
+        Assert.Equal((2, @"c:\src\app\lanq.yml"), (windows.Runs, windows.PlanFile)); // the newest run's spelling
+        Assert.Equal(2, JobStats.PlanJobsOf(records, ignoreCase: false).Count);
+        Assert.Equal(OperatingSystem.IsWindows() ? 1 : 2, JobStats.PlanJobsOf(records).Count);
+    }
+
     [Fact]
     public void WallIsFirstStartToLastEnd()
     {

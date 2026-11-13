@@ -48,14 +48,14 @@ public sealed partial class PlanFileRunTests
     }
 
     [Theory]
-    [InlineData("fetch: x\n    fetch_max: 201M")]
-    [InlineData("fetch: x\n    fetch_max: 1G")]
-    [InlineData("fetch: x\n    fetch_max_files: 501")]
-    public void FileValueAboveDefaultRefused(string keys)
+    [InlineData("fetch: x\n    fetch_max: 201M", "fetch_max (line 6)")]
+    [InlineData("fetch: x\n    fetch_max: 1G", "fetch_max (line 6)")]
+    [InlineData("fetch: x\n    fetch_max_files: 501", "fetch_max_files (line 6)")]
+    public void FileValueAboveDefaultRefused(string keys, string where)
     {
         var ex = Assert.Throws<PlanFileException>(() => PlanFileLoader.Parse(Job(keys)));
 
-        Assert.Equal("lanq.yml: job 'unit' (line 3): lanq.yml may lower fetch limits (at most 200M / 500 files); a larger limit is the developer's choice: lanq run --plan --fetch-max 1G", ex.Message);
+        Assert.Equal($"lanq.yml: job 'unit' (line 3): {where}: lanq.yml may lower fetch limits (at most 200M / 500 files); a larger limit is the developer's choice: lanq run --plan --fetch-max 1G", ex.Message);
 
         // The defaults themselves, too, and even when no job fetches.
         var inDefaults = Assert.Throws<PlanFileException>(() => PlanFileLoader.Parse("version: 1\ndefaults:\n  fetch_max: 2G\njobs:\n  lint:\n    command: dotnet build\n"));
