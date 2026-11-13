@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.9.2/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.10.0/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.9.2 --repo jangolath/lanqueue
+gh release download v0.10.0 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.9.2    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.10.0    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
