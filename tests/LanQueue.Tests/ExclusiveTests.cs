@@ -1045,6 +1045,28 @@ public sealed class ExclusiveTests : IDisposable
         Assert.Equal(RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction, reader.ReadToEnd());
     }
 
+    /// <summary>Many claims (shards, plan jobs) report the same stuck slot at once: the line is printed exactly once.</summary>
+    [Fact]
+    public void TheStuckLineIsPrintedOnceUnderConcurrentClaims()
+    {
+        for (var round = 0; round < 20; round++)
+        {
+            var ssh = new FakeSsh();
+            var runner = new JobRunner(T.Config(), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, Path.Combine(_root, "tmp"), _ => { });
+            var lines = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var machine = T.Linux();
+            using var start = new Barrier(16);
+            var threads = Enumerable.Range(0, 16).Select(_ => new Thread(() =>
+            {
+                start.SignalAndWait();
+                runner.NoteStuckSlots(machine, "RECLAIM=STUCK slot-2\nSLOT=FULL", lines.Add);
+            })).ToList();
+            threads.ForEach(t => t.Start());
+            threads.ForEach(t => t.Join());
+            Assert.Single(lines);
+        }
+    }
+
     [Fact]
     public void StuckSlotsAreReadOnlyFromWellFormedMarkerLines()
     {

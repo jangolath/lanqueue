@@ -911,7 +911,7 @@ public sealed partial class JobRunner(
             .Distinct(StringComparer.Ordinal)];
 
     /// <summary>Records the stuck slots a claim on <paramref name="machine"/> reported; prints <see cref="StuckStaleLine"/> the first time for that machine.</summary>
-    private void NoteStuckSlots(Machine machine, string output, Action<string> emit)
+    internal void NoteStuckSlots(Machine machine, string output, Action<string> emit)
     {
         var stuck = StuckSlots(output);
         if (stuck.Count == 0)
@@ -919,12 +919,11 @@ public sealed partial class JobRunner(
             return;
         }
 
-        var first = false;
-        var slots = _staleStuck.GetOrAdd(machine.Name, _ =>
-        {
-            first = true;
-            return new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
-        });
+        // GetOrAdd with a value (not a factory, which may run on two threads at once): exactly one caller's dictionary is stored, and
+        // only that caller prints the line.
+        var fresh = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+        var slots = _staleStuck.GetOrAdd(machine.Name, fresh);
+        var first = ReferenceEquals(slots, fresh);
         foreach (var s in stuck)
         {
             slots.TryAdd(s, true);

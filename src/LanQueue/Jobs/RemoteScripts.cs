@@ -279,7 +279,7 @@ public static partial class RemoteScripts
     internal static string WindowsReclaimFunction => """
         function Reclaim($f,$i){try{$c=$IOFile::ReadAllText($f)}catch{return};$l=$c -split "`n"
         if(!($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+GRACE))){return}
-        if(Take $f){try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}}
+        if(Take $f){try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";try{$IOFile::Move($f,$t)}catch{Start-Sleep -Milliseconds 200;$IOFile::Move($f,$t)};$IOFile::Delete($t)} }catch{}finally{Drop $f}}
         elseif($IOFile::Exists("$f.reclaim") -and $IOFile::GetLastWriteTimeUtc("$f.reclaim") -ge [DateTime]::UtcNow.AddSeconds(-LOCKAGE)){return}
         try{if($IOFile::ReadAllText($f) -ceq $c){"RECLAIM=STUCK slot-$i"}}catch{}}
         """.Replace("GRACE", StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
@@ -294,7 +294,7 @@ public static partial class RemoteScripts
           if take "$1"; then
             if [ "$(cat "$1" 2>/dev/null)" = "$c" ]; then
               stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
-              mv "$1" "$1.stale.$$" 2>/dev/null && rm -f "$1.stale.$$"
+              { mv "$1" "$1.stale.$$" 2>/dev/null || { sleep 0.2 2>/dev/null || sleep 1; mv "$1" "$1.stale.$$" 2>/dev/null; }; } && rm -f "$1.stale.$$"
             fi
             drop "$1"
           elif [ -e "$1.reclaim" ] && [ -z "$(find "$1.reclaim" -mmin +MINUTES 2>/dev/null)" ]; then
