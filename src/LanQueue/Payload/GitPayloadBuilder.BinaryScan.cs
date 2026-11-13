@@ -139,7 +139,9 @@ public sealed partial class GitPayloadBuilder
         var blobsRead = 0;
         long binaryBytes = 0, textBytes = 0, bytesRead = 0;
         await using var reader = BatchReader.Start(top, WorkTreeTimeout, ct);
-        foreach (var t in targets)
+        // Smallest first (ordinal path on a tie): secrets usually sit in small files, so large files can never use up the totals
+        // before a small one is read. A missing object sorts first and fails closed.
+        foreach (var t in targets.OrderBy(t => Size(t.NewOid) ?? -1).ThenBy(t => t.Path, StringComparer.Ordinal))
         {
             if (Size(t.NewOid) is not { } size || (t.OldOid is { } o && Size(o) is null))
             {
@@ -203,8 +205,7 @@ public sealed partial class GitPayloadBuilder
                 }
 
                 var oldKind = kind == BlobScan.Kind.Binary ? kind : BlobScan.Classify(oldData) == BlobScan.Kind.Utf16Text ? BlobScan.Kind.Utf16Text : BlobScan.Kind.MaskedText;
-                var known = new HashSet<string>(BlobScan.Lines(oldData, oldKind), StringComparer.Ordinal);
-                lines = [.. lines.Where(l => !known.Contains(l))];
+                lines = BlobScan.NewContent(lines, BlobScan.Lines(oldData, oldKind));
             }
 
             findings.AddRange(BlobScan.ScanLines(lines, BlobScan.Where(t.Path)));

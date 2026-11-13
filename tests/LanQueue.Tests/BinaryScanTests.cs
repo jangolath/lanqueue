@@ -475,13 +475,51 @@ public sealed class BinaryScanTests : IDisposable
 
         Assert.Equal(
             [
-                new ScanSkip("a2.bin", 60 * 1024, BlobScan.BinaryOverTotalCap),
-                new ScanSkip("a3.bin", 200 * 1024, BlobScan.BinaryOverFileCap),
+                new ScanSkip("a2.bin", 60 * 1024, BlobScan.BinaryOverTotalCap), // smallest first, then by path
                 new ScanSkip("t2.dat", 60 * 1024, BlobScan.MaskedTextOverTotalCap),
+                new ScanSkip("a3.bin", 200 * 1024, BlobScan.BinaryOverFileCap),
                 new ScanSkip("t3.dat", 200 * 1024, BlobScan.MaskedTextOverCap),
             ],
             r.Skipped);
         Assert.Equal((60 * 1024 * 2) + (5 * BlobScan.ClassifyBytes), r.BytesRead); // two whole files, five first parts (t1 might have been over the binary total)
+    }
+
+    /// <summary>Blobs are read smallest first: large files earlier in path order cannot use up the total before a small secret-bearing one.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task SmallFilesAreReadBeforeLargeOnes()
+    {
+        var caps = new BlobScan.Caps(BinaryFile: 64 * 1024, BinaryTotal: 100 * 1024, Text: 64 * 1024, TextTotal: 100 * 1024);
+        var targets = new List<GitPayloadBuilder.BlobTarget>();
+        void Add(string name, byte[] data)
+        {
+            Write(name, data);
+            targets.Add(new GitPayloadBuilder.BlobTarget(name, Git("hash-object", "-w", name).Trim(), null));
+        }
+
+        Add("a1.bin", Binary(60 * 1024, 1));
+        Add("a2.bin", Binary(60 * 1024, 2));
+        Add("z.bin", WithText(Binary(2048, 3), 100, "aws " + AwsKey)); // last by path, first by size
+
+        var r = await GitPayloadBuilder.ScanBlobsAsync(_repo, targets, CancellationToken.None, caps);
+
+        Assert.Contains(r.Findings, f => f.Rule == "aws-access-key" && f.Where == "uncommitted file z.bin (binary per git)");
+        Assert.Equal([new ScanSkip("a2.bin", 60 * 1024, BlobScan.BinaryOverTotalCap)], r.Skipped);
+    }
+
+    /// <summary>A private key replaced in place in a -diff file (same BEGIN line, new body) is found; an unchanged one is not re-flagged.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task KeyReplacedInPlaceInADiffFileIsFound()
+    {
+        static string Pem(char body) => "config\n-----BEGIN RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat(new string(body, 64) + "\n", 4)) + "-----END RSA PRIVATE KEY-----\ntail\n";
+        Write("deploy.dat", Pem('A'));
+        Commit();
+
+        Write("deploy.dat", Pem('A').Replace("tail", "tail changed", StringComparison.Ordinal));
+        Assert.Empty((await Snapshot()).BinaryFindings); // the same key, something else changed
+
+        Write("deploy.dat", Pem('B'));
+        var p = await Snapshot();
+        Assert.True(Has(p, "private-key-block", "deploy.dat"), string.Join("; ", p.BinaryFindings));
     }
 
     /// <summary>A file lanq could not read from git: refused with a git fsck hint, not the "take the secret out" one.</summary>

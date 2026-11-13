@@ -192,6 +192,29 @@ internal static class BlobScan
     }
 
     /// <summary>
+    /// The lines of a modified file's new version to scan: those its old version does not have, as the diff's added lines. One exception:
+    /// an old line that starts a secret block (<c>-----BEGIN ... PRIVATE KEY</c>, <see cref="SecretScanner.StartsASecretBlock"/>) is
+    /// scanned again when the line after it is new, so a key replaced in place (same header, new body) is found. An unchanged single-line
+    /// secret stays known and is not re-flagged.
+    /// </summary>
+    internal static List<string> NewContent(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
+    {
+        var known = new HashSet<string>(oldLines, StringComparer.Ordinal);
+        var result = new List<string>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            if (!known.Contains(line)
+                || (i + 1 < lines.Count && !known.Contains(lines[i + 1]) && SecretScanner.StartsASecretBlock(line)))
+            {
+                result.Add(line);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Scans <paramref name="lines"/> with every secret rule in line-cut chunks of about <see cref="ChunkChars"/> characters. Each chunk
     /// after the first starts with the previous one's last whole lines holding <see cref="OverlapLines"/> non-blank lines (blank lines
     /// between them do not count; at most about one more chunk of them), so a match that spans lines is still seen; a line is never cut, and a line over the chunk size is a chunk of its own (with
