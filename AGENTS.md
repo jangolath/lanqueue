@@ -30,7 +30,8 @@ You may run: `lanq health --json` (also with `--needs`, `--mem`, `--on`, `--size
 --json`, `lanq stats --json`, `lanq --version`.
 
 Ask the developer first: `lanq wake`, `lanq health --wake`, `lanq run` without `--no-wake`, `lanq makeready`
-(also `--all`), `lanq unlock`. They act on someone else's PC.
+(also `--all`), `lanq unlock`. They act on someone else's PC. (lanq's release smoke, `scripts/smoke-workers.ps1`, runs
+`lanq unlock` on its smoke machines; it too runs only when the developer asks.)
 
 For the developer only, never you: `lanq makeready --setup` and `--add`, any `--yes`, `lanq init`, editing
 `machines.yml` or `lanq.yml`, `ssh` to a worker yourself.

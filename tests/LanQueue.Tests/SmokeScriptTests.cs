@@ -42,42 +42,65 @@ public sealed class SmokeScriptTests : IDisposable
         return path;
     }
 
-    /// <summary>The script run as a file with <paramref name="args"/>, LANQ_CONFIG pointing at <paramref name="realConfig"/>.</summary>
-    private static (int Code, string Output) RunScript(string realConfig, params string[] args) =>
-        Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Script, .. args], new Dictionary<string, string> { ["LANQ_CONFIG"] = realConfig });
+    /// <summary>
+    /// The script run as a file with <paramref name="args"/>, LANQ_CONFIG pointing at <paramref name="realConfig"/> and the per-user folder
+    /// (APPDATA, XDG_CONFIG_HOME) inside the test folder, so a developer's own config is never looked at.
+    /// </summary>
+    private (int Code, string Output) RunScript(string realConfig, params string[] args) =>
+        Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Script, .. args], Env(realConfig));
+
+    private Dictionary<string, string> Env(string? realConfig)
+    {
+        var env = new Dictionary<string, string> { ["APPDATA"] = Path.Combine(_dir, "appdata"), ["XDG_CONFIG_HOME"] = Path.Combine(_dir, "xdg") };
+        env["LANQ_CONFIG"] = realConfig ?? "";
+        return env;
+    }
 
     /// <summary>The script's functions loaded (-LoadOnly, nothing runs), then <paramref name="code"/>.</summary>
-    private static (int Code, string Output) WithFunctions(string code) =>
-        Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", $". '{Script}' -LoadOnly; {code}"]);
+    private (int Code, string Output) WithFunctions(string code, string? realConfig = null) =>
+        Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", $". '{Script}' -LoadOnly; {code}"], Env(realConfig));
+
+    private static string[] Lines(string output) => output.Replace("\r", "", StringComparison.Ordinal).Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
     [PowerShellFact]
     public void SmokeArgumentsAreChecked()
     {
         var config = File("machines.smoke.yml", Real);
         var (code, output) = WithFunctions(
-            $"Test-SmokeArgs '' 'x'; Test-SmokeArgs '12a' 'x'; Test-SmokeArgs '123' ''; Test-SmokeArgs '123' '{_dir}\\none.yml'; " +
-            $"if ($null -eq (Test-SmokeArgs '123' '{config}')) {{ 'OK' }}");
+            $"Test-SmokeArgs '' 'x' 'release/0.9.2'; Test-SmokeArgs '12a' 'x' 'release/0.9.2'; Test-SmokeArgs '123' 'x' ''; Test-SmokeArgs '123' 'x' 'main'; " +
+            $"Test-SmokeArgs '123' 'x' '-x'; Test-SmokeArgs '123' 'x' 'a..b'; Test-SmokeArgs '123' '' 'v0.9.2'; Test-SmokeArgs '123' '{_dir}\\none.yml' 'v0.9.2'; " +
+            $"if ($null -eq (Test-SmokeArgs '123' '{config}' 'v0.9.2')) {{ 'OK' }}");
         Assert.Equal(0, code);
-        var lines = output.Replace("\r", "", StringComparison.Ordinal).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        Assert.Equal(5, lines.Length);
+        var lines = Lines(output);
+        Assert.Equal(9, lines.Length);
         Assert.StartsWith("give -Run", lines[0], StringComparison.Ordinal);
         Assert.StartsWith("-Run must be a run id", lines[1], StringComparison.Ordinal);
-        Assert.StartsWith("give -Config", lines[2], StringComparison.Ordinal);
-        Assert.StartsWith("-Config: no file", lines[3], StringComparison.Ordinal);
-        Assert.Equal("OK", lines[4]);
+        Assert.StartsWith("give -Branch", lines[2], StringComparison.Ordinal);
+        Assert.StartsWith("-Branch is the default branch", lines[3], StringComparison.Ordinal);
+        Assert.Contains("is not a branch name", lines[4], StringComparison.Ordinal);
+        Assert.Contains("is not a branch name", lines[5], StringComparison.Ordinal);
+        Assert.StartsWith("give -Config", lines[6], StringComparison.Ordinal);
+        Assert.StartsWith("-Config: no file", lines[7], StringComparison.Ordinal);
+        Assert.Equal("OK", lines[8]);
 
         // As a script: refused with exit 2 before anything.
-        var (exit, said) = RunScript(config, "-Run", "abc", "-Config", config);
+        var (exit, said) = RunScript(config, "-Run", "abc", "-Branch", "v0.9.2", "-Config", config);
         Assert.Equal(2, exit);
         Assert.Contains("-Run must be a run id", said, StringComparison.Ordinal);
+        (exit, said) = RunScript(config, "-Run", "123", "-Config", config);
+        Assert.Equal(2, exit);
+        Assert.Contains("give -Branch", said, StringComparison.Ordinal);
     }
 
-    /// <summary>The real config is refused by resolved full path: as given, in another case (Windows), through .., and through a link to it.</summary>
+    /// <summary>
+    /// The real config is refused: as given, in another case (Windows), through .., through a link, by a relative LANQ_CONFIG, a copy or
+    /// hard link (same SHA-256), and the per-user file too when LANQ_CONFIG points elsewhere.
+    /// </summary>
     [PowerShellFact]
     public void SmokeScriptRefusesTheRealConfig()
     {
         var real = File("machines.yml", Real);
-        var variants = new List<string> { real, Path.Combine(_dir, "sub", "..", "machines.yml") };
+        var variants = new List<string> { real, Path.Combine(_dir, "sub", "..", "machines.yml"), File("copy.yml", Real) };
         Directory.CreateDirectory(Path.Combine(_dir, "sub"));
         if (OperatingSystem.IsWindows())
         {
@@ -92,33 +115,37 @@ public sealed class SmokeScriptTests : IDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // creating a symbolic link needs Developer Mode or admin on Windows: that variant is left out
-        }
-
-        var linkedDir = Path.Combine(_dir, "linked");
-        try
-        {
-            Directory.CreateSymbolicLink(linkedDir, _dir);
-            variants.Add(Path.Combine(linkedDir, "machines.yml"));
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // as above
+            // creating a symbolic link needs Developer Mode or admin on Windows: that variant is left out (the hash check still catches it)
         }
 
         foreach (var config in variants)
         {
-            var (code, output) = RunScript(real, "-Run", "123", "-Config", config);
+            var (code, output) = RunScript(real, "-Run", "123", "-Branch", "v0.9.2", "-Config", config);
             Assert.True(code == 2, config + ": " + output);
-            Assert.Contains("is your real config", output, StringComparison.Ordinal);
+            Assert.True(output.Contains("is your real config", StringComparison.Ordinal) || output.Contains("same content as your real config", StringComparison.Ordinal), output);
         }
 
-        // A separate file with the same content is not the real config (it gets as far as the identity check, which passes, so the
-        // function is called directly instead of letting the script reach gh).
-        var copy = File("machines.smoke.yml", Real);
-        var (c2, o2) = WithFunctions($"if ($null -eq (Test-NotRealConfig '{copy}' '{real}')) {{ 'NOT-REAL' }}");
-        Assert.Equal(0, c2);
-        Assert.Contains("NOT-REAL", o2, StringComparison.Ordinal);
+        // A relative LANQ_CONFIG is resolved from the current folder, once, like any path.
+        var (c1, o1) = Shells.Exec(
+            Shells.PowerShell!,
+            ["-NoProfile", "-NonInteractive", "-Command", $"Set-Location '{_dir}'; . '{Script}' -LoadOnly; Get-RealConfigPath"],
+            Env("machines.yml"));
+        Assert.Equal(0, c1);
+        Assert.Equal(real, Lines(o1)[^1], ignoreCase: OperatingSystem.IsWindows());
+
+        // The per-user file is refused even when LANQ_CONFIG names another one.
+        var perUser = OperatingSystem.IsWindows() ? Path.Combine(_dir, "appdata", "lanq", "machines.yml") : Path.Combine(_dir, "xdg", "lanq", "machines.yml");
+        Directory.CreateDirectory(Path.GetDirectoryName(perUser)!);
+        System.IO.File.WriteAllText(perUser, Real.Replace("max_jobs: 1", "max_jobs: 1   # per-user", StringComparison.Ordinal));
+        var (c2, o2) = RunScript(real, "-Run", "123", "-Branch", "v0.9.2", "-Config", perUser);
+        Assert.Equal(2, c2);
+        Assert.Contains("is your real config", o2, StringComparison.Ordinal);
+
+        // A different smoke config is not refused by this check.
+        var smoke = File("machines.smoke.yml", Real + "# smoke\n");
+        var (c3, o3) = WithFunctions($"if ($null -eq (Test-NotRealConfig '{smoke}' (Get-RealConfigPaths))) {{ 'NOT-REAL' }}", real);
+        Assert.Equal(0, c3);
+        Assert.Contains("NOT-REAL", o3, StringComparison.Ordinal);
     }
 
     [PowerShellFact]
@@ -143,18 +170,78 @@ public sealed class SmokeScriptTests : IDisposable
         Assert.StartsWith("REFUSED", Compare("machines:\n  - {name: build-01, ssh: x, work_root: y}\n"), StringComparison.Ordinal);
         Assert.StartsWith("REFUSED", Compare("machines: [x]\n"), StringComparison.Ordinal);
         Assert.StartsWith("REFUSED", Compare("machines:\n  - name: build-01\n    os: linux\n"), StringComparison.Ordinal); // no ssh line
+        Assert.StartsWith("REFUSED", Compare("machines:\n  - name: build-01\n    os: darwin\n    ssh: a@b\n    work_root: /x\n"), StringComparison.Ordinal);
         Assert.Contains("lists no machines", Compare("policy: {}\n"), StringComparison.Ordinal);
 
+        // os defaults to windows and max_jobs to 1, as in lanq.
+        var plain = File("plain.yml", "machines:\n  - name: m1\n    ssh: a@10.20.30.31\n    work_root: C:/lq\n");
+        var (c, o) = WithFunctions($"$m = Read-MachineIdentities '{plain}'; $m['m1'].os; $m['m1'].max_jobs");
+        Assert.Equal(0, c);
+        Assert.Equal(["windows", "1"], Lines(o));
+
         // As a script: a mismatch is refused with exit 2 before anything runs.
-        var smoke = File("machines.smoke.yml", Real.Replace("/srv/lanq", "/srv/other", StringComparison.Ordinal));
-        var (exit, said) = RunScript(real, "-Run", "123", "-Config", smoke);
+        var smokeFile = File("machines.smoke.yml", Real.Replace("/srv/lanq", "/srv/other", StringComparison.Ordinal));
+        var (exit, said) = RunScript(real, "-Run", "123", "-Branch", "v0.9.2", "-Config", smokeFile);
         Assert.Equal(2, exit);
         Assert.Contains("must equal the real ones", said, StringComparison.Ordinal);
     }
 
+    /// <summary>The run must be a successful release workflow_dispatch run on the branch, at its head; the binary must carry +headSha.</summary>
+    [PowerShellFact]
+    public void SmokeRunAndBinaryAreBound()
+    {
+        var sha = new string('a', 40);
+        const string Ok = "@{ workflowName = 'release'; event = 'workflow_dispatch'; conclusion = 'success'; headBranch = 'v0.9.2'; headSha = 'SHA' }";
+        string Check(string view, string branch = "v0.9.2", string remote = "SHA", string defaultBranch = "main")
+        {
+            var (code, output) = WithFunctions(
+                $"$v = [pscustomobject]({view.Replace("SHA", sha, StringComparison.Ordinal)}); $p = Test-SmokeRun $v '{branch}' '{remote.Replace("SHA", sha, StringComparison.Ordinal)}' '{defaultBranch}'; if ($null -eq $p) {{ 'OK' }} else {{ $p }}");
+            Assert.Equal(0, code);
+            return output.Trim();
+        }
+
+        Assert.Equal("OK", Check(Ok));
+        Assert.Contains("not release", Check(Ok.Replace("'release'", "'ci'", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("push run", Check(Ok.Replace("'workflow_dispatch'", "'push'", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("not success", Check(Ok.Replace("'success'", "'failure'", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("dispatched on 'main'", Check(Ok.Replace("'v0.9.2'", "'main'", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("default branch", Check(Ok.Replace("'v0.9.2'", "'trunk'", StringComparison.Ordinal), branch: "trunk", defaultBranch: "trunk"), StringComparison.Ordinal);
+        Assert.Contains("dispatch a new dry run", Check(Ok, remote: new string('b', 40)), StringComparison.Ordinal);
+
+        string Version(string result)
+        {
+            var (code, output) = WithFunctions($"$p = Test-SmokeVersion ({result}) '{sha}'; if ($null -eq $p) {{ 'OK' }} else {{ $p }}");
+            Assert.Equal(0, code);
+            return output.Trim();
+        }
+
+        Assert.Equal("OK", Version($"@{{ Code = 0; TimedOut = $false; Stdout = 'lanq 0.0.0-dryrun.7+{sha}' }}"));
+        Assert.Contains("exited 1", Version($"@{{ Code = 1; TimedOut = $false; Stdout = 'lanq 0.0.0-dryrun.7+{sha}' }}"), StringComparison.Ordinal);
+        Assert.Contains("does not carry", Version("@{ Code = 0; TimedOut = $false; Stdout = 'lanq 0.9.2+0123' }"), StringComparison.Ordinal);
+    }
+
+    /// <summary>Exit 0 only when something passed and nothing failed; SKIP fails unless -AllowSkip; N/A never counts.</summary>
+    [PowerShellFact]
+    public void SmokeExitCodeCountsSkipsButNotNA()
+    {
+        string Exit(string results, string allow = "$false")
+        {
+            var (code, output) = WithFunctions($"Get-SmokeExitCode @({results}) {allow}");
+            Assert.Equal(0, code);
+            return output.Trim();
+        }
+
+        static string R(string outcome) => $"[pscustomobject]@{{ Result = '{outcome}' }}";
+        Assert.Equal("0", Exit($"{R("PASS")}, {R("N/A")}"));
+        Assert.Equal("1", Exit($"{R("PASS")}, {R("SKIP")}"));
+        Assert.Equal("0", Exit($"{R("PASS")}, {R("SKIP")}", "$true"));
+        Assert.Equal("1", Exit($"{R("PASS")}, {R("FAIL")}", "$true"));
+        Assert.Equal("1", Exit($"{R("N/A")}, {R("N/A")}")); // nothing ran at all
+    }
+
     /// <summary>
-    /// Every file write, delete or folder creation is in Write-SmokeFile, Remove-SmokeFile or Remove-SmokeTemp (which stay under the
-    /// smoke folder); no cmdlet that writes files and no redirection appears anywhere.
+    /// Every file write, delete or folder creation is in Write-SmokeFile, Remove-SmokeFile, Expand-SmokeZip or Remove-SmokeTemp (which stay
+    /// under the smoke folder); no cmdlet that writes files and no redirection appears anywhere.
     /// </summary>
     [PowerShellFact]
     public void SmokeScriptWritesOnlyUnderItsTemp()
@@ -169,15 +256,15 @@ public sealed class SmokeScriptTests : IDisposable
         var dump = File("dump.ps1", Dump);
         var (code, output) = Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", dump, Script]);
         Assert.True(code == 0, output);
-        var lines = output.Replace("\r", "", StringComparison.Ordinal).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split(' ')).ToList();
+        var lines = Lines(output).Select(l => l.Split(' ')).ToList();
         Assert.Contains(lines, l => l[0] == "MEMBER" && l[1] == "WriteAllText"); // the dump works
 
-        string[] writers = ["Set-Content", "Add-Content", "Out-File", "New-Item", "Remove-Item", "Copy-Item", "Move-Item", "Rename-Item", "Clear-Content", "Export-Csv", "Tee-Object"];
+        string[] writers = ["Set-Content", "Add-Content", "Out-File", "New-Item", "Remove-Item", "Copy-Item", "Move-Item", "Rename-Item", "Clear-Content", "Export-Csv", "Tee-Object", "Expand-Archive"];
         Assert.DoesNotContain(lines, l => l[0] == "CMD" && writers.Contains(l[1], StringComparer.OrdinalIgnoreCase));
-        Assert.DoesNotContain(lines, l => l[0] == "REDIRECT" && !l[1].StartsWith("2>&1", StringComparison.Ordinal));
+        Assert.All(lines.Where(l => l[0] == "REDIRECT"), l => Assert.True(l[1] == "2>&1", string.Join(' ', l)));
 
-        string[] fileMembers = ["WriteAllText", "WriteAllBytes", "WriteAllLines", "AppendAllText", "Delete", "CreateDirectory", "Move", "Copy"];
-        string[] owners = ["Write-SmokeFile", "Remove-SmokeFile", "Remove-SmokeTemp"];
+        string[] fileMembers = ["WriteAllText", "WriteAllBytes", "WriteAllLines", "AppendAllText", "Delete", "CreateDirectory", "Move", "Copy", "ExtractToDirectory"];
+        string[] owners = ["Write-SmokeFile", "Remove-SmokeFile", "Remove-SmokeTemp", "Expand-SmokeZip"];
         Assert.All(lines.Where(l => l[0] == "MEMBER" && fileMembers.Contains(l[1], StringComparer.Ordinal)), l => Assert.True(owners.Contains(l[2]) || (l[1] == "CreateDirectory" && l[2] == "-"), string.Join(' ', l)));
 
         // The one top-level CreateDirectory makes the smoke folder itself; Remove-SmokeTemp only removes a folder named lanq-smoke-*.
@@ -207,7 +294,7 @@ public sealed class SmokeScriptTests : IDisposable
         Assert.Null(LanQueue.Policy.JobPolicy.AllowedBy(config.Policy, ["sh", "smoke/other.sh"])); // scenario 2a's refusal
     }
 
-    /// <summary>LANQ_HOME is a fresh folder under the smoke folder before lanq is first run, and is restored at the end.</summary>
+    /// <summary>LANQ_HOME is a fresh folder under the smoke folder before lanq is first run, and every variable it sets is restored at the end.</summary>
     [Fact]
     public void SmokeScriptSetsLanqHome()
     {
@@ -216,8 +303,9 @@ public sealed class SmokeScriptTests : IDisposable
         Assert.True(set > 0);
         var firstLanq = text.IndexOf("Invoke-Smoke $lanq", StringComparison.Ordinal);
         Assert.True(firstLanq > set, "lanq runs before LANQ_HOME is set");
-        Assert.Contains("$env:LANQ_HOME = $savedHome", text, StringComparison.Ordinal);
-        Assert.True(text.IndexOf("Test-NotRealConfig $Config $realConfig", StringComparison.Ordinal) < set, "the real-config refusal comes first");
+        Assert.True(text.IndexOf("foreach ($n in @('LANQ_HOME', 'LANQ_CONFIG') + $gitNames) { $saved[$n] =", StringComparison.Ordinal) < set, "saved before it is set");
+        Assert.Contains("foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }", text, StringComparison.Ordinal);
+        Assert.True(text.IndexOf("Test-NotRealConfig $Config $realConfigs", StringComparison.Ordinal) < set, "the real-config refusal comes first");
         Assert.True(text.IndexOf("Compare-MachineIdentities $smokeMachines $realMachines", StringComparison.Ordinal) < set, "the identity check comes first");
         Assert.True(text.IndexOf("& gh run download", StringComparison.Ordinal) > set);
 

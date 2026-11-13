@@ -65,9 +65,13 @@
   machines. CI runs the split guard on Linux (sh) and Windows (PowerShell).
 - `scripts/smoke-workers.ps1` (Windows PowerShell 5.1 and PowerShell 7) smokes a release candidate on real workers,
   as RELEASING.md's new step 1b: it runs the release dry run's `native-win-x64` binary (checked by the run's `headSha`
-  against the release branch), with the owner's separate `machines.smoke.yml` and a temporary `LANQ_HOME`. It refuses
-  the real `machines.yml` (by resolved path) and checks it is unchanged, refuses unless the smoke machines' `ssh`,
-  `work_root` and `max_jobs` equal the real ones, and prints a PASS/FAIL/SKIP table. Agents run it only when asked.
+  against the release branch), with the owner's separate `machines.smoke.yml` and a temporary `LANQ_HOME`. It needs
+  `-Branch` (never the default branch), a successful `release` workflow_dispatch run at that branch's head, and a
+  binary whose `--version` carries `+<headSha>`. It refuses the real config (`LANQ_CONFIG` and the per-user file, by
+  resolved path or the same SHA-256) and checks it is unchanged, refuses unless the smoke machines' `ssh`, `work_root`
+  and `max_jobs` equal the real ones, and prints a PASS/FAIL/SKIP/N/A table: exit 0 only when every scenario that
+  applies passed (N/A: no machine of that kind in the smoke config; a skip fails unless `-AllowSkip`). Agents run it
+  only when asked.
 
 ## 0.9.1 (2026-11-13)
 

@@ -940,7 +940,8 @@ Values may be added in a later version. **Treat an `action` you do not know as `
 
 What a suggestion can be, by construction:
 
-- Only `lanq run`, `lanq health`, `lanq doctor` or `lanq makeready`. Never `lanq unlock`, `lanq init`, `lanq wake`,
+- Only `lanq run`, `lanq health`, `lanq doctor` or `lanq makeready`. Never `lanq unlock` (lanq's release smoke script runs
+  it, only when the developer asks for the smoke), `lanq init`, `lanq wake`,
   `lanq health --wake`, `--force`, `--yes` or `--add`. `--setup` appears only as `lanq makeready --ssh X --os Y
   --setup`, after a worker refused the key or its host key is not in `known_hosts` yet.
 - `lanq makeready` (any form) is never safe unattended: it runs a script on someone else's PC, or prints setup for the

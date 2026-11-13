@@ -49,7 +49,7 @@
   `lanq makeready --add`, `lanq makeready --setup` or any `--yes`: adding a machine is the developer's job. If a
   command is refused, say so and stop; do not look for a way around it, and never edit `lanq.yml` or the machines
   file to get one through.
-- Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
+- Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC. (lanq's release smoke script runs `lanq unlock` itself, and only when the developer asks for the smoke.)
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Never run lanq-makeready-fix, even when `lanq makeready` points to it: it is the PC owner's, local and interactive only.
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
