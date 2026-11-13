@@ -274,7 +274,7 @@ public sealed partial class JobRunner(
         {
             var result = await Dispatch(jobId, req, prepared, ct).ConfigureAwait(false);
 
-            // --baseline: only the job's own failure is rerun at the base (never TimedOut, InfraError, NoCapacity, Rejected or Cancelled).
+            // --baseline: only the job's own failure is rerun at the base (never TimedOut, WindowClosed, InfraError, NoCapacity, Rejected or Cancelled).
             if (baseCommit is null || result.Status != JobStatus.Failed)
             {
                 return result;
@@ -384,10 +384,18 @@ public sealed partial class JobRunner(
         if (judged.Count > 0 && judged.All(j => j.Rule is not null)
             && judged.FirstOrDefault(j => j.Rule?.Reason == Exclusion.WindowsCommandTooLong).Machine is { } tooLong)
         {
+            var length = string.Create(
+                CultureInfo.InvariantCulture,
+                $"the Windows command would be {WindowsLength(tooLong, req.Env):N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {tooLong.Name}");
+            var clashes = judged.Where(j => j.Rule?.Reason == Exclusion.EnvConflict).ToList();
+
+            // Only the length: the message as before. Clashes too: name each machine and its variable, then the length.
             return Refused(
-                string.Create(
-                    CultureInfo.InvariantCulture,
-                    $"the --env values make the Windows command {WindowsLength(tooLong, req.Env):N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {tooLong.Name}"),
+                clashes.Count == 0
+                    ? string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"the --env values make the Windows command {WindowsLength(tooLong, req.Env):N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {tooLong.Name}")
+                    : "--env: " + string.Join("; ", clashes.Select(j => $"{j.Machine.Name} sets {ClashName(j.Machine, req.Env)} in its env (machines.yml)")) + "; " + length,
                 Jobs.RejectKind.JobEnv);
         }
 
@@ -433,9 +441,9 @@ public sealed partial class JobRunner(
             return null;
         }
 
-        if (env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase)) is { } clash)
+        if (ClashName(m, env) is { } clash)
         {
-            return (Exclusion.EnvConflict, $"env {clash.Name} is set by this machine's env in machines.yml");
+            return (Exclusion.EnvConflict, $"env {clash} is set by this machine's env in machines.yml");
         }
 
         if (m.Os == MachineOs.Windows && !windowsUnsafe && WindowsLength(m, env) is var size && size > RemoteScripts.MaxWindowsCommandLength)
@@ -446,6 +454,10 @@ public sealed partial class JobRunner(
 
         return null;
     }
+
+    /// <summary>The first of the job's variables that the machine's env: sets too (as the job spelled it), or null when none does.</summary>
+    private static string? ClashName(Machine m, IReadOnlyList<JobEnvVar> env) =>
+        env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase))?.Name;
 
     private static int WindowsLength(Machine m, IReadOnlyList<JobEnvVar> env) => RemoteScripts.WorstCaseWindowsCommandLength(m, env);
 

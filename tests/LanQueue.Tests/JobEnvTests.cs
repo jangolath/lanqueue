@@ -432,9 +432,15 @@ public sealed class JobEnvTests : IDisposable
         Assert.Empty(ssh.Calls);
         Assert.Equal("fix_command", Assert.Single(NextSteps.ForRun(ParsedArgs.Parse(["run", "--", "dotnet", "test"]), NextSteps.Outcome(only))).Action);
 
-        // build-01 ruled out by a clash and build-02 by the length: refused (the values must change), not NoCapacity.
-        config.Machines[0].Env["BIG"] = "1";
-        Assert.Equal(RejectKind.JobEnv, (await Runner(config, new FakeSsh()).RunAsync(Req(big), CancellationToken.None)).RejectKind);
+        // build-01 ruled out by a clash and build-02 by the length: refused (the values must change), not NoCapacity, and the message
+        // names both causes and both machines.
+        config.Machines[0].Env["big"] = "1";
+        var mixed = await Runner(config, new FakeSsh()).RunAsync(Req(big), CancellationToken.None);
+        Assert.Equal((JobStatus.Rejected, RejectKind.JobEnv, 2), (mixed.Status, mixed.RejectKind, mixed.CliExitCode));
+        Assert.Matches(
+            @"^--env: build-01 sets BIG in its env \(machines\.yml\); the Windows command would be [0-9]{1,3},[0-9]{3} characters \(limit 8,000\) on build-02$",
+            mixed.Message);
+        Assert.DoesNotContain("xxxx", mixed.Message, StringComparison.Ordinal);
 
         // The rule for one machine, and the load-time check without --env is unchanged.
         var (reason, why) = JobRunner.EnvExclusion(T.Windows(), [big], windowsUnsafe: false)!.Value;

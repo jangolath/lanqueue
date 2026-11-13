@@ -631,7 +631,7 @@ public static partial class Cli
         main, master), or with --baseline-ref REF (lanq.yml baseline_ref:) the merge-base of HEAD and REF. The verdict is new (the base
         completed), preexisting (it failed there too), inconclusive (anything else) or skipped (the snapshot is the base): one "[lanq]
         baseline:" line, a baseline object in --json and the fix_code reason. It never changes the status or exit code, never runs after
-        TimedOut, InfraError, NoCapacity, Rejected or Cancelled, and a REF that is not a commit is refused (exit 2) before anything is sent.
+        TimedOut, WindowClosed, InfraError, NoCapacity, Rejected or Cancelled, and a REF that is not a commit is refused (exit 2) before anything is sent.
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
