@@ -135,7 +135,7 @@ public static class PlanGraph
     {
         try
         {
-            return ExpectedFromHistory(log.Read(ct).Records, now);
+            return ExpectedFromHistory(log.ReadHistory(ct).Records, now);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

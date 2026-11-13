@@ -113,6 +113,7 @@ public static partial class Cli
 
         // What to do next, then the logs of the jobs that did not complete (--json carries every logPath); all before the status line.
         var next = NextSteps.ForPlanFile(p, result, jobArgs);
+        await WriteBaselineLines(stderr, PlanBaselines(result)).ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json)
         {
@@ -206,6 +207,23 @@ public static partial class Cli
         return sb.ToString();
     }
 
+    /// <summary>Every baseline rerun of a plan, labelled "job unit " (a shard: "job unit shard 2/3 "), in launch order.</summary>
+    internal static IEnumerable<(string Label, BaselineResult Baseline)> PlanBaselines(PlanRunResult result)
+    {
+        foreach (var j in result.Jobs)
+        {
+            if (j.Baseline is { } b)
+            {
+                yield return ($"job {j.Name} ", b);
+            }
+
+            foreach (var s in j.Sharded?.Shards.Where(s => s.Baseline is not null) ?? [])
+            {
+                yield return (string.Create(CultureInfo.InvariantCulture, $"job {j.Name} shard {s.Index}/{j.Sharded!.Count} "), s.Baseline!);
+            }
+        }
+    }
+
     /// <summary>"[lanq] log: PATH (build)" for each job, and "(unit 2/3)" for each shard, that did not complete and has a log.</summary>
     internal static IEnumerable<string> PlanLogLines(PlanRunResult result)
     {
@@ -272,6 +290,7 @@ public static partial class Cli
             FetchDir = single?.FetchDir,
             FetchError = single?.FetchError,
             ShardTiming = TimingJson(j.Sharded?.Timing),
+            Baseline = BaselineJsonOf(j.Baseline),
         };
     }
 

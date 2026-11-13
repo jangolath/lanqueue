@@ -63,7 +63,7 @@ public static class JobHistory
     {
         try
         {
-            return From(log.Read(ct).Records, key, dir, now);
+            return From(log.ReadHistory(ct).Records, key, dir, now);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

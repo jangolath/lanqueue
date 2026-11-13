@@ -46,11 +46,11 @@ public static partial class PlanFileLoader
     internal static readonly string[] TopKeys = ["version", "defaults", "jobs"];
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
-    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive"];
+    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
-        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "env", "exclusive"];
+        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "env", "exclusive", "baseline", "baseline_ref"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -436,6 +436,18 @@ public static partial class PlanFileLoader
         if (values.TryGetValue("exclusive", out var exclusive) && Flag(exclusive, "exclusive", Error))
         {
             args.Add("--exclusive");
+        }
+
+        // baseline: true is --baseline, baseline_ref: REF is --baseline-ref REF (which implies it, as on the command line). A job's own
+        // baseline: false turns both off, even a baseline_ref: from defaults:.
+        var baselineOff = values.TryGetValue("baseline", out var baselineNode) && !Flag(baselineNode, "baseline", Error);
+        if (!baselineOff && values.TryGetValue("baseline_ref", out var baselineRef))
+        {
+            args.AddRange(["--baseline-ref", Scalar(baselineRef, "baseline_ref")]);
+        }
+        else if (baselineNode is not null && !baselineOff)
+        {
+            args.Add("--baseline");
         }
 
         // --timeout's own parser throws a FormatException for a word; say what the CLI says for a number out of range instead.

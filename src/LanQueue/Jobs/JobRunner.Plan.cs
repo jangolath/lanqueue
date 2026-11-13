@@ -31,6 +31,12 @@ public sealed partial class JobRunner
                 : Ended(refused, null);
         }
 
+        var (baseCommit, badBase) = await ResolveBaseAsync(id, req, ct).ConfigureAwait(false);
+        if (badBase is not null)
+        {
+            return Ended(badBase, null);
+        }
+
         var (payload, failed) = await SnapshotAndScanAsync(id, req, PayloadKinds.None, ct).ConfigureAwait(false);
         if (payload is null)
         {
@@ -49,6 +55,7 @@ public sealed partial class JobRunner
             Machine = ranked.Count > 0 ? ranked[0].Machine.Name : null,
             AllowedBy = JobPolicy.AllowedBy(config.Policy, req.Argv),
             UncommittedFiles = payload.ChangedFiles.Count,
+            Baseline = baseCommit is null ? null : PreviewBaseline(baseCommit, payload.Sha),
         };
         return ranked.Count > 0 ? plan : NoneNow(id, req, needs, candidates, probes, plan);
     }
@@ -92,6 +99,12 @@ public sealed partial class JobRunner
             return Ended(refusal.Refused with { Message = refusal.Message }, null) with { ShardCount = count, ShardCountAuto = auto, AutoWhy = autoWhy, Timing = timing };
         }
 
+        var (baseCommit, badBase) = await ResolveBaseAsync(id, template, ct).ConfigureAwait(false);
+        if (badBase is not null)
+        {
+            return Ended(badBase, null) with { ShardCount = count, ShardCountAuto = auto, AutoWhy = autoWhy, Timing = timing };
+        }
+
         var (payload, failed) = await SnapshotAndScanAsync(id, template, PayloadKinds.None, ct).ConfigureAwait(false);
         if (payload is null)
         {
@@ -132,6 +145,7 @@ public sealed partial class JobRunner
             Timing = timing,
             Placement = placement,
             Waiting = waiting,
+            Baseline = baseCommit is null ? null : PreviewBaseline(baseCommit, payload.Sha),
         };
         return dealt.Count > 0 ? plan : NoneNow("shard", template, needs, candidates, probes, plan);
     }

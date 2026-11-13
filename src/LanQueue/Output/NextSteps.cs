@@ -308,10 +308,30 @@ internal static class NextSteps
     /// <param name="MayStillRun">The job may still be running on <paramref name="Machine"/> (connection lost while it ran, cleanup not done).</param>
     internal sealed record RunOutcome(
         string Status, int ExitCode, string Message, RejectKind? RejectKind, InfraKind? InfraKind, bool MayStillRun, string? Machine, bool? Retryable,
-        IReadOnlyList<ExcludedMachine>? Excluded, string? LogPath);
+        IReadOnlyList<ExcludedMachine>? Excluded, string? LogPath)
+    {
+        /// <summary>lanq run --baseline: the rerun at the base commit after the job failed, or null.</summary>
+        public BaselineResult? Baseline { get; init; }
+    }
 
     internal static RunOutcome Outcome(JobResult r) => new(
-        r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath);
+        r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath)
+    {
+        Baseline = r.Baseline,
+    };
+
+    /// <summary>
+    /// What a baseline rerun says about a failure, for the fix_code reason: "; new: the base commit passes", "; pre-existing: it fails at the
+    /// base commit too (log: PATH)", "; baseline inconclusive: ..." or "; baseline skipped: ..."; empty without one.
+    /// </summary>
+    internal static string BaselineSentence(BaselineResult? b) => b?.Verdict switch
+    {
+        null => "",
+        BaselineVerdict.New => "; new: the base commit passes",
+        BaselineVerdict.Preexisting => $"; pre-existing: it fails at the base commit too (log: {b.LogPath ?? "none"})",
+        BaselineVerdict.Skipped => "; baseline skipped: the snapshot is the base commit",
+        _ => "; baseline inconclusive: " + b.Message,
+    };
 
     /// <summary>lanq health judging a job like the one of <paramref name="p"/>: its --on, --needs, --mem, --size / --min-size and --config.</summary>
     private static SuggestedCommand? HealthFor(ParsedArgs p) => SuggestedCommand.Health(p.Needs, p.MemGb, p.ConfigPath, p.On, p.Size);
@@ -325,7 +345,7 @@ internal static class NextSteps
             case nameof(JobStatus.Completed):
                 return Nothing("the job completed");
             case nameof(JobStatus.Failed):
-                return [Step(NextAction.FixCode, string.Create(CultureInfo.InvariantCulture, $"the job exited {o.ExitCode}; read logTail or the log ({o.LogPath ?? "no log"}) and fix the code"))];
+                return [Step(NextAction.FixCode, string.Create(CultureInfo.InvariantCulture, $"the job exited {o.ExitCode}; read logTail or the log ({o.LogPath ?? "no log"}) and fix the code") + BaselineSentence(o.Baseline))];
             case nameof(JobStatus.Rejected):
                 return Rejected(p, o.RejectKind, o.Message);
             case nameof(JobStatus.NoCapacity):
@@ -356,7 +376,7 @@ internal static class NextSteps
         {
             var failed = r.Shards.Where(s => s.Status == nameof(JobStatus.Failed)).ToList();
             var which = string.Join("; ", failed.Select(s => string.Create(
-                CultureInfo.InvariantCulture, $"shard {s.Index}/{r.Count} exited {s.ExitCode} (log: {s.LogPath ?? "none"})")));
+                CultureInfo.InvariantCulture, $"shard {s.Index}/{r.Count} exited {s.ExitCode} (log: {s.LogPath ?? "none"}){BaselineSentence(s.Baseline)}")));
             return [Step(NextAction.FixCode, $"{failed.Count} shard(s) failed: {which}; read their logTail or logs and fix the code")];
         }
 
@@ -472,8 +492,8 @@ internal static class NextSteps
         }
 
         static string FailedText(PlanJobOutcome j) => j.Sharded is { } s
-            ? $"{j.Name} ({string.Join("; ", s.Shards.Where(x => x.Status == nameof(JobStatus.Failed)).Select(x => string.Create(CultureInfo.InvariantCulture, $"shard {x.Index}/{s.Count} exited {x.ExitCode}, log: {x.LogPath ?? "none"}")))})"
-            : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"})");
+            ? $"{j.Name} ({string.Join("; ", s.Shards.Where(x => x.Status == nameof(JobStatus.Failed)).Select(x => string.Create(CultureInfo.InvariantCulture, $"shard {x.Index}/{s.Count} exited {x.ExitCode}, log: {x.LogPath ?? "none"}{BaselineSentence(x.Baseline)}")))})"
+            : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"}){BaselineSentence(j.Baseline)}");
     }
 
     /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>

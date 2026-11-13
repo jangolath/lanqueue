@@ -157,7 +157,25 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Exclusive { get; init; }
+
+    /// <summary>--baseline only (0.9.0), on a single run's object and on each shard of --shards: the rerun at the base commit after the job (shard) ended Failed. Absent when not asked for or not run.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BaselineJson? Baseline { get; init; }
 }
+
+/// <summary>
+/// lanq run --baseline (0.9.0): the rerun of a failed job (shard, plan job) at the base commit. Every member is always written (null where it
+/// does not apply). Information only: the run's own status and exit code never change.
+/// </summary>
+/// <param name="Ref">What the base came from: the default branch found (origin/main) or --baseline-ref as given.</param>
+/// <param name="Sha">The base commit's full id, or null when it could not be found (a shallow clone).</param>
+/// <param name="Status">The rerun's own status (Completed, Failed, TimedOut, InfraError, NoCapacity, Cancelled, ...), or null when it never started.</param>
+/// <param name="ExitCode">The rerun's exit code as lanq run would exit with it, or null when it never started.</param>
+/// <param name="DurationSeconds">How long the rerun's command ran, or null when it never started.</param>
+/// <param name="Verdict">new (the base completed), preexisting (it failed there too), inconclusive (anything else) or skipped (the snapshot is the base commit; nothing ran). Values may be added. Null only in a dry run (nothing ran yet).</param>
+/// <param name="Message">The same line lanq prints after "[lanq] baseline: ".</param>
+internal sealed record BaselineJson(
+    string Ref, string? Sha, string? Status, int? ExitCode, string? Machine, string? JobId, string? LogPath, double? DurationSeconds, string? Verdict, string Message);
 
 /// <summary>
 /// The one object <c>lanq run --shards --json</c> prints on stdout: the overall status and exit code, N, and one <see cref="RunJson"/> per
@@ -278,6 +296,10 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Exclusive { get; init; }
+
+    /// <summary>--baseline only (0.9.0): the base a failure would be rerun at (ref, sha, message; verdict skipped when the snapshot is the base, else null). Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BaselineJson? Baseline { get; init; }
 }
 
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
@@ -365,6 +387,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Exclusive { get; init; }
+
+    /// <summary>baseline: true only (0.9.0), single job: its rerun at the base commit after it ended Failed (a sharded job has one per failed shard). Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BaselineJson? Baseline { get; init; }
 }
 
 /// <summary>
@@ -550,6 +576,7 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(RunJson))]
 [JsonSerializable(typeof(ShardRunJson))]
 [JsonSerializable(typeof(ExcludedJson))]
+[JsonSerializable(typeof(BaselineJson))]
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]

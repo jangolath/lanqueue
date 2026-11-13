@@ -50,4 +50,16 @@ public interface IPayloadBuilder
     /// the snapshot, otherwise full. Called only when a git machine is about to get the job.
     /// </summary>
     Task<BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct);
+
+    /// <summary>lanq run --baseline: the base commit (<see cref="BaseRef.ResolveAsync"/>), resolved locally before anything is sent.</summary>
+    /// <param name="named">--baseline-ref, or null for the default branch.</param>
+    Task<BaseResolution> ResolveBaseAsync(string repoDir, string? named, CancellationToken ct) => BaseRef.ResolveAsync(repoDir, named, ct);
+
+    /// <summary>
+    /// lanq run --baseline: the payload of commit <paramref name="sha"/> as it is, a clean tree (no overlay), with its committed file names and
+    /// package configs for the secret scan; built only when a baseline actually runs. Bundles and archives of it are built through
+    /// <see cref="BuildBundleAsync"/> and <see cref="BuildArchiveAsync"/> with that sha.
+    /// </summary>
+    Task<JobPayload> BuildCommitAsync(string jobId, string repoDir, string outputDir, string sha, PayloadKinds kinds, CancellationToken ct) =>
+        throw new InvalidOperationException("this payload builder cannot build a commit's payload");
 }

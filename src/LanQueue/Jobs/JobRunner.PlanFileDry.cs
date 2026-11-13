@@ -71,6 +71,12 @@ public sealed partial class JobRunner
                 : NeverDry(ordered, ended);
         }
 
+        // baseline: a bad baseline_ref refuses the plan here too, before the snapshot (the dry run shows each job's --baseline in its run line).
+        if ((await ResolvePlanBasesAsync(ordered, ct).ConfigureAwait(false)).Refused is { } badBase)
+        {
+            return new PlanDryResult(badBase.Status, badBase.ExitCode, badBase.Message, []) { Decided = badBase.Decided, RejectKind = badBase.RejectKind };
+        }
+
         var (payload, failed) = await SnapshotAndScanAsync(NewId(), ordered[0].Request, PayloadKinds.None, ct).ConfigureAwait(false);
         if (payload is null)
         {

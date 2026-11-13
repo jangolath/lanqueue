@@ -137,6 +137,24 @@ public sealed record JobRequest(
     /// </summary>
     public bool Exclusive { get; init; }
 
+    /// <summary>
+    /// lanq run --baseline / --baseline-ref (lanq.yml baseline:, baseline_ref:): when the job (a shard, a plan job) ends Failed, the same request
+    /// runs again at the base commit (<see cref="BaseRef"/>) and its verdict is reported (information only: status and exit code stay the job's).
+    /// </summary>
+    public bool Baseline { get; init; }
+
+    /// <summary>--baseline-ref: the branch, tag or commit to compare with (its merge-base with HEAD); null means the default branch.</summary>
+    public string? BaselineRef { get; init; }
+
+    /// <summary>A baseline rerun only: the id of the failed job it reruns (jobs.jsonl baselineOf; timing history leaves such records out).</summary>
+    public string? BaselineOf { get; init; }
+
+    /// <summary>A baseline rerun only: the base commit's short id (jobs.jsonl commit).</summary>
+    public string? Commit { get; init; }
+
+    /// <summary>Lines of this job are prefixed "[Label machine] " (a baseline rerun's "baseline 2/4"), instead of a plan job's name; null otherwise.</summary>
+    public string? Label { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -189,6 +207,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// </summary>
     public double? RunSeconds { get; init; }
 
+    /// <summary>lanq run --baseline: the rerun at the base commit after this job ended Failed (never changes the status or exit code); else null.</summary>
+    public BaselineResult? Baseline { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -237,6 +258,12 @@ public sealed partial class JobRunner(
             return refused;
         }
 
+        var (baseCommit, badBase) = await ResolveBaseAsync(jobId, req, ct).ConfigureAwait(false);
+        if (badBase is not null)
+        {
+            return badBase;
+        }
+
         var (prepared, failed) = await PrepareAsync(jobId, req, output, ct).ConfigureAwait(false);
         if (prepared is null)
         {
@@ -245,7 +272,16 @@ public sealed partial class JobRunner(
 
         await using (prepared.ConfigureAwait(false))
         {
-            return await Dispatch(jobId, req, prepared, ct).ConfigureAwait(false);
+            var result = await Dispatch(jobId, req, prepared, ct).ConfigureAwait(false);
+
+            // --baseline: only the job's own failure is rerun at the base (never TimedOut, InfraError, NoCapacity, Rejected or Cancelled).
+            if (baseCommit is null || result.Status != JobStatus.Failed)
+            {
+                return result;
+            }
+
+            var baseline = await RunBaselinesAsync([new BaselineTarget(req, baseCommit, result.JobId, result.Machine)], prepared.Payload, ct).ConfigureAwait(false);
+            return result with { Baseline = baseline[0] };
         }
     }
 
@@ -528,18 +564,27 @@ public sealed partial class JobRunner(
             return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message) { InfraKind = Jobs.InfraKind.Snapshot });
         }
 
+        if (ScanPayload(payloadId, payload) is { } refused)
+        {
+            TryDelete(payload.ArchivePath);
+            return (null, refused);
+        }
+
+        return (payload, null);
+    }
+
+    /// <summary>
+    /// The secret scans of a payload: the uncommitted changes and their file names (none for a baseline's clean base commit), the committed file
+    /// names and the package-manager configs. The Rejected (Secret) result, or null when it is clean.
+    /// </summary>
+    private static JobResult? ScanPayload(string payloadId, JobPayload payload)
+    {
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
             .Concat((payload.CommittedConfigs ?? new Dictionary<string, string?>()).SelectMany(c => SecretScanner.ScanCommittedConfig(c.Key, c.Value)))
             .ToList();
-        if (findings.Count > 0)
-        {
-            TryDelete(payload.ArchivePath);
-            return (null, Rejected(payloadId, findings));
-        }
-
-        return (payload, null);
+        return findings.Count > 0 ? Rejected(payloadId, findings) : null;
     }
 
     /// <summary>A snapshot shared by the jobs of one lanq run (one job, or every shard): deleting it removes the snapshot files and every bundle and archive built.</summary>
@@ -649,7 +694,8 @@ public sealed partial class JobRunner(
         [.. assessed.Select(a => new ExcludedMachine(a.Machine.Name, a.Code ?? Eligibility.Code(Exclusion.Busy)!, WhyNot(a), a.Permanent))];
 
     /// <param name="onSlot">Called with the machine's name once the job holds a slot there (a plan job reports where it ran when cancelled).</param>
-    private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null)
+    /// <param name="prefer">A machine tried first whenever it can take the job (a baseline rerun prefers the machine the job failed on); null for none.</param>
+    private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null, string? prefer = null)
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
@@ -663,6 +709,11 @@ public sealed partial class JobRunner(
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
+            if (prefer is not null)
+            {
+                ranked = [.. ranked.OrderBy(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal) ? 0 : 1)]; // stable: the rest keep their rank
+            }
+
             foreach (var a in ranked)
             {
                 var held = false;
@@ -766,10 +817,10 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>Where a job's own lanq lines go: as they are, or for a plan job prefixed "[name] ".</summary>
-    private Action<string> Say(JobRequest req) => req.PlanJob is { } name ? line => output($"[{name}] {line}") : output;
+    private Action<string> Say(JobRequest req) => (req.Label ?? req.PlanJob) is { } name ? line => output($"[{name}] {line}") : output;
 
-    /// <summary>Where a single job's lines on a machine go: as they are, or for a plan job prefixed "[name machine] ".</summary>
-    private Action<string> MachineLines(JobRequest req, string machine) => req.PlanJob is { } name ? line => output($"[{name} {machine}] {line}") : output;
+    /// <summary>Where a single job's lines on a machine go: as they are, or for a plan job prefixed "[name machine] " (a baseline rerun: its label).</summary>
+    private Action<string> MachineLines(JobRequest req, string machine) => (req.Label ?? req.PlanJob) is { } name ? line => output($"[{name} {machine}] {line}") : output;
 
     /// <summary>
     /// Static property of the config: can any git-transfer candidate ever take this job (capabilities and a declared size: only; load, hours
@@ -1018,6 +1069,8 @@ public sealed partial class JobRunner(
                 PlanRun = req.PlanRun,
                 Exclusive = req.Exclusive ? true : null,
                 EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
+                BaselineOf = req.BaselineOf,
+                Commit = req.BaselineOf is null ? null : req.Commit,
             });
             return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
@@ -1293,6 +1346,7 @@ public sealed partial class JobRunner(
 
         if (step.Ok && git)
         {
+            // A baseline's base commit is recorded too: the worker's refs/lanq/base moved to it, so the next bundle is incremental on it.
             // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
             await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
         }

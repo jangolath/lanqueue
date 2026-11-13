@@ -126,11 +126,20 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --exclusive (lanq.yml exclusive: true): the job takes every slot of its machine (no other lanq job runs there meanwhile).</summary>
     public bool Exclusive { get; init; }
 
+    /// <summary>
+    /// lanq run --baseline (lanq.yml baseline: true), or --baseline-ref REF, which implies it: when the job (a shard) ends Failed, the same
+    /// command runs again at the base commit and the verdict (new, preexisting, inconclusive, skipped) is reported; status and exit stay the job's.
+    /// </summary>
+    public bool Baseline { get; init; }
+
+    /// <summary>lanq run --baseline-ref REF (lanq.yml baseline_ref:): the branch, tag or commit to compare with; null means the default branch.</summary>
+    public string? BaselineRef { get; init; }
+
     /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
     internal static readonly string[] PlanFileOptions =
     [
         "--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
-        "--fetch-max-files", "--env", "--exclusive",
+        "--fetch-max-files", "--env", "--exclusive", "--baseline", "--baseline-ref",
     ];
 
     /// <summary>
@@ -147,7 +156,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive",
+            "--env", "--exclusive", "--baseline", "--baseline-ref",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -182,6 +191,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var wakeSleepers = false;
         var noWake = false;
         var exclusive = false;
+        var baseline = false;
+        string? baselineRef = null;
         var dryRun = false;
         var force = false;
         string? sshTarget = null;
@@ -337,6 +348,22 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--exclusive":
                     exclusive = true;
                     break;
+
+                // The base is optional, but this parser takes an option's value from the next argument, so "--baseline REF" could not tell a
+                // ref from the job's next option or a typo. Two forms instead: --baseline alone uses the default branch, and --baseline-ref REF
+                // names the base (and implies --baseline).
+                case "--baseline":
+                    baseline = true;
+                    break;
+                case "--baseline-ref" when i + 1 < own.Length:
+                    baselineRef = own[++i];
+                    if (Payload.BaseRef.CheckRefText(baselineRef) is { } badRef)
+                    {
+                        throw new ArgumentException(badRef);
+                    }
+
+                    baseline = true;
+                    break;
                 case "--dry-run":
                     dryRun = true;
                     break;
@@ -441,6 +468,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WakeSleepers = wakeSleepers,
             NoWake = noWake,
             Exclusive = exclusive,
+            Baseline = baseline,
+            BaselineRef = baselineRef,
             DryRun = dryRun,
             Force = force,
             SshTarget = sshTarget,
@@ -562,6 +591,7 @@ public static partial class Cli
           lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test
           lanq run ... [--env NAME=VALUE ...] -- dotnet test
           lanq run ... --exclusive [--shards N|auto] -- dotnet test
+          lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq stats [--json] [--target-minutes M]
@@ -596,6 +626,12 @@ public static partial class Cli
         busy machine, until every slot is free (busy, retryable; no reservation, so a machine that is never idle never takes it: use --on with
         an idle machine). With --shards each shard takes a whole machine: auto counts the idle machines, and a fixed N above the machines
         that can take the job is refused (exit 2). --mem and every other rule still apply.
+        --baseline (lanq.yml baseline: true) answers "is this failure new?": when the job (a shard, a plan job) ends Failed, the same request
+        runs again at the base commit, a clean tree: the merge-base of HEAD and the default branch (origin/HEAD, else origin/main, origin/master,
+        main, master), or with --baseline-ref REF (lanq.yml baseline_ref:) the merge-base of HEAD and REF. The verdict is new (the base
+        completed), preexisting (it failed there too), inconclusive (anything else) or skipped (the snapshot is the base): one "[lanq]
+        baseline:" line, a baseline object in --json and the fix_code reason. It never changes the status or exit code, never runs after
+        TimedOut, InfraError, NoCapacity, Rejected or Cancelled, and a REF that is not a commit is refused (exit 2) before anything is sent.
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
@@ -870,6 +906,7 @@ public static partial class Cli
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
         var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        await WriteBaselineLines(stderr, result.Baseline is { } b ? [("", b)] : []).ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json && result.LogPath is { } logPath)
         {
@@ -888,6 +925,7 @@ public static partial class Cli
                         NextSteps = next,
                         Env = EnvNames(p.Env),
                         Exclusive = Flag(p.Exclusive),
+                        Baseline = BaselineJsonOf(result.Baseline),
                     },
                     result.LogPath,
                     p.LogTail),
@@ -902,6 +940,28 @@ public static partial class Cli
     /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
     internal static IReadOnlyList<string>? EnvNames(IReadOnlyList<Policy.JobEnvVar> env) => env.Count > 0 ? [.. env.Select(e => e.Name)] : null;
 
+    /// <summary>"[lanq] baseline: {label}{message}" per rerun, before the Next lines and the status line (which stays last).</summary>
+    internal static async Task WriteBaselineLines(TextWriter stderr, IEnumerable<(string Label, BaselineResult Baseline)> baselines)
+    {
+        foreach (var (label, b) in baselines)
+        {
+            await stderr.WriteLineAsync(JobRunner.SafeLine($"[lanq] baseline: {label}{b.Message}")).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The baseline object of a run, shard or plan job (sanitised), or null (the key left out) when no baseline was asked for or run.</summary>
+    internal static BaselineJson? BaselineJsonOf(BaselineResult? b) => b is null ? null : new BaselineJson(
+        JobRunner.SafeLine(b.Ref),
+        b.Sha,
+        b.Status,
+        b.ExitCode,
+        b.Machine is { } m ? JobRunner.SafeLine(m) : null,
+        b.JobId,
+        b.LogPath is { } l ? JobRunner.SafeLine(l) : null,
+        b.DurationSeconds,
+        b.Verdict.Length == 0 ? null : b.Verdict,
+        JobRunner.SafeLine(b.Message));
+
     /// <summary>An optional JSON flag such as exclusive: true when set, null (the key left out) when not.</summary>
     internal static bool? Flag(bool set) => set ? true : null;
 
@@ -914,6 +974,8 @@ public static partial class Cli
             Size = p.Size,
             Env = p.Env,
             Exclusive = p.Exclusive,
+            Baseline = p.Baseline,
+            BaselineRef = p.BaselineRef,
         };
 
     /// <summary>

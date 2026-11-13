@@ -49,13 +49,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             var snapshotFiles = sha == head
                 ? committed
                 : (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", sha).ConfigureAwait(false)).Split('\0', StringSplitOptions.RemoveEmptyEntries);
-            var configs = new Dictionary<string, string?>(StringComparer.Ordinal);
-            foreach (var path in snapshotFiles.Where(Policy.SecretScanner.IsPackageConfig))
-            {
-                // Read only small blobs (a bigger one is refused unread by the scan); the content never leaves this process.
-                var size = long.Parse((await Git(top, null, ct, "cat-file", "-s", sha + ":" + path).ConfigureAwait(false)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
-                configs[path] = size > Policy.SecretScanner.MaxConfigBytes ? null : await Git(top, null, ct, "cat-file", "-p", sha + ":" + path).ConfigureAwait(false);
-            }
+            var configs = await PackageConfigsAsync(top, sha, snapshotFiles, ct).ConfigureAwait(false);
 
             ArchiveBuild? built = null;
             if (kinds.HasFlag(PayloadKinds.Archive))
@@ -72,9 +66,39 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
     }
 
     /// <summary>
+    /// The payload of a commit as it is, a clean tree (lanq run --baseline's base): no snapshot commit, no overlay. Its committed file names and
+    /// package-manager configs are read for the same secret scans a snapshot gets; nothing else is built (bundles and archives come on demand).
+    /// </summary>
+    public async Task<JobPayload> BuildCommitAsync(string jobId, string repoDir, string outputDir, string sha, PayloadKinds kinds, CancellationToken ct)
+    {
+        Directory.CreateDirectory(outputDir);
+        var top = (await Git(repoDir, null, ct, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim();
+        var commit = (await Git(top, null, ct, "rev-parse", "--verify", sha + "^{commit}").ConfigureAwait(false)).Trim();
+        var repoId = kinds.HasFlag(PayloadKinds.Bundle) ? await RepoIdAsync(top, ct).ConfigureAwait(false) : null;
+        var files = (await Git(top, null, ct, "ls-tree", "-r", "-z", "--name-only", commit).ConfigureAwait(false)).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        var configs = await PackageConfigsAsync(top, commit, files, ct).ConfigureAwait(false);
+        return new JobPayload(commit, [], "", RepoId: repoId, Head: commit, CommittedFiles: files, CommittedConfigs: configs);
+    }
+
+    /// <summary>The content of each package-manager config among <paramref name="files"/> of commit <paramref name="sha"/>, for the credential scan.</summary>
+    private static async Task<Dictionary<string, string?>> PackageConfigsAsync(string top, string sha, IEnumerable<string> files, CancellationToken ct)
+    {
+        var configs = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach (var path in files.Where(Policy.SecretScanner.IsPackageConfig))
+        {
+            // Read only small blobs (a bigger one is refused unread by the scan); the content never leaves this process.
+            var size = long.Parse((await Git(top, null, ct, "cat-file", "-s", sha + ":" + path).ConfigureAwait(false)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
+            configs[path] = size > Policy.SecretScanner.MaxConfigBytes ? null : await Git(top, null, ct, "cat-file", "-p", sha + ":" + path).ConfigureAwait(false);
+        }
+
+        return configs;
+    }
+
+    /// <summary>
     /// Bundles the snapshot <paramref name="sha"/> under <c>refs/lanq/&lt;jobId&gt;</c>. With a <paramref name="baseSha"/> that is still a
-    /// local commit and an ancestor of the snapshot, the bundle is incremental (<c>--not &lt;base&gt;</c>, or the base's parents when the
-    /// snapshot is the base itself, since git refuses an empty bundle); otherwise, or when the base is malformed, it is a full bundle.
+    /// local commit and an ancestor of the snapshot, the bundle is incremental (<c>--not &lt;base&gt;</c>). When the snapshot is the base itself
+    /// or an ancestor of it (git refuses an empty bundle), it is incremental on the snapshot's own parents, which the worker has. Otherwise, or
+    /// when the base is malformed, it is a full bundle.
     /// </summary>
     public async Task<BundleBuild> BuildBundleAsync(string jobId, string repoDir, string outputDir, string sha, string? baseSha, CancellationToken ct)
     {
@@ -101,19 +125,26 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
     /// <summary>The commits to exclude for an incremental bundle on <paramref name="baseSha"/>, or none when only a full bundle is safe.</summary>
     private static async Task<IReadOnlyList<string>> IncrementalExcludesAsync(string top, string baseSha, string sha, CancellationToken ct)
     {
-        if (!IsObjectId(baseSha)
-            || (await GitRun(top, null, ct, "cat-file", "-e", baseSha + "^{commit}").ConfigureAwait(false)).Code != 0
-            || (await GitRun(top, null, ct, "merge-base", "--is-ancestor", baseSha, sha).ConfigureAwait(false)).Code != 0)
+        if (!IsObjectId(baseSha) || (await GitRun(top, null, ct, "cat-file", "-e", baseSha + "^{commit}").ConfigureAwait(false)).Code != 0)
         {
             return [];
         }
 
-        if (!string.Equals(baseSha, sha, StringComparison.Ordinal))
+        if ((await GitRun(top, null, ct, "merge-base", "--is-ancestor", baseSha, sha).ConfigureAwait(false)).Code == 0)
         {
-            return [baseSha];
+            if (!string.Equals(baseSha, sha, StringComparison.Ordinal))
+            {
+                return [baseSha];
+            }
+        }
+        else if ((await GitRun(top, null, ct, "merge-base", "--is-ancestor", sha, baseSha).ConfigureAwait(false)).Code != 0)
+        {
+            return [];
         }
 
-        return (await Git(top, null, ct, "rev-parse", baseSha + "^@").ConfigureAwait(false))
+        // The snapshot is the base itself, or an ancestor of it (lanq run --baseline's base commit, sent after a snapshot on top of it): the
+        // worker has every commit up to the base, so only the snapshot commit's own objects go, on its parents (a root commit: a full bundle).
+        return (await Git(top, null, ct, "rev-parse", sha + "^@").ConfigureAwait(false))
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
@@ -409,7 +440,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         return code == 0 ? output : throw new InvalidOperationException($"git {args[0]} failed: {error.Trim()}");
     }
 
-    private static async Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)
+    internal static async Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)
     {
         var psi = new ProcessStartInfo("git")
         {

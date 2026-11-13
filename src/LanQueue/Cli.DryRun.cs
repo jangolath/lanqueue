@@ -57,7 +57,9 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {plan.Status}: {JobRunner.SafeLine(plan.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive) }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(
+                PlanJsonOf(plan, p.LogTail) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline) },
+                LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
         return plan.ExitCode;
@@ -131,6 +133,11 @@ public static partial class Cli
                 var when = !a.Permanent ? "can change" : byConfig ? "never (config)" : "never (machine)";
                 Line($"  {JobRunner.SafeLine(a.Machine.Name).PadRight(nameWidth)}{JobRunner.SafeLine(JobRunner.WhyNot(a)).PadRight(whyWidth)}{when}");
             }
+        }
+
+        if (plan.Baseline is { } baseline)
+        {
+            Line("Baseline: " + JobRunner.SafeLine(baseline.Message) + " (a dry run runs nothing)");
         }
 
         if (plan.WouldWake is { } sleeper)
