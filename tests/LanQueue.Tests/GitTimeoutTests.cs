@@ -80,6 +80,7 @@ public class GitTimeoutTests
     [InlineData("cat-file", 60)]
     [InlineData("add", 600)]
     [InlineData("diff", 600)]
+    [InlineData("grep", 600)]
     [InlineData("bundle", 1800)]
     public void EachGitCallHasALimitByWhatItDoes(string subcommand, int seconds) =>
         Assert.Equal(TimeSpan.FromSeconds(seconds), GitPayloadBuilder.TimeoutFor(subcommand));

@@ -4,9 +4,10 @@ using System.Text.RegularExpressions;
 namespace LanQueue.Policy;
 
 /// <summary>
-/// An uncommitted file git shows as binary whose content the secret scan did not read in full (0.9.2): it was over a cap. Reported, never
-/// refused. <see cref="Reason"/> is <see cref="BlobScan.BinaryOverFileCap"/>, <see cref="BlobScan.BinaryOverTotalCap"/> or
-/// <see cref="BlobScan.MaskedTextOverCap"/>.
+/// An uncommitted file whose content the secret scan did not read in full: it was over a cap. Reported, never refused. <see cref="Reason"/>
+/// is <see cref="BlobScan.BinaryOverFileCap"/>, <see cref="BlobScan.BinaryOverTotalCap"/>, <see cref="BlobScan.MaskedTextOverCap"/> or
+/// <see cref="BlobScan.MaskedTextOverTotalCap"/> for a file git shows as binary (0.9.2), and <see cref="BlobScan.TextOverCap"/> for a
+/// changed text file that holds a private-key BEGIN line (0.10.1).
 /// </summary>
 /// <param name="Path">The file's path in the repository, as git gives it (unsanitised; sanitised wherever it is shown).</param>
 /// <param name="Bytes">The file's size.</param>
@@ -58,6 +59,12 @@ internal static class BlobScan
 
     internal const string MaskedTextOverTotalCap = "masked_text_over_total_cap";
 
+    /// <summary>
+    /// A changed text file with a private-key BEGIN line whose old or new version is over <see cref="TextCap"/>, or that would take the text
+    /// key scan past <see cref="TextTotalCap"/> (0.10.1): its key blocks were not compared.
+    /// </summary>
+    internal const string TextOverCap = "text_over_cap";
+
     /// <summary>The finding when a file git shows as binary could not be looked up or read (fails closed: the run is refused).</summary>
     internal const string IncompleteRule = "scan-incomplete (refusing: a file git shows as binary could not be read)";
 
@@ -72,6 +79,17 @@ internal static class BlobScan
     internal static string Where(string path) => $"uncommitted file {Jobs.JobRunner.SafeLine(path)}{WhereSuffix}";
 
     internal const string WhereSuffix = " (binary per git)";
+
+    /// <summary>
+    /// The finding when a changed text file with a private-key BEGIN line could not be looked up or read for the key-block scan (0.10.1; fails
+    /// closed: the run is refused).
+    /// </summary>
+    internal const string TextIncompleteRule = "scan-incomplete (refusing: a changed text file with a private-key block could not be read)";
+
+    /// <summary>The "where" of a finding of the text key-block scan (0.10.1); the path is sanitised.</summary>
+    internal static string TextWhere(string path) => $"uncommitted file {Jobs.JobRunner.SafeLine(path)}{TextWhereSuffix}";
+
+    internal const string TextWhereSuffix = " (key block changed in place)";
 
     /// <summary>UTF-16 (a byte order mark), masked text (no NUL in the first <see cref="ClassifyBytes"/> bytes) or a real binary.</summary>
     internal static Kind Classify(ReadOnlySpan<byte> data)
@@ -105,6 +123,9 @@ internal static class BlobScan
             : [.. SplitLines(Encoding.UTF8.GetString(data)), .. Strings(data)],
         _ => Strings(data),
     };
+
+    /// <summary>The lines of an ordinary text file (UTF-8, invalid bytes replaced; a trailing CR dropped, as on both sides of a comparison).</summary>
+    internal static List<string> TextLines(byte[] data) => SplitLines(Encoding.UTF8.GetString(data));
 
     private static List<string> SplitLines(string text)
     {
@@ -205,6 +226,28 @@ internal static class BlobScan
         {
             var line = lines[i];
             if (!known.Contains(line) || (SecretScanner.StartsASecretBlock(line) && BlockChanged(lines, i, known)))
+            {
+                result.Add(line);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The text key-block scan (0.10.1): only the old BEGIN lines <see cref="NewContent"/> scans again, those that are unchanged themselves
+    /// but start a block with a new line. Every other line <see cref="NewContent"/> returns is a line the overlay diff already shows as added
+    /// (and scans), so it is left out here. Lines are matched by content (set membership), as in <see cref="NewContent"/>: a new key added
+    /// under a BEGIN line identical to an old one can be reported twice, once by the diff and once here (harmless: either refuses).
+    /// </summary>
+    internal static List<string> ChangedBlockStarts(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
+    {
+        var known = new HashSet<string>(oldLines, StringComparer.Ordinal);
+        var result = new List<string>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            if (line.Contains("-----", StringComparison.Ordinal) && known.Contains(line) && SecretScanner.StartsASecretBlock(line) && BlockChanged(lines, i, known))
             {
                 result.Add(line);
             }

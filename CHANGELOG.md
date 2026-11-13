@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.10.1 (unreleased)
+
+### Security
+
+- **A private key replaced in place in a text file is found.** The secret scan reads the uncommitted diff, which
+  shows only changed lines: a key whose body changed while its BEGIN line stayed the same never showed its BEGIN line,
+  so it was not recognised (files git shows as binary already got this in 0.9.2). Now lanq greps the snapshot's changed
+  text files for `-----BEGIN` (`git grep --cached -I`, only those files), and for each modified or renamed one compares its
+  old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line whose block (up to its END
+  line, at most 512 lines) has a new line is scanned again. The finding reads `private-key-block in uncommitted file
+  <path> (key block changed in place)` and never shows the key. A file lanq cannot look up or read refuses the job
+  (`scan-incomplete`, with a `git fsck` hint). Such a file is read up to 32 MB per version and 256 MB in all; one over
+  that is listed in `scanSkipped` with the new reason `text_over_cap` (the larger version's size) and on stderr, not
+  refused. Added files are not read (every line is already in the diff), nor files without a BEGIN line.
+- **One rename mode for the text scan.** The diff, its file list and the new comparison now always use `-M`,
+  whatever `diff.renames` says, so a renamed file is compared with its old version everywhere. The binary scan
+  keeps `--no-renames` (a moved binary is read whole).
+
+### Behaviour changes
+
+- Edits to sample keys kept in tracked text files are now refused: changing the body of a committed private key (a
+  test fixture, a doc sample) under the same BEGIN line refuses the run like a new key. Generate test keys when the
+  tests run, or keep such samples out of the files you edit.
+- A user whose `diff.renames` is `false` now gets rename-aware file lists and diffs for the scan: a renamed file's
+  old name is no longer listed among the changed files (its new name is).
+
+### Documentation
+
+- SECURITY.md and the README now say that the uncommitted diff is scanned with its removed lines too (so removing a
+  secret from a tracked file is refused until that removal is committed), and describe the text key-block comparison
+  and its limits; `scanSkipped` documents `text_over_cap`.
+
 ## 0.10.0 (2026-11-13)
 
 ### Added

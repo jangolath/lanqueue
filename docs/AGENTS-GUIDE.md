@@ -155,7 +155,10 @@ it is: the agent never changes a worker's permissions or ACLs, and never suggest
   `.gitattributes` `-diff` or `binary` entry hides a file from the diff, not from lanq), up to its caps. The agent
   never adds an attribute, renames, compresses, moves or re-encodes a file, or moves a secret into a `-diff` file, to
   get past the scan. `scanSkipped` lists files over the caps that were not read in full: the agent reports them and
-  does not try to get them read.
+  does not try to get them read. Since 0.10.1 a private key replaced in place in a tracked text file (a new body
+  under the same BEGIN line) is refused too, sample keys included (`private-key-block in uncommitted file <path> (key
+  block changed in place)`); a large such file is listed as `text_over_cap`. The agent never reverts, splits or
+  re-encodes a key, or moves it to another file, to get past the scan: it reports the refusal to the developer.
 - `lanq makeready --json` (and `--all`, `--add`) prints the worker's report sanitised; `suggestedMachine.path_prepend`
   and `env` appear only when lanq would use them, and `lanqWithheld` (lanq's own key) says what was left out.
   `suggestedMachine` is advice for the developer: the agent never writes it into `machines.yml`.

@@ -63,8 +63,13 @@ files cannot use up the totals before a small one; a single file over a per-file
 listed, not refused, so a secret placed in a very large binary or text file is not seen. In a modified file only new
 lines count, except that an unchanged private-key BEGIN line is scanned again when any line of its block (up to its
 END line, indented or not) is new, so a key replaced in place is found (PEM, OpenSSH and PGP blocks, encrypted ones
-included); in ordinary text files the diff shows only changed lines, so a key whose body is replaced while its
-BEGIN line stays the same is not recognised there. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
+included). The diff of ordinary text files is scanned with both its added and its removed lines, but it shows only
+changed lines, so since 0.10.1 lanq also finds the changed text files whose new version has a `-----BEGIN` line
+(`git grep --cached` of the snapshot, those files only) and compares their old and new blobs the same way, renames included (the diff,
+its file list and this comparison all use `-M`). A key whose body changed under an unchanged BEGIN line is refused
+like a new key, sample keys kept in tracked text files included. Such a file is read up to 32 MB per version and
+256 MB in all; one over that is listed in `scanSkipped` (`text_over_cap`), not refused. A block is judged up to its
+END line and at most 512 lines, so a change further down an unterminated block is not seen. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).
 A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_ref:`), never a commit id, `HEAD` or
