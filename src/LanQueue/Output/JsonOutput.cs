@@ -374,6 +374,14 @@ internal sealed record PlanFileRunJson(
     /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the plan's one snapshot. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
+
+    /// <summary>--plan-timeout or lanq.yml plan_timeout: (0.10.0): the whole plan's limit in minutes. Absent without one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? PlanTimeoutMinutes { get; init; }
+
+    /// <summary>true when the plan's limit was reached before it ended (0.10.0). Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? PlanTimedOut { get; init; }
 }
 
 /// <summary>
@@ -469,6 +477,10 @@ internal sealed record PlanFileDryJson(string Status, int ExitCode)
     /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the snapshot the dry run took. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
+
+    /// <summary>--plan-timeout or lanq.yml plan_timeout: (0.10.0): the limit the plan would run under, in minutes. Absent without one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? PlanTimeoutMinutes { get; init; }
 }
 
 /// <summary>One job of <c>lanq run --plan --dry-run --json</c> (every member always written, null where it does not apply).</summary>

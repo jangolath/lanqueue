@@ -194,9 +194,10 @@ public sealed partial class JobRunner
             return Result(BaselineVerdict.Skipped, $"skipped: the snapshot is the base commit {b.Short} ({b.Label}), nothing to compare");
         }
 
+        var planTimedOut = t.Request.PlanTimeout is { Expired: true };
         if (ct.IsCancellationRequested)
         {
-            return Result(BaselineVerdict.Inconclusive, $"{at}: inconclusive: cancelled (Ctrl+C) before it started");
+            return Result(BaselineVerdict.Inconclusive, planTimedOut ? $"{at}: inconclusive: plan_timeout reached before it started" : $"{at}: inconclusive: cancelled (Ctrl+C) before it started");
         }
 
         var name = "baseline" + (t.Request.PlanJob is { } job ? " " + job : "") + (t.Request.Shard is { } shard ? " " + shard : "");
@@ -246,12 +247,17 @@ public sealed partial class JobRunner
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            // --plan-timeout (it is marked expired before the plan is cancelled): TimedOut, never Cancelled, and said so.
+            var timedOut = t.Request.PlanTimeout is { Expired: true };
             var logPath = machine is null ? null : log.LogPathFor(jobId) is var path && File.Exists(path) ? Path.GetFullPath(path) : null;
-            return Result(BaselineVerdict.Inconclusive, $"{at}: inconclusive: cancelled (Ctrl+C)" + (machine is null ? " before it started" : "; its cleanup ran")) with
+            var why = timedOut
+                ? "plan_timeout reached" + (machine is null ? " while waiting for a slot" : "; its cleanup ran")
+                : "cancelled (Ctrl+C)" + (machine is null ? " before it started" : "; its cleanup ran");
+            return Result(BaselineVerdict.Inconclusive, $"{at}: inconclusive: {why}") with
             {
                 FailedOn = t.Machine,
-                Status = Cancelled,
-                ExitCode = 130,
+                Status = timedOut ? nameof(JobStatus.TimedOut) : Cancelled,
+                ExitCode = timedOut ? Ssh.ProcessSshClient.TimedOutExitCode : 130,
                 Machine = machine,
                 JobId = machine is null ? null : jobId,
                 LogPath = logPath,

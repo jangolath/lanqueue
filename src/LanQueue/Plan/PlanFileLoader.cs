@@ -43,7 +43,7 @@ public static partial class PlanFileLoader
     public const int MaxNameLength = 32;
 
     /// <summary>The top-level keys.</summary>
-    internal static readonly string[] TopKeys = ["version", "defaults", "jobs"];
+    internal static readonly string[] TopKeys = ["version", "plan_timeout", "defaults", "jobs"];
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
     internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref"];
@@ -147,10 +147,14 @@ public static partial class PlanFileLoader
         YamlMappingNode? defaults = null;
         YamlMappingNode? jobs = null;
         YamlNode? jobsKey = null;
+        int? planTimeout = null;
         foreach (var (k, v) in Keys(root, TopKeys, label, "", "at the top"))
         {
             switch (k.Value)
             {
+                case "plan_timeout":
+                    planTimeout = PlanTimeout(v, label);
+                    break;
                 case "defaults":
                     defaults = v as YamlMappingNode ?? throw new PlanFileException($"{label}: defaults: must be a mapping of keys such as needs: and timeout: (line {v.Start.Line}).");
                     break;
@@ -210,7 +214,28 @@ public static partial class PlanFileLoader
             throw new PlanFileException($"{label}: job '{first.Name}' (line {first.Line}): after: makes a cycle: {string.Join(" -> ", cycle)}; no job of a cycle could ever start.");
         }
 
-        return new PlanFile(path, Version, expanded, Warnings(expanded));
+        return new PlanFile(path, Version, expanded, Warnings(expanded)) { PlanTimeoutMinutes = planTimeout };
+    }
+
+    /// <summary>
+    /// plan_timeout: M (0.10.0) is --plan-timeout M: the same parser judges it, so its range and words are the CLI's (lanq run --plan
+    /// --plan-timeout on the command line replaces it).
+    /// </summary>
+    private static int PlanTimeout(YamlNode node, string label)
+    {
+        if (node is not YamlScalarNode { Value: { } text })
+        {
+            throw new PlanFileException($"{label}: plan_timeout: must be a single value (line {node.Start.Line}).");
+        }
+
+        try
+        {
+            return ParsedArgs.Parse(["run", "--plan", "--plan-timeout", text]).PlanTimeoutMinutes!.Value;
+        }
+        catch (ArgumentException ex)
+        {
+            throw new PlanFileException($"{label}: plan_timeout (line {node.Start.Line}): {ex.Message}");
+        }
     }
 
     /// <summary>

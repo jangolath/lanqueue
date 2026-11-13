@@ -482,6 +482,15 @@ internal static class NextSteps
                 }
 
                 return Infra(p, new RunOutcome(r.Status, r.ExitCode, r.Message, null, r.InfraKind, false, null, null, null, null), health);
+            case nameof(JobStatus.TimedOut) when r.PlanTimedOut:
+                var stopped = r.Jobs.Where(j => j.Status == nameof(JobStatus.TimedOut)).Select(j => j.Name).ToList();
+                return
+                [
+                    Step(NextAction.FixCode, string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"plan_timeout {r.PlanTimeoutMinutes} min was reached before the plan ended ({(stopped.Count > 0 ? "stopped: " + string.Join(", ", stopped) : "no job was running")}); ")
+                        + "see logTail or the logs for where it was slow; if the plan is only slow, raise plan_timeout in lanq.yml or pass --plan-timeout (the developer decides)"),
+                ];
             case nameof(JobStatus.TimedOut):
                 var slow = r.Jobs.Where(j => j.Status == nameof(JobStatus.TimedOut)).Select(j => j.Name).ToList();
                 return [Step(NextAction.FixCode, $"{string.Join(", ", slow)} timed out; see logTail or the logs for where it hung; if a job is only slow, raise timeout: for job {slow.FirstOrDefault()} in lanq.yml")];

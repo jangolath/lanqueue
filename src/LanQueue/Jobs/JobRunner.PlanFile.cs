@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using LanQueue.Config;
 using LanQueue.Payload;
+using LanQueue.Ssh;
 
 namespace LanQueue.Jobs;
 
@@ -99,6 +100,45 @@ public sealed class PlanProgress(string holders = "this plan's other jobs")
     }
 }
 
+/// <summary>
+/// lanq run --plan --plan-timeout M (lanq.yml plan_timeout: M, 0.10.0): the whole plan's limit, shared by every job and baseline of one plan. It
+/// starts after the precheck and the snapshot. On expiry <see cref="Expired"/> is set BEFORE the plan's jobs are cancelled, so each one that
+/// stops can tell a plan timeout from Ctrl+C or --fail-fast: a running job is cleaned up and ends TimedOut (124), a job waiting for a slot ends
+/// TimedOut, a job not started yet is Skipped, and a baseline not finished is inconclusive.
+/// </summary>
+public sealed class PlanDeadline(int minutes)
+{
+    private volatile bool _expired;
+    private int _running;
+
+    /// <summary>The limit, in minutes (1 to 10080).</summary>
+    public int Minutes => minutes;
+
+    /// <summary>True once the limit was reached (set before anything is cancelled).</summary>
+    public bool Expired => _expired;
+
+    /// <summary>How many jobs of the plan are started and not ended (for the line printed on expiry).</summary>
+    public int Running
+    {
+        get => Volatile.Read(ref _running);
+        set => Volatile.Write(ref _running, value);
+    }
+
+    /// <summary>A job that held a slot and was stopped by it.</summary>
+    public string RunningMessage => string.Create(CultureInfo.InvariantCulture, $"plan_timeout {minutes} min reached; cancelled and cleaned up");
+
+    /// <summary>A job (or shard) still waiting for a slot when it was reached: nothing was claimed, nothing to clean up.</summary>
+    public const string WaitingMessage = "plan_timeout reached while waiting for a slot";
+
+    /// <summary>A job that had not started (behind after: or the stagger).</summary>
+    public const string NotStartedMessage = "not started: plan_timeout reached";
+
+    /// <summary>The line lanq prints when the limit is reached.</summary>
+    public string ReachedLine => string.Create(CultureInfo.InvariantCulture, $"[lanq] plan_timeout: {minutes} min reached; stopping {Running} running job(s)");
+
+    internal void Expire() => _expired = true;
+}
+
 /// <summary>One job of lanq run --plan, ready to run: its lanq.yml name, the request its lanq run line makes, --shards (or null), and the jobs it starts after.</summary>
 /// <param name="After">The selected jobs it waits for (edges to jobs left out by --only are already dropped).</param>
 public sealed record PlanJobSpec(string Name, JobRequest Request, ShardOptions? Shards, IReadOnlyList<string> After)
@@ -183,6 +223,12 @@ public sealed record PlanRunResult(string Status, int ExitCode, string Message, 
     /// (the suggested rerun's --only, which replaces any --only typed); null otherwise.
     /// </summary>
     public IReadOnlyList<string>? Runnable { get; init; }
+
+    /// <summary>--plan-timeout: the limit in minutes the plan ran under, or null without one.</summary>
+    public int? PlanTimeoutMinutes { get; init; }
+
+    /// <summary>--plan-timeout: true when the limit was reached before the plan ended (jobs and baselines included).</summary>
+    public bool PlanTimedOut { get; init; }
 }
 
 public sealed partial class JobRunner
@@ -200,7 +246,17 @@ public sealed partial class JobRunner
     /// <paramref name="failFast"/>: then it cancels the running jobs (each is cleaned up) and skips the rest. Ctrl+C cancels and cleans up every
     /// started job and returns what ran so far.
     /// </summary>
-    public async Task<PlanRunResult> RunPlanAsync(IReadOnlyList<PlanJobSpec> ordered, bool failFast, CancellationToken ct)
+    /// <param name="planTimeoutMinutes">
+    /// --plan-timeout (lanq.yml plan_timeout:): the whole plan's limit, from after the snapshot to the last baseline (<see cref="PlanDeadline"/>);
+    /// on expiry the plan is TimedOut (124) unless a Failed or Rejected job decides it. Null for none.
+    /// </param>
+    public async Task<PlanRunResult> RunPlanAsync(IReadOnlyList<PlanJobSpec> ordered, bool failFast, CancellationToken ct, int? planTimeoutMinutes = null)
+    {
+        var result = await RunPlanCoreAsync(ordered, failFast, ct, planTimeoutMinutes is { } m ? new PlanDeadline(m) : null).ConfigureAwait(false);
+        return result with { PlanTimeoutMinutes = planTimeoutMinutes };
+    }
+
+    private async Task<PlanRunResult> RunPlanCoreAsync(IReadOnlyList<PlanJobSpec> ordered, bool failFast, CancellationToken ct, PlanDeadline? deadline)
     {
         if (PrecheckPlan(ordered) is { } ended)
         {
@@ -227,9 +283,64 @@ public sealed partial class JobRunner
 
         await using (prepared.ConfigureAwait(false))
         {
-            // DispatchPlan returns only once every job it started has finished (and cleaned up), so the payload outlives them all.
-            var result = await DispatchPlan(ordered, failFast, prepared, planRun, ct).ConfigureAwait(false);
-            return bases.Count == 0 ? result : await WithPlanBaselinesAsync(ordered, result, bases, planRun, prepared.Payload, ct).ConfigureAwait(false);
+            // --plan-timeout starts now, after the precheck and the snapshot, and covers the waits, the jobs and the baselines. The plan's token
+            // is cancelled by Ctrl+C or by the deadline; the timer stops at Ctrl+C (which then wins) and when the plan ends.
+            using var plan = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            using var timerStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (deadline is not null)
+            {
+                ordered = [.. ordered.Select(s => s with { Request = s.Request with { PlanTimeout = deadline } })];
+            }
+
+            var timer = deadline is null ? Task.CompletedTask : PlanTimerAsync(deadline, plan, timerStop.Token, ct);
+            try
+            {
+                // DispatchPlan returns only once every job it started has finished (and cleaned up), so the payload outlives them all.
+                var result = await DispatchPlan(ordered, failFast, prepared, planRun, ct, plan.Token, deadline).ConfigureAwait(false);
+                if (bases.Count > 0)
+                {
+                    result = await WithPlanBaselinesAsync(ordered, result, bases, planRun, prepared.Payload, plan.Token, deadline).ConfigureAwait(false);
+                }
+
+                return result with { PlanTimedOut = deadline?.Expired == true };
+            }
+            finally
+            {
+                await timerStop.CancelAsync().ConfigureAwait(false);
+                await timer.ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits out the plan's limit; then marks <paramref name="deadline"/> expired, says so, and only then cancels the plan's token. Returns quietly
+    /// when stopped first (the plan ended, or Ctrl+C came first). Never throws.
+    /// </summary>
+    private async Task PlanTimerAsync(PlanDeadline deadline, CancellationTokenSource plan, CancellationToken stop, CancellationToken user)
+    {
+        try
+        {
+            await delay(TimeSpan.FromMinutes(deadline.Minutes), stop).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (stop.IsCancellationRequested || user.IsCancellationRequested)
+        {
+            return;
+        }
+
+        deadline.Expire();
+        output(deadline.ReachedLine);
+        try
+        {
+            await plan.CancelAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // the plan ended meanwhile
         }
     }
 
@@ -311,7 +422,8 @@ public sealed partial class JobRunner
     /// (Ctrl+C) before it started".
     /// </summary>
     private async Task<PlanRunResult> WithPlanBaselinesAsync(
-        IReadOnlyList<PlanJobSpec> ordered, PlanRunResult result, Dictionary<string, BaseCommit> bases, string planRun, JobPayload snapshot, CancellationToken ct)
+        IReadOnlyList<PlanJobSpec> ordered, PlanRunResult result, Dictionary<string, BaseCommit> bases, string planRun, JobPayload snapshot, CancellationToken ct,
+        PlanDeadline? deadline = null)
     {
         var targets = new List<(string Name, int? Shard, BaselineTarget Target)>();
         foreach (var j in result.Jobs)
@@ -336,6 +448,11 @@ public sealed partial class JobRunner
         if (targets.Count == 0)
         {
             return result;
+        }
+
+        if (deadline is not null)
+        {
+            deadline.Running = targets.Count;
         }
 
         var baselines = await RunBaselinesAsync([.. targets.Select(t => t.Target)], snapshot, ct).ConfigureAwait(false);
@@ -415,9 +532,12 @@ public sealed partial class JobRunner
 
     private static PlanJobOutcome SkippedJob(PlanJobSpec spec, string why) => new(spec.Name, PlanJobOutcome.Skipped, 0, why, spec.After);
 
-    private async Task<PlanRunResult> DispatchPlan(IReadOnlyList<PlanJobSpec> ordered, bool failFast, PreparedPayload prepared, string planRun, CancellationToken ct)
+    /// <param name="ct">Ctrl+C.</param>
+    /// <param name="planToken">The plan's token: Ctrl+C, or <paramref name="deadline"/> reached (it is set expired first).</param>
+    private async Task<PlanRunResult> DispatchPlan(
+        IReadOnlyList<PlanJobSpec> ordered, bool failFast, PreparedPayload prepared, string planRun, CancellationToken ct, CancellationToken planToken, PlanDeadline? deadline)
     {
-        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(planToken);
         var progress = new PlanProgress();
         var sinceStart = Stopwatch.StartNew();
         var outcomes = new Dictionary<string, PlanJobOutcome>(StringComparer.Ordinal);
@@ -427,10 +547,18 @@ public sealed partial class JobRunner
         Exception? loopError = null;
         Task? gate = null;
 
+        // Completes when the plan is stopped (Ctrl+C, --fail-fast, --plan-timeout), so the loop never waits past it, even with nothing running.
+        var stopped = Task.Delay(Timeout.Infinite, stop.Token);
+
         try
         {
             while (true)
             {
+                if (deadline is not null)
+                {
+                    deadline.Running = running.Count;
+                }
+
                 foreach (var task in running.Keys.Where(t => t.IsCompleted).ToList())
                 {
                     running.Remove(task);
@@ -492,7 +620,7 @@ public sealed partial class JobRunner
                     break; // every job has ended (or was skipped)
                 }
 
-                var waits = new List<Task>(running.Keys);
+                var waits = new List<Task>(running.Keys) { stopped };
                 if (next is not null)
                 {
                     waits.Add(gate!);
@@ -517,17 +645,89 @@ public sealed partial class JobRunner
             outcomes[o.Name] = failedFast is not null && o.Status == Cancelled ? o with { Message = $"cancelled by --fail-fast ({failedFast}); " + o.Message } : o;
         }
 
-        var userCancelled = ct.IsCancellationRequested;
+        // --plan-timeout came first (Ctrl+C after it does not change that): the jobs it stopped end TimedOut, never Cancelled.
+        var timedOut = deadline is { Expired: true } && failedFast is null && loopError is null;
+        if (timedOut)
+        {
+            foreach (var (name, o) in outcomes.ToList())
+            {
+                outcomes[name] = PlanTimedOutJob(o, deadline!);
+            }
+        }
+
+        var userCancelled = ct.IsCancellationRequested && !timedOut;
         List<PlanJobOutcome> jobs = [.. ordered.Select(j => (outcomes.TryGetValue(j.Name, out var o)
             ? o
             : SkippedJob(j, failedFast is not null ? $"not started: --fail-fast after {failedFast}"
                 : loopError is not null ? SafeLine($"not started: unexpected error: {loopError.GetType().Name}: {loopError.Message}")
+                : timedOut ? PlanDeadline.NotStartedMessage
                 : userCancelled ? "not started: cancelled (Ctrl+C)"
                 : "not started")) with { FileOrder = j.FileOrder })];
         var result = AggregatePlan(jobs, userCancelled && jobs.Any(j => j.Status is Cancelled or PlanJobOutcome.Skipped));
-        return loopError is not null && result.Status != nameof(JobStatus.Failed)
-            ? result with { Status = nameof(JobStatus.InfraError), ExitCode = 70, InfraKind = Jobs.InfraKind.Unexpected, Message = SafeLine($"{result.Message}; unexpected error: {loopError.GetType().Name}: {loopError.Message}") }
-            : result;
+        if (loopError is not null && result.Status != nameof(JobStatus.Failed))
+        {
+            return result with { Status = nameof(JobStatus.InfraError), ExitCode = 70, InfraKind = Jobs.InfraKind.Unexpected, Message = SafeLine($"{result.Message}; unexpected error: {loopError.GetType().Name}: {loopError.Message}") };
+        }
+
+        return timedOut ? PlanTimedOutResult(result, deadline!) : result;
+    }
+
+    /// <summary>
+    /// The plan's status once --plan-timeout was reached: TimedOut (124) unless a Failed or Rejected job decides it, also when the limit came
+    /// between after: waves or while every job was waiting (nothing running). The job that decides is the first TimedOut one in lanq.yml, if any.
+    /// </summary>
+    internal static PlanRunResult PlanTimedOutResult(PlanRunResult result, PlanDeadline deadline)
+    {
+        if (result.Status is nameof(JobStatus.Failed) or nameof(JobStatus.Rejected))
+        {
+            return result;
+        }
+
+        var jobs = result.Jobs;
+        var done = jobs.Count(j => j.Status == nameof(JobStatus.Completed));
+        var first = jobs.Where(j => j.Status == nameof(JobStatus.TimedOut)).OrderBy(j => j.FileOrder).FirstOrDefault();
+        return new PlanRunResult(
+            nameof(JobStatus.TimedOut),
+            ProcessSshClient.TimedOutExitCode,
+            string.Create(CultureInfo.InvariantCulture, $"{done} of {jobs.Count} job(s) completed; plan_timeout {deadline.Minutes} min reached")
+                + (first is null ? "" : $"; {first.Name}: {first.Status}: {first.Message}"),
+            jobs)
+        {
+            Decided = first?.Name,
+        };
+    }
+
+    /// <summary>
+    /// One job's outcome after --plan-timeout stopped the plan: Cancelled becomes TimedOut (124), "cancelled and cleaned up" when it held a slot,
+    /// "while waiting for a slot" when it never did; a sharded job's cancelled shards the same, and its status is aggregated again. Others stay.
+    /// </summary>
+    internal static PlanJobOutcome PlanTimedOutJob(PlanJobOutcome o, PlanDeadline deadline)
+    {
+        if (o.Sharded is { } r)
+        {
+            if (!r.Shards.Any(s => s.Status == Cancelled))
+            {
+                return o;
+            }
+
+            var shards = r.Shards.Select(s => s.Status != Cancelled ? s : s with
+            {
+                Status = nameof(JobStatus.TimedOut),
+                ExitCode = ProcessSshClient.TimedOutExitCode,
+                Message = s.Machine is null ? PlanDeadline.WaitingMessage : deadline.RunningMessage,
+            }).ToList();
+            var again = Aggregate(r.Count, shards, cancelled: false) with { Timing = r.Timing };
+            return o with { Status = again.Status, ExitCode = again.ExitCode, Message = again.Message, Sharded = again, RejectKind = again.RejectKind, InfraKind = again.InfraKind };
+        }
+
+        return o.Status != Cancelled
+            ? o
+            : o with
+            {
+                Status = nameof(JobStatus.TimedOut),
+                ExitCode = ProcessSshClient.TimedOutExitCode,
+                Message = o.Machine is null ? PlanDeadline.WaitingMessage : deadline.RunningMessage,
+            };
     }
 
     /// <summary>Runs one plan job (single or sharded) on the shared payload; never throws (an error or Ctrl+C is the job's outcome).</summary>

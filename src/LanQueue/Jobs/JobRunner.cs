@@ -123,6 +123,12 @@ public sealed record JobRequest(
     public Action? Placed { get; init; }
 
     /// <summary>
+    /// lanq run --plan --plan-timeout (lanq.yml plan_timeout:, 0.10.0): the whole plan's limit every job and baseline of it shares, or null. Once
+    /// it has <see cref="PlanDeadline.Expired"/>, a job stopped by the plan's cancellation ends TimedOut (and is recorded so in jobs.jsonl).
+    /// </summary>
+    public PlanDeadline? PlanTimeout { get; init; }
+
+    /// <summary>
     /// lanq run --env (lanq.yml env:): the job's own variables, in the order given (parsed and deny-checked by <see cref="JobEnv.Parse"/>;
     /// policy.allowed_env and the secret scan are checked in <see cref="JobRunner"/>'s precheck; a machine whose env: sets one too is ruled
     /// out, see <see cref="JobRunner.EnvExclusion"/>). Shards and plan jobs carry their template's. jobs.jsonl and the JSON env field carry
@@ -1170,7 +1176,15 @@ public sealed partial class JobRunner(
             JobResult result;
             try
             {
-                result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
+                try
+                {
+                    result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (req.PlanTimeout is { Expired: true } planTimeout)
+                {
+                    // --plan-timeout: stopped as --fail-fast stops a job (the cleanup below still runs), but it ends, and is recorded, TimedOut.
+                    result = new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, planTimeout.RunningMessage);
+                }
             }
             finally
             {

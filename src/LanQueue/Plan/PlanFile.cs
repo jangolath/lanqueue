@@ -29,6 +29,9 @@ public sealed record PlanJob(string Name, int Line, int Index, IReadOnlyList<str
 /// <param name="Version">The file's version: (always 1 for now).</param>
 public sealed record PlanFile(string Path, int Version, IReadOnlyList<PlanJob> Jobs, IReadOnlyList<string> Warnings)
 {
+    /// <summary>plan_timeout: M (0.10.0): the whole plan's limit in minutes (--plan-timeout on the command line replaces it); null without it.</summary>
+    public int? PlanTimeoutMinutes { get; init; }
+
     /// <summary>The job of this name (ignoring case, as names are unique that way), or null.</summary>
     public PlanJob? Job(string name) => Jobs.FirstOrDefault(j => string.Equals(j.Name, name, StringComparison.OrdinalIgnoreCase));
 }

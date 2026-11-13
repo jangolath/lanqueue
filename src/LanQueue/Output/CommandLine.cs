@@ -100,7 +100,7 @@ internal static partial class CommandLine
         "--wait" => command != "wake",
         "--config" or "--needs" or "--dir" or "--timeout" or "--mem" or "--fetch" or "--fetch-dir" or "--fetch-max" or "--fetch-max-files"
             or "--log-tail" or "--shards" or "--shard-retries" or "--target-minutes" or "--ssh" or "--os" or "--key-env" or "--name"
-            or "--on" or "--size" or "--min-size" or "--only" or "--plan-file" or "--env" or "--baseline-ref" => true,
+            or "--on" or "--size" or "--min-size" or "--only" or "--plan-file" or "--env" or "--baseline-ref" or "--plan-timeout" => true,
         _ => false,
     };
 
