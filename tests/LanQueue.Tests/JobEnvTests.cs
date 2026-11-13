@@ -546,13 +546,16 @@ public sealed class JobEnvTests : IDisposable
     [Theory]
     [InlineData("NODE_*", "policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH, NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused")]
     [InlineData("DOTNET_*", "policy.allowed_env DOTNET_*: names on lanq's deny list (DOTNET_STARTUP_HOOKS, DOTNET_ADDITIONAL_DEPS, DOTNET_SHARED_STORE, ...) stay refused")]
-    [InlineData("CARGO_*", "policy.allowed_env CARGO_*: names on lanq's deny list (CARGO_TARGET_*, CARGO_BUILD_*) stay refused")]
+    [InlineData("CARGO_*", "policy.allowed_env CARGO_*: names on lanq's deny list (CARGO_ENCODED_RUSTFLAGS, CARGO_HOME, CARGO_TARGET_*, ...) stay refused")]
+    [InlineData("CARGO_R*", "policy.allowed_env CARGO_R*: names on lanq's deny list (CARGO_REGISTRIES_*) stay refused")]
     [InlineData("java_*", "policy.allowed_env java_*: names on lanq's deny list (JAVA_TOOL_OPTIONS, JAVA_OPTS) stay refused")]
     [InlineData("MYAPP_*", null)]
     [InlineData("NODE_ENV", null)]
     [InlineData("GIT_*", null)] // refused at load, not warned about
     [InlineData("GIT_SSL_*", null)] // inside the denied prefix GIT_: refused at load too (above), so never a doctor line
-    [InlineData("UV_*", "policy.allowed_env UV_*: names on lanq's deny list (UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_INDEX) stay refused")]
+    [InlineData("UV_*", "policy.allowed_env UV_*: names on lanq's deny list (UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_INDEX, ...) stay refused")]
+    [InlineData("UV_P*", "policy.allowed_env UV_P*: names on lanq's deny list (UV_PYTHON) stay refused")]
+    [InlineData("RUST*", "policy.allowed_env RUST*: names on lanq's deny list (RUSTFMT, RUSTUP_TOOLCHAIN, RUSTC_WRAPPER, ...) stay refused")]
     public void APrefixThatCoversDeniedNamesIsAWarning(string pattern, string? warning) =>
         Assert.Equal(warning, JobEnv.PatternWarning(pattern));
 
@@ -584,6 +587,16 @@ public sealed class JobEnvTests : IDisposable
     [InlineData("UV_INDEX_URL")]
     [InlineData("UV_EXTRA_INDEX_URL")]
     [InlineData("UV_INDEX")]
+    [InlineData("RUSTFLAGS")]
+    [InlineData("RUSTDOCFLAGS")]
+    [InlineData("CARGO_ENCODED_RUSTFLAGS")]
+    [InlineData("CARGO_HOME")]
+    [InlineData("CARGO_REGISTRIES_CRATES_IO_PROTOCOL")]
+    [InlineData("CARGO_SOURCE_CRATES_IO_REPLACE_WITH")]
+    [InlineData("UV_DEFAULT_INDEX")]
+    [InlineData("UV_FIND_LINKS")]
+    [InlineData("UV_PYTHON")]
+    [InlineData("MAVEN_ARGS")]
     public void TheTlsProxyDotnetRustAndJavaAdditionsAreDenied(string name)
     {
         Assert.True(JobEnv.IsJobDenied(name));
@@ -629,6 +642,9 @@ public sealed class JobEnvTests : IDisposable
     [InlineData("GIT_SSL_*", false)]
     [InlineData("PIP_*", false)]
     [InlineData("CARGO_BUILD_*", false)]
+    [InlineData("CARGO_REGISTRIES_*", false)]
+    [InlineData("CARGO_SOURCE_*", false)]
+    [InlineData("CARGO_SOURCE_CRATES_IO_*", false)]
     [InlineData("CARGO_*", true)]
     [InlineData("UV_*", true)]
     [InlineData("MSBUILD*", false)]

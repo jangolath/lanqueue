@@ -56,7 +56,7 @@ public static partial class JobEnv
         "DOTNET_HOST_PATH", "NUGET_PLUGIN_PATHS",
 
         // Java, Gradle and make
-        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS", "CLASSPATH", "GRADLE_USER_HOME", "GRADLE_OPTS", "MAVEN_OPTS", "MAKEFILES",
+        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS", "CLASSPATH", "GRADLE_USER_HOME", "GRADLE_OPTS", "MAVEN_OPTS", "MAVEN_ARGS", "MAKEFILES",
         "MAKEFLAGS",
 
         // Python, Perl, Ruby
@@ -67,10 +67,11 @@ public static partial class JobEnv
         "GOFLAGS", "GOROOT", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOENV", "GOPATH", "GOBIN", "CC", "CXX",
 
         // Rust
-        "RUSTFMT", "RUSTUP_TOOLCHAIN", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTC", "RUSTDOC",
+        "RUSTFMT", "RUSTUP_TOOLCHAIN", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTC", "RUSTDOC", "RUSTFLAGS", "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS", "CARGO_HOME",
 
         // Package indexes: from whom a tool downloads (pip's own settings are a prefix below)
-        "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX",
+        "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX", "UV_DEFAULT_INDEX", "UV_FIND_LINKS", "UV_PYTHON",
 
         // Native libraries that load modules from a path (OpenSSL, glibc iconv)
         "OPENSSL_CONF", "OPENSSL_ENGINES", "OPENSSL_MODULES", "GCONV_PATH",
@@ -85,12 +86,13 @@ public static partial class JobEnv
 
     /// <summary>
     /// The prefixes on the hard deny table: the loader ones, .NET profilers, runtime settings and SDK resolver, git, ssh, npm and yarn
-    /// settings, MSBuild, cgo, Cargo target runners, linkers and build tools, pip's settings (its package indexes), and lanq's own.
+    /// settings, MSBuild, cgo, Cargo target runners, linkers, build tools, registries and sources, pip's settings (its package indexes), and
+    /// lanq's own.
     /// </summary>
     internal static readonly string[] JobDeniedPrefixes =
     [
         .. MachineDeniedPrefixes, "CORECLR_", "COR_", "COMPLUS_", "DOTNET_MSBUILD_SDK_RESOLVER_", "GIT_", "SSH_", "NPM_CONFIG_", "YARN_", "MSBUILD", "CGO_",
-        "CARGO_TARGET_", "CARGO_BUILD_", "PIP_", "LANQ_",
+        "CARGO_TARGET_", "CARGO_BUILD_", "CARGO_REGISTRIES_", "CARGO_SOURCE_", "PIP_", "LANQ_",
     ];
 
     /// <summary>The longest value one --env may have (characters).</summary>
