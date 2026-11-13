@@ -83,14 +83,13 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `env` | `--env NAME=VALUE` | A mapping of `NAME: value`, one `--env` per entry (0.9.0). Only names in your `policy.allowed_env`; see [Environment variables: env](#environment-variables-env). |
 | `exclusive` | `--exclusive` | `true`: the job takes every slot of its machine (0.9.0); see [Exclusive jobs](#exclusive-jobs). |
 | `baseline` | `--baseline` | `true`: if the job fails, rerun it at the base commit and report whether the failure is new (0.9.0); see [Baseline](#baseline-is-the-failure-new). |
-| `baseline_ref` | `--baseline-ref` | The branch, tag or commit to compare with (implies `baseline: true`). |
+| `baseline_ref` | `--baseline-ref` | The branch or tag to compare with (implies `baseline: true`). A commit id is refused here; see [Baseline](#baseline-is-the-failure-new). |
 | `after` | (none) | Job names this job starts after; see [Ordering](#ordering-after). |
 
 **Defaults are replaced, not merged.** A job's own value replaces the default as a whole: `needs: [node]` on a job
 drops `needs: [dotnet]` from `defaults:` (write `needs: [dotnet, node]` for both). `size` and `min_size` are one
-setting, so either one on a job drops both defaults. `baseline: false` on a job turns off both `baseline` and a
-`baseline_ref` from `defaults:`; `baseline: false` with `baseline_ref:` on the same job is an error (`lanq.yml: job 'x'
-(line N): baseline_ref has no effect with baseline: false; drop one.`). **`env` is the exception:** it is merged by name (see below).
+setting, so either one on a job drops both defaults. `baseline` and `baseline_ref` combine as described under
+[Baseline](#baseline-is-the-failure-new). **`env` is the exception:** it is merged by name (see below).
 
 **No machine settings.** `lanq.yml` has no keys for hosts, `ssh`, keys, `path_prepend`, `wake`, `priority`,
 `work_root`, `max_jobs` or `policy`. Writing one is an unknown-key error that points to `machines.yml`. `env:` here is
@@ -154,9 +153,33 @@ branch, or of HEAD and `baseline_ref`) once the whole plan has ended, and its re
 `preexisting`, `inconclusive` or `skipped`. Only failed jobs rerun (for a sharded job, only its failed shards), never
 a job `Skipped` after them, and nothing reruns after Ctrl+C (each failed job that asked gets an `inconclusive`
 "cancelled (Ctrl+C) before it started"). A rerun waits briefly for the machine the job failed on (its lines start
-`[baseline unit]` or `[baseline unit 2/4]`). The verdict never changes the plan's status or exit
-code. A `baseline_ref` that is not a commit refuses the plan (2) before anything is sent, in the dry run too. See the
+`[baseline unit]` or `[baseline unit 2/4]`). The verdict never changes the plan's status or exit code. See the
 README's [Is this failure new?](../README.md#is-this-failure-new---baseline).
+
+**`baseline_ref` names a branch or tag.** It must resolve under `refs/heads/`, `refs/remotes/` or `refs/tags/`
+(`origin/main`, `release-2.1`, `v1.2.0`). A commit id, `HEAD` or `*_HEAD`, and revision characters
+(`~ ^ : @ { } \ * ? [` and space) are refused before anything is sent, in the dry run too:
+
+```text
+lanq.yml: job 'unit' (line 12): baseline_ref must name a branch or tag (a commit can be given on the command line with --baseline-ref)
+```
+
+The plan file comes with the repository. If it could name any commit, it could make lanq send that commit's tree to
+a worker, which on an archive worker means any old version of the files. You can still compare with a commit by
+running one job by hand with `--baseline-ref <sha>`.
+
+**How `baseline` and `baseline_ref` combine.** The job's own keys decide first, then `defaults:`:
+
+| On the job | In `defaults:` | Result |
+| --- | --- | --- |
+| `baseline: false` and `baseline_ref:` | any | Error: `lanq.yml: job 'x' (line N): baseline_ref has no effect with baseline: false; drop one.` |
+| `baseline: false` | any | No baseline (an inherited `baseline_ref` is dropped quietly). |
+| `baseline_ref: REF` | any, even `baseline: false` | `--baseline-ref REF`. |
+| `baseline: true` | `baseline_ref: REF` | `--baseline-ref REF`. |
+| `baseline: true` | `baseline: false` and `baseline_ref: REF` | `--baseline` (the default's ref is dropped). |
+| `baseline: true` | nothing | `--baseline`. |
+| neither | `baseline: false` | No baseline. |
+| neither | `baseline_ref: REF` or `baseline: true` | `--baseline-ref REF`, or `--baseline`. |
 
 ### Command: list or string
 

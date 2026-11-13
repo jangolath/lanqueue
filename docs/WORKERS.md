@@ -216,7 +216,8 @@ the environment of long-running helper processes you want stopped with the job.
 4. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason. `lanq health --needs
    <caps>` also says whether it could take a job with those capabilities.
 
-If a `lanq` process was killed mid-job, its slot on the worker is reclaimed 30 minutes after the slot's deadline.
+If a `lanq` process was killed mid-job, its slot on the worker counts as stale 30 minutes after the slot's deadline: it no longer
+makes the machine busy (`lanq health` shows `(1 stale: reclaimed by the next claim)`), and the next claim reclaims it.
 `lanq unlock <name>` clears expired slots at once; `lanq unlock <name> --all --yes` clears every slot (including ones
 left by a lanq before 0.4) when you are sure nothing is running there.
 

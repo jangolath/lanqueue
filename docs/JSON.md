@@ -201,7 +201,7 @@ added; judge an unknown one by `permanent`.
 | `memory_pressure` | no | Linux memory pressure above `policy.max_mem_pressure`. |
 | `load` | no | Load above `policy.load_threshold`. |
 | `mem_below_request` | no | Available memory now is below `--mem`. |
-| `busy` | no | Every slot is taken. For an `--exclusive` job, any slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). |
+| `busy` | no | Every live slot is taken. For an `--exclusive` job, any live slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). Stale slots do not count; when there are some, the reason says so: "busy (slots 3/4, 1 stale: reclaimed by the next claim)". |
 | `avoided` | no | `--shards` only: an earlier attempt of the shard lost the connection there, and it may still be running. |
 | `held` | no | Any other hold. |
 
@@ -248,22 +248,27 @@ Every key of `baseline` except `sameMachine` is always there, `null` where it do
 | --- | --- | --- |
 | `ref` | string | What the base came from: the default branch found (`origin/main`), or `--baseline-ref` as given. |
 | `sha` | string or null | The base commit's full id; `null` when it could not be found (a shallow clone without the merge-base). |
-| `status` | string or null | The rerun's own status (`Completed`, `Failed`, `TimedOut`, `InfraError`, `NoCapacity`, `Cancelled`, ...); `null` when it never started. |
-| `exitCode` | number or null | The rerun's exit code as `lanq run` would exit with it; `null` when it never started. |
-| `machine`, `jobId`, `logPath` | string or null | The rerun's, as in [lanq run](#lanq-run---json); `null` when it never started. |
-| `durationSeconds` | number or null | How long the rerun's command ran; `null` when it never started. |
+| `status` | string or null | The rerun's own status (`Completed`, `Failed`, `TimedOut`, `InfraError`, `NoCapacity`, `Cancelled`, ...). `null` only when no rerun was attempted: skipped, base not found or not sent, or Ctrl+C before the rerun began. A rerun that found no machine is `NoCapacity`; Ctrl+C while it waited or claimed a slot is `Cancelled`. |
+| `exitCode` | number or null | The rerun's exit code as `lanq run` would exit with it (75 for `NoCapacity`, 130 for `Cancelled`); `null` when `status` is. |
+| `machine`, `jobId`, `logPath` | string or null | The rerun's, as in [lanq run](#lanq-run---json); `null` when it never got a machine. |
+| `durationSeconds` | number or null | How long the rerun's command ran; `null` when the command never ran. |
 | `verdict` | string or null | `new` (the base completed), `preexisting` (the base failed too, any exit code), `inconclusive` (anything else: it timed out, found no machine, the base could not be read or sent, Ctrl+C) or `skipped` (the snapshot is the base commit; nothing ran). Values may be added. `null` only in a dry run, where nothing ran. |
 | `message` | string | The same line lanq prints after `[lanq] baseline:`. On another machine than the one the job failed on it ends `(on big-01, not build-01 where it failed: the result may reflect the machine)`. |
 | `sameMachine` | boolean | Conditional: `true` when the rerun ran on the machine the job failed on, `false` on another machine. Left out when the rerun ran nowhere (skipped, base not found, cancelled before it started, `NoCapacity`). With `false`, the verdict may reflect the machine rather than the commit. |
 
-The rerun waits up to 2 looks (about 15 seconds each, within its own `--wait`) for a slot on the machine the job failed
-on, while that machine could take it but is busy, then takes any eligible machine. A held machine, or one that can
-never take the job, is not waited for.
+The rerun waits up to 2 looks for a slot on the machine the job failed on, while that machine could take it but is
+busy, then takes any eligible machine. Each look waits about 15 seconds and never past what is left of the rerun's own
+`--wait`; with `--wait 0` it does not wait for that machine at all and takes any machine that can run it now (none:
+`NoCapacity`, inconclusive). A held machine, or one that can never take the job, is not waited for.
 
-Some `inconclusive` messages: `cancelled (Ctrl+C) before it started` (`status` `null`, on every path: single, shards,
-plans), `cancelled (Ctrl+C); its cleanup ran` (`status` `Cancelled`, `exitCode` 130), a rerun that found no machine
-(`status` `NoCapacity`, `exitCode` 75), and `the base commit was not sent: Refused: possible secrets in payload (...)`
-(the value is never shown).
+Some `inconclusive` messages (on every path: single, shards, plans):
+
+- `cancelled (Ctrl+C) before it started`: `status` `null` when Ctrl+C came before the rerun began; `Cancelled` with
+  `exitCode` 130 when it came while the rerun waited for or claimed a slot.
+- `cancelled (Ctrl+C); its cleanup ran`: `status` `Cancelled`, `exitCode` 130.
+- A rerun that found no machine: `status` `NoCapacity`, `exitCode` 75.
+- `the base commit was not sent: Refused: possible secrets in payload (...)`: `status` `null` (the value is never
+  shown).
 
 The verdict is information only: the run's `status` and `exitCode` stay the job's own. It also appears in the
 `fix_code` step's `reason`:
@@ -276,8 +281,12 @@ The verdict is information only: the run's `status` and `exitCode` stay the job'
 | `skipped` | `; baseline skipped: the snapshot is the base commit` |
 | `inconclusive` | `; baseline inconclusive: <message>` |
 
-A `--baseline-ref` that is not a commit, no default branch, or a history with no common commit is `Rejected` (2)
-before anything is sent. A plan's reruns run after the whole plan has ended, only for failed jobs that asked for one.
+Refused (`Rejected`, 2) before anything is sent: a `--baseline-ref` that is empty, over 256 characters, holds control
+characters, starts with `-` or contains `..` ("--baseline-ref must name one branch, tag or commit (for example
+--baseline-ref origin/main or --baseline-ref v1.2.0)."), a ref that is not a commit, a repository with no commit, no
+default branch, or a history with no common commit. In `lanq.yml`, `baseline_ref:` must name a branch or tag
+(`lanq.yml: job 'x' (line N): baseline_ref must name a branch or tag (a commit can be given on the command line with
+--baseline-ref)`). A plan's reruns run after the whole plan has ended, only for failed jobs that asked for one.
 The rerun is recorded in `jobs.jsonl` with `baselineOf` (the failed job's id) and `commit` (the base's short id);
 `lanq stats`, `--target-minutes` and a plan's order leave such records out.
 
@@ -359,7 +368,7 @@ Every key is always there (`null` where it does not apply), except `logTail`, `e
 | `retryable` | boolean or null | `NoCapacity` only, as for [a run](#nocapacity-retryable-and-excluded). |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty (a dry run starts no job). |
 | `env`, `exclusive` | | Conditional (0.9.0): as for [a run](#lanq-run---json). The text plan shows the `--env` flags with their values (after the secret scan) on its `Options:` line. |
-| `baseline` | object | Conditional (0.9.0): with `--baseline`, the base a failure would be rerun at: a [baseline](#baseline) object with `ref`, `sha` and `message` (`on failure, rerun at 1a2b3c4 (merge-base with origin/main)`), the rerun's keys `null`, and `verdict` `null`, or `skipped` when the snapshot is the base commit, or `inconclusive` when a shallow clone lacks it. |
+| `baseline` | object | Conditional (0.9.0): with `--baseline`, the base a failure would be rerun at: a [baseline](#baseline) object with `ref`, `sha` and `message` (`on failure, rerun at 1a2b3c4 (merge-base with origin/main)`; the text plan's `Baseline:` line also ends with `(a dry run runs nothing)`, this message does not), the rerun's keys `null`, and `verdict` `null`, or `skipped` when the snapshot is the base commit, or `inconclusive` when a shallow clone lacks it. |
 | `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. See [nextSteps](#nextsteps). |
 
 A dry run cannot foresee an archive that fails to build or a slot another run takes between the probe and a real
@@ -544,13 +553,14 @@ One array, one object per machine in config order:
 | `load` | number | Load ratio, compared with `policy.load_threshold`. Not meaningful when `down`. |
 | `diskFreeGb` | number | Free disk in GB. Not meaningful when `down`. |
 | `memFreeGb` | number or null | Available memory; `null` when not reported. |
-| `slotsUsed` | number | Job slots in use. |
+| `slotsUsed` | number | Job slot files on the machine, stale ones included. |
+| `slotsStale` | number | Conditional (0.9.0): only when above 0. Of `slotsUsed`, the slots a crashed run left more than 30 minutes (1,800 s) past their deadline. They do not count against `freeSlots` or make the machine busy; the next claim reclaims them. |
 | `maxJobs` | number | Its `max_jobs`. |
 | `localTime` | string or null | The worker's own clock, `yyyy-MM-ddTHH:mm:ss`; `null` when not reported. |
 | `cores` | number or null | Logical processors; `null` when not reported. |
 | `memTotalGb` | number or null | Total memory; `null` when not reported. |
 | `loadKnown` | boolean | `false` when the worker could not measure its load (a Windows account denied WMI where the fallback is refused too): `load` is then 0 and means nothing, and load alone never holds the machine. `true` otherwise, also when `down` (0.8.0). |
-| `freeSlots` | number | `maxJobs` minus `slotsUsed`, never below 0; 0 when `down`. |
+| `freeSlots` | number | `maxJobs` minus the live slots in use (`slotsUsed` minus `slotsStale`), never below 0; 0 when `down`. |
 | `size` | string | `light`, `medium`, `heavy` or `unknown`: the effective size, the machine's `size:` in `machines.yml` when it has one, else the probed class (since 0.8.0; without `size:` it is the probed class, as before). |
 | `sizeSource` | string | `config` (the machine's `size:`) or `probe` (its memory and cores). Always there (0.8.0). |
 | `suitedFor` | string | What the machine suits, for example `light: lint and unit-test shards`; `+ container builds` with a `docker` capability. |
@@ -742,6 +752,7 @@ The check names, with the levels each can have:
 | `ssh`, `scp`, `git`, `ssh_keygen` | `local` | `ok`, `fail` | The program is on PATH (`ssh` and `git` with their version). |
 | `state_folder` | `local` | `ok`, `fail` | The state folder is writable. |
 | `config` | `local` | `ok`, `fail` | The config loads. A `fail` here is the last check: nothing after it runs. |
+| `allowed_env` | `local` | `ok` | Only for a `policy.allowed_env` prefix that covers names on lanq's deny list, such as `NODE_*` (0.9.0): those names stay refused. Information only; `fix` is "nothing to change if that is intended (the deny list always wins); list exact names in policy.allowed_env to make it plain". |
 | `logs` | `local` | `ok`, `warn`, `skip` | lanq's job logs in `logs/`: count and size. `warn` over 2 GB with `policy.keep_logs_days` 0; `skip` when the folder could not be read. |
 | `known_hosts` | `machine` | `ok`, `fail` | A `known_hosts` entry for the machine's host (and port). |
 | `key_env` | `machine` | `ok`, `warn`, `fail` | Only with `key_env`: `fail` when the variable is not set or the key file is missing; `warn` when the key has no passphrase. |
@@ -916,14 +927,14 @@ What lanq suggests, by result:
 | --- | --- |
 | run `Completed`, `Cancelled` | `none` |
 | run `Failed` | `fix_code` (the reason names the log; with `--baseline`, it adds the [verdict](#baseline)) |
-| run `Rejected` | not allowlisted, or an `--env` name not in `policy.allowed_env`: `ask_developer` (do not work around it); a secret (in the payload, the command line or an `--env` value): `fix_code`; bad arguments (an `--env` name on the deny table or a bad value included) or the Windows-arguments rule: `fix_command`; `--env` values too long for every Windows machine left: `fix_command` ("fix the --env values: ..."); config: `ask_developer` + `run_doctor` |
+| run `Rejected` | not allowlisted, or an `--env` name not in `policy.allowed_env`: `ask_developer` (do not work around it); a secret (in the payload, the command line or an `--env` value): `fix_code`; an `--env` name on the deny table: `fix_command` ("this variable can never be set by a job; drop it or ask the developer: ..."); other bad arguments (a bad `--env` value included) or the Windows-arguments rule: `fix_command`; `--env` values too long for every Windows machine left: `ask_developer` ("...; ask the developer: they can shorten or drop the --env values, or change machines.yml"); config: `ask_developer` + `run_doctor` |
 | run `NoCapacity`, `retryable: true` | `wait` (the same run with `--wait 120`) + `run_health` (`lanq health --needs ... --json`), + `run_doctor` when every machine was unreachable |
-| run `NoCapacity`, `retryable: false` | `ask_developer` + `run_health`; when machines were ruled out by `env_conflict`, the reason adds "drop --env NAME or remove it from the machine's env (build-01, ...)" |
+| run `NoCapacity`, `retryable: false` | `ask_developer` + `run_health`; when machines were ruled out by `env_conflict`, the reason adds "; ask the developer: they can drop --env CONFIGURATION or remove it from the machine's env (build-01, big-01)" |
 | run `InfraError` | a lost connection with the job not running: `retry`; the job may still be running: `ask_developer` + `run_health`; snapshot or bundle: `run_doctor` + `ask_developer`; prepare: `run_doctor` (`--remote`) + `ask_developer`; the archive could not be built: `fix_code`; otherwise `ask_developer` + `run_doctor` |
 | run `TimedOut` | `fix_code` + `retry` with double the `--timeout` |
 | run `WindowClosed` | `wait` |
 | `--shards` | by the overall status as above; `Failed` lists each failing shard and its log; lost connections: `retry` with `--shard-retries 1` |
-| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log and, with `baseline: true`, its verdict; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); `env:` values too long for every Windows machine left: `fix_code` (`fix lanq.yml or machines.yml: ...`); an `env:` clash on every machine: `ask_developer` naming the variables and machines (fix `lanq.yml` or `machines.yml`) + `run_health`; a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `WindowClosed`: `wait` with `--only` |
+| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log and, with `baseline: true`, its verdict; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); `env:` values too long for every Windows machine left: `ask_developer` ("...; ask the developer: they can shorten or drop that job's env: values in lanq.yml, or change machines.yml"); an `env:` name on the deny table: `ask_developer` ("this variable can never be set by a job; the developer drops it from that job's env: in lanq.yml (...)"); an `env:` clash on every machine: `ask_developer` ("ask the developer: they can drop NAME from that job's env: in lanq.yml, or remove it from the env of build-01 in machines.yml") + `run_health`; a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `WindowClosed`: `wait` with `--only` |
 | `--plan --dry-run` | `WouldRun`: `proceed`; otherwise as for the plan, without `--only` edits |
 | dry run `WouldRun` | `proceed` |
 | dry run `NoCapacity`, retryable | `wait` (the same dry run, later) + `run_health` |
