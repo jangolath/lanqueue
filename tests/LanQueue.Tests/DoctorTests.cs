@@ -358,18 +358,31 @@ public sealed class DoctorTests : IDisposable
         Assert.Contains("OK    logs: 2 files, 1.5 MB (kept for ever: policy.keep_logs_days is 0)", o, StringComparison.Ordinal);
     }
 
-    /// <summary>A policy.allowed_env prefix that covers names on the --env deny list is a WARN line (they stay refused), not a config error.</summary>
+    /// <summary>
+    /// A policy.allowed_env prefix that covers names on the --env deny list gets an informational OK line (they stay refused); it changes
+    /// neither the exit code nor the status.
+    /// </summary>
     [Fact]
     public async Task AnAllowedEnvPrefixCoveringDeniedNamesIsAWarning()
     {
         var config = T.Config();
         config.Policy.AllowedEnv.AddRange(["CONFIGURATION", "NODE_*"]);
         var (code, o) = await Doctor(Host(), config: () => config);
-        Assert.Equal(1, code);
+        Assert.Equal(0, code);
         Assert.Contains(
-            "WARN  policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH, NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused" + Environment.NewLine,
+            "OK    policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH, NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused" + Environment.NewLine,
             o,
             StringComparison.Ordinal);
+
+        var (jsonCode, json, _) = await DoctorRun(Host(), config: () => config, json: true);
+        Assert.Equal(0, jsonCode);
+        using (var doc = System.Text.Json.JsonDocument.Parse(json))
+        {
+            Assert.Equal("Ok", doc.RootElement.GetProperty("status").GetString());
+            var check = doc.RootElement.GetProperty("checks").EnumerateArray().Single(c => c.GetProperty("name").GetString() == "allowed_env");
+            Assert.Equal("ok", check.GetProperty("level").GetString());
+            Assert.StartsWith("nothing to change if that is intended", check.GetProperty("fix").GetString(), StringComparison.Ordinal);
+        }
 
         config.Policy.AllowedEnv.Remove("NODE_*");
         (code, o) = await Doctor(Host(), config: () => config);
