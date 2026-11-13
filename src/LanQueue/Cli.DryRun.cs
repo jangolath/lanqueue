@@ -58,7 +58,7 @@ public static partial class Cli
         if (p.Json)
         {
             await stdout.WriteLineAsync(JsonSerializer.Serialize(
-                PlanJsonOf(plan, p.LogTail) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline) },
+                PlanJsonOf(plan, p.LogTail, p.Exclusive) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline) },
                 LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
@@ -94,7 +94,7 @@ public static partial class Cli
             var best = plan.Ranked[0];
             var rest = plan.Ranked.Skip(1).Select(a => JobRunner.SafeLine(a.Machine.Name)).ToList();
             Line(string.Create(CultureInfo.InvariantCulture, $"Would run on: {JobRunner.SafeLine(best.Machine.Name)} (load {best.Health.LoadRatio:0.00}, slots free {best.FreeSlots}/{best.Machine.MaxJobs})")
-                + (rest.Count > 0 ? $", then {string.Join(", ", rest)} if that slot is taken" : ""));
+                + (rest.Count > 0 ? $", then {string.Join(", ", rest)} if {(p.Exclusive ? "that machine is no longer free" : "that slot is taken")}" : ""));
         }
         else
         {
@@ -190,7 +190,13 @@ public static partial class Cli
     }
 
     /// <summary>The <see cref="PlanJson"/> of a plan, sanitised; logTail is empty with --log-tail (a dry run starts no job) and absent without it.</summary>
-    internal static PlanJson PlanJsonOf(JobPlan plan, int? logTail) => new(plan.Status, plan.ExitCode)
+    /// <summary>
+    /// A dry run's jobSlots for a machine: the copies of the job it could take now, except that an eligible machine for an --exclusive job
+    /// shows the slots that job would take, its max_jobs (it takes the machine whole: one copy, every slot).
+    /// </summary>
+    internal static int DryJobSlots(Scheduling.Assessment a, bool exclusive) => exclusive && a.JobSlots > 0 ? a.Machine.MaxJobs : a.JobSlots;
+
+    internal static PlanJson PlanJsonOf(JobPlan plan, int? logTail, bool exclusive = false) => new(plan.Status, plan.ExitCode)
     {
         Message = JobRunner.SafeLine(plan.Message),
         Machine = plan.Machine is { } m ? JobRunner.SafeLine(m) : null,
@@ -201,7 +207,7 @@ public static partial class Cli
         ShardTiming = TimingJson(plan.Timing),
         Placement = plan.Placement?.Select(x => new PlacementJson(JobRunner.SafeLine(x.Machine.Name), x.Shards)).ToList(),
         Machines = [.. plan.Assessed.Select(a => new PlanMachineJson(
-            JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, a.JobSlots))],
+            JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, exclusive)))],
         WouldWake = plan.WouldWake is { } w ? JobRunner.SafeLine(w) : null,
         Retryable = plan.Retryable,
         LogTail = logTail is null ? null : [],

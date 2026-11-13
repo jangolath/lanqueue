@@ -682,6 +682,7 @@ public sealed class ExclusiveTests : IDisposable
         Assert.Equal(0, code);
         Assert.Equal(("WouldRun", "big-01", true), (jobs["whole"].GetProperty("status").GetString(), jobs["whole"].GetProperty("machine").GetString(), jobs["whole"].GetProperty("exclusive").GetBoolean()));
         Assert.Equal("WouldWait", jobs["unit"].GetProperty("status").GetString());
+        Assert.Equal(4, jobs["whole"].GetProperty("machines").EnumerateArray().Single(m => m.GetProperty("machine").GetString() == "big-01").GetProperty("jobSlots").GetInt32());
         Assert.False(jobs["unit"].TryGetProperty("exclusive", out _));
 
         // A normal job first: one of big-01's four slots is the plan's, so the exclusive job cannot go there now.
@@ -782,6 +783,20 @@ public sealed class ExclusiveTests : IDisposable
         Assert.True(json.GetProperty("exclusive").GetBoolean());
         Assert.Contains("--exclusive (needs every slot of the machine", stderr, StringComparison.Ordinal);
         Assert.Contains("--exclusive", json.GetProperty("nextSteps")[0].GetProperty("argv").EnumerateArray().Select(a => a.GetString()));
+
+        // jobSlots: the slots the exclusive job would take on each machine (its max_jobs), single and sharded alike; plain runs as before.
+        Assert.Equal(("big-01:4", "tiny-01:1"), JobSlots(json));
+        Assert.Contains("if that machine is no longer free", stderr, StringComparison.Ordinal);
+        Assert.Equal(("big-01:4", "tiny-01:1"), JobSlots((await Run(new PoolSsh(), "--exclusive", "--shards", "auto", "--dry-run")).Json));
+        Assert.Equal(("big-01:4", "tiny-01:1"), JobSlots((await Run(new PoolSsh(), "--dry-run")).Json));
+    }
+
+    private static (string, string) JobSlots(JsonElement json)
+    {
+        var rows = json.GetProperty("machines").EnumerateArray()
+            .Select(m => m.GetProperty("machine").GetString() + ":" + m.GetProperty("jobSlots").GetInt32().ToString(CultureInfo.InvariantCulture))
+            .Order(StringComparer.Ordinal).ToList();
+        return (rows[0], rows[1]);
     }
 
     // ---- stale slots on a machine judged busy (0.9.0: the probe reports them, scheduling does not count them) ----
