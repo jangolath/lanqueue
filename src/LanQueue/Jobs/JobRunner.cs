@@ -884,23 +884,56 @@ public sealed partial class JobRunner(
         return (probes, Scheduler.Assess(machines.Zip(probes), needs));
     }
 
-    /// <summary>The stale slots each machine's latest probe reported (before <see cref="CountStuckStale"/>), by machine name.</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _staleSeen = new(StringComparer.Ordinal);
-
     /// <summary>
-    /// Machines where a claim came back FULL although the probe said some slots were stale (so free): their reclaim failed (a dead
-    /// reclaimer's .reclaim lock, or file permissions). For the rest of this run their stale slots count as used.
+    /// Per machine, the stale slots a claim of this run reported it could not reclaim (its <see cref="RemoteScripts.ReclaimStuckMarker"/>
+    /// lines: a dead reclaimer's .reclaim lock, or file permissions). For the rest of this run that many of the machine's stale slots count
+    /// as used. Only that explicit line marks a machine: a plain FULL (another claim was first, or a live slot above max_jobs) never does.
     /// </summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _staleStuck = new(StringComparer.Ordinal);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, bool>> _staleStuck =
+        new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Records <paramref name="h"/>'s stale slots and, on a machine whose stale slots this run found it could not reclaim, counts them as
+    /// On a machine where this run found stale slots it could not reclaim, counts up to that many of <paramref name="h"/>'s stale slots as
     /// used (<see cref="MachineHealth.SlotsStuck"/>), so the job waits as for a busy machine instead of claiming there again and again.
     /// </summary>
     private MachineHealth CountStuckStale(MachineHealth h)
     {
-        _staleSeen[h.Name] = h.SlotsStale;
-        return h.SlotsStale > 0 && _staleStuck.ContainsKey(h.Name) ? h with { SlotsStuck = h.SlotsStale, SlotsStale = 0 } : h;
+        var stuck = h.SlotsStale > 0 && _staleStuck.TryGetValue(h.Name, out var slots) ? Math.Min(h.SlotsStale, slots.Count) : 0;
+        return stuck > 0 ? h with { SlotsStuck = stuck, SlotsStale = h.SlotsStale - stuck } : h;
+    }
+
+    /// <summary>The slot names a claim's <see cref="RemoteScripts.ReclaimStuckMarker"/> lines name ("slot-2"), each well formed.</summary>
+    internal static List<string> StuckSlots(string output) =>
+        [.. output.Split('\n', StringSplitOptions.TrimEntries)
+            .Where(l => l.StartsWith(RemoteScripts.ReclaimStuckMarker, StringComparison.Ordinal))
+            .Select(l => l[RemoteScripts.ReclaimStuckMarker.Length..])
+            .Where(n => n.Length is > 5 and <= 14 && n.StartsWith("slot-", StringComparison.Ordinal) && n[5..].All(char.IsAsciiDigit))
+            .Distinct(StringComparer.Ordinal)];
+
+    /// <summary>Records the stuck slots a claim on <paramref name="machine"/> reported; prints <see cref="StuckStaleLine"/> the first time for that machine.</summary>
+    private void NoteStuckSlots(Machine machine, string output, Action<string> emit)
+    {
+        var stuck = StuckSlots(output);
+        if (stuck.Count == 0)
+        {
+            return;
+        }
+
+        var first = false;
+        var slots = _staleStuck.GetOrAdd(machine.Name, _ =>
+        {
+            first = true;
+            return new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+        });
+        foreach (var s in stuck)
+        {
+            slots.TryAdd(s, true);
+        }
+
+        if (first)
+        {
+            emit(StuckStaleLine(machine.Name, stuck.Count));
+        }
     }
 
     /// <summary>
@@ -1071,14 +1104,12 @@ public sealed partial class JobRunner(
             {
                 await ReleaseClaimAsync(machine, jobId).ConfigureAwait(false);
             }
-            else if (_staleSeen.TryGetValue(machine.Name, out var stale) && stale > 0 && _staleStuck.TryAdd(machine.Name, true))
-            {
-                // FULL although the probe called some slots stale: the claim could not reclaim them. Count them as used from now on.
-                emit(StuckStaleLine(machine.Name, stale));
-            }
 
+            NoteStuckSlots(machine, acquire.Output, emit);
             return null;
         }
+
+        NoteStuckSlots(machine, acquire.Output, emit); // it got a slot past a stale one it could not reclaim
 
         onSlot?.Invoke();
         emit(slot.Contains(',', StringComparison.Ordinal)

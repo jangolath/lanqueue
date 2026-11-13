@@ -262,6 +262,49 @@ public static partial class RemoteScripts
     /// </summary>
     internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(50);
 
+    /// <summary>The line a claim prints for a stale slot it could not reclaim (<see cref="WindowsReclaimFunction"/>): "RECLAIM=STUCK slot-N".</summary>
+    internal const string ReclaimStuckMarker = "RECLAIM=STUCK ";
+
+    /// <summary>How old a slot's .reclaim lock must be before a claim that cannot take it calls the slot stuck (a live reclaim takes seconds).</summary>
+    internal const int ReclaimLockStuckSeconds = 60;
+
+    /// <summary>
+    /// <c>Reclaim $f $i</c> (needs $root, $now and <see cref="WindowsSlotFunctions"/>): reclaims slot <c>$f</c> when it is more than
+    /// <see cref="StaleSlotGraceSeconds"/> past its deadline, exactly as the claims always did (under its lock, read again there, its job
+    /// stopped, renamed away, deleted). When it was stale and still holds the same stale content afterwards, it prints
+    /// <see cref="ReclaimStuckMarker"/>slot-N: the reclaim took the lock but could not move or delete the file, or could not take the lock
+    /// because none could be created or another holds one older than <see cref="ReclaimLockStuckSeconds"/> (a dead reclaimer's; such a lock is
+    /// cleared after 10 minutes). A younger lock is a reclaim in progress: no marker. Prints nothing otherwise.
+    /// </summary>
+    internal static string WindowsReclaimFunction => """
+        function Reclaim($f,$i){try{$c=$IOFile::ReadAllText($f)}catch{return};$l=$c -split "`n"
+        if(!($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+GRACE))){return}
+        if(Take $f){try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}}
+        elseif($IOFile::Exists("$f.reclaim") -and $IOFile::GetLastWriteTimeUtc("$f.reclaim") -ge [DateTime]::UtcNow.AddSeconds(-LOCKAGE)){return}
+        try{if($IOFile::ReadAllText($f) -ceq $c){"RECLAIM=STUCK slot-$i"}}catch{}}
+        """.Replace("GRACE", StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+        .Replace("LOCKAGE", ReclaimLockStuckSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+
+    /// <summary><c>reclaim FILE</c> (needs $R, $now and <see cref="LinuxSlotFunctions"/>): as <see cref="WindowsReclaimFunction"/>, in sh.</summary>
+    internal static string LinuxReclaimFunction => """
+        reclaim() {
+          [ -f "$1" ] || return 0
+          c=$(cat "$1" 2>/dev/null)
+          d=$(deadline_of "$c") && [ "$now" -gt $((d + GRACE)) ] || return 0
+          if take "$1"; then
+            if [ "$(cat "$1" 2>/dev/null)" = "$c" ]; then
+              stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
+              mv "$1" "$1.stale.$$" 2>/dev/null && rm -f "$1.stale.$$"
+            fi
+            drop "$1"
+          elif [ -e "$1.reclaim" ] && [ -z "$(find "$1.reclaim" -mmin +MINUTES 2>/dev/null)" ]; then
+            return 0
+          fi
+          if [ -f "$1" ] && [ "$(cat "$1" 2>/dev/null)" = "$c" ]; then echo "RECLAIM=STUCK ${1##*/}"; fi
+        }
+        """.Replace("GRACE", StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+        .Replace("MINUTES", (ReclaimLockStuckSeconds / 60).ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+
     /// <summary>
     /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
     /// its deadline in the worker's own epoch seconds (now + <paramref name="jobTimeout"/> + <see cref="SlotTransferAllowance"/>). A slot
@@ -269,27 +312,22 @@ public static partial class RemoteScripts
     /// file (<c>slot-N.reclaim</c>, created exclusively): the slot is read again there and only if it is still the stale file, its job is
     /// stopped if it is somehow still running (see <see cref="LinuxSlotFunctions"/>), then it is renamed away to a unique name and deleted,
     /// and the slot is created afresh like any free one (another claimer may win it; then the next slot is tried). There is no step that
-    /// puts a file back. A slot without a deadline, or with a deadline that is not 1 to 18 decimal digits, is never reclaimed.
+    /// puts a file back. A slot without a deadline, or with a deadline that is not 1 to 18 decimal digits, is never reclaimed. A stale slot
+    /// it could not reclaim adds a <see cref="ReclaimStuckMarker"/> line (see <see cref="WindowsReclaimFunction"/>) before SLOT=.
     /// </summary>
     public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout)
     {
         var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
         var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
-        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
         return m.Os == MachineOs.Windows
             ? $$"""
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
                 [void][IO.Directory]::CreateDirectory("$root/locks")
                 $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
-                {{WindowsSlotFunctions}}
+                {{WindowsSlotFunctionsPacked}}
                 for($i=1;$i -le {{max}};$i++){
                   $f="$root/locks/slot-$i"
-                  try {
-                    $c=$IOFile::ReadAllText($f);$l=$c -split "`n"
-                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+{{grace}}) -and (Take $f)) {
-                      try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}
-                    }
-                  } catch { }
+                  Reclaim $f $i
                   try {
                     $fs=$IOFile::Open($f,'CreateNew','Write','None')
                     $b=[Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}}+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close()
@@ -303,19 +341,11 @@ public static partial class RemoteScripts
                 mkdir -p "$R/locks"
                 now=$(date +%s); D=$((now + {{lease}}))
                 {{LinuxSlotFunctions}}
+                {{LinuxReclaimFunction}}
                 i=1
                 while [ "$i" -le {{max}} ]; do
                   f="$R/locks/slot-$i"
-                  if [ -f "$f" ]; then
-                    c=$(cat "$f" 2>/dev/null)
-                    if d=$(deadline_of "$c") && [ "$now" -gt $((d + {{grace}})) ] && take "$f"; then
-                      if [ "$(cat "$f" 2>/dev/null)" = "$c" ]; then
-                        stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
-                        mv "$f" "$f.stale.$$" 2>/dev/null && rm -f "$f.stale.$$"
-                      fi
-                      drop "$f"
-                    fi
-                  fi
+                  reclaim "$f"
                   if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
                   i=$((i+1))
                 done
@@ -324,16 +354,17 @@ public static partial class RemoteScripts
     }
 
     /// <summary>
-    /// <see cref="WindowsSlotFunctions"/> (lanq's own constant text) deflated and dot-sourced, so <see cref="AcquireAll"/> with its extra
-    /// back-out and higher-slot checks stays under the Windows command-line cap; it defines the same functions and variables in the same scope.
+    /// <see cref="WindowsSlotFunctions"/> and <see cref="WindowsReclaimFunction"/> (lanq's own constant text) deflated and dot-sourced, so the
+    /// claims stay under the Windows command-line cap; it defines the same functions and variables in the same scope.
     /// </summary>
-    private static readonly string WindowsSlotFunctionsPacked =
+    internal static readonly string WindowsSlotFunctionsPacked =
         ". ([scriptblock]::Create((New-Object IO.StreamReader (New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('"
-        + Deflated(WindowsSlotFunctions) + "')), ([IO.Compression.CompressionMode]::Decompress))).ReadToEnd()))";
+        + Deflated(WindowsSlotFunctions + "\n" + WindowsReclaimFunction) + "')), ([IO.Compression.CompressionMode]::Decompress))).ReadToEnd()))";
 
     /// <summary>
     /// lanq run --exclusive: claims EVERY slot file, slot-1 to slot-max_jobs in ascending order, each exactly as <see cref="AcquireSlot"/>
-    /// claims one (the same atomic create, the same content: job id and deadline, and the same stale reclaim under the slot's lock file).
+    /// claims one (the same atomic create, the same content: job id and deadline, and the same stale reclaim under the slot's lock file,
+    /// with the same <see cref="ReclaimStuckMarker"/> line for a stale slot it could not reclaim).
     /// Prints <c>SLOTS=1,2,...,n</c> when it holds them all. At the first slot it cannot create it removes the slots this attempt created
     /// (each only if its first line is still this job id) and prints <c>SLOT=FULL</c>: all or nothing. The ascending order means two
     /// exclusive claims never deadlock; at worst both back off and one wins on a later look. Each slot file is an ordinary slot, so the
@@ -358,12 +389,7 @@ public static partial class RemoteScripts
                 function HL{foreach($h in (gci "$root/locks" -Filter slot-* -EA 0)){if($h.Name -notmatch '^slot-0*([0-9]+)\z' -or ($Matches[1].Length -lt 10 -and [long]$Matches[1] -le {{max}})){continue};try{$x=$IOFile::ReadAllText($h.FullName) -split "`n"}catch [IO.FileNotFoundException]{continue}catch{return 1};if(!($x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$x[1].Trim()+{{grace}}))){return 1} };0}
                 for($i=1;$i -le {{max}};$i++){
                   $f="$root/locks/slot-$i"
-                  try {
-                    $c=$IOFile::ReadAllText($f);$l=$c -split "`n"
-                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+{{grace}}) -and (Take $f)) {
-                      try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}
-                    }
-                  } catch { }
+                  Reclaim $f $i
                   $ok=$false
                   try {
                     $fs=$IOFile::Open($f,'CreateNew','Write','None')
@@ -380,6 +406,7 @@ public static partial class RemoteScripts
                 mkdir -p "$R/locks"
                 now=$(date +%s); D=$((now + {{lease}}))
                 {{LinuxSlotFunctions}}
+                {{LinuxReclaimFunction}}
                 J={{ShellQuote.Posix(jobId)}}; got=
                 back_out() {
                   n=1
@@ -404,16 +431,7 @@ public static partial class RemoteScripts
                 i=1
                 while [ "$i" -le {{max}} ]; do
                   sf="$R/locks/slot-$i"
-                  if [ -f "$sf" ]; then
-                    c=$(cat "$sf" 2>/dev/null)
-                    if d=$(deadline_of "$c") && [ "$now" -gt $((d + {{grace}})) ] && take "$sf"; then
-                      if [ "$(cat "$sf" 2>/dev/null)" = "$c" ]; then
-                        stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
-                        mv "$sf" "$sf.stale.$$" 2>/dev/null && rm -f "$sf.stale.$$"
-                      fi
-                      drop "$sf"
-                    fi
-                  fi
+                  reclaim "$sf"
                   if ( set -C; printf '%s\n%s\n' "$J" "$D" > "$sf" ) 2>/dev/null; then got="$got${got:+,}$i"; i=$((i+1)); continue; fi
                   back_out
                 done

@@ -974,26 +974,16 @@ public sealed class ExclusiveTests : IDisposable
     // ---- a stale slot the claim cannot reclaim; an unreadable higher slot ----
 
     /// <summary>
-    /// The probe calls one of build-01's two slots stale, but the claim cannot reclaim it (a dead reclaimer's lock, permissions) and answers
-    /// FULL: lanq says so once, counts it as used for the rest of the run, and does not claim there again while it waits.
+    /// The probe calls one of build-01's two slots stale, but the claim cannot reclaim it (a dead reclaimer's lock, permissions): it says so
+    /// (RECLAIM=STUCK slot-2) and answers FULL. lanq says so once, counts it as used for the rest of the run, and does not claim there again
+    /// while it waits.
     /// </summary>
     [Fact(Timeout = TestTimeout)]
     public async Task AStaleSlotThatCannotBeReclaimedCountsAsBusyForTheRun()
     {
         foreach (var exclusive in new[] { false, true })
         {
-            var ssh = new FakeSsh
-            {
-                Handler = (_, cmd) => cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=FULL")
-                    : new SshResult(0, $"load=0.1\ndisk_free_gb=50\nslots_used={(exclusive ? 1 : 2)}\nslots_stale=1\ntool=ok"),
-            };
-            var lines = new List<string>();
-            var runner = new JobRunner(
-                T.Config(), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, Path.Combine(_root, "tmp"),
-                l => { lock (lines) { lines.Add(l); } }, (_, ct) => Task.Delay(20, ct));
-
-            var r = await runner.RunAsync(
-                new JobRequest(["dotnet"], ["dotnet", "test"], ".", Repo, TimeSpan.FromSeconds(1)) { On = ["build-01"], Exclusive = exclusive, NoWake = true }, CancellationToken.None);
+            var (r, ssh, lines) = await RunOnAStaleMachine(exclusive, "RECLAIM=STUCK slot-2\nSLOT=FULL");
 
             Assert.Equal(JobStatus.NoCapacity, r.Status);
             Assert.True(r.Retryable);
@@ -1005,6 +995,116 @@ public sealed class ExclusiveTests : IDisposable
             var why = Assert.Single(r.Excluded!).Why;
             Assert.Equal(exclusive ? "busy (slots 1/2, 1 stale, not reclaimable; --exclusive needs all 2 free)" : "busy (slots 2/2, 1 stale, not reclaimable)", why);
         }
+    }
+
+    /// <summary>
+    /// A plain FULL on a machine whose probe showed a stale slot is not a failed reclaim: another claim that read the same probe reclaimed it
+    /// first, or (exclusive) a live slot above max_jobs made the claim back out. The machine is never marked: no line, and it is claimed again
+    /// on the next look.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task APlainFullNeverMarksAMachineStuck()
+    {
+        foreach (var exclusive in new[] { false, true })
+        {
+            var (r, ssh, lines) = await RunOnAStaleMachine(exclusive, "SLOT=FULL");
+
+            Assert.Equal(JobStatus.NoCapacity, r.Status);
+            Assert.True(ssh.Calls.Count(c => c.Command.Contains("SLOT=", StringComparison.Ordinal)) > 1, "a plain FULL stopped the claims");
+            Assert.DoesNotContain(lines, l => l.Contains("could not be reclaimed", StringComparison.Ordinal));
+            Assert.DoesNotContain("not reclaimable", Assert.Single(r.Excluded!).Why, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>build-01 (max_jobs 2) probed with one stale slot, a claim that always answers <paramref name="claim"/>, --wait 1 s.</summary>
+    private async Task<(JobResult Result, FakeSsh Ssh, List<string> Lines)> RunOnAStaleMachine(bool exclusive, string claim)
+    {
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, claim)
+                : new SshResult(0, $"load=0.1\ndisk_free_gb=50\nslots_used={(exclusive ? 1 : 2)}\nslots_stale=1\ntool=ok"),
+        };
+        var lines = new List<string>();
+        var runner = new JobRunner(
+            T.Config(), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, Path.Combine(_root, "tmp"),
+            l => { lock (lines) { lines.Add(l); } }, (_, ct) => Task.Delay(20, ct));
+        var r = await runner.RunAsync(
+            new JobRequest(["dotnet"], ["dotnet", "test"], ".", Repo, TimeSpan.FromSeconds(1)) { On = ["build-01"], Exclusive = exclusive, NoWake = true }, CancellationToken.None);
+        return (r, ssh, lines);
+    }
+
+    /// <summary>The deflated block both claims dot-source is exactly the slot functions plus the reclaim function, nothing else.</summary>
+    [Fact]
+    public void ThePackedSlotFunctionsAreExactlyTheSlotAndReclaimFunctions()
+    {
+        var packed = RemoteScripts.WindowsSlotFunctionsPacked;
+        var start = packed.IndexOf("FromBase64String('", StringComparison.Ordinal) + "FromBase64String('".Length;
+        var base64 = packed[start..packed.IndexOf('\'', start)];
+        using var inflate = new System.IO.Compression.DeflateStream(new MemoryStream(Convert.FromBase64String(base64)), System.IO.Compression.CompressionMode.Decompress);
+        using var reader = new StreamReader(inflate, System.Text.Encoding.UTF8);
+        Assert.Equal(RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction, reader.ReadToEnd());
+    }
+
+    [Fact]
+    public void StuckSlotsAreReadOnlyFromWellFormedMarkerLines()
+    {
+        Assert.Equal(["slot-2", "slot-3"], JobRunner.StuckSlots("RECLAIM=STUCK slot-2\r\nRECLAIM=STUCK slot-3\nRECLAIM=STUCK slot-2\nSLOT=FULL"));
+        Assert.Empty(JobRunner.StuckSlots("SLOT=FULL\nRECLAIM=STUCK slot-\nRECLAIM=STUCK slot-x\nRECLAIM=STUCK ../x\nRECLAIM=STUCK slot-12345678901"));
+    }
+
+    [ShFact]
+    public void TheClaimSaysWhichStaleSlotItCouldNotReclaimSh() => TheClaimSaysWhichStaleSlotItCouldNotReclaim("linux");
+
+    [PowerShellFact]
+    public void TheClaimSaysWhichStaleSlotItCouldNotReclaimPowerShell() => TheClaimSaysWhichStaleSlotItCouldNotReclaim("windows");
+
+    /// <summary>
+    /// Real claims, both kinds: a stale slot whose .reclaim lock a dead reclaimer left (older than a minute) cannot be reclaimed, and the
+    /// claim says so. A fresh lock (a reclaim in progress), a normal reclaim, and a FULL with no stale slot print no marker.
+    /// </summary>
+    private void TheClaimSaysWhichStaleSlotItCouldNotReclaim(string shell)
+    {
+        foreach (var exclusive in new[] { false, true })
+        {
+            string Claim() => exclusive ? ClaimAll(shell, "new-job", 2) : ClaimOne(shell, "new-job", 2);
+
+            // A dead reclaimer's lock on the stale slot-1, five minutes old (cleared only after ten); slot-2 is live.
+            ClearLocks();
+            WriteSlot(1, Lines("crashed-job", Stale));
+            WriteSlot(2, Lines("live-job", Now + 3600));
+            File.WriteAllText(Slot(1) + ".reclaim", "dead-reclaimer");
+            File.SetLastWriteTimeUtc(Slot(1) + ".reclaim", DateTime.UtcNow.AddMinutes(-5));
+            var output = Claim();
+            Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
+            Assert.Equal(["slot-1"], JobRunner.StuckSlots(output));
+            Assert.Equal("crashed-job", Holder(1));
+
+            // A fresh lock: a reclaim in progress elsewhere, not stuck.
+            File.SetLastWriteTimeUtc(Slot(1) + ".reclaim", DateTime.UtcNow);
+            output = Claim();
+            Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
+            Assert.Empty(JobRunner.StuckSlots(output));
+            Assert.Equal("crashed-job", Holder(1));
+
+            // No lock: reclaimed as always, no marker (a normal claim takes slot-1; the exclusive one takes it and backs out at slot-2).
+            File.Delete(Slot(1) + ".reclaim");
+            output = Claim();
+            Assert.Empty(JobRunner.StuckSlots(output));
+            Assert.Equal(exclusive ? null : "new-job", Holder(1));
+
+            // Simply full, nothing stale: no marker.
+            ClearLocks();
+            WriteSlot(1, Lines("live-job", Now + 3600));
+            WriteSlot(2, Lines("live-job-2", Now + 3600));
+            Assert.Empty(JobRunner.StuckSlots(Claim()));
+        }
+
+        // An exclusive claim that backs out because of a live slot above max_jobs prints no marker either.
+        ClearLocks();
+        WriteSlot(5, Lines("other-dev", Now + 3600));
+        var higher = ClaimAll(shell, "ex-job", 2);
+        Assert.Contains("SLOT=FULL", higher, StringComparison.Ordinal);
+        Assert.Empty(JobRunner.StuckSlots(higher));
     }
 
     [Fact]
