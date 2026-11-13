@@ -14,16 +14,21 @@
   other code or move where tools keep their files: the loader and shell startup names machines.yml already refused,
   `PATH`, Node (`NODE_OPTIONS`, `NODE_PATH`), .NET (`DOTNET_STARTUP_HOOKS`, `DOTNET_ROOT*`, `CORECLR_*`, `COR_*`, ...),
   Java, Python, Perl and Ruby startup and path variables, the Go toolchain and module settings and `CC`/`CXX`/`CGO_*`,
-  Rust (`RUSTFMT`, `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTDOC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
-  `CARGO_TARGET_*`, `CARGO_BUILD_*`), build tools (`JAVA_OPTS`, `GRADLE_USER_HOME`, `GRADLE_OPTS`, `MAVEN_OPTS`,
+  Rust (`RUSTFMT`, `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTDOC`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC_WRAPPER`,
+  `RUSTC_WORKSPACE_WRAPPER`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_HOME`, `CARGO_TARGET_*`, `CARGO_BUILD_*`,
+  `CARGO_REGISTRIES_*`, `CARGO_SOURCE_*`), build tools (`JAVA_OPTS`, `GRADLE_USER_HOME`, `GRADLE_OPTS`, `MAVEN_OPTS`,
+  `MAVEN_ARGS`,
   `MAKEFILES`, `MAKEFLAGS`, `DOTNET_HOST_PATH`, `NUGET_PLUGIN_PATHS`, `COMPLUS_*`, `DOTNET_MSBUILD_SDK_RESOLVER_*`),
   TLS trust and proxies (`NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
   `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), package indexes
-  (`PIP_*`, `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`), OpenSSL and glibc module paths, profile and system folders (`HOME`, `USERPROFILE`, `APPDATA`, `TEMP`,
+  (`PIP_*`, `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_FIND_LINKS`, `UV_PYTHON`), OpenSSL and glibc module paths, profile and system folders (`HOME`, `USERPROFILE`, `APPDATA`, `TEMP`,
   `TMP`, `XDG_CONFIG_HOME`, ...), `IFS`, `CDPATH`, and every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_`,
   `MSBUILD`, `LD_`, `DYLD_` or `LANQ_`. `NODE_ENV`, `GOOS` and `GOARCH` stay allowed. An `allowed_env` entry the
-  table fully covers (`GIT_*`, `HOME`, `PIP_*`, `CARGO_BUILD_*`) makes the config fail to load; a prefix that only
-  partly overlaps (`NODE_*`, `UV_*`, `CARGO_*`) loads, and `lanq doctor` prints an informational `OK` line (`allowed_env`) saying those names stay refused.
+  table fully covers (`GIT_*`, `HOME`, `PIP_*`, `CARGO_BUILD_*`, `CARGO_REGISTRIES_*`, `CARGO_SOURCE_*`) makes the
+  config fail to load; a prefix that only
+  partly overlaps (`NODE_*`, `UV_*`, `CARGO_*`) loads, and `lanq doctor` prints an informational `OK` line (`allowed_env`) saying those names stay refused, for
+  example `policy.allowed_env CARGO_*: names on lanq's deny list (CARGO_ENCODED_RUSTFLAGS, CARGO_HOME, CARGO_TARGET_*,
+  ...) stay refused`.
 - A deny-table name on the command line is a `fix_command` step ("this variable can never be set by a job; drop it or
   ask the developer: ..."); from `lanq.yml` it is `ask_developer` ("the developer drops it from that job's env: in
   lanq.yml").
@@ -58,8 +63,8 @@
   `machines.yml` with a higher `max_jobs` for the same `work_root` has a job there. That is one look at claim time, so
   such a developer can still start a job in a higher slot afterwards: everyone sharing a worker should use the same
   `max_jobs`.
-- To fit the Windows command-line limit, the exclusive claim's fixed PowerShell functions travel compressed (deflate,
-  base64) and are dot-sourced in memory, as the helper install already does. Some endpoint-protection tools flag that
+- To fit the Windows command-line limit, every Windows slot claim (normal and exclusive) carries its fixed PowerShell
+  slot functions compressed (deflate, base64) and dot-sources them in memory, as the helper install already does. Some endpoint-protection tools flag that
   pattern; the inflated text is lanq's constant claim code, and AMSI scans it as such.
 
 ### Baseline rerun: is this failure new?
@@ -79,7 +84,8 @@
   archive worker. `--baseline-ref` on the command line still takes any commit. A short name must exist under exactly
   one of those (`baseline_ref NAME is both a branch and a tag; write refs/heads/NAME or refs/tags/NAME`, `baseline_ref
   NAME names more than one ref (refs/heads/NAME, refs/remotes/NAME); write one of them`); a full `refs/heads/NAME` or
-  `refs/tags/NAME` is accepted. The baseline's `ref` and label show the name as written.
+  `refs/tags/NAME` is accepted; git's short forms `heads/main`, `tags/v1.0` and `remotes/origin/main`, which git would
+  accept, are refused with the full ref to write (`baseline_ref heads/main: write refs/heads/main`). The baseline's `ref` and label show the name as written.
 - How the keys combine: a job's own `baseline: false` with its own `baseline_ref:` is an error; its own `baseline: false`
   drops an inherited ref quietly; its own `baseline_ref:` turns the baseline on even when `defaults:` say `false`; its
   own `baseline: true` under `defaults:` with `baseline: false` and a ref gives a plain `--baseline`.
@@ -147,8 +153,11 @@
   it passes. Before, one dead job's slot kept a machine busy for every `--exclusive` job for ever, and a dead
   exclusive job's slots blocked the machine for everyone until something reclaimed them. `lanq health` shows them as
   `(4 stale: reclaimed by the next claim)`.
-- A stale slot a claim cannot reclaim (a `.reclaim` lock or file permissions) counts as busy for the rest of the run,
-  with one line per machine: `[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file
+- A stale slot a claim cannot reclaim counts as busy for the rest of the run. The claim reports it
+  (`RECLAIM=STUCK slot-N`) only when the slot's `.reclaim` lock is older than about a minute (a dead reclaimer's), no lock
+  could be made, or the file could not be moved or deleted; a younger lock (a reclaim in progress) or a claim that
+  simply lost the slot to another job never marks the machine. lanq prints one line per machine, counting the slots
+  the claim named: `[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file
   permissions); counting it as busy for this run; lanq unlock build-01 clears it`. Busy reasons then read `busy (slots
   2/2, 1 stale, not reclaimable)`. On Windows an unreadable slot above `max_jobs` now counts as live, as on Linux.
 - Linux workers: stopping a stale job from inside the stale-slot reclaim or `lanq unlock` overwrote the loop's own

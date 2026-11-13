@@ -903,19 +903,21 @@ What is refused, and why:
     `DOTNET_ROOT*`, `DOTNET_HOST_PATH`, `CORECLR_*`, `COR_*`, `COMPLUS_*`), Java (`JAVA_TOOL_OPTIONS`, `JAVA_OPTS`,
     `CLASSPATH`, ...), Python (`PYTHONSTARTUP`, `PYTHONPATH`, ...), Perl and Ruby;
   - toolchains and build tools: Go (`GOFLAGS`, `GOROOT`, `GOPROXY`, ..., `CC`, `CXX`, `CGO_*`), Rust (`RUSTFMT`,
-    `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTDOC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_TARGET_*`,
-    `CARGO_BUILD_*`), Gradle and Maven (`GRADLE_OPTS`, `MAVEN_OPTS`), `MAKEFLAGS`, `NUGET_PLUGIN_PATHS`,
+    `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTDOC`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
+    `CARGO_ENCODED_RUSTFLAGS`, `CARGO_HOME`, `CARGO_TARGET_*`, `CARGO_BUILD_*`, `CARGO_REGISTRIES_*`,
+    `CARGO_SOURCE_*`), Gradle and Maven (`GRADLE_OPTS`, `MAVEN_OPTS`, `MAVEN_ARGS`), `MAKEFLAGS`, `NUGET_PLUGIN_PATHS`,
     `DOTNET_MSBUILD_SDK_RESOLVER_*`, `MSBUILD*`, `GRADLE_USER_HOME`, `MAKEFILES`;
   - TLS trust and proxies: `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
     `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`;
-  - package indexes: every name starting `PIP_`, and `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`;
+  - package indexes and interpreters: every name starting `PIP_`, and `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`,
+    `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_FIND_LINKS`, `UV_PYTHON`;
   - OpenSSL and glibc module paths;
   - profile and temp folders: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TMPDIR`,
     `XDG_CONFIG_HOME`, ...;
   - every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_` or `LANQ_`.
 
   `NODE_ENV`, `GOOS` and `GOARCH` stay allowed. An `allowed_env` entry the table fully covers (`GIT_*`, `HOME`) stops
-  the config from loading (so do `PIP_*` and `CARGO_BUILD_*`); a prefix that only partly overlaps (`NODE_*`,
+  the config from loading (so do `PIP_*`, `CARGO_BUILD_*`, `CARGO_REGISTRIES_*` and `CARGO_SOURCE_*`); a prefix that only partly overlaps (`NODE_*`,
   `UV_*`, `CARGO_*`) loads, and `lanq doctor` notes it with an
   `OK` line: `policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH,
   NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused` (fix: nothing to change if that is intended; list exact names to
@@ -978,8 +980,11 @@ stale: reclaimed by the next claim)`, `health --json` adds `slotsStale` (only wh
 live slots only, and a busy reason reads `busy (slots 3/4, 1 stale: reclaimed by the next claim)` (for an exclusive
 job, `busy (slots 2/4, 1 stale: reclaimed by the next claim; --exclusive needs all 4 free)`).
 
-When a claim cannot reclaim a stale slot (a `.reclaim` lock a dead claim left, or file permissions), lanq says so once
-per machine per run and counts it as busy for the rest of that run:
+When a claim reports that it could not reclaim a stale slot, lanq says so once per machine per run and counts that
+machine's stale slots as busy for the rest of that run. The claim reports it (`RECLAIM=STUCK slot-N`) only when the
+slot's `.reclaim` lock is older than about a minute (a dead reclaimer's), no lock could be made, or the file could not be
+moved or deleted. A younger `.reclaim` lock is a reclaim in progress and is not reported, and a claim that simply
+lost the slot to another job never marks the machine. The count in the line is the number of slots the claim named:
 
 ```text
 [lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file permissions); counting it as busy for this run; lanq unlock build-01 clears it

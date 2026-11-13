@@ -167,7 +167,9 @@ lanq.yml: job 'unit' (line 12): baseline_ref must name a branch or tag (a commit
 A short name must exist under exactly one of those: a name that is both a branch and a tag is refused with
 `baseline_ref NAME is both a branch and a tag; write refs/heads/NAME or refs/tags/NAME`, and one that matches more
 than one ref with `baseline_ref NAME names more than one ref (refs/heads/NAME, refs/remotes/NAME); write one of them`.
-A full `refs/heads/NAME` or `refs/tags/NAME` is accepted. The baseline's `ref` and its label show the name as you
+A full `refs/heads/NAME` or `refs/tags/NAME` is accepted. git's own short forms `heads/main`, `tags/v1.0` and
+`remotes/origin/main`, which git itself would accept, are refused with the full ref to write instead:
+`baseline_ref heads/main: write refs/heads/main` (and `write refs/tags/v1.0`, `write refs/remotes/origin/main`). The baseline's `ref` and its label show the name as you
 wrote it.
 
 The plan file comes with the repository. If it could name any commit, it could make lanq send that commit's tree to
