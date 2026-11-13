@@ -7,9 +7,11 @@
 - **A private key replaced in place in a text file is found.** The secret scan reads the uncommitted diff, which
   shows only changed lines: a key whose body changed while its BEGIN line stayed the same never showed its BEGIN line,
   so it was not recognised (files git shows as binary already got this in 0.9.2). Now lanq greps the snapshot's changed
-  text files for `-----BEGIN` (`git grep --cached -I`, only those files), and for each modified or renamed one compares its
-  old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line whose block (up to its END
-  line, at most 512 lines) has a new line is scanned again. The finding reads `private-key-block in uncommitted file
+  text files for `-----BEGIN` (`git grep --cached`, only those files), and for each modified or renamed one compares its
+  old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line whose block reaches its END line
+  within 512 lines and has a new line between the two is scanned again. Unterminated blocks are not rescanned in text
+  files (a lone key header in code, such as a parser or a test, never refuses an edit near it), so a key with no END
+  line, or longer than 512 lines, replaced in place is not found. The finding reads `private-key-block in uncommitted file
   <path> (key block changed in place)` and never shows the key. A file lanq cannot look up or read refuses the job
   (`scan-incomplete`, with a `git fsck` hint). Such a file is read up to 32 MB per version and 256 MB in all; one over
   that is listed in `scanSkipped` with the new reason `text_over_cap` (the larger version's size) and on stderr, not

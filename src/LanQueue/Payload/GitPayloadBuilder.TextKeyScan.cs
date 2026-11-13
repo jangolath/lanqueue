@@ -10,13 +10,13 @@ namespace LanQueue.Payload;
 /// <item>the rename-aware (<c>-M</c>, like the overlay diff and its file list) <c>--numstat -z</c> and <c>--raw -z</c> of the snapshot's
 /// temporary index against HEAD say which files are text, modified (or renamed or copied) with added lines, and their old and new object
 /// ids;</item>
-/// <item><c>git grep --cached -I -l -z -i -F -e -----BEGIN</c> under the same index, given only those files, keeps the ones whose new
+/// <item><c>git grep --cached -l -z -i -F -e -----BEGIN</c> under the same index, given only those files, keeps the ones whose new
 /// version has a BEGIN line at all (a BEGIN line only the old version has is a removed line, which the diff scan sees already); one of
 /// them that cannot be looked up fails closed (<see cref="BlobScan.TextIncompleteRule"/>);</item>
 /// <item>their sizes come from one <c>git cat-file --batch-check</c>, so a file over the caps is listed (<see cref="BlobScan.TextOverCap"/>)
 /// before anything is read; the rest are read by object id from one <c>git cat-file --batch</c> (no filters, no textconv);</item>
-/// <item>only the unchanged BEGIN lines whose block has a new line are scanned (<see cref="BlobScan.ChangedBlockStarts"/>): every other new
-/// line is in the diff already.</item>
+/// <item>only the unchanged BEGIN lines whose terminated block (an END line within 512 lines) has a new line are scanned
+/// (<see cref="BlobScan.ChangedBlockStarts"/>): every other new line is in the diff already, and a lone header string in code is no key.</item>
 /// </list>
 /// Added files are not read (every line is in the diff), nor deleted files, files git shows as binary (the binary scan's), symlinks and
 /// submodules. Content is never written anywhere and never echoed.
@@ -61,14 +61,14 @@ public sealed partial class GitPayloadBuilder
     private const int GrepPathChars = 16_000;
 
     /// <summary>
-    /// Which of <paramref name="paths"/> are text files in the snapshot's index (git's own text test, <c>-I</c>) holding <c>-----BEGIN</c> in
-    /// any case: a superset of the files with a line <see cref="SecretScanner.StartsASecretBlock"/> matches. The paths go as literal pathspecs,
+    /// Which of <paramref name="paths"/> (text files per numstat; no <c>-I</c>, so git grep's own binary test can never drop one) hold
+    /// <c>-----BEGIN</c> in the snapshot's index, in any case: a superset of the files with a line <see cref="SecretScanner.StartsASecretBlock"/> matches. The paths go as literal pathspecs,
     /// in batches of at most <see cref="GrepPathChars"/> characters. No match is git grep's exit code 1.
     /// </summary>
     private static async Task<HashSet<string>> KeyBearingPathsAsync(string top, Dictionary<string, string> env, IReadOnlyList<string> paths, CancellationToken ct)
     {
         var keyed = new HashSet<string>(StringComparer.Ordinal);
-        string[] grep = ["grep", "--cached", "-I", "-l", "-z", "-i", "-F", "--full-name", "--no-color", "--no-textconv", "--no-recurse-submodules", "-e", "-----BEGIN", "--"];
+        string[] grep = ["grep", "--cached", "-l", "-z", "-i", "-F", "--full-name", "--no-color", "--no-textconv", "--no-recurse-submodules", "-e", "-----BEGIN", "--"];
         for (var i = 0; i < paths.Count;)
         {
             var batch = new List<string>();

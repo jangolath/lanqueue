@@ -239,6 +239,9 @@ internal static class BlobScan
     /// but start a block with a new line. Every other line <see cref="NewContent"/> returns is a line the overlay diff already shows as added
     /// (and scans), so it is left out here. Lines are matched by content (set membership), as in <see cref="NewContent"/>: a new key added
     /// under a BEGIN line identical to an old one can be reported twice, once by the diff and once here (harmless: either refuses).
+    /// Only terminated blocks count here: the block must reach a line holding <c>-----END</c> within <see cref="MaxBlockLines"/> lines, and
+    /// the new line must lie between the BEGIN and that END line (the END line included). A real key replaced in place always keeps its END
+    /// line; a lone header string in code (a parser, a scanner, a test) has none, so ordinary edits near it are never refused.
     /// </summary>
     internal static List<string> ChangedBlockStarts(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
     {
@@ -247,7 +250,8 @@ internal static class BlobScan
         for (var i = 0; i < lines.Count; i++)
         {
             var line = lines[i];
-            if (line.Contains("-----", StringComparison.Ordinal) && known.Contains(line) && SecretScanner.StartsASecretBlock(line) && BlockChanged(lines, i, known))
+            if (line.Contains("-----", StringComparison.Ordinal) && known.Contains(line) && SecretScanner.StartsASecretBlock(line)
+                && BlockChanged(lines, i, known, terminatedOnly: true))
             {
                 result.Add(line);
             }
@@ -265,12 +269,29 @@ internal static class BlobScan
     /// in the middle. The block ends at the first line that holds <c>-----END</c> anywhere (an indented key in a YAML block scalar too), and
     /// after at most <see cref="MaxBlockLines"/> lines; a BEGIN line that itself holds <c>-----END</c> (a one-line JSON or escaped key) has
     /// no block, so an unclosed BEGIN can never reach a far-away edit.
+    /// With <paramref name="terminatedOnly"/> (the text key-block scan, 0.10.1) a block counts only when it reaches its END line within
+    /// <see cref="MaxBlockLines"/> lines, and that END line is part of the block.
     /// </summary>
-    private static bool BlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
+    private static bool BlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known, bool terminatedOnly = false)
     {
         if (lines[begin].Contains("-----END", StringComparison.Ordinal))
         {
             return false;
+        }
+
+        if (terminatedOnly)
+        {
+            var changed = false;
+            for (var j = begin + 1; j < lines.Count && j <= begin + MaxBlockLines; j++)
+            {
+                changed |= !known.Contains(lines[j]);
+                if (lines[j].Contains("-----END", StringComparison.Ordinal))
+                {
+                    return changed;
+                }
+            }
+
+            return false; // no END line within the cap: not a key block
         }
 
         for (var j = begin + 1; j < lines.Count && j <= begin + MaxBlockLines && !lines[j].Contains("-----END", StringComparison.Ordinal); j++)

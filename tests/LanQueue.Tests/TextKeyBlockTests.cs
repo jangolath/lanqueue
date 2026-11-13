@@ -169,7 +169,7 @@ public sealed class TextKeyBlockTests : IDisposable
     }
 
     [Fact(Timeout = TestTimeout)]
-    public async Task KeyAtFileStartAndUnterminatedKeyAtEnd()
+    public async Task KeyAtFileStartIsFoundAndUnterminatedKeyIsNot()
     {
         static string Start(char c) => Begin + "RSA PRIVATE KEY-----\n" + Body(c) + "-----END RSA PRIVATE KEY-----\n";
         static string Unterminated(char c) => "config\n" + Begin + "EC PRIVATE KEY-----\n" + Body(c).TrimEnd('\n');
@@ -182,15 +182,16 @@ public sealed class TextKeyBlockTests : IDisposable
         var p = await Snapshot();
 
         Assert.True(Has(p, "start.txt"), Show(p));
-        Assert.True(Has(p, "end.txt"), Show(p));
+        Assert.False(Has(p, "end.txt"), Show(p)); // no END line: not rescanned in a text file (documented limit)
+        Assert.Single(p.TextKeyFindings);
     }
 
-    /// <summary>An unclosed BEGIN is judged on its next 512 lines only: a change further down is not a key change (documented).</summary>
+    /// <summary>A block whose END line is more than 512 lines down is not a key block: a change inside it is not rescanned (documented).</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task ChangeBeyondBlockCapIsNotFlagged()
     {
         static string Long(string last) =>
-            Begin + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Range(0, 600).Select(i => $"line {i}\n")) + last + "\n";
+            Begin + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Range(0, 600).Select(i => $"line {i}\n")) + last + "\n-----END RSA PRIVATE KEY-----\n";
         Write("notes.txt", Long("end"));
         Commit();
 
@@ -312,6 +313,28 @@ public sealed class TextKeyBlockTests : IDisposable
         Assert.Empty(BlobScan.ChangedBlockStarts(added, ["config"]));
         var oneLine = "{\"k\": \"" + begin + "\\nMII\\n-----END RSA PRIVATE KEY-----\"}";
         Assert.Empty(BlobScan.ChangedBlockStarts([oneLine, "x2"], [oneLine, "x1"]));
+
+        // Only terminated blocks: a BEGIN with no END line is never rescanned; a changed END line is inside the block.
+        Assert.Empty(BlobScan.ChangedBlockStarts([begin, "BBBB", "tail"], [begin, "AAAA", "tail"]));
+        Assert.Equal([begin], BlobScan.ChangedBlockStarts([begin, "AAAA", "-----END EC PRIVATE KEY-----"], [begin, "AAAA", "-----END RSA PRIVATE KEY-----"]));
+    }
+
+    /// <summary>A key-header string in code (a parser, a scanner, a test) has no END line: editing a few lines below it is never refused.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task LoneBeginLiteralInCodeIsNotFlagged()
+    {
+        static string Code(string body) =>
+            "namespace Demo;\n\npublic static class Keys\n{\n    public const string Header = \"" + Begin + "OPENSSH PRIVATE KEY-----\";\n\n"
+            + "    public static bool Looks(string s) => s.StartsWith(Header);\n\n    public static int Size() => " + body + ";\n}\n";
+        Write("Keys.cs", Code("1"));
+        Commit();
+        Write("Keys.cs", Code("2"));
+
+        var p = await Snapshot();
+
+        Assert.Empty(DiffFindings(p));
+        Assert.Empty(p.TextKeyFindings);
+        Assert.Equal(2, p.TextBlobsRead); // compared, and the lone header is no block
     }
 
     [Fact]

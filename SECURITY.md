@@ -68,8 +68,11 @@ changed lines, so since 0.10.1 lanq also finds the changed text files whose new 
 (`git grep --cached` of the snapshot, those files only) and compares their old and new blobs the same way, renames included (the diff,
 its file list and this comparison all use `-M`). A key whose body changed under an unchanged BEGIN line is refused
 like a new key, sample keys kept in tracked text files included. Such a file is read up to 32 MB per version and
-256 MB in all; one over that is listed in `scanSkipped` (`text_over_cap`), not refused. A block is judged up to its
-END line and at most 512 lines, so a change further down an unterminated block is not seen. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
+256 MB in all; one over that is listed in `scanSkipped` (`text_over_cap`), not refused. In text files only terminated
+blocks are rescanned: the block must reach its END line within 512 lines, and the new line must lie between BEGIN and
+END. Unterminated blocks are not rescanned in text files, so a lone key header in code (a parser or a test) never
+refuses an edit near it, and a key with no END line, or one longer than 512 lines, replaced in place is not seen. It
+does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).
 A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_ref:`), never a commit id, `HEAD` or
