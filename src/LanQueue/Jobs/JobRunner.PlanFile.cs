@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using LanQueue.Config;
+using LanQueue.Payload;
 
 namespace LanQueue.Jobs;
 
@@ -9,8 +10,12 @@ namespace LanQueue.Jobs;
 /// waiting for a slot counts --wait only while no job of the plan holds one, so it waits behind its siblings even with --wait 0 and ends
 /// NoCapacity only when nothing of the plan runs (a job every machine rules out for good still ends at once).
 /// </summary>
-public sealed class PlanProgress
+/// <param name="holders">Who holds the slots a waiting job waits behind, in its waiting line ("this plan's other jobs hold some").</param>
+public sealed class PlanProgress(string holders = "this plan's other jobs")
 {
+    /// <summary>Who holds the slots a waiting job waits behind (see the constructor).</summary>
+    public string Holders => holders;
+
     private readonly Lock _gate = new();
     private int _holding;
     private long _idleSince = Stopwatch.GetTimestamp();
@@ -100,6 +105,9 @@ public sealed record PlanJobSpec(string Name, JobRequest Request, ShardOptions? 
 {
     /// <summary>The job's place in lanq.yml (0 for the first job in the file): breaks ties in <see cref="JobRunner.AggregatePlan"/>.</summary>
     public int FileOrder { get; init; }
+
+    /// <summary>Where the job is defined, for refusals found once the repository is read ("lanq.yml: job 'x' (line 14)"); null means "job 'x'".</summary>
+    public string? Where { get; init; }
 }
 
 /// <summary>
@@ -147,6 +155,9 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
 
     /// <summary>The job (or one of its shards) may still be running on its machine: the connection dropped while it ran and its cleanup did not finish.</summary>
     public bool MayStillRun { get; init; }
+
+    /// <summary>baseline: true, a single job that ended Failed: its rerun at the base commit (a sharded job has one per failed shard); else null.</summary>
+    public BaselineResult? Baseline { get; init; }
 }
 
 /// <summary>
@@ -191,6 +202,12 @@ public sealed partial class JobRunner
         }
 
         var planRun = NewId();
+        var (bases, badBase) = await ResolvePlanBasesAsync(ordered, ct).ConfigureAwait(false);
+        if (badBase is not null)
+        {
+            return badBase;
+        }
+
         var anyGit = ordered.SelectMany(j => Candidates(j.Request)).Any(m => m.Transfer == TransferMode.Git);
         var (prepared, failed) = await PrepareAsync(planRun, ordered[0].Request, anyGit, output, ct).ConfigureAwait(false);
         if (prepared is null)
@@ -205,8 +222,115 @@ public sealed partial class JobRunner
         await using (prepared.ConfigureAwait(false))
         {
             // DispatchPlan returns only once every job it started has finished (and cleaned up), so the payload outlives them all.
-            return await DispatchPlan(ordered, failFast, prepared, planRun, ct).ConfigureAwait(false);
+            var result = await DispatchPlan(ordered, failFast, prepared, planRun, ct).ConfigureAwait(false);
+            return bases.Count == 0 ? result : await WithPlanBaselinesAsync(ordered, result, bases, planRun, prepared.Payload, ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The base commit of every plan job with baseline: true (<see cref="ResolveBaseAsync"/>, once per distinct baseline_ref), before anything is
+    /// built or sent: by job name, or the plan refused (Rejected 2, "job 'unit': ...") at the first job whose base cannot be resolved.
+    /// </summary>
+    private async Task<(Dictionary<string, BaseCommit> Bases, PlanRunResult? Refused)> ResolvePlanBasesAsync(IReadOnlyList<PlanJobSpec> ordered, CancellationToken ct)
+    {
+        var bases = new Dictionary<string, BaseCommit>(StringComparer.Ordinal);
+        var byRef = new Dictionary<string, BaseCommit>(StringComparer.Ordinal);
+        foreach (var spec in ordered.Where(j => j.Request.Baseline))
+        {
+            // A baseline_ref from lanq.yml (a file of the repository, not the developer's own command line) must name a branch or tag: a commit
+            // id or HEAD~n could pick any old commit and send its tree to a worker. --baseline-ref on the command line takes any commit. The
+            // exact full ref the check found is what is resolved, so the check and the resolution see the same object.
+            var request = spec.Request;
+            string? fullRef = null;
+            if (request.BaselineRef is { } named)
+            {
+                var checkedRef = await payloads.BranchOrTagAsync(request.RepoDir, named, ct).ConfigureAwait(false);
+                if (checkedRef.FullRef is null)
+                {
+                    return (bases, new PlanRunResult(nameof(JobStatus.Rejected), 2, $"{spec.Where ?? $"job '{spec.Name}'"}: {checkedRef.Error ?? BaseRef.PlanRefMessage}", [])
+                    {
+                        Decided = spec.Name,
+                        RejectKind = Jobs.RejectKind.PlanFile,
+                    });
+                }
+
+                fullRef = checkedRef.FullRef;
+                request = request with { BaselineRef = fullRef };
+            }
+
+            var key = fullRef ?? "";
+            if (!byRef.TryGetValue(key, out var b))
+            {
+                var (resolved, refused) = await ResolveBaseAsync("plan", request, ct).ConfigureAwait(false);
+                if (refused is not null)
+                {
+                    return (bases, new PlanRunResult(refused.Status.ToString(), refused.CliExitCode, $"job '{spec.Name}': {refused.Message}", [])
+                    {
+                        Decided = spec.Name,
+                        RejectKind = refused.RejectKind,
+                    });
+                }
+
+                // Shown as written in lanq.yml (main), though resolved as its full ref (refs/heads/main).
+                b = fullRef is null || spec.Request.BaselineRef is not { } written
+                    ? resolved!
+                    : resolved! with { Ref = written, Label = resolved.Label.Replace(fullRef, written, StringComparison.Ordinal) };
+                byRef[key] = b;
+            }
+
+            bases[spec.Name] = b;
+        }
+
+        return (bases, null);
+    }
+
+    /// <summary>
+    /// baseline: true in a plan: after every job has ended, the failed jobs that asked for it (a single job that ended Failed, or each Failed
+    /// shard of a sharded job; never a job Skipped after them) are rerun at their base all at once. Each result goes on its job (or shard); the
+    /// plan's status, exit code and message stay as they are. Nothing reruns after Ctrl+C: each such job's baseline is inconclusive, "cancelled
+    /// (Ctrl+C) before it started".
+    /// </summary>
+    private async Task<PlanRunResult> WithPlanBaselinesAsync(
+        IReadOnlyList<PlanJobSpec> ordered, PlanRunResult result, Dictionary<string, BaseCommit> bases, string planRun, JobPayload snapshot, CancellationToken ct)
+    {
+        var targets = new List<(string Name, int? Shard, BaselineTarget Target)>();
+        foreach (var j in result.Jobs)
+        {
+            if (!bases.TryGetValue(j.Name, out var b) || ordered.FirstOrDefault(s => s.Name == j.Name) is not { } spec)
+            {
+                continue;
+            }
+
+            var req = spec.Request with { PlanJob = spec.Name, PlanRun = planRun };
+            if (j.Single is { Status: JobStatus.Failed } one)
+            {
+                targets.Add((j.Name, null, new BaselineTarget(req, b, one.JobId, one.Machine)));
+            }
+
+            foreach (var s in j.Sharded?.Shards.Where(x => x.Status == nameof(JobStatus.Failed) && x.JobId is not null) ?? [])
+            {
+                targets.Add((j.Name, s.Index, new BaselineTarget(ShardRequest(req, new ShardInfo(s.Index, j.Sharded!.Count)), b, s.JobId!, s.Machine)));
+            }
+        }
+
+        if (targets.Count == 0)
+        {
+            return result;
+        }
+
+        var baselines = await RunBaselinesAsync([.. targets.Select(t => t.Target)], snapshot, ct).ConfigureAwait(false);
+        var found = targets.Zip(baselines).ToDictionary(x => (x.First.Name, x.First.Shard), x => x.Second);
+        return result with
+        {
+            Jobs = [.. result.Jobs.Select(j =>
+            {
+                var single = found.GetValueOrDefault((j.Name, (int?)null));
+                var sharded = j.Sharded is { } r
+                    ? r with { Shards = [.. r.Shards.Select(s => found.TryGetValue((j.Name, s.Index), out var sb) ? s with { Baseline = sb } : s)] }
+                    : null;
+                return j with { Baseline = single ?? j.Baseline, Sharded = sharded };
+            })],
+        };
     }
 
     /// <summary>

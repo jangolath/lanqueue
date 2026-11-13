@@ -55,7 +55,11 @@ public static partial class Cli
 
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
         var ordered = PlanGraph.Order(selection, expected);
-        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name]) { FileOrder = j.Index }).ToList();
+        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name])
+        {
+            FileOrder = j.Index,
+            Where = string.Create(CultureInfo.InvariantCulture, $"{Path.GetFileName(plan.Path)}: job '{j.Name}' (line {j.Line})"),
+        }).ToList();
         var jobArgs = ordered.ToDictionary(j => j.Name, j => j.Args, StringComparer.Ordinal);
         if (p.DryRun)
         {
@@ -113,6 +117,7 @@ public static partial class Cli
 
         // What to do next, then the logs of the jobs that did not complete (--json carries every logPath); all before the status line.
         var next = NextSteps.ForPlanFile(p, result, jobArgs);
+        await WriteBaselineLines(stderr, PlanBaselines(result)).ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json)
         {
@@ -206,6 +211,23 @@ public static partial class Cli
         return sb.ToString();
     }
 
+    /// <summary>Every baseline rerun of a plan, labelled "job unit " (a shard: "job unit shard 2/3 "), in launch order.</summary>
+    internal static IEnumerable<(string Label, BaselineResult Baseline)> PlanBaselines(PlanRunResult result)
+    {
+        foreach (var j in result.Jobs)
+        {
+            if (j.Baseline is { } b)
+            {
+                yield return ($"job {j.Name} ", b);
+            }
+
+            foreach (var s in j.Sharded?.Shards.Where(s => s.Baseline is not null) ?? [])
+            {
+                yield return (string.Create(CultureInfo.InvariantCulture, $"job {j.Name} shard {s.Index}/{j.Sharded!.Count} "), s.Baseline!);
+            }
+        }
+    }
+
     /// <summary>"[lanq] log: PATH (build)" for each job, and "(unit 2/3)" for each shard, that did not complete and has a log.</summary>
     internal static IEnumerable<string> PlanLogLines(PlanRunResult result)
     {
@@ -232,7 +254,11 @@ public static partial class Cli
         Math.Round(elapsed.TotalSeconds, 1),
         JobRunner.SafeLine(result.Message),
         order,
-        [.. result.Jobs.Select(j => PlanJobJsonOf(j, specs.FirstOrDefault(s => s.Name == j.Name)?.Request.Fetch is not null, logTail))])
+        [.. result.Jobs.Select(j =>
+        {
+            var req = specs.FirstOrDefault(s => s.Name == j.Name)?.Request;
+            return PlanJobJsonOf(j, req?.Fetch is not null, logTail) with { Env = req is null ? null : EnvNames(req.Env), Exclusive = Flag(req?.Exclusive == true) };
+        })])
         {
             Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
             Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
@@ -268,6 +294,7 @@ public static partial class Cli
             FetchDir = single?.FetchDir,
             FetchError = single?.FetchError,
             ShardTiming = TimingJson(j.Sharded?.Timing),
+            Baseline = BaselineJsonOf(j.Baseline),
         };
     }
 
@@ -390,8 +417,10 @@ public static partial class Cli
             ShardTiming = TimingJson(x.Second.Timing),
             ExpectedMinutes = expected(x.First) is { } s ? Math.Round(s / 60, 1) : null,
             Machines = [.. x.Second.Assessed.Select(a => new PlanMachineJson(
-                JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } w ? JobRunner.SafeLine(w) : null, a.Permanent, a.FreeSlots, a.JobSlots))],
+                JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } w ? JobRunner.SafeLine(w) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, x.First.Args.Exclusive)))],
             Retryable = x.Second.Retryable,
+            Env = EnvNames(x.First.Args.Env),
+            Exclusive = Flag(x.First.Args.Exclusive),
         })],
     };
 }

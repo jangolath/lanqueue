@@ -53,7 +53,7 @@ public static partial class RemoteScripts
             } catch { } }
             if ($null -eq $cpu) { $cpu = 0 }
             $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
-            $slots = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }).Count
+            $sf = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }); $slots = $sf.Count
             'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
             'load_source=' + $ls
             'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
@@ -67,6 +67,7 @@ public static partial class RemoteScripts
             'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
             'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
             $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $s = $e - ($e % 900)
+            {{WindowsStaleSlotCount}}
             'now_epoch=' + $e
             'tz_start=' + $s
             'tz_offsets=' + ((0..144 | ForEach-Object { [int][TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds($s + 900 * $_)).TotalMinutes }) -join ',')
@@ -82,6 +83,7 @@ public static partial class RemoteScripts
             echo "load=$(awk -v l="$l" -v c="$cpus" 'BEGIN{printf "%.3f", l/c}')"
             echo "disk_free_gb=$(df -Pk "$d" | awk 'NR==2{printf "%.1f", $4/1048576}')"
             echo "slots_used=$(ls "$R/locks" 2>/dev/null | grep -c '^slot-[0-9][0-9]*$')"
+            {{LinuxStaleSlotCount}}
             awk '/^MemAvailable:/{print "mem_free_gb=" sprintf("%.2f", $2/1048576)} /^MemTotal:/{print "mem_total_gb=" sprintf("%.2f", $2/1048576)} /^SwapFree:/{print "swap_free_gb=" sprintf("%.2f", $2/1048576)}' /proc/meminfo 2>/dev/null
             if [ -n "$n" ]; then echo "cores=$n"; fi
             if [ -r /proc/pressure/memory ]; then awk '$1=="some"{for(i=2;i<=NF;i++) if(index($i,"avg10=")==1) print "mem_pressure=" substr($i,7)}' /proc/pressure/memory 2>/dev/null; fi
@@ -240,10 +242,68 @@ public static partial class RemoteScripts
     internal const int StaleSlotGraceSeconds = 1800;
 
     /// <summary>
+    /// The probe's <c>slots_stale=</c> on Windows (needs $sf, the probe's slot-N files, and $e, the worker's epoch now): how many slot-N files a claim would reclaim now, by the reclaim's own rules in
+    /// <see cref="AcquireSlot"/> (a second line of 1 to 18 digits, and the worker's epoch now more than <see cref="StaleSlotGraceSeconds"/>
+    /// past it). A slot without a deadline, with a malformed one, or still inside the grace is not stale.
+    /// </summary>
+    internal static string WindowsStaleSlotCount =>
+        "'slots_stale='+@($sf|?{try{$x=[IO.File]::ReadAllText($_.FullName) -split \"`n\";$x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\\z' -and $e -gt [long]$x[1].Trim()+"
+        + StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture) + "}catch{}}).Count";
+
+    /// <summary>The probe's <c>slots_stale=</c> on Linux (needs $R): as <see cref="WindowsStaleSlotCount"/>, with deadline_of's rules (leading zeros stripped).</summary>
+    internal static string LinuxStaleSlotCount =>
+        "sn=0; ne=$(date +%s); for sf in \"$R\"/locks/slot-*; do case \"${sf##*/}\" in slot-|slot-*[!0-9]*) continue ;; esac; [ -f \"$sf\" ] || continue; "
+        + "dl=$(sed -n 2p \"$sf\" 2>/dev/null); case \"$dl\" in ''|*[!0-9]*) continue ;; esac; [ ${#dl} -le 18 ] || continue; dl=$(printf '%s' \"$dl\" | sed 's/^0*//'); "
+        + "if [ \"$ne\" -gt $((${dl:-0} + " + StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture) + ")) ]; then sn=$((sn+1)); fi; done; echo \"slots_stale=$sn\"";
+
+    /// <summary>
     /// Added to the job timeout for a slot's deadline: ensure, upload and prepare (twice with a full-bundle fallback), the --fetch step
     /// (<see cref="JobRunner.FetchTimeout"/>) and cleanup.
     /// </summary>
     internal static readonly TimeSpan SlotTransferAllowance = TimeSpan.FromMinutes(50);
+
+    /// <summary>The line a claim prints for a stale slot it could not reclaim (<see cref="WindowsReclaimFunction"/>): "RECLAIM=STUCK slot-N".</summary>
+    internal const string ReclaimStuckMarker = "RECLAIM=STUCK ";
+
+    /// <summary>How old a slot's .reclaim lock must be before a claim that cannot take it calls the slot stuck (a live reclaim takes seconds).</summary>
+    internal const int ReclaimLockStuckSeconds = 60;
+
+    /// <summary>
+    /// <c>Reclaim $f $i</c> (needs $root, $now and <see cref="WindowsSlotFunctions"/>): reclaims slot <c>$f</c> when it is more than
+    /// <see cref="StaleSlotGraceSeconds"/> past its deadline, exactly as the claims always did (under its lock, read again there, its job
+    /// stopped, renamed away, deleted). When it was stale and still holds the same stale content afterwards, it prints
+    /// <see cref="ReclaimStuckMarker"/>slot-N: the reclaim took the lock but could not move or delete the file, or could not take the lock
+    /// because none could be created or another holds one older than <see cref="ReclaimLockStuckSeconds"/> (a dead reclaimer's; such a lock is
+    /// cleared after 10 minutes). A younger lock is a reclaim in progress: no marker. Prints nothing otherwise.
+    /// </summary>
+    internal static string WindowsReclaimFunction => """
+        function Reclaim($f,$i){try{$c=$IOFile::ReadAllText($f)}catch{return};$l=$c -split "`n"
+        if(!($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+GRACE))){return}
+        if(Take $f){try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";try{$IOFile::Move($f,$t)}catch{Start-Sleep -Milliseconds 200;$IOFile::Move($f,$t)};$IOFile::Delete($t)} }catch{}finally{Drop $f}}
+        elseif($IOFile::Exists("$f.reclaim") -and $IOFile::GetLastWriteTimeUtc("$f.reclaim") -ge [DateTime]::UtcNow.AddSeconds(-LOCKAGE)){return}
+        try{if($IOFile::ReadAllText($f) -ceq $c){"RECLAIM=STUCK slot-$i"}}catch{}}
+        """.Replace("GRACE", StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+        .Replace("LOCKAGE", ReclaimLockStuckSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+
+    /// <summary><c>reclaim FILE</c> (needs $R, $now and <see cref="LinuxSlotFunctions"/>): as <see cref="WindowsReclaimFunction"/>, in sh.</summary>
+    internal static string LinuxReclaimFunction => """
+        reclaim() {
+          [ -f "$1" ] || return 0
+          c=$(cat "$1" 2>/dev/null)
+          d=$(deadline_of "$c") && [ "$now" -gt $((d + GRACE)) ] || return 0
+          if take "$1"; then
+            if [ "$(cat "$1" 2>/dev/null)" = "$c" ]; then
+              stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
+              { mv "$1" "$1.stale.$$" 2>/dev/null || { sleep 0.2 2>/dev/null || sleep 1; mv "$1" "$1.stale.$$" 2>/dev/null; }; } && rm -f "$1.stale.$$"
+            fi
+            drop "$1"
+          elif [ -e "$1.reclaim" ] && [ -z "$(find "$1.reclaim" -mmin +MINUTES 2>/dev/null)" ]; then
+            return 0
+          fi
+          if [ -f "$1" ] && [ "$(cat "$1" 2>/dev/null)" = "$c" ]; then echo "RECLAIM=STUCK ${1##*/}"; fi
+        }
+        """.Replace("GRACE", StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+        .Replace("MINUTES", (ReclaimLockStuckSeconds / 60).ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
 
     /// <summary>
     /// Atomically claims one of max_jobs slot files. Prints SLOT=n or SLOT=FULL. The slot file holds the job id and, on its second line,
@@ -252,27 +312,22 @@ public static partial class RemoteScripts
     /// file (<c>slot-N.reclaim</c>, created exclusively): the slot is read again there and only if it is still the stale file, its job is
     /// stopped if it is somehow still running (see <see cref="LinuxSlotFunctions"/>), then it is renamed away to a unique name and deleted,
     /// and the slot is created afresh like any free one (another claimer may win it; then the next slot is tried). There is no step that
-    /// puts a file back. A slot without a deadline, or with a deadline that is not 1 to 18 decimal digits, is never reclaimed.
+    /// puts a file back. A slot without a deadline, or with a deadline that is not 1 to 18 decimal digits, is never reclaimed. A stale slot
+    /// it could not reclaim adds a <see cref="ReclaimStuckMarker"/> line (see <see cref="WindowsReclaimFunction"/>) before SLOT=.
     /// </summary>
     public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout)
     {
         var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
         var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
-        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
         return m.Os == MachineOs.Windows
             ? $$"""
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
                 [void][IO.Directory]::CreateDirectory("$root/locks")
                 $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
-                {{WindowsSlotFunctions}}
+                {{WindowsSlotFunctionsPacked}}
                 for($i=1;$i -le {{max}};$i++){
                   $f="$root/locks/slot-$i"
-                  try {
-                    $c=$IOFile::ReadAllText($f);$l=$c -split "`n"
-                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+{{grace}}) -and (Take $f)) {
-                      try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}
-                    }
-                  } catch { }
+                  Reclaim $f $i
                   try {
                     $fs=$IOFile::Open($f,'CreateNew','Write','None')
                     $b=[Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}}+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close()
@@ -286,23 +341,102 @@ public static partial class RemoteScripts
                 mkdir -p "$R/locks"
                 now=$(date +%s); D=$((now + {{lease}}))
                 {{LinuxSlotFunctions}}
+                {{LinuxReclaimFunction}}
                 i=1
                 while [ "$i" -le {{max}} ]; do
                   f="$R/locks/slot-$i"
-                  if [ -f "$f" ]; then
-                    c=$(cat "$f" 2>/dev/null)
-                    if d=$(deadline_of "$c") && [ "$now" -gt $((d + {{grace}})) ] && take "$f"; then
-                      if [ "$(cat "$f" 2>/dev/null)" = "$c" ]; then
-                        stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
-                        mv "$f" "$f.stale.$$" 2>/dev/null && rm -f "$f.stale.$$"
-                      fi
-                      drop "$f"
-                    fi
-                  fi
+                  reclaim "$f"
                   if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
                   i=$((i+1))
                 done
                 echo "SLOT=FULL"
+                """;
+    }
+
+    /// <summary>
+    /// <see cref="WindowsSlotFunctions"/> and <see cref="WindowsReclaimFunction"/> (lanq's own constant text) deflated and dot-sourced, so the
+    /// claims stay under the Windows command-line cap; it defines the same functions and variables in the same scope.
+    /// </summary>
+    internal static readonly string WindowsSlotFunctionsPacked =
+        ". ([scriptblock]::Create((New-Object IO.StreamReader (New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('"
+        + Deflated(WindowsSlotFunctions + "\n" + WindowsReclaimFunction) + "')), ([IO.Compression.CompressionMode]::Decompress))).ReadToEnd()))";
+
+    /// <summary>
+    /// lanq run --exclusive: claims EVERY slot file, slot-1 to slot-max_jobs in ascending order, each exactly as <see cref="AcquireSlot"/>
+    /// claims one (the same atomic create, the same content: job id and deadline, and the same stale reclaim under the slot's lock file,
+    /// with the same <see cref="ReclaimStuckMarker"/> line for a stale slot it could not reclaim).
+    /// Prints <c>SLOTS=1,2,...,n</c> when it holds them all. At the first slot it cannot create it removes the slots this attempt created
+    /// (each only if its first line is still this job id) and prints <c>SLOT=FULL</c>: all or nothing. The ascending order means two
+    /// exclusive claims never deadlock; at worst both back off and one wins on a later look. Each slot file is an ordinary slot, so the
+    /// probe, <see cref="Unlock"/> and a later stale reclaim (slot by slot) treat them as they treat any other.
+    /// Once it holds them all it also looks above max_jobs: a live slot-N with N above max_jobs (another lanq with a higher max_jobs for the
+    /// same work_root runs a job there; one past its deadline plus the grace does not count) makes it back out and print <c>SLOT=FULL</c> too.
+    /// </summary>
+    public static string AcquireAll(Machine m, string jobId, TimeSpan jobTimeout)
+    {
+        var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
+        var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
+        // The sh loop keeps its own names (sf, n, nn, got): stop_job's kill_recorded used f and g as globals once.
+        return m.Os == MachineOs.Windows
+            ? $$"""
+                $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+                [void][IO.Directory]::CreateDirectory("$root/locks")
+                $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
+                {{WindowsSlotFunctionsPacked}}
+                $jid={{ShellQuote.PowerShell(jobId)}};$got=@()
+                function BO{foreach($n in $got){$g="$root/locks/slot-$n";try{if(($IOFile::ReadAllText($g) -split "`n")[0].Trim() -ceq $jid){$IOFile::Delete($g)} }catch{} };'SLOT=FULL';exit 0}
+                function HL{foreach($h in (gci "$root/locks" -Filter slot-* -EA 0)){if($h.Name -notmatch '^slot-0*([0-9]+)\z' -or ($Matches[1].Length -lt 10 -and [long]$Matches[1] -le {{max}})){continue};try{$x=$IOFile::ReadAllText($h.FullName) -split "`n"}catch [IO.FileNotFoundException]{continue}catch{return 1};if(!($x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$x[1].Trim()+{{grace}}))){return 1} };0}
+                for($i=1;$i -le {{max}};$i++){
+                  $f="$root/locks/slot-$i"
+                  Reclaim $f $i
+                  $ok=$false
+                  try {
+                    $fs=$IOFile::Open($f,'CreateNew','Write','None')
+                    $b=[Text.Encoding]::UTF8.GetBytes($jid+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close();$ok=$true
+                  }catch [IO.IOException]{}
+                  if($ok){$got+=$i;continue}
+                  BO
+                }
+                if(HL){BO}
+                'SLOTS='+($got -join ',')
+                """
+            : $$"""
+                R={{ShellQuote.Posix(m.WorkRoot)}}
+                mkdir -p "$R/locks"
+                now=$(date +%s); D=$((now + {{lease}}))
+                {{LinuxSlotFunctions}}
+                {{LinuxReclaimFunction}}
+                J={{ShellQuote.Posix(jobId)}}; got=
+                back_out() {
+                  n=1
+                  while [ "$n" -lt "$i" ]; do
+                    sf="$R/locks/slot-$n"
+                    if [ "$(sed -n 1p "$sf" 2>/dev/null)" = "$J" ]; then rm -f "$sf"; fi
+                    n=$((n+1))
+                  done
+                  echo "SLOT=FULL"; exit 0
+                }
+                higher_live() {
+                  for sf in "$R"/locks/slot-*; do
+                    case "${sf##*/}" in slot-|slot-*[!0-9]*) continue ;; esac
+                    [ -f "$sf" ] || continue
+                    nn=$(printf '%s' "${sf##*/slot-}" | sed 's/^0*//')
+                    if [ ${#nn} -le 9 ] && [ "${nn:-0}" -le {{max}} ]; then continue; fi
+                    if d=$(deadline_of "$(cat "$sf" 2>/dev/null)") && [ "$now" -gt $((d + {{grace}})) ]; then continue; fi
+                    return 0
+                  done
+                  return 1
+                }
+                i=1
+                while [ "$i" -le {{max}} ]; do
+                  sf="$R/locks/slot-$i"
+                  reclaim "$sf"
+                  if ( set -C; printf '%s\n%s\n' "$J" "$D" > "$sf" ) 2>/dev/null; then got="$got${got:+,}$i"; i=$((i+1)); continue; fi
+                  back_out
+                done
+                if higher_live; then back_out; fi
+                echo "SLOTS=$got"
                 """;
     }
 
@@ -451,7 +585,8 @@ public static partial class RemoteScripts
     /// <summary>
     /// Git mode: verifies the uploaded bundle against the bare per-repository cache <c>repos/&lt;repoId&gt;.git</c> (printing
     /// <see cref="BundleNotUsable"/> and failing if its prerequisites are missing), fetches it, moves <c>refs/lanq/base</c> to the snapshot
-    /// (keeping it alive as the next incremental base) and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
+    /// (keeping it alive as the next incremental base) unless the snapshot is an ancestor of the current base (a lanq run --baseline rerun of an
+    /// older commit: the newer base stays, so the next run's bundle stays small), and adds a detached per-job worktree. Archive mode ignores <paramref name="repoId"/>.
     /// </summary>
     /// <param name="bundleRef">The id the bundle carries the snapshot under (refs/lanq/&lt;bundleRef&gt;): the payload id shared by every shard of one
     /// run; null means <paramref name="jobId"/>. The job's own ref in the cache is always refs/lanq/&lt;jobId&gt;.</param>
@@ -533,7 +668,11 @@ public static partial class RemoteScripts
             $ErrorActionPreference = 'Stop'
             if (-not $ok) { '{{BundleNotUsable}}'; exit 3 }
             G -c protocol.file.allow=always -C $c fetch -q "$root/incoming/$id.bundle" "refs/lanq/${b}:refs/lanq/${id}"
-            G -C $c update-ref refs/lanq/base "refs/lanq/$id"
+            $ErrorActionPreference = 'Continue'
+            Q -C $c merge-base --is-ancestor "refs/lanq/$id" refs/lanq/base 2>&1 | Out-Null
+            $older = $LASTEXITCODE -eq 0
+            $ErrorActionPreference = 'Stop'
+            if (-not $older) { G -C $c update-ref refs/lanq/base "refs/lanq/$id" }
             G -C $c worktree add -q --detach "$root/jobs/$id" "refs/lanq/$id"
             """
         : $$"""
@@ -550,7 +689,7 @@ public static partial class RemoteScripts
             rm -rf "$C/info/attributes"
             G -C "$C" bundle verify "$R/incoming/$ID.bundle" >/dev/null 2>&1 || { echo '{{BundleNotUsable}}'; exit 3; }
             G -c protocol.file.allow=always -C "$C" fetch -q "$R/incoming/$ID.bundle" "refs/lanq/$B:refs/lanq/$ID"
-            G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
+            G -C "$C" merge-base --is-ancestor "refs/lanq/$ID" refs/lanq/base >/dev/null 2>&1 || G -C "$C" update-ref refs/lanq/base "refs/lanq/$ID"
             G -C "$C" worktree add -q --detach "$R/jobs/$ID" "refs/lanq/$ID"
             """;
 
@@ -583,8 +722,12 @@ public static partial class RemoteScripts
     /// and nowhere else (not in the job's environment), so a job that prints a marker-like line cannot pass it off as the wrapper's. Null
     /// leaves it out (tests that run the wrapper by hand).
     /// </param>
+    /// <param name="env">
+    /// lanq run --env: the job's own variables (already checked: <see cref="JobEnv"/>), set in the given order after the machine's env: and
+    /// before LANQ_JOB, LANQ_SHARD(S) and LANQ_PLAN_JOB, so lanq's own variables always win. Null or empty sets none.
+    /// </param>
     public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null, string? planJob = null,
-        string? nonce = null)
+        string? nonce = null, IReadOnlyList<JobEnvVar>? env = null)
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
@@ -608,6 +751,7 @@ public static partial class RemoteScripts
                 $p=Get-Item -LiteralPath $here
                 while($p.FullName.Length -gt $wr.Length){if($p.Attributes -band [IO.FileAttributes]::ReparsePoint){exit 126};$p=$p.Parent}
                 {{JobEnvironmentPowerShell(m)}}
+                {{JobEnvPowerShell(env)}}
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{ShardEnvironmentPowerShell(shard)}}
                 {{PlanJobEnvironmentPowerShell(planJob)}}
@@ -645,7 +789,7 @@ public static partial class RemoteScripts
             T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
-            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob, env)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
             printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
@@ -675,9 +819,12 @@ public static partial class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null)
+    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null, IReadOnlyList<JobEnvVar>? env = null)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
+
+        // The job's --env, in the order given: after the machine's (a clash is refused before this), before lanq's own.
+        words.AddRange((env ?? []).Select(e => ShellQuote.Posix(SafeJobEnvName(e.Name) + "=" + e.Value)));
         if (jobId is not null)
         {
             // After the machine's own env: words, so the marker wins even if one named it (config refuses LANQ_* names anyway).
@@ -790,6 +937,27 @@ public static partial class RemoteScripts
     private static string ShardEnvironmentPowerShell(ShardInfo? shard) =>
         shard is null ? "" : string.Join('\n', ShardVariables(shard).Select(v => $"$env:{v.Name} = '{v.Value}'"));
 
+    /// <summary>A job's --env name, checked again here (a valid name, not on the deny table) before it is written into a script.</summary>
+    private static string SafeJobEnvName(string name) =>
+        JobEnv.IsValidName(name) && !JobEnv.IsJobDenied(name) ? name : throw new ArgumentException("Invalid job variable name.", nameof(name));
+
+    /// <summary>A job's --env as PowerShell lines ($env:NAME = 'value'), in the order given; empty for none.</summary>
+    private static string JobEnvPowerShell(IReadOnlyList<JobEnvVar>? env) =>
+        string.Join('\n', (env ?? []).Select(e => $"$env:{SafeJobEnvName(e.Name)} = {ShellQuote.PowerShell(e.Value)}"));
+
+    /// <summary>The shortest job arguments that still bring the native .exe check into the Windows job script (a one-letter program and a |).</summary>
+    private static readonly string[] WorstCaseArgv = ["x", "|"];
+
+    /// <summary>
+    /// The Windows job script's encoded length at its largest for a machine, before any job arguments: the largest LANQ_SHARD / LANQ_SHARDS,
+    /// the longest LANQ_PLAN_JOB, and the native .exe check a job given &amp; or | carries, plus the job's own <paramref name="env"/> (none for
+    /// the config check). Over <see cref="MaxWindowsCommandLength"/> every such job there would fail.
+    /// </summary>
+    internal static int WorstCaseWindowsCommandLength(Machine m, IReadOnlyList<JobEnvVar>? env = null) =>
+        WindowsCommand(Execute(
+            m, "20260101-000000-000000", ".", WorstCaseArgv, JobRequest.DefaultTimeout, new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards),
+            new string('x', Plan.PlanFileLoader.MaxNameLength), new string('0', 16), env)).Length;
+
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
     internal static string JobEnvironmentPowerShell(Machine m)
     {
@@ -819,8 +987,8 @@ public static partial class RemoteScripts
     internal const string LinuxKillRecordedFunction = """
         kill_recorded() {
           kp="$1"; [ -f "$kp" ] || return 0
-          g=$(sed -n 1p "$kp" 2>/dev/null); st=$(sed -n 2p "$kp" 2>/dev/null); bt=$(sed -n 3p "$kp" 2>/dev/null)
-          case "$g" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
+          kg=$(sed -n 1p "$kp" 2>/dev/null); st=$(sed -n 2p "$kp" 2>/dev/null); bt=$(sed -n 3p "$kp" 2>/dev/null)
+          case "$kg" in ''|*[!0-9]*) rm -f "$kp"; return 0 ;; esac
           case "$st" in *[!0-9]*) st= ;; esac
           case "$bt" in *[!0-9a-f-]*) bt= ;; esac
           case "$3" in ''|*[!A-Za-z0-9_-]*) rm -f "$kp"; return 0 ;; esac
@@ -828,21 +996,21 @@ public static partial class RemoteScripts
           if [ -n "$st" ] && [ -d /proc/self ]; then
             if [ -z "$bt" ] || [ "$bt" != "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ]; then
               :
-            elif [ -r "/proc/$g/stat" ]; then
-              [ "$(sed -n 's/.*) //p' "/proc/$g/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ] && mine=1
-            elif kill -s 0 -- "-$g" 2>/dev/null; then
-              for f in /proc/[0-9]*/stat; do
-                [ "$(sed -n 's/.*) //p' "$f" 2>/dev/null | cut -d' ' -f3)" = "$g" ] || continue
-                if { tr '\000' '\n' < "${f%/stat}/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
+            elif [ -r "/proc/$kg/stat" ]; then
+              [ "$(sed -n 's/.*) //p' "/proc/$kg/stat" 2>/dev/null | cut -d' ' -f20)" = "$st" ] && mine=1
+            elif kill -s 0 -- "-$kg" 2>/dev/null; then
+              for kf in /proc/[0-9]*/stat; do
+                [ "$(sed -n 's/.*) //p' "$kf" 2>/dev/null | cut -d' ' -f3)" = "$kg" ] || continue
+                if { tr '\000' '\n' < "${kf%/stat}/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3"; then mine=1; break; fi
               done
             fi
           elif [ -e /proc/self/cwd ]; then
             jd=$(cd -P "$2" 2>/dev/null && pwd -P) || jd="$2"
-            case "$(readlink "/proc/$g/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
-          elif [ "$(ps -o pgid= -p "$g" 2>/dev/null | tr -d ' ')" = "$g" ]; then
+            case "$(readlink "/proc/$kg/cwd" 2>/dev/null)" in "$jd"|"$jd"/*|"$jd (deleted)") mine=1 ;; esac
+          elif [ "$(ps -o pgid= -p "$kg" 2>/dev/null | tr -d ' ')" = "$kg" ]; then
             mine=1
           fi
-          if [ -n "$mine" ]; then kill -s TERM -- "-$g" 2>/dev/null; kill -s TERM "$g" 2>/dev/null; sleep 2; kill -s KILL -- "-$g" 2>/dev/null; kill -s KILL "$g" 2>/dev/null; fi
+          if [ -n "$mine" ]; then kill -s TERM -- "-$kg" 2>/dev/null; kill -s TERM "$kg" 2>/dev/null; sleep 2; kill -s KILL -- "-$kg" 2>/dev/null; kill -s KILL "$kg" 2>/dev/null; fi
           rm -f "$kp"
         }
         """;
@@ -876,6 +1044,8 @@ public static partial class RemoteScripts
     /// <summary>
     /// Best-effort teardown: worktree, ref, bundle, slot. Never fails the job. In git mode without a repository id (nothing was fetched
     /// into a cache) only the cache steps are left out: the job's process, folder, bundle and slot are still removed.
+    /// <paramref name="slot"/> is what <see cref="JobRunner.ParseSlot"/> returned: one slot ("2"), removed as always, or an exclusive job's
+    /// list ("1,2,3,4", from <see cref="AcquireAll"/>), each of which is removed only while its first line is still this job's id.
     /// </summary>
     public static string Cleanup(Machine m, string jobId, string slot, string? repoId = null) =>
         m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot, repoId is null ? null : SafeRepoId(repoId));
@@ -894,14 +1064,14 @@ public static partial class RemoteScripts
               if (Test-Path -LiteralPath $jd) { Write-Output "cleanup incomplete: $jd could not be removed"; $rc = 1 }
             }
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.tar.gz", "$root/incoming/$id.list"
-            Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
+            {{WindowsSlotRemoval(slot)}}
             exit $rc
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
             rm -rf "$R/jobs/$ID"
-            rm -f "$R/incoming/$ID.tar.gz" "$R/incoming/$ID.list" "$R/locks/slot-{{SafeSlot(slot)}}"
+            {{LinuxSlotRemoval(slot, "rm -f \"$R/incoming/$ID.tar.gz\" \"$R/incoming/$ID.list\"")}}
             exit 0
             """;
 
@@ -915,7 +1085,7 @@ public static partial class RemoteScripts
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
             {{(repoId is null ? "" : WindowsCacheCleanupAfter)}}
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
-            Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
+            {{WindowsSlotRemoval(slot)}}
             exit 0
             """
         : $$"""
@@ -924,7 +1094,7 @@ public static partial class RemoteScripts
             {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
             {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}
-            rm -f "$R/incoming/$ID.bundle" "$R/locks/slot-{{SafeSlot(slot)}}"
+            {{LinuxSlotRemoval(slot, "rm -f \"$R/incoming/$ID.bundle\"")}}
             exit 0
             """;
 
@@ -960,4 +1130,40 @@ public static partial class RemoteScripts
         int.TryParse(slot, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0
             ? n.ToString(CultureInfo.InvariantCulture)
             : throw new ArgumentException("Invalid slot id.", nameof(slot));
+
+    /// <summary>The slot ids of "2" or "1,2,3,4", each a positive whole number (anything else throws, so no text reaches a script).</summary>
+    private static List<string> SafeSlots(string slot) => [.. slot.Split(',').Select(SafeSlot)];
+
+    /// <summary>
+    /// Cleanup's slot step on Windows (needs $root and $id): each of the job's slots is removed only while the file's first line is still this
+    /// job's id. A slot that was reclaimed and claimed by another job in the meantime (for example by an exclusive job while this job's
+    /// controller was asleep past the stale grace) is left to that job.
+    /// </summary>
+    private static string WindowsSlotRemoval(string slot) =>
+        "foreach($n in @(" + string.Join(',', SafeSlots(slot)) + ")){$g=\"$root/locks/slot-$n\";try{if(([IO.File]::ReadAllText($g) -split \"`n\")[0].Trim() -ceq $id){[IO.File]::Delete($g)}}catch{}}";
+
+    /// <summary>
+    /// Cleanup's last step on Linux (needs $R and $ID): <paramref name="rm"/>, then each of the job's slots only while its first line is still
+    /// this job's id (as <see cref="WindowsSlotRemoval"/>).
+    /// </summary>
+    private static string LinuxSlotRemoval(string slot, string rm) => rm + "\n" + LinuxCheckedSlotLoop(SafeSlots(slot));
+
+    private static string LinuxCheckedSlotLoop(IEnumerable<string> slots) =>
+        "for n in " + string.Join(' ', slots) + "; do if [ \"$(sed -n 1p \"$R/locks/slot-$n\" 2>/dev/null)\" = \"$ID\" ]; then rm -f \"$R/locks/slot-$n\"; fi; done";
+
+    /// <summary>The comment that starts <see cref="ReleaseClaim"/> (tests and logs recognise the call by it).</summary>
+    internal const string ReleaseClaimMarker = "# lanq: release the slots of a claim that did not report back";
+
+    /// <summary>
+    /// After a slot claim that never reported back (timed out, lost its connection, or printed something unreadable): removes every slot
+    /// file slot-1 to slot-max_jobs whose first line is this job's id, so slots the claim may have created do not block the machine until
+    /// their deadline plus the stale grace. Another job's slot is never touched (the same check as cleanup's).
+    /// </summary>
+    public static string ReleaseClaim(Machine m, string jobId)
+    {
+        var slots = Enumerable.Range(1, Math.Max(m.MaxJobs, 1)).Select(i => i.ToString(CultureInfo.InvariantCulture)).ToList();
+        return m.Os == MachineOs.Windows
+            ? ReleaseClaimMarker + "\n$root = " + ShellQuote.PowerShell(m.WorkRoot) + "; $id = " + ShellQuote.PowerShell(jobId) + "\n" + WindowsSlotRemoval(string.Join(',', slots)) + "\nexit 0"
+            : ReleaseClaimMarker + "\nR=" + ShellQuote.Posix(m.WorkRoot) + "; ID=" + ShellQuote.Posix(jobId) + "\n" + LinuxCheckedSlotLoop(slots) + "\nexit 0";
+    }
 }

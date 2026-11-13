@@ -189,6 +189,9 @@ Security, then Enable Account and Remote Enable for the build user.
 Every job runs with `LANQ_JOB=<job id>` in its environment (on Linux and Windows), besides the machine's own `env:`
 and `path_prepend:` (names starting with `LANQ_` are reserved, so `env:` cannot set them). A shard also gets
 `LANQ_SHARD` and `LANQ_SHARDS`, and a job of a plan file (`lanq run --plan`) `LANQ_PLAN_JOB=<its name in lanq.yml>`.
+A job run with `--env NAME=VALUE` (or `env:` in `lanq.yml`) also gets those variables, set after the machine's `env:`
+and before the `LANQ_*` ones; only names in your `policy.allowed_env` get that far. They are in the job's process
+environment, so other users of the worker can see them: they are for settings, never secrets.
 A build script may read them, for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
 the environment of long-running helper processes you want stopped with the job.
 
@@ -213,7 +216,8 @@ the environment of long-running helper processes you want stopped with the job.
 4. Run `lanq health`: the worker should show as ready, or as "hold short" with the reason. `lanq health --needs
    <caps>` also says whether it could take a job with those capabilities.
 
-If a `lanq` process was killed mid-job, its slot on the worker is reclaimed 30 minutes after the slot's deadline.
+If a `lanq` process was killed mid-job, its slot on the worker counts as stale 30 minutes after the slot's deadline: it no longer
+makes the machine busy (`lanq health` shows `(1 stale: reclaimed by the next claim)`), and the next claim reclaims it.
 `lanq unlock <name>` clears expired slots at once; `lanq unlock <name> --all --yes` clears every slot (including ones
 left by a lanq before 0.4) when you are sure nothing is running there.
 

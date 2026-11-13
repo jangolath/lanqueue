@@ -124,6 +124,8 @@ public static partial class Cli
         // What to do next, then the logs of the shards that did not complete (--json carries every shard's logPath); all before the status
         // line, which stays last.
         var next = NextSteps.ForShards(p, result);
+        await WriteBaselineLines(stderr, result.Shards.Where(s => s.Baseline is not null).Select(s => (string.Create(CultureInfo.InvariantCulture, $"shard {s.Index}/{result.Count} "), s.Baseline!)))
+            .ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json)
         {
@@ -136,7 +138,7 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next), LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
         }
 
         return result.ExitCode;
@@ -150,7 +152,12 @@ public static partial class Cli
         JobRunner.SafeLine(result.Message),
         [.. result.Shards.Select(s => WithFetch(
             WithLog(
-                new RunJson(s.Status, s.ExitCode, s.Machine, s.JobId, Math.Round(s.Duration.TotalSeconds, 1), JobRunner.SafeLine(s.Message)) { Shard = s.Index, Attempts = s.Attempts },
+                new RunJson(s.Status, s.ExitCode, s.Machine, s.JobId, Math.Round(s.Duration.TotalSeconds, 1), JobRunner.SafeLine(s.Message))
+                {
+                    Shard = s.Index,
+                    Attempts = s.Attempts,
+                    Baseline = BaselineJsonOf(s.Baseline),
+                },
                 s.LogPath,
                 logTail),
             fetch,

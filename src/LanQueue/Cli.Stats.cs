@@ -53,7 +53,7 @@ public static partial class Cli
         try
         {
             ct.ThrowIfCancellationRequested();
-            read = log.Read(ct);
+            read = log.ReadHistory(ct);
         }
         catch (OperationCanceledException) when (p.Json && ct.IsCancellationRequested)
         {

@@ -57,7 +57,9 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {plan.Status}: {JobRunner.SafeLine(plan.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(
+                PlanJsonOf(plan, p.LogTail, p.Exclusive) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline) },
+                LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
         return plan.ExitCode;
@@ -92,7 +94,7 @@ public static partial class Cli
             var best = plan.Ranked[0];
             var rest = plan.Ranked.Skip(1).Select(a => JobRunner.SafeLine(a.Machine.Name)).ToList();
             Line(string.Create(CultureInfo.InvariantCulture, $"Would run on: {JobRunner.SafeLine(best.Machine.Name)} (load {best.Health.LoadRatio:0.00}, slots free {best.FreeSlots}/{best.Machine.MaxJobs})")
-                + (rest.Count > 0 ? $", then {string.Join(", ", rest)} if that slot is taken" : ""));
+                + (rest.Count > 0 ? $", then {string.Join(", ", rest)} if {(p.Exclusive ? "that machine is no longer free" : "that slot is taken")}" : ""));
         }
         else
         {
@@ -126,11 +128,16 @@ public static partial class Cli
             var whyWidth = Math.Max(53, excluded.Max(a => JobRunner.SafeLine(JobRunner.WhyNot(a)).Length) + 2);
             foreach (var a in excluded)
             {
-                var byConfig = a.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs
+                var byConfig = a.Reason is Exclusion.MissingCapability or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
                     || (a.Reason == Exclusion.WrongSize && MachineSize.Declared(a.Machine) is not null);
                 var when = !a.Permanent ? "can change" : byConfig ? "never (config)" : "never (machine)";
                 Line($"  {JobRunner.SafeLine(a.Machine.Name).PadRight(nameWidth)}{JobRunner.SafeLine(JobRunner.WhyNot(a)).PadRight(whyWidth)}{when}");
             }
+        }
+
+        if (plan.Baseline is { } baseline)
+        {
+            Line("Baseline: " + JobRunner.SafeLine(baseline.Message) + " (a dry run runs nothing)");
         }
 
         if (plan.WouldWake is { } sleeper)
@@ -146,7 +153,7 @@ public static partial class Cli
         return sb.ToString();
     }
 
-    /// <summary>--timeout (when not the default), --fetch and --log-tail as lanq run would use them; null when none was given.</summary>
+    /// <summary>--timeout (when not the default), --fetch, --env, --exclusive and --log-tail as lanq run would use them; null when none was given.</summary>
     private static string? OptionsText(ParsedArgs p)
     {
         var parts = new List<string>();
@@ -163,6 +170,17 @@ public static partial class Cli
                 $"--fetch {JobRunner.SafeLine(string.Join(", ", p.Fetch))} into {JobRunner.SafeLine(p.FetchDir ?? ".lanq/artifacts")}/<job id>/ (at most {p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles} files, {JobRunner.Size(bytes)}; a dry run fetches nothing)"));
         }
 
+        if (p.Env.Count > 0)
+        {
+            // The values as typed: the run line holds them anyway, and this text is only printed once the secret scan passed.
+            parts.Add("--env " + JobRunner.SafeLine(string.Join(' ', p.Env.Select(e => e.Name + "=" + e.Value))));
+        }
+
+        if (p.Exclusive)
+        {
+            parts.Add("--exclusive (needs every slot of the machine; it waits while any is in use)");
+        }
+
         if (p.LogTail is { } tail)
         {
             parts.Add(string.Create(CultureInfo.InvariantCulture, $"--log-tail {tail} (empty: a dry run starts no job)"));
@@ -172,7 +190,13 @@ public static partial class Cli
     }
 
     /// <summary>The <see cref="PlanJson"/> of a plan, sanitised; logTail is empty with --log-tail (a dry run starts no job) and absent without it.</summary>
-    internal static PlanJson PlanJsonOf(JobPlan plan, int? logTail) => new(plan.Status, plan.ExitCode)
+    /// <summary>
+    /// A dry run's jobSlots for a machine: the copies of the job it could take now, except that an eligible machine for an --exclusive job
+    /// shows the slots that job would take, its max_jobs (it takes the machine whole: one copy, every slot).
+    /// </summary>
+    internal static int DryJobSlots(Scheduling.Assessment a, bool exclusive) => exclusive && a.JobSlots > 0 ? a.Machine.MaxJobs : a.JobSlots;
+
+    internal static PlanJson PlanJsonOf(JobPlan plan, int? logTail, bool exclusive = false) => new(plan.Status, plan.ExitCode)
     {
         Message = JobRunner.SafeLine(plan.Message),
         Machine = plan.Machine is { } m ? JobRunner.SafeLine(m) : null,
@@ -183,7 +207,7 @@ public static partial class Cli
         ShardTiming = TimingJson(plan.Timing),
         Placement = plan.Placement?.Select(x => new PlacementJson(JobRunner.SafeLine(x.Machine.Name), x.Shards)).ToList(),
         Machines = [.. plan.Assessed.Select(a => new PlanMachineJson(
-            JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, a.JobSlots))],
+            JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, exclusive)))],
         WouldWake = plan.WouldWake is { } w ? JobRunner.SafeLine(w) : null,
         Retryable = plan.Retryable,
         LogTail = logTail is null ? null : [],

@@ -4,6 +4,8 @@
 
 The developer sets up the pool (`machines.yml`, allowlists, SSH keys); a coding agent only runs `lanq health --json`, `lanq run --json` (with `--dry-run` to preview; `--size`/`--min-size` and `--on` to route), `lanq run --plan --json --no-wake` (the jobs of the repository's `lanq.yml`; `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`) and `lanq stats --json`, and follows the `nextSteps` lanq prints. It never edits `lanq.yml` or `machines.yml` to get around a refusal.
 
+Since 0.9.0 an agent may also add `--exclusive` (the job takes every slot of a machine; it waits for an idle one, with no reservation), `--baseline` / `--baseline-ref REF` (after a `Failed` run, the same command reruns at the base commit and the JSON gains `baseline.verdict`: `new`, `preexisting`, `inconclusive` or `skipped`; status and exit code never change) and `--env NAME=VALUE`, only for names the developer already lists in `machines.yml` `policy.allowed_env` and never with a secret (values are visible on the worker). It never edits `allowed_env` or `machines.yml` to get an `--env` through, reports a `preexisting` failure as such without trying to fix it unless that is its task, reports a `new` verdict with `sameMachine: false` with the caveat that it may be machine-specific, and reports the reason codes `env_conflict` and `windows_command_too_long` to the developer. An `ask_developer` step for an env refusal means stop and report, never drop variables or edit config to get through.
+
 `lanq doctor --json` prints one object with every setup check (`scope`, `machine`, `name`, `level` ok|warn|fail|skip|hold, `detail`, `fix`); `lanq stats --json` prints one object with the local job log's totals, per-machine times and speed factors, and per-command runs and `timing` (the work and per-shard overhead that `--shards auto --target-minutes M` uses to pick N).
 
 ## Docs
@@ -17,7 +19,7 @@ The developer sets up the pool (`machines.yml`, allowlists, SSH keys); a coding 
 
 - [Team quick start](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/TEAM-QUICKSTART.md): one orchestrator and a mixed pool of Windows and Linux workers, step by step (`lanq makeready --setup` and `--add`)
 - [Workers](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/WORKERS.md): what each worker needs (OpenSSH, a build user, tools, Wake-on-LAN)
-- [Plan files](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/PLANS.md): `lanq.yml` and `lanq run --plan`, several jobs (build, tests, a serial tail) routed by size across a mixed pool, one snapshot and one result
+- [Plan files](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/PLANS.md): `lanq.yml` and `lanq run --plan`, several jobs (build, tests, a serial tail) routed by size across a mixed pool, one snapshot and one result; per-job `env:`, `exclusive:` and `baseline:`
 - [Sharding](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/SHARDING.md): splitting long test suites across the pool with `--shards`, picking N from history with `--target-minutes`, and balancing shards by duration, per ecosystem
 
 ## Optional

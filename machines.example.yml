@@ -32,6 +32,14 @@ policy:
     - "."
     - src
     - tests
+  # Variables a job may set with `lanq run --env NAME=VALUE` or `env:` in a repository's lanq.yml (default: none, so
+  # every --env is refused). Exact names, or a prefix ending in *. Names that can make a command run other code or
+  # move where tools keep their files (NODE_OPTIONS, DOTNET_STARTUP_HOOKS, GIT_*, HOME, TEMP, LANQ_*, ...) are refused
+  # even when listed. Settings only, never secrets: other users of a worker can see the values.
+  # allowed_env:
+  #   - CONFIGURATION
+  #   - TEST_FILTER
+  #   - "MYAPP_*"
 
 machines:
   - name: build-01
@@ -85,7 +93,7 @@ machines:
     priority: low              # the default; written out here for clarity
     min_free_mem_gb: 2         # overrides policy.min_free_mem_gb for this machine
     size: medium               # optional (light, medium, heavy): a 16 GB, 8-core PC probes heavy; medium keeps --min-size heavy jobs off a PC people use
-    env:                       # for the job process only
+    env:                       # for the job process only; a job whose --env sets one of these names skips this machine (env_conflict)
       DOTNET_GCHeapHardLimitPercent: "0x32"      # .NET GC heap at most 50% of RAM (hexadecimal)
       NODE_OPTIONS: "--max-old-space-size=2048"  # Node heap at most 2 GB
     path_prepend:              # tools installed per user that a non-login SSH session does not find

@@ -397,11 +397,17 @@ public sealed class StaleSlotTests : IDisposable
             Assert.DoesNotContain("ln ", script, StringComparison.Ordinal);
         }
 
-        foreach (var script in new[] { RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(5)), RemoteScripts.Unlock(T.Windows(), all: false) })
+        // The Windows claims carry the reclaim deflated: check the text itself (and that the claims really carry it).
+        foreach (var script in new[] { RemoteScripts.WindowsReclaimFunction, RemoteScripts.WindowsSlotFunctions, RemoteScripts.Unlock(T.Windows(), all: false) })
         {
             Assert.DoesNotContain("Move($t, $f)", script, StringComparison.Ordinal);
             Assert.DoesNotContain("Move($t, $p)", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("Move($t,$f)", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("Move($t,$p)", script, StringComparison.Ordinal);
         }
+
+        Assert.Contains("$IOFile::Move($f,$t)", RemoteScripts.WindowsReclaimFunction, StringComparison.Ordinal); // the check above looks at the real reclaim
+        Assert.Contains(RemoteScripts.WindowsSlotFunctionsPacked, RemoteScripts.AcquireSlot(T.Windows(), "j", TimeSpan.FromMinutes(5)), StringComparison.Ordinal);
     }
 
     // ---- unlock ----

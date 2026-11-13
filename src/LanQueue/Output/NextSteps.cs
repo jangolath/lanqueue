@@ -308,10 +308,30 @@ internal static class NextSteps
     /// <param name="MayStillRun">The job may still be running on <paramref name="Machine"/> (connection lost while it ran, cleanup not done).</param>
     internal sealed record RunOutcome(
         string Status, int ExitCode, string Message, RejectKind? RejectKind, InfraKind? InfraKind, bool MayStillRun, string? Machine, bool? Retryable,
-        IReadOnlyList<ExcludedMachine>? Excluded, string? LogPath);
+        IReadOnlyList<ExcludedMachine>? Excluded, string? LogPath)
+    {
+        /// <summary>lanq run --baseline: the rerun at the base commit after the job failed, or null.</summary>
+        public BaselineResult? Baseline { get; init; }
+    }
 
     internal static RunOutcome Outcome(JobResult r) => new(
-        r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath);
+        r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath)
+    {
+        Baseline = r.Baseline,
+    };
+
+    /// <summary>
+    /// What a baseline rerun says about a failure, for the fix_code reason: "; new: the base commit passes", "; pre-existing: it fails at the
+    /// base commit too (log: PATH)", "; baseline inconclusive: ..." or "; baseline skipped: ..."; empty without one.
+    /// </summary>
+    internal static string BaselineSentence(BaselineResult? b) => b?.Verdict switch
+    {
+        null => "",
+        BaselineVerdict.New => "; new: the base commit passes" + b.MachineCaveat,
+        BaselineVerdict.Preexisting => $"; pre-existing: it fails at the base commit too (log: {b.LogPath ?? "none"})",
+        BaselineVerdict.Skipped => "; baseline skipped: the snapshot is the base commit",
+        _ => "; baseline inconclusive: " + b.Message,
+    };
 
     /// <summary>lanq health judging a job like the one of <paramref name="p"/>: its --on, --needs, --mem, --size / --min-size and --config.</summary>
     private static SuggestedCommand? HealthFor(ParsedArgs p) => SuggestedCommand.Health(p.Needs, p.MemGb, p.ConfigPath, p.On, p.Size);
@@ -325,7 +345,7 @@ internal static class NextSteps
             case nameof(JobStatus.Completed):
                 return Nothing("the job completed");
             case nameof(JobStatus.Failed):
-                return [Step(NextAction.FixCode, string.Create(CultureInfo.InvariantCulture, $"the job exited {o.ExitCode}; read logTail or the log ({o.LogPath ?? "no log"}) and fix the code"))];
+                return [Step(NextAction.FixCode, string.Create(CultureInfo.InvariantCulture, $"the job exited {o.ExitCode}; read logTail or the log ({o.LogPath ?? "no log"}) and fix the code") + BaselineSentence(o.Baseline))];
             case nameof(JobStatus.Rejected):
                 return Rejected(p, o.RejectKind, o.Message);
             case nameof(JobStatus.NoCapacity):
@@ -356,7 +376,7 @@ internal static class NextSteps
         {
             var failed = r.Shards.Where(s => s.Status == nameof(JobStatus.Failed)).ToList();
             var which = string.Join("; ", failed.Select(s => string.Create(
-                CultureInfo.InvariantCulture, $"shard {s.Index}/{r.Count} exited {s.ExitCode} (log: {s.LogPath ?? "none"})")));
+                CultureInfo.InvariantCulture, $"shard {s.Index}/{r.Count} exited {s.ExitCode} (log: {s.LogPath ?? "none"}){BaselineSentence(s.Baseline)}")));
             return [Step(NextAction.FixCode, $"{failed.Count} shard(s) failed: {which}; read their logTail or logs and fix the code")];
         }
 
@@ -435,7 +455,8 @@ internal static class NextSteps
                 return
                 [
                     Step(NextAction.AskDeveloper, $"job '{r.Decided}' can never run on these machines as configured, so waiting will not help ({ExcludedText(r.Excluded)}); "
-                        + "a machine needs the capability, the size or the memory, or that job's needs, size, min_size, mem or on in lanq.yml must change (the developer decides)"),
+                        + "a machine needs the capability, the size or the memory, or that job's needs, size, min_size, mem or on in lanq.yml must change (the developer decides)"
+                        + EnvConflictAdvice(r.Excluded ?? [], plan: true)),
                     Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health),
                 ];
             case nameof(JobStatus.NoCapacity):
@@ -471,8 +492,8 @@ internal static class NextSteps
         }
 
         static string FailedText(PlanJobOutcome j) => j.Sharded is { } s
-            ? $"{j.Name} ({string.Join("; ", s.Shards.Where(x => x.Status == nameof(JobStatus.Failed)).Select(x => string.Create(CultureInfo.InvariantCulture, $"shard {x.Index}/{s.Count} exited {x.ExitCode}, log: {x.LogPath ?? "none"}")))})"
-            : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"})");
+            ? $"{j.Name} ({string.Join("; ", s.Shards.Where(x => x.Status == nameof(JobStatus.Failed)).Select(x => string.Create(CultureInfo.InvariantCulture, $"shard {x.Index}/{s.Count} exited {x.ExitCode}, log: {x.LogPath ?? "none"}{BaselineSentence(x.Baseline)}")))})"
+            : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"}){BaselineSentence(j.Baseline)}");
     }
 
     /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>
@@ -489,7 +510,8 @@ internal static class NextSteps
             ],
             nameof(JobStatus.NoCapacity) =>
             [
-                Step(NextAction.AskDeveloper, message + "; a machine needs the capability, the size or the memory, or that job's settings in lanq.yml must change (the developer decides)"),
+                Step(NextAction.AskDeveloper, message + "; a machine needs the capability, the size or the memory, or that job's settings in lanq.yml must change (the developer decides)"
+                    + (message.Contains(EnvConflictWhy, StringComparison.Ordinal) ? "; for an env clash, ask the developer: they can drop the variable from that job's env: in lanq.yml, or remove it from the machine's env in machines.yml" : "")),
                 Step(NextAction.RunHealth, "see how each machine is judged for that job", health),
             ],
             nameof(JobStatus.Rejected) => Rejected(p, reject, message),
@@ -497,6 +519,29 @@ internal static class NextSteps
             JobRunner.Cancelled => Nothing("cancelled (Ctrl+C)"),
             _ => [Step(NextAction.AskDeveloper, "unexpected status " + status)],
         };
+    }
+
+    /// <summary>The words every env_conflict reason carries ("env NAME is set by this machine's env in machines.yml").</summary>
+    private const string EnvConflictWhy = "is set by this machine's env in machines.yml";
+
+    /// <summary>
+    /// For machines ruled out because their env: sets one of the job's variables (env_conflict): "; ask the developer: they can drop --env NAME
+    /// or remove it from the machine's env (build-01, big-01)", naming each variable and machine (a plan job: its env: in lanq.yml, or
+    /// machines.yml). Advice for the developer, never a step for the agent. Empty when none.
+    /// </summary>
+    private static string EnvConflictAdvice(IReadOnlyList<ExcludedMachine> excluded, bool plan)
+    {
+        var clashes = excluded.Where(x => x.Reason == Eligibility.Code(Exclusion.EnvConflict)).ToList();
+        if (clashes.Count == 0)
+        {
+            return "";
+        }
+
+        var names = string.Join(", ", clashes.Select(x => x.Why.Split(' ') is { Length: > 1 } w ? w[1] : "?").Distinct(StringComparer.OrdinalIgnoreCase));
+        var machines = string.Join(", ", clashes.Select(x => x.Machine));
+        return plan
+            ? $"; ask the developer: they can drop {names} from that job's env: in lanq.yml, or remove it from the env of {machines} in machines.yml"
+            : $"; ask the developer: they can drop --env {names} or remove it from the machine's env ({machines})";
     }
 
     private static string ExcludedText(IReadOnlyList<ExcludedMachine>? excluded) =>
@@ -510,10 +555,17 @@ internal static class NextSteps
 
     private static List<NextStepJson> Rejected(ParsedArgs p, RejectKind? kind, string message) => kind switch
     {
+        RejectKind.PlanFile when Policy.JobEnv.IsDeniedMessage(message) =>
+            [Step(NextAction.AskDeveloper, "this variable can never be set by a job; the developer drops it from that job's env: in lanq.yml (" + message + ")")],
         RejectKind.PlanFile => [Step(NextAction.FixCode, "fix lanq.yml: " + message)],
+        RejectKind.Policy when Policy.JobEnv.IsDeniedMessage(message) => ArgumentsError(message),
         RejectKind.Policy => [Step(NextAction.AskDeveloper, $"refused by policy, not allowlisted ({message}); do not work around it, ask the developer")],
-        RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes or the command line; nothing was sent")],
+        RejectKind.Secret => [Step(NextAction.FixCode, "possible secrets: remove them from the uncommitted changes, the command line or --env values; nothing was sent")],
         RejectKind.Config => ConfigError(p.ConfigPath, message, p.Json),
+        // The variables cannot work on the machines as configured: what changes (the values, lanq.yml or machines.yml) is the developer's call.
+        RejectKind.JobEnv when p.Plan =>
+            [Step(NextAction.AskDeveloper, message + "; ask the developer: they can shorten or drop that job's env: values in lanq.yml, or change machines.yml")],
+        RejectKind.JobEnv => [Step(NextAction.AskDeveloper, message + "; ask the developer: they can shorten or drop the --env values, or change machines.yml")],
         _ => [Step(NextAction.FixCommand, "fix the command line: " + message)],
     };
 
@@ -525,7 +577,11 @@ internal static class NextSteps
     ];
 
     /// <summary>The command line could not be parsed (any command).</summary>
-    public static List<NextStepJson> ArgumentsError(string message) => [Step(NextAction.FixCommand, "fix the command line: " + message)];
+    /// <remarks>A deny-table --env (the agent's own flag) is "drop it or ask the developer", never a way to get it through.</remarks>
+    public static List<NextStepJson> ArgumentsError(string message) =>
+        [Step(NextAction.FixCommand, Policy.JobEnv.IsDeniedMessage(message)
+            ? "this variable can never be set by a job; drop it or ask the developer: " + message
+            : "fix the command line: " + message)];
 
     private static List<NextStepJson> NoCapacity(ParsedArgs p, bool retryable, IReadOnlyList<ExcludedMachine> excluded, SuggestedCommand? health)
     {
@@ -535,7 +591,8 @@ internal static class NextSteps
             var lacks = string.Join("; ", excluded.Select(x => $"{x.Machine}: {x.Why}"));
             return
             [
-                Step(NextAction.AskDeveloper, $"--on {string.Join(',', on)} cannot ever take this job" + (lacks.Length > 0 ? ": " + lacks : "") + "; pick another machine or drop --on"),
+                Step(NextAction.AskDeveloper, $"--on {string.Join(',', on)} cannot ever take this job" + (lacks.Length > 0 ? ": " + lacks : "") + "; pick another machine or drop --on"
+                    + EnvConflictAdvice(excluded, plan: false)),
                 Step(NextAction.RunHealth, "see how each machine is judged for this job", health),
             ];
         }
@@ -546,7 +603,8 @@ internal static class NextSteps
             return
             [
                 Step(NextAction.AskDeveloper, "no machine can ever take this job as configured, so waiting will not help" + (why.Length > 0 ? " (" + why + ")" : "")
-                    + "; a machine needs the capability, the size or the memory, or the job needs other --needs, --size / --min-size or --mem"),
+                    + "; a machine needs the capability, the size or the memory, or the job needs other --needs, --size / --min-size or --mem"
+                    + EnvConflictAdvice(excluded, plan: false)),
                 Step(NextAction.RunHealth, "see how each machine is judged for this job", health),
             ];
         }
@@ -606,7 +664,7 @@ internal static class NextSteps
     {
         var name = m.Name;
         if (a is { Eligible: false } job && job.Reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.MemExceedsTotal
-            or Exclusion.MemUnknown or Exclusion.SizeUnknown)
+            or Exclusion.MemUnknown or Exclusion.SizeUnknown or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong)
         {
             return [Step(NextAction.AskDeveloper, $"{name} can never take such a job as configured: {job.Why}")];
         }

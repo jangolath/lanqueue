@@ -52,6 +52,25 @@ public sealed record JobRecord(
     /// <summary>lanq run --plan only (0.8.0): the id every job of one plan run shares (its snapshot's id).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? PlanRun { get; init; }
+
+    /// <summary>lanq run --env only (0.9.0): the names of the job's own variables, in the order given. Never their values.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? EnvNames { get; init; }
+
+    /// <summary>lanq run --exclusive only (0.9.0): true when the job held every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
+
+    /// <summary>
+    /// lanq run --baseline only (0.9.0): on the rerun at the base commit, the id of the failed job it reran. Absent otherwise. Such records are
+    /// not the command's own history: timing (--target-minutes), lanq stats and the plan's history order leave them out (<see cref="JobLog.ReadHistory"/>).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? BaselineOf { get; init; }
+
+    /// <summary>lanq run --baseline only (0.9.0): on the rerun at the base commit, that commit's short id. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Commit { get; init; }
 }
 
 /// <summary>What <see cref="JobLog.Read"/> found: the records (oldest file first), how many lines could not be read, and the files read.</summary>
@@ -252,6 +271,16 @@ public sealed class JobLog(string folder, Action<string>? warn = null)
 
     /// <summary>Every readable record, oldest file first (see <see cref="Read"/>); unreadable lines are left out.</summary>
     public IReadOnlyList<JobRecord> ReadAll() => Read(CancellationToken.None).Records;
+
+    /// <summary>
+    /// <see cref="Read"/> without the records of lanq run --baseline reruns (<see cref="JobRecord.BaselineOf"/>): they ran another commit, so
+    /// they are not the command's history. Every reader of history uses this: timing (--target-minutes), lanq stats and the plan's order.
+    /// </summary>
+    public JobLogRead ReadHistory(CancellationToken ct)
+    {
+        var read = Read(ct);
+        return read.Records.Any(r => r.BaselineOf is not null) ? read with { Records = [.. read.Records.Where(r => r.BaselineOf is null)] } : read;
+    }
 
     /// <summary>
     /// Reads jobs.1.jsonl (if any) and then jobs.jsonl, sharing them with a lanq that is appending. A line that is not a job record (a torn

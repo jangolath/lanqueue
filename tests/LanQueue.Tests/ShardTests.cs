@@ -88,6 +88,23 @@ internal sealed partial class PoolSsh : ISshClient
             r = new SshResult(0, $"load=0.1\ndisk_free_gb=50\nslots_used={Used(machine.Name)}\n{ProbeExtra(machine)}\ntool=ok");
             r = await AfterProbe(machine, r, ct);
         }
+        else if (remoteCommand.Contains("SLOTS=", StringComparison.Ordinal))
+        {
+            // --exclusive (RemoteScripts.AcquireAll): every slot or none.
+            lock (_gate)
+            {
+                if (_used.GetValueOrDefault(machine.Name) == 0 && !RefuseSlot(machine))
+                {
+                    _used[machine.Name] = machine.MaxJobs;
+                    Peak.AddOrUpdate(machine.Name, machine.MaxJobs, (_, p) => Math.Max(p, machine.MaxJobs));
+                    r = new SshResult(0, "SLOTS=" + string.Join(',', Enumerable.Range(1, machine.MaxJobs)));
+                }
+                else
+                {
+                    r = new SshResult(0, "SLOT=FULL");
+                }
+            }
+        }
         else if (remoteCommand.Contains("SLOT=", StringComparison.Ordinal))
         {
             lock (_gate)
@@ -113,7 +130,9 @@ internal sealed partial class PoolSsh : ISshClient
             {
                 lock (_gate)
                 {
-                    _used[machine.Name] = _used.GetValueOrDefault(machine.Name) - 1;
+                    // An exclusive job's cleanup releases every slot it listed ("for n in 1 2 3 4").
+                    var all = System.Text.RegularExpressions.Regex.Match(remoteCommand, "for n in ([0-9 ]+);", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(5));
+                    _used[machine.Name] = _used.GetValueOrDefault(machine.Name) - (all.Success ? all.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length : 1);
                 }
             }
         }

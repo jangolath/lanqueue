@@ -23,6 +23,7 @@ public sealed class StaticYamlTests
             - dotnet build
             - dotnet test
           allowed_directories: [".", src]
+          allowed_env: [CONFIGURATION, "MYAPP_*"]
         machines:
           - name: lin
             os: linux
@@ -71,6 +72,7 @@ public sealed class StaticYamlTests
         Assert.Equal(45, c.Policy.KeepLogsDays);
         Assert.Equal(["dotnet build", "dotnet test"], c.Policy.AllowedCommands);
         Assert.Equal([".", "src"], c.Policy.AllowedDirectories);
+        Assert.Equal(["CONFIGURATION", "MYAPP_*"], c.Policy.AllowedEnv);
 
         var lin = c.Machines[0];
         Assert.Equal(("lin", MachineOs.Linux, "build@lin.lan", "LANQ_KEY_LIN", "/srv/lanq"), (lin.Name, lin.Os, lin.Ssh, lin.KeyEnv, lin.WorkRoot));

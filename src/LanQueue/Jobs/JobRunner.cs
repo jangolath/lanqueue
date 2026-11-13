@@ -44,6 +44,12 @@ public enum RejectKind
     /// <summary>The config could not be found or loaded.</summary>
     Config,
 
+    /// <summary>
+    /// lanq run --env: every capable machine is ruled out by the job's variables, at least one because they make its Windows command too
+    /// long. The variables (lanq.yml env: for a plan job) or the machines must change.
+    /// </summary>
+    JobEnv,
+
     /// <summary>lanq run --plan: the plan file (lanq.yml) is missing or not valid.</summary>
     PlanFile,
 }
@@ -116,6 +122,39 @@ public sealed record JobRequest(
     /// <summary>lanq run --plan: called once the job holds its first slot or begins waiting for one (the next job's start waits for it).</summary>
     public Action? Placed { get; init; }
 
+    /// <summary>
+    /// lanq run --env (lanq.yml env:): the job's own variables, in the order given (parsed and deny-checked by <see cref="JobEnv.Parse"/>;
+    /// policy.allowed_env and the secret scan are checked in <see cref="JobRunner"/>'s precheck; a machine whose env: sets one too is ruled
+    /// out, see <see cref="JobRunner.EnvExclusion"/>). Shards and plan jobs carry their template's. jobs.jsonl and the JSON env field carry
+    /// the names only.
+    /// </summary>
+    public IReadOnlyList<JobEnvVar> Env { get; init; } = [];
+
+    /// <summary>
+    /// lanq run --exclusive (lanq.yml exclusive: true): the job takes every slot of its machine (<see cref="RemoteScripts.AcquireAll"/>), so no
+    /// other lanq job runs there while it does; it waits, like any busy machine, until every slot is free (no reservation). With --shards each
+    /// shard takes a whole machine, so N is at most the machines that can take the job.
+    /// </summary>
+    public bool Exclusive { get; init; }
+
+    /// <summary>
+    /// lanq run --baseline / --baseline-ref (lanq.yml baseline:, baseline_ref:): when the job (a shard, a plan job) ends Failed, the same request
+    /// runs again at the base commit (<see cref="BaseRef"/>) and its verdict is reported (information only: status and exit code stay the job's).
+    /// </summary>
+    public bool Baseline { get; init; }
+
+    /// <summary>--baseline-ref: the branch, tag or commit to compare with (its merge-base with HEAD); null means the default branch.</summary>
+    public string? BaselineRef { get; init; }
+
+    /// <summary>A baseline rerun only: the id of the failed job it reruns (jobs.jsonl baselineOf; timing history leaves such records out).</summary>
+    public string? BaselineOf { get; init; }
+
+    /// <summary>A baseline rerun only: the base commit's short id (jobs.jsonl commit).</summary>
+    public string? Commit { get; init; }
+
+    /// <summary>Lines of this job are prefixed "[Label machine] " (a baseline rerun's "baseline 2/4"), instead of a plan job's name; null otherwise.</summary>
+    public string? Label { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -168,6 +207,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// </summary>
     public double? RunSeconds { get; init; }
 
+    /// <summary>lanq run --baseline: the rerun at the base commit after this job ended Failed (never changes the status or exit code); else null.</summary>
+    public BaselineResult? Baseline { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -216,6 +258,12 @@ public sealed partial class JobRunner(
             return refused;
         }
 
+        var (baseCommit, badBase) = await ResolveBaseAsync(jobId, req, ct).ConfigureAwait(false);
+        if (badBase is not null)
+        {
+            return badBase;
+        }
+
         var (prepared, failed) = await PrepareAsync(jobId, req, output, ct).ConfigureAwait(false);
         if (prepared is null)
         {
@@ -224,7 +272,16 @@ public sealed partial class JobRunner(
 
         await using (prepared.ConfigureAwait(false))
         {
-            return await Dispatch(jobId, req, prepared, ct).ConfigureAwait(false);
+            var result = await Dispatch(jobId, req, prepared, ct).ConfigureAwait(false);
+
+            // --baseline: only the job's own failure is rerun at the base (never TimedOut, WindowClosed, InfraError, NoCapacity, Rejected or Cancelled).
+            if (baseCommit is null || result.Status != JobStatus.Failed)
+            {
+                return result;
+            }
+
+            var baseline = await RunBaselinesAsync([new BaselineTarget(req, baseCommit, result.JobId, result.Machine)], prepared.Payload, ct).ConfigureAwait(false);
+            return result with { Baseline = baseline[0] };
         }
     }
 
@@ -234,10 +291,10 @@ public sealed partial class JobRunner(
     /// </summary>
     private List<Machine> Candidates(JobRequest req) => Pinning.Candidates(config, req.On);
 
-    /// <summary>What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>).</summary>
-    private static JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe) { Size = req.Size };
-
-    /// <summary>The checks on the command line alone (--on names, policy, secrets in it, Windows-safe arguments), before any network or git work; null when it may run.</summary>
+    /// <summary>
+    /// The checks on the command line alone (--on names, policy, secrets in it, --env (<see cref="PrecheckEnv"/>), Windows-safe arguments), before
+    /// any network or git work; null when it may run.
+    /// </summary>
     private JobResult? Precheck(string jobId, JobRequest req)
     {
         if (Pinning.Resolve(config, req.On).Error is { } unknown)
@@ -258,6 +315,11 @@ public sealed partial class JobRunner(
             return Rejected(jobId, commandFindings);
         }
 
+        if (PrecheckEnv(jobId, req) is { } envRefused)
+        {
+            return envRefused;
+        }
+
         // Arguments unsafe on Windows (" < > ^ %, or & | for a program that is not an .exe) can still run on a Linux worker; refuse only
         // when no non-Windows machine has the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
@@ -271,12 +333,142 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>
-    /// When the config alone rules out every candidate machine (<see cref="Candidates"/>): each lacks a capability the job needs or has a
-    /// declared size: outside --size / --min-size. Each judged from the config alone (never probed), all permanently ruled out. Null when at
+    /// The checks on the job's --env (<see cref="JobRequest.Env"/>), after the command line's: the hard deny table again (Policy), then
+    /// policy.allowed_env (Policy), the secret scan of each NAME=VALUE (Secret; the value is never shown), a name that a candidate machine's
+    /// env: in machines.yml sets too, and the Windows command-line cap with the job's variables. Those two rule out a machine, not the job
+    /// (<see cref="EnvExclusion"/>), except that a job whose capable machines are all ruled out by --env, at least one by the cap, is refused
+    /// here (<see cref="RejectKind.JobEnv"/>). Null when the job sets none or every check passes.
+    /// </summary>
+    private JobResult? PrecheckEnv(string jobId, JobRequest req)
+    {
+        if (req.Env.Count == 0)
+        {
+            return null;
+        }
+
+        JobResult Refused(string message, RejectKind kind) => new(jobId, JobStatus.Rejected, 2, null, message) { RejectKind = kind };
+        foreach (var e in req.Env)
+        {
+            // Parse refused these already; a request built some other way gets the same answer.
+            if (!JobEnv.IsValidName(e.Name))
+            {
+                return Refused("--env NAME=VALUE: the name must be letters, digits and _ and not start with a digit.", Jobs.RejectKind.Arguments);
+            }
+
+            if (JobEnv.IsJobDenied(e.Name))
+            {
+                return Refused(JobEnv.DeniedMessage(e.Name), Jobs.RejectKind.Policy);
+            }
+
+            if (!JobEnv.IsAllowed(config.Policy.AllowedEnv, e.Name))
+            {
+                return Refused(JobEnv.NotAllowedMessage(e.Name), Jobs.RejectKind.Policy);
+            }
+        }
+
+        var findings = req.Env.SelectMany(e => SecretScanner.ScanText(e.Name + "=" + e.Value, "--env " + e.Name)).ToList();
+        if (findings.Count > 0)
+        {
+            return Rejected(jobId, findings);
+        }
+
+        // A machine's env: clash or a Windows command too long rules out that machine only (EnvExclusion, judged again per machine when the
+        // job is placed), and NeverByConfig ends the job when that leaves no capable machine. The one refusal here: every capable machine
+        // not already ruled out is ruled out by --env, at least one of them because the values make its Windows command too long (the
+        // values themselves must change).
+        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var judged = Candidates(req)
+            .Where(m => HasCapabilities(m, req.Needs) && !(windowsUnsafe && m.Os == MachineOs.Windows))
+            .Select(m => (Machine: m, Rule: EnvExclusion(m, req.Env, windowsUnsafe)))
+            .ToList();
+        if (judged.Count > 0 && judged.All(j => j.Rule is not null)
+            && judged.FirstOrDefault(j => j.Rule?.Reason == Exclusion.WindowsCommandTooLong).Machine is { } tooLong)
+        {
+            var length = string.Create(
+                CultureInfo.InvariantCulture,
+                $"the Windows command would be {WindowsLength(tooLong, req.Env):N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {tooLong.Name}");
+            var clashes = judged.Where(j => j.Rule?.Reason == Exclusion.EnvConflict).ToList();
+
+            // Only the length: the message as before. Clashes too: name each machine and its variable, then the length.
+            return Refused(
+                clashes.Count == 0
+                    ? string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"the --env values make the Windows command {WindowsLength(tooLong, req.Env):N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {tooLong.Name}")
+                    : "--env: " + string.Join("; ", clashes.Select(j => $"{j.Machine.Name} sets {ClashName(j.Machine, req.Env)} in its env (machines.yml)")) + "; " + length,
+                Jobs.RejectKind.JobEnv);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>, and
+    /// the candidates its --env rules out).
+    /// </summary>
+    private JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe)
+    {
+        Size = req.Size,
+        Exclusive = req.Exclusive,
+        EnvRuledOut = EnvRuledOut(Candidates(req), req.Env, windowsUnsafe),
+    };
+
+    /// <summary>The candidates the job's --env rules out (<see cref="EnvExclusion"/>), by name; empty without --env.</summary>
+    private static Dictionary<string, (Exclusion Reason, string Why)> EnvRuledOut(IEnumerable<Machine> candidates, IReadOnlyList<JobEnvVar> env, bool windowsUnsafe)
+    {
+        var ruled = new Dictionary<string, (Exclusion Reason, string Why)>(StringComparer.Ordinal);
+        foreach (var m in env.Count == 0 ? [] : candidates)
+        {
+            if (EnvExclusion(m, env, windowsUnsafe) is { } rule)
+            {
+                ruled[m.Name] = rule;
+            }
+        }
+
+        return ruled;
+    }
+
+    /// <summary>
+    /// Whether the job's --env rules out a machine, judged from the config alone: its env: in machines.yml sets one of the variables too
+    /// (<see cref="Exclusion.EnvConflict"/>), or it is a Windows machine on which the variables make the encoded job command longer than the
+    /// Windows limit (<see cref="Exclusion.WindowsCommandTooLong"/>; not judged when <paramref name="windowsUnsafe"/> rules Windows out already).
+    /// Both are permanent. Null when the machine can take the job as far as --env goes.
+    /// </summary>
+    internal static (Exclusion Reason, string Why)? EnvExclusion(Machine m, IReadOnlyList<JobEnvVar> env, bool windowsUnsafe)
+    {
+        if (env.Count == 0)
+        {
+            return null;
+        }
+
+        if (ClashName(m, env) is { } clash)
+        {
+            return (Exclusion.EnvConflict, $"env {clash} is set by this machine's env in machines.yml");
+        }
+
+        if (m.Os == MachineOs.Windows && !windowsUnsafe && WindowsLength(m, env) is var size && size > RemoteScripts.MaxWindowsCommandLength)
+        {
+            return (Exclusion.WindowsCommandTooLong, string.Create(
+                CultureInfo.InvariantCulture, $"with these --env values the Windows command is {size:N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0})"));
+        }
+
+        return null;
+    }
+
+    /// <summary>The first of the job's variables that the machine's env: sets too (as the job spelled it), or null when none does.</summary>
+    private static string? ClashName(Machine m, IReadOnlyList<JobEnvVar> env) =>
+        env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase))?.Name;
+
+    private static int WindowsLength(Machine m, IReadOnlyList<JobEnvVar> env) => RemoteScripts.WorstCaseWindowsCommandLength(m, env);
+
+    /// <summary>
+    /// When the config alone rules out every candidate machine (<see cref="Candidates"/>): each lacks a capability the job needs, has a
+    /// declared size: outside --size / --min-size, or is ruled out by the job's --env (<see cref="EnvExclusion"/>). Each judged from the config alone (never probed), all permanently ruled out. Null when at
     /// least one candidate could take the job as far as the config says.
     /// </summary>
     private List<Assessment>? NeverByConfig(JobRequest req)
     {
+        var windowsUnsafe = req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok;
         var judged = new List<Assessment>();
         foreach (var m in Candidates(req))
         {
@@ -289,6 +481,10 @@ public sealed partial class JobRunner(
             {
                 judged.Add(new Assessment(m, Unprobed(m), Exclusion.WrongSize, wrongSize, true, 0, 0));
             }
+            else if (EnvExclusion(m, req.Env, windowsUnsafe) is { } env)
+            {
+                judged.Add(new Assessment(m, Unprobed(m), env.Reason, env.Why, true, 0, 0));
+            }
             else
             {
                 return null;
@@ -300,7 +496,8 @@ public sealed partial class JobRunner(
 
     /// <summary>
     /// The per-shard command-line checks of lanq run --shards (<see cref="Precheck"/> on each shard's substituted arguments, in index order):
-    /// the first refusal with its message ("shard i/N: ..."), or null when every shard may run.
+    /// the first refusal with its message ("shard i/N: ..."), or null when every shard may run. An exclusive run's N may not exceed the
+    /// machines that can take the job as far as the config says (<see cref="ExclusiveMachines"/>): each shard takes a whole machine.
     /// </summary>
     private (string Message, JobResult Refused)? PrecheckShards(JobRequest template, IReadOnlyList<ShardInfo> shards)
     {
@@ -312,8 +509,24 @@ public sealed partial class JobRunner(
             }
         }
 
+        if (template.Exclusive && ExclusiveMachines(template) is var machines && shards.Count > machines)
+        {
+            var message = string.Create(
+                CultureInfo.InvariantCulture,
+                $"--exclusive --shards {shards.Count}: only {machines} machine{(machines == 1 ? "" : "s")} can take this job");
+            return (message, new JobResult("shard", JobStatus.Rejected, 2, null, message) { RejectKind = Jobs.RejectKind.Arguments });
+        }
+
         return null;
     }
+
+    /// <summary>
+    /// How many candidate machines (<see cref="Candidates"/>) could ever take the job as far as the config says: every capability it needs and
+    /// no declared size: outside --size / --min-size, and not ruled out by its --env (as <see cref="NeverByConfig"/> judges them).
+    /// </summary>
+    private int ExclusiveMachines(JobRequest req) =>
+        Candidates(req).Count(m => Eligibility.Missing(m, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(m, req.Size) is null
+            && EnvExclusion(m, req.Env, req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok) is null);
 
     /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
     private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
@@ -363,18 +576,27 @@ public sealed partial class JobRunner(
             return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message) { InfraKind = Jobs.InfraKind.Snapshot });
         }
 
+        if (ScanPayload(payloadId, payload) is { } refused)
+        {
+            TryDelete(payload.ArchivePath);
+            return (null, refused);
+        }
+
+        return (payload, null);
+    }
+
+    /// <summary>
+    /// The secret scans of a payload: the uncommitted changes and their file names (none for a baseline's clean base commit), the committed file
+    /// names and the package-manager configs. The Rejected (Secret) result, or null when it is clean.
+    /// </summary>
+    private static JobResult? ScanPayload(string payloadId, JobPayload payload)
+    {
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
             .Concat((payload.CommittedConfigs ?? new Dictionary<string, string?>()).SelectMany(c => SecretScanner.ScanCommittedConfig(c.Key, c.Value)))
             .ToList();
-        if (findings.Count > 0)
-        {
-            TryDelete(payload.ArchivePath);
-            return (null, Rejected(payloadId, findings));
-        }
-
-        return (payload, null);
+        return findings.Count > 0 ? Rejected(payloadId, findings) : null;
     }
 
     /// <summary>A snapshot shared by the jobs of one lanq run (one job, or every shard): deleting it removes the snapshot files and every bundle and archive built.</summary>
@@ -484,7 +706,13 @@ public sealed partial class JobRunner(
         [.. assessed.Select(a => new ExcludedMachine(a.Machine.Name, a.Code ?? Eligibility.Code(Exclusion.Busy)!, WhyNot(a), a.Permanent))];
 
     /// <param name="onSlot">Called with the machine's name once the job holds a slot there (a plan job reports where it ran when cancelled).</param>
-    private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null)
+    /// <param name="prefer">
+    /// A machine tried first whenever it can take the job (a baseline rerun prefers the machine the job failed on); null for none. While it can
+    /// take the job but has no free slot (busy, or its slot was taken first), no other machine is tried for up to <see cref="PreferRounds"/>
+    /// looks, and never past what is left of --wait: a rerun elsewhere could pass or fail because of the machine, not the commit. lanq run's
+    /// --wait defaults to 0, so without --wait the rerun does not wait for that machine at all and takes any machine that can take it now.
+    /// </param>
+    private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null, string? prefer = null)
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
@@ -493,11 +721,26 @@ public sealed partial class JobRunner(
         var candidates = Candidates(req);
         var say = Say(req);
         var relooked = 0L;
+        var preferLooks = 0;
         while (true)
         {
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
+            // Never longer than what is left of --wait (with --wait 0, not at all: any machine that can take it now).
+            var waitLeft = req.Wait - deadline.Elapsed;
+            var holdForPreferred = prefer is not null && preferLooks < PreferRounds && waitLeft > TimeSpan.Zero
+                && assessed.FirstOrDefault(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal)) is { } preferred
+                && (preferred.Eligible || preferred.Reason == Exclusion.Busy);
+            if (holdForPreferred)
+            {
+                ranked = [.. ranked.Where(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal))];
+            }
+            else if (prefer is not null)
+            {
+                ranked = [.. ranked.OrderBy(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal) ? 0 : 1)]; // stable: the rest keep their rank
+            }
+
             foreach (var a in ranked)
             {
                 var held = false;
@@ -528,6 +771,18 @@ public sealed partial class JobRunner(
                 }
             }
 
+            if (holdForPreferred)
+            {
+                // The preferred machine can take the job but has no free slot now: wait for it, at most PreferRounds looks and never past what
+                // is left of --wait (waitLeft; with --wait 0, the default, this hold is off and another machine is taken at once).
+                preferLooks++;
+                say(req.Progress is { AnyHolding: true } busy
+                    ? $"[lanq] waiting for a slot on {prefer}, where the job failed ({busy.Holders} hold some)"
+                    : string.Create(CultureInfo.InvariantCulture, $"[lanq] waiting for a slot on {prefer}, where the job failed, before taking another machine (look {preferLooks} of {PreferRounds})"));
+                await PauseAsync(req, ct, waitLeft).ConfigureAwait(false);
+                continue;
+            }
+
             // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now.
             if (assessed.All(a => a.Permanent))
             {
@@ -552,11 +807,14 @@ public sealed partial class JobRunner(
                 continue; // a sibling gave back a slot after this look began: look again now, it may be free
             }
 
-            say(req.Progress is { AnyHolding: true } ? "[lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)" : "[lanq] no eligible machine; waiting 15s");
+            say(req.Progress is { AnyHolding: true } holding ? $"[lanq] no eligible machine; waiting for a slot ({holding.Holders} hold some)" : "[lanq] no eligible machine; waiting 15s");
             req.Placed?.Invoke();
             await PauseAsync(req, ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>How many looks a baseline rerun waits for the machine the job failed on (busy there) before it takes another machine.</summary>
+    internal const int PreferRounds = 2;
 
     /// <summary>
     /// Whether a job still waiting for a slot has used up --wait: from its own start, or in a plan (<see cref="JobRequest.Progress"/>) only
@@ -582,9 +840,10 @@ public sealed partial class JobRunner(
     internal static long RoundStart() => Stopwatch.GetTimestamp() - (long)(ProbeShareWindow.TotalSeconds * Stopwatch.Frequency);
 
     /// <summary>The 15 s between two looks at the machines; in a plan cut short when a job of the plan gives back a slot.</summary>
-    private async Task PauseAsync(JobRequest req, CancellationToken ct)
+    /// <param name="atMost">A shorter pause when less than 15 s is left (the wait for a baseline's preferred machine); null for 15 s.</param>
+    private async Task PauseAsync(JobRequest req, CancellationToken ct, TimeSpan? atMost = null)
     {
-        var timer = delay(TimeSpan.FromSeconds(15), ct);
+        var timer = delay(atMost is { } most && most < TimeSpan.FromSeconds(15) ? most : TimeSpan.FromSeconds(15), ct);
         if (req.Progress is { } plan)
         {
             await Task.WhenAny(timer, plan.Released).ConfigureAwait(false);
@@ -601,10 +860,10 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>Where a job's own lanq lines go: as they are, or for a plan job prefixed "[name] ".</summary>
-    private Action<string> Say(JobRequest req) => req.PlanJob is { } name ? line => output($"[{name}] {line}") : output;
+    private Action<string> Say(JobRequest req) => (req.Label ?? req.PlanJob) is { } name ? line => output($"[{name}] {line}") : output;
 
-    /// <summary>Where a single job's lines on a machine go: as they are, or for a plan job prefixed "[name machine] ".</summary>
-    private Action<string> MachineLines(JobRequest req, string machine) => req.PlanJob is { } name ? line => output($"[{name} {machine}] {line}") : output;
+    /// <summary>Where a single job's lines on a machine go: as they are, or for a plan job prefixed "[name machine] " (a baseline rerun: its label).</summary>
+    private Action<string> MachineLines(JobRequest req, string machine) => (req.Label ?? req.PlanJob) is { } name ? line => output($"[{name} {machine}] {line}") : output;
 
     /// <summary>
     /// Static property of the config: can any git-transfer candidate ever take this job (capabilities and a declared size: only; load, hours
@@ -621,8 +880,68 @@ public sealed partial class JobRunner(
     private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(IReadOnlyList<Machine> machines, JobNeeds needs, CancellationToken ct)
     {
         var probes = await Task.WhenAll(machines.Select(m => ProbeSharedAsync(m, ct))).ConfigureAwait(false);
+        probes = [.. probes.Select(CountStuckStale)];
         return (probes, Scheduler.Assess(machines.Zip(probes), needs));
     }
+
+    /// <summary>
+    /// Per machine, the stale slots a claim of this run reported it could not reclaim (its <see cref="RemoteScripts.ReclaimStuckMarker"/>
+    /// lines: a dead reclaimer's .reclaim lock, or file permissions). For the rest of this run that many of the machine's stale slots count
+    /// as used. Only that explicit line marks a machine: a plain FULL (another claim was first, or a live slot above max_jobs) never does.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, bool>> _staleStuck =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// On a machine where this run found stale slots it could not reclaim, counts up to that many of <paramref name="h"/>'s stale slots as
+    /// used (<see cref="MachineHealth.SlotsStuck"/>), so the job waits as for a busy machine instead of claiming there again and again.
+    /// </summary>
+    private MachineHealth CountStuckStale(MachineHealth h)
+    {
+        var stuck = h.SlotsStale > 0 && _staleStuck.TryGetValue(h.Name, out var slots) ? Math.Min(h.SlotsStale, slots.Count) : 0;
+        return stuck > 0 ? h with { SlotsStuck = stuck, SlotsStale = h.SlotsStale - stuck } : h;
+    }
+
+    /// <summary>The slot names a claim's <see cref="RemoteScripts.ReclaimStuckMarker"/> lines name ("slot-2"), each well formed.</summary>
+    internal static List<string> StuckSlots(string output) =>
+        [.. output.Split('\n', StringSplitOptions.TrimEntries)
+            .Where(l => l.StartsWith(RemoteScripts.ReclaimStuckMarker, StringComparison.Ordinal))
+            .Select(l => l[RemoteScripts.ReclaimStuckMarker.Length..])
+            .Where(n => n.Length is > 5 and <= 14 && n.StartsWith("slot-", StringComparison.Ordinal) && n[5..].All(char.IsAsciiDigit))
+            .Distinct(StringComparer.Ordinal)];
+
+    /// <summary>Records the stuck slots a claim on <paramref name="machine"/> reported; prints <see cref="StuckStaleLine"/> the first time for that machine.</summary>
+    internal void NoteStuckSlots(Machine machine, string output, Action<string> emit)
+    {
+        var stuck = StuckSlots(output);
+        if (stuck.Count == 0)
+        {
+            return;
+        }
+
+        // GetOrAdd with a value (not a factory, which may run on two threads at once): exactly one caller's dictionary is stored, and
+        // only that caller prints the line.
+        var fresh = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+        var slots = _staleStuck.GetOrAdd(machine.Name, fresh);
+        var first = ReferenceEquals(slots, fresh);
+        foreach (var s in stuck)
+        {
+            slots.TryAdd(s, true);
+        }
+
+        if (first)
+        {
+            emit(StuckStaleLine(machine.Name, stuck.Count));
+        }
+    }
+
+    /// <summary>
+    /// The line lanq prints once per run for a machine whose stale slots could not be reclaimed:
+    /// "[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file permissions); counting it as busy for this run; lanq unlock build-01 clears it".
+    /// </summary>
+    internal static string StuckStaleLine(string machine, int stale) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"[lanq] {SafeLine(machine)}: {stale} stale slot{(stale == 1 ? "" : "s")} could not be reclaimed (a .reclaim lock or file permissions); counting {(stale == 1 ? "it" : "them")} as busy for this run; lanq unlock {SafeLine(machine)} clears {(stale == 1 ? "it" : "them")}");
 
     /// <summary>How recent an in-flight probe of a machine must be for another job of this runner to share it (<see cref="ProbeSharedAsync"/>).</summary>
     internal static readonly TimeSpan ProbeShareWindow = TimeSpan.FromSeconds(3);
@@ -681,7 +1000,7 @@ public sealed partial class JobRunner(
     internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
         m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
         && Eligibility.DeclaredSizeMismatch(m, needs.Size) is null
-        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !needs.EnvRuledOut.ContainsKey(m.Name) && !(m.Transfer == TransferMode.Archive && archiveFailed);
 
     /// <summary>
     /// Wakes at most one machine: the first by name among those <see cref="CouldWakeFor"/> allows that are inside their hours. The decision uses
@@ -761,16 +1080,40 @@ public sealed partial class JobRunner(
         var clock = Stopwatch.StartNew();
         var command = string.Join(' ', req.Argv);
 
-        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.AcquireSlot(machine, jobId, req.Timeout ?? JobRequest.DefaultTimeout)), null, TimeSpan.FromSeconds(30), ct)
-            .ConfigureAwait(false);
+        // --exclusive claims every slot of the machine, all or nothing (SLOTS=1,...,n or SLOT=FULL).
+        var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
+        var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout);
+        SshResult acquire;
+        try
+        {
+            acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, claim), null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await ReleaseClaimAsync(machine, jobId).ConfigureAwait(false); // Ctrl+C mid-claim: it may have created slots
+            throw;
+        }
+
         var slot = ParseSlot(acquire.Output);
         if (!acquire.Ok || slot is null)
         {
-            return null; // unreachable or full: try the next machine
+            // A claim that did not report back (timed out, lost the connection, unreadable output) may still have created slot files; a
+            // clean SLOT=FULL created none. Either way: unreachable or full, try the next machine.
+            if (!acquire.Ok || !IsCleanFull(acquire.Output))
+            {
+                await ReleaseClaimAsync(machine, jobId).ConfigureAwait(false);
+            }
+
+            NoteStuckSlots(machine, acquire.Output, emit);
+            return null;
         }
 
+        NoteStuckSlots(machine, acquire.Output, emit); // it got a slot past a stale one it could not reclaim
+
         onSlot?.Invoke();
-        emit($"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
+        emit(slot.Contains(',', StringComparison.Ordinal)
+            ? $"[lanq] job {jobId} -> {machine.Name} (slots {slot}, exclusive)"
+            : $"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         var logFile = new StreamWriter(logPath, append: false);
@@ -830,6 +1173,10 @@ public sealed partial class JobRunner(
                 RunSeconds = result.RunSeconds,
                 PlanJob = req.PlanJob,
                 PlanRun = req.PlanRun,
+                Exclusive = req.Exclusive ? true : null,
+                EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
+                BaselineOf = req.BaselineOf,
+                Commit = req.BaselineOf is null ? null : req.Commit,
             });
             return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
@@ -852,7 +1199,7 @@ public sealed partial class JobRunner(
         try
         {
             // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
-            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob));
+            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob, env: req.Env));
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -911,7 +1258,7 @@ public sealed partial class JobRunner(
         // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
         // A fresh nonce in the wrapper's marker lines, so a job printing "LANQ_EXIT=..." or "LANQ_WINARGS=..." itself is only output.
         var nonce = RemoteScripts.NewMarkerNonce();
-        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob, nonce));
+        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob, nonce, req.Env));
         // The wrapper's exit marker counts only as the FINAL output line (or glued to the end of it): a line carrying one is held back until
         // the next line arrives, which shows it was not final, and is then passed on unchanged as ordinary output. The final one is taken off.
         var heldGate = new object();
@@ -1062,11 +1409,12 @@ public sealed partial class JobRunner(
         var git = machine.Transfer == TransferMode.Git;
         var local = archivePath;
         string? incrementalBase = null;
+        string? known = null;
         if (git && payload.RepoId is not null)
         {
             try
             {
-                var known = await BaseStoreCall(() => bases.Get(machine.Name, payload.RepoId), "read", machine, onLine, ct).ConfigureAwait(false);
+                known = await BaseStoreCall(() => bases.Get(machine.Name, payload.RepoId), "read", machine, onLine, ct).ConfigureAwait(false);
                 var bundle = await bundles.GetAsync(known, ct).ConfigureAwait(false);
                 (local, incrementalBase) = (bundle.Path, bundle.Base);
             }
@@ -1103,10 +1451,13 @@ public sealed partial class JobRunner(
             step = await UploadAndPrepare(jobId, prepared, machine, local, onLine, ct).ConfigureAwait(false);
         }
 
-        if (step.Ok && git)
+        // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
+        // Not when HEAD is an ancestor of the recorded base (a lanq run --baseline rerun of an older commit): the worker kept its newer
+        // refs/lanq/base (see RemoteScripts.Prepare), and so does lanq, so the next run's bundle stays incremental on it.
+        var head = payload.Head ?? payload.Sha;
+        if (step.Ok && git && !(known is not null && await payloads.IsAncestorAsync(bundles.RepoDir, head, known, ct).ConfigureAwait(false)))
         {
-            // The worker has fetched the snapshot, so HEAD (its parent, or the snapshot itself) is in its cache: the next bundle can stop there.
-            await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, payload.Head ?? payload.Sha); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
+            await BaseStoreCall(() => { bases.Set(machine.Name, payload.RepoId!, head); return null; }, "record", machine, onLine, ct).ConfigureAwait(false);
         }
 
         return (step, null);
@@ -1289,13 +1640,57 @@ public sealed partial class JobRunner(
         });
     }
 
+    /// <summary>How long the best-effort release after a claim that did not report back may take.</summary>
+    internal static readonly TimeSpan ReleaseClaimTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>True when a claim's output says SLOT=FULL (it created no slot file) and no slot.</summary>
+    internal static bool IsCleanFull(string output) =>
+        output.Split('\n', StringSplitOptions.TrimEntries).Any(l => l == "SLOT=FULL")
+        && !output.Split('\n', StringSplitOptions.TrimEntries).Any(l => l.StartsWith("SLOTS=", StringComparison.Ordinal) || (l.StartsWith("SLOT=", StringComparison.Ordinal) && l != "SLOT=FULL"));
+
+    /// <summary>
+    /// Best effort, never throws: removes the slot files this job's claim may have created on <paramref name="machine"/>
+    /// (<see cref="RemoteScripts.ReleaseClaim"/>: only files whose first line is this job's id), with a short timeout.
+    /// </summary>
+    private async Task ReleaseClaimAsync(Machine machine, string jobId)
+    {
+        try
+        {
+            await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.ReleaseClaim(machine, jobId)), null, ReleaseClaimTimeout, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Best effort: the slots then go stale and are reclaimed as any crashed run's are.
+        }
+    }
+
+    /// <summary>
+    /// The slot a claim printed: "n" from <c>SLOT=n</c> (<see cref="RemoteScripts.AcquireSlot"/>), or "1,2,...,n" from <c>SLOTS=...</c>
+    /// (<see cref="RemoteScripts.AcquireAll"/>: every slot, distinct and ascending); null for <c>SLOT=FULL</c> or anything unreadable.
+    /// The result is what <see cref="RemoteScripts.Cleanup"/> takes back.
+    /// </summary>
     internal static string? ParseSlot(string output)
     {
-        var line = output.Split('\n', StringSplitOptions.TrimEntries).FirstOrDefault(l => l.StartsWith("SLOT=", StringComparison.Ordinal));
-        var value = line?["SLOT=".Length..];
-        return value is not null && int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0
-            ? n.ToString(CultureInfo.InvariantCulture)
-            : null;
+        foreach (var line in output.Split('\n', StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("SLOT=", StringComparison.Ordinal))
+            {
+                return PositiveInt(line["SLOT=".Length..]) is { } n ? n.ToString(CultureInfo.InvariantCulture) : null;
+            }
+
+            if (line.StartsWith("SLOTS=", StringComparison.Ordinal))
+            {
+                var slots = line["SLOTS=".Length..].Split(',').Select(PositiveInt).ToList();
+                return slots.Count <= 1024 && slots.All(n => n is not null) && slots.Zip(slots.Skip(1)).All(p => p.First < p.Second)
+                    ? string.Join(',', slots.Select(n => n!.Value.ToString(CultureInfo.InvariantCulture)))
+                    : null;
+            }
+        }
+
+        return null;
+
+        static int? PositiveInt(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0 ? n : null;
     }
 
     private static bool IsRepoId(string id)
@@ -1402,6 +1797,9 @@ public sealed partial class JobRunner(
     /// </summary>
     private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, SemaphoreSlim builds)
     {
+        /// <summary>The repository the bundles are built from (for local ancestry checks).</summary>
+        public string RepoDir => repoDir;
+
         private readonly Lock _gate = new();
         private readonly Dictionary<string, (Task<BundleBuild> Task, int Started)> _built = new(StringComparer.Ordinal);
 

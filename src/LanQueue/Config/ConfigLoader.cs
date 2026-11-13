@@ -97,15 +97,6 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:[/\\]", RegexOptions.None, 1000)]
     private static partial Regex WindowsAbsolutePathRegex();
 
-    /// <summary>
-    /// Names that would let a value hijack the dynamic loader or a shell's startup or tracing; refused in env: (compared ignoring case), as
-    /// is every name starting with LD_ or DYLD_. Best effort: the config's author is trusted, this only catches the obvious mistakes.
-    /// </summary>
-    private static readonly string[] DeniedEnvNames =
-        ["BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELLOPTS", "BASHOPTS", "PS4", "GLIBC_TUNABLES", "PSModulePath", "COMSPEC", "PATHEXT"];
-
-    private static readonly string[] DeniedEnvPrefixes = ["LD_", "DYLD_"];
-
     public static FleetConfig Parse(string yaml)
     {
         // Strict: unknown keys (for example "password") are an error, not ignored.
@@ -197,6 +188,11 @@ public static partial class ConfigLoader
 
         RequireEntries("policy.allowed_commands", config.Policy.AllowedCommands);
         RequireEntries("policy.allowed_directories", config.Policy.AllowedDirectories);
+        RequireEntries("policy.allowed_env", config.Policy.AllowedEnv);
+        if (config.Policy.AllowedEnv.Select(Policy.JobEnv.PatternProblem).FirstOrDefault(p => p is not null) is { } badPattern)
+        {
+            throw new ConfigException(badPattern);
+        }
 
         if (config.Policy.AllowedCommands.Count == 0)
         {
@@ -366,9 +362,6 @@ public static partial class ConfigLoader
         }
     }
 
-    /// <summary>The shortest job arguments that still bring the native .exe check into the Windows job script (a one-letter program and a |).</summary>
-    private static readonly string[] WorstCaseArgv = ["x", "|"];
-
     /// <summary>
     /// A Windows worker gets each script as one encoded command line of at most 8000 characters. The machine's env: and path_prepend: go
     /// into the job script, so if they alone, with no job arguments at all, already pass the cap, every job there would fail: refuse the
@@ -383,7 +376,8 @@ public static partial class ConfigLoader
             return;
         }
 
-        var size = Jobs.RemoteScripts.WindowsCommand(Jobs.RemoteScripts.Execute(m, "20260101-000000-000000", ".", WorstCaseArgv, Jobs.JobRequest.DefaultTimeout, new Jobs.ShardInfo(Jobs.ShardInfo.MaxShards, Jobs.ShardInfo.MaxShards), new string('x', Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
+        // Without any job's --env: a job's own variables are counted when it is checked (JobRunner.Precheck).
+        var size = Jobs.RemoteScripts.WorstCaseWindowsCommandLength(m);
         var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
         if (size > limit)
         {
@@ -409,7 +403,9 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is not allowed; list extra directories under path_prepend instead.");
             }
 
-            if (DeniedEnvPrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)) || DeniedEnvNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+            // The same list a job's --env is refused on (Policy/JobEnv.cs has it, and more for jobs). Best effort: the config's author is trusted,
+            // this only catches the obvious mistakes.
+            if (Policy.JobEnv.IsMachineDenied(name))
             {
                 throw new ConfigException($"Machine '{m.Name}': env '{name}' is refused because it can hijack the program loader or a shell.");
             }

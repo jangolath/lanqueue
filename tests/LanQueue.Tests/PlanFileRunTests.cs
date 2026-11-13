@@ -87,10 +87,11 @@ public sealed partial class PlanFileRunTests : IDisposable
     internal static string JobOf(PoolSsh.Exec e) => PlanJobRegex().Match(e.Command).Groups[1].Value;
 
     private async Task<(int Code, string Stdout, string Stderr)> Run(
-        PoolSsh ssh, RunnerTests.FakePayloads payloads, string[] args, CancellationToken ct = default, string? repoDir = null, string fleet = Fleet)
+        PoolSsh ssh, RunnerTests.FakePayloads payloads, string[] args, CancellationToken ct = default, string? repoDir = null, string fleet = Fleet,
+        StringWriter? stderr = null)
     {
         var o = new StringWriter();
-        var e = new StringWriter();
+        var e = stderr ?? new StringWriter();
         var code = await Cli.RunPlanFile(
             ParsedArgs.Parse(["run", .. args]), ConfigLoader.Parse(fleet), ssh, payloads, new HealthProbe(ssh, TimeProvider.System), Log, Home, repoDir ?? Repo, o, e, ct,
             (_, c) => Task.Delay(Timeout.InfiniteTimeSpan, c));
@@ -371,17 +372,145 @@ public sealed partial class PlanFileRunTests : IDisposable
             return e.Exit(0);
         };
 
-        // --wait 0: with one slot, the second job waits behind the first (a plain run would end NoCapacity at once), then runs.
-        var run = Run(ssh, new RunnerTests.FakePayloads(""), ["--plan", "--json", "--wait", "0"], fleet: Solo);
+        // --wait 0: with one slot, the second job waits behind the first (a plain run would end NoCapacity at once), then runs. The first job
+        // is let go only once the second has said it waits: released earlier, the second's look could find the slot free already (its probe
+        // answering after the first's cleanup) or look again at once for the slot given back (Relook), and rightly print no waiting line.
+        const string Waiting = "[second] [lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)";
+        var stderrLines = new LineSignal(Waiting);
+        var run = Run(ssh, new RunnerTests.FakePayloads(""), ["--plan", "--json", "--wait", "0"], fleet: Solo, stderr: stderrLines);
         await firstRuns.Task;
+        if (!await stderrLines.WaitAsync(TimeSpan.FromSeconds(30)))
+        {
+            release.SetResult(); // let the run end, so the failure below is the only one
+            await run;
+            Assert.Fail("the waiting line was never written; stderr so far:\n" + stderrLines);
+        }
+
         release.SetResult();
         var (code, stdout, stderr) = await run;
 
         Assert.Equal(0, code);
         Assert.Equal(2, ssh.Executes.Count);
         Assert.Equal(1, ssh.Peak["solo-01"]);
-        Assert.Contains("[second] [lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)", stderr, StringComparison.Ordinal);
+        Assert.Contains(Waiting, stderr, StringComparison.Ordinal);
         Assert.Equal("Completed", Json(stdout).GetProperty("status").GetString());
+    }
+
+    /// <summary>
+    /// A StringWriter that notices once <paramref name="text"/> has been written, by any write path (a line, a string, chars, spans; sync or
+    /// async) from any thread: after each write it looks at everything written so far.
+    /// </summary>
+    private sealed class LineSignal(string text) : StringWriter
+    {
+        private readonly TaskCompletionSource _seen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Lock _gate = new();
+
+        /// <summary>True once the text was written; false when <paramref name="timeout"/> passed first.</summary>
+        public async Task<bool> WaitAsync(TimeSpan timeout)
+        {
+            try
+            {
+                await _seen.Task.WaitAsync(timeout);
+                return true;
+            }
+            catch (TimeoutException)
+            {
+                return false;
+            }
+        }
+
+        public override void Write(char value) => Locked(() => base.Write(value));
+
+        public override void Write(char[] buffer, int index, int count) => Locked(() => base.Write(buffer, index, count));
+
+        public override void Write(ReadOnlySpan<char> buffer)
+        {
+            var copy = buffer.ToString();
+            Locked(() => base.Write(copy));
+        }
+
+        public override void Write(string? value) => Locked(() => base.Write(value));
+
+        public override void WriteLine(ReadOnlySpan<char> buffer)
+        {
+            var copy = buffer.ToString();
+            Locked(() => base.WriteLine(copy));
+        }
+
+        public override void WriteLine(string? value) => Locked(() => base.WriteLine(value));
+
+        public override Task WriteAsync(char value)
+        {
+            Write(value);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteAsync(string? value)
+        {
+            Write(value);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteAsync(char[] buffer, int index, int count)
+        {
+            Write(buffer, index, count);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            Write(buffer.Span);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteLineAsync(char value)
+        {
+            Write(value);
+            WriteLine();
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteLineAsync(string? value)
+        {
+            WriteLine(value);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteLineAsync(char[] buffer, int index, int count)
+        {
+            Write(buffer, index, count);
+            WriteLine();
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteLineAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            WriteLine(buffer.Span);
+            return Task.CompletedTask;
+        }
+
+        public override string ToString()
+        {
+            lock (_gate)
+            {
+                return base.ToString();
+            }
+        }
+
+        private void Locked(Action write)
+        {
+            bool seen;
+            lock (_gate)
+            {
+                write();
+                seen = GetStringBuilder().ToString().Contains(text, StringComparison.Ordinal);
+            }
+
+            if (seen)
+            {
+                _seen.TrySetResult();
+            }
+        }
     }
 
     /// <summary>

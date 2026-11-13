@@ -115,9 +115,32 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --fail-fast: with --shards the first shard that does not complete cancels the rest (also in <see cref="Shards"/>); with --plan the first job.</summary>
     public bool FailFast { get; init; }
 
+    /// <summary>
+    /// lanq run --env NAME=VALUE (repeatable): the job's own variables, in the order given (<see cref="Policy.JobEnv.Parse"/>: split at the first
+    /// '=', a valid name not on the hard deny table, a non-empty value of at most 4,096 characters without control characters, no name twice,
+    /// at most 16,384 characters in all). policy.allowed_env and the secret scan are checked when the job is (JobRunner's precheck); a machine
+    /// whose env: sets the same name is not used for it. Shards inherit them.
+    /// </summary>
+    public IReadOnlyList<Policy.JobEnvVar> Env { get; init; } = [];
+
+    /// <summary>lanq run --exclusive (lanq.yml exclusive: true): the job takes every slot of its machine (no other lanq job runs there meanwhile).</summary>
+    public bool Exclusive { get; init; }
+
+    /// <summary>
+    /// lanq run --baseline (lanq.yml baseline: true), or --baseline-ref REF, which implies it: when the job (a shard) ends Failed, the same
+    /// command runs again at the base commit and the verdict (new, preexisting, inconclusive, skipped) is reported; status and exit stay the job's.
+    /// </summary>
+    public bool Baseline { get; init; }
+
+    /// <summary>lanq run --baseline-ref REF (lanq.yml baseline_ref:): the branch, tag or commit to compare with; null means the default branch.</summary>
+    public string? BaselineRef { get; init; }
+
     /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
     internal static readonly string[] PlanFileOptions =
-        ["--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files"];
+    [
+        "--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
+        "--fetch-max-files", "--env", "--exclusive", "--baseline", "--baseline-ref",
+    ];
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -133,6 +156,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
+            "--env", "--exclusive", "--baseline", "--baseline-ref",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -166,6 +190,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var waitForSsh = false;
         var wakeSleepers = false;
         var noWake = false;
+        var exclusive = false;
+        var baseline = false;
+        string? baselineRef = null;
         var dryRun = false;
         var force = false;
         string? sshTarget = null;
@@ -186,6 +213,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var plan = false;
         string? planFile = null;
         List<string>? only = null;
+        var env = new List<string>();
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -234,6 +262,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--fetch" when i + 1 < own.Length:
                     fetch.Add(own[++i]);
+                    break;
+                case "--env" when i + 1 < own.Length:
+                    env.Add(own[++i]);
                     break;
                 case "--fetch-dir" when i + 1 < own.Length:
                     fetchDir = own[++i];
@@ -314,6 +345,25 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--no-wake":
                     noWake = true;
                     break;
+                case "--exclusive":
+                    exclusive = true;
+                    break;
+
+                // The base is optional, but this parser takes an option's value from the next argument, so "--baseline REF" could not tell a
+                // ref from the job's next option or a typo. Two forms instead: --baseline alone uses the default branch, and --baseline-ref REF
+                // names the base (and implies --baseline).
+                case "--baseline":
+                    baseline = true;
+                    break;
+                case "--baseline-ref" when i + 1 < own.Length:
+                    baselineRef = own[++i];
+                    if (Payload.BaseRef.CheckRefText(baselineRef) is { } badRef)
+                    {
+                        throw new ArgumentException(badRef);
+                    }
+
+                    baseline = true;
+                    break;
                 case "--dry-run":
                     dryRun = true;
                     break;
@@ -382,6 +432,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             CheckPlanOptions(seen, plan, split >= 0);
         }
 
+        // After the option checks, so lanq health --env says "does not take --env" rather than judging the value.
+        var jobEnv = Policy.JobEnv.ParseAll(env);
+
         if (logTail is not null && !json)
         {
             throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
@@ -414,6 +467,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitForSsh = waitForSsh,
             WakeSleepers = wakeSleepers,
             NoWake = noWake,
+            Exclusive = exclusive,
+            Baseline = baseline,
+            BaselineRef = baselineRef,
             DryRun = dryRun,
             Force = force,
             SshTarget = sshTarget,
@@ -435,6 +491,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             Only = only,
             FailFast = shards.FailFast,
             LogTail = logTail,
+            Env = jobEnv,
             Raw = [.. args],
         };
     }
@@ -532,6 +589,9 @@ public static partial class Cli
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
           lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test
+          lanq run ... [--env NAME=VALUE ...] -- dotnet test
+          lanq run ... --exclusive [--shards N|auto] -- dotnet test
+          lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq stats [--json] [--target-minutes M]
@@ -555,6 +615,23 @@ public static partial class Cli
         another size, or one that does not report its memory, can never take the job (wrong_size, size_unknown). --on m[,m] uses only the
         named machines (an unknown name is refused before any network); every other rule still applies (capabilities, size, --mem, holds,
         allowed hours, slots, wake). On health, --size / --min-size judge each machine like --needs and --on shows only those machines.
+        --env NAME=VALUE (repeatable; lanq.yml env:) sets a variable for the job only (shards too): the name must be in machines.yml
+        policy.allowed_env (exact, or a prefix ending in *) and not on lanq's deny list (loader, runtime and shell startup variables such as
+        NODE_OPTIONS, DOTNET_STARTUP_HOOKS, GIT_*, GOFLAGS, HOME, TEMP, LANQ_*), the value non-empty, at most 4,096 characters (16,384 in all),
+        free of control characters and secrets; refused with exit 2 otherwise. A machine whose env: sets the same name, or a Windows machine
+        whose command the values make too long, is not used for the job (env_conflict, windows_command_too_long). Settings only: values are
+        visible to other users of the worker (its process list) and are not secret-safe; never pass secrets. The JSON env field and jobs.jsonl
+        list names only; suggested commands in nextSteps repeat your command line, values included.
+        --exclusive (lanq.yml exclusive: true) takes every slot of the machine, so no other lanq job runs there while it does. It waits, like a
+        busy machine, until every slot is free (busy, retryable; no reservation, so a machine that is never idle never takes it: use --on with
+        an idle machine). With --shards each shard takes a whole machine: auto counts the idle machines, and a fixed N above the machines
+        that can take the job is refused (exit 2). --mem and every other rule still apply.
+        --baseline (lanq.yml baseline: true) answers "is this failure new?": when the job (a shard, a plan job) ends Failed, the same request
+        runs again at the base commit, a clean tree: the merge-base of HEAD and the default branch (origin/HEAD, else origin/main, origin/master,
+        main, master), or with --baseline-ref REF (lanq.yml baseline_ref:) the merge-base of HEAD and REF. The verdict is new (the base
+        completed), preexisting (it failed there too), inconclusive (anything else) or skipped (the snapshot is the base): one "[lanq]
+        baseline:" line, a baseline object in --json and the fix_code reason. It never changes the status or exit code, never runs after
+        TimedOut, WindowClosed, InfraError, NoCapacity, Rejected or Cancelled, and a REF that is not a commit is refused (exit 2) before anything is sent.
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
@@ -829,6 +906,7 @@ public static partial class Cli
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
         var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        await WriteBaselineLines(stderr, result.Baseline is { } b ? [("", b)] : []).ConfigureAwait(false);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         if (!p.Json && result.LogPath is { } logPath)
         {
@@ -845,6 +923,9 @@ public static partial class Cli
                         Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
                         NextSteps = next,
+                        Env = EnvNames(p.Env),
+                        Exclusive = Flag(p.Exclusive),
+                        Baseline = BaselineJsonOf(result.Baseline),
                     },
                     result.LogPath,
                     p.LogTail),
@@ -856,6 +937,37 @@ public static partial class Cli
         return result.CliExitCode;
     }
 
+    /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
+    internal static IReadOnlyList<string>? EnvNames(IReadOnlyList<Policy.JobEnvVar> env) => env.Count > 0 ? [.. env.Select(e => e.Name)] : null;
+
+    /// <summary>"[lanq] baseline: {label}{message}" per rerun, before the Next lines and the status line (which stays last).</summary>
+    internal static async Task WriteBaselineLines(TextWriter stderr, IEnumerable<(string Label, BaselineResult Baseline)> baselines)
+    {
+        foreach (var (label, b) in baselines)
+        {
+            await stderr.WriteLineAsync(JobRunner.SafeLine($"[lanq] baseline: {label}{b.Message}")).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The baseline object of a run, shard or plan job (sanitised), or null (the key left out) when no baseline was asked for or run.</summary>
+    internal static BaselineJson? BaselineJsonOf(BaselineResult? b) => b is null ? null : new BaselineJson(
+        JobRunner.SafeLine(b.Ref),
+        b.Sha,
+        b.Status,
+        b.ExitCode,
+        b.Machine is { } m ? JobRunner.SafeLine(m) : null,
+        b.JobId,
+        b.LogPath is { } l ? JobRunner.SafeLine(l) : null,
+        b.DurationSeconds,
+        b.Verdict.Length == 0 ? null : b.Verdict,
+        JobRunner.SafeLine(b.Message))
+    {
+        SameMachine = b.SameMachine,
+    };
+
+    /// <summary>An optional JSON flag such as exclusive: true when set, null (the key left out) when not.</summary>
+    internal static bool? Flag(bool set) => set ? true : null;
+
     /// <summary>The job lanq run (or its dry run) asks for, from its command line: one job, or the template of every shard.</summary>
     internal static JobRequest RequestOf(ParsedArgs p, string repoDir, FetchRequest? fetch) =>
         new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
@@ -863,6 +975,10 @@ public static partial class Cli
             NoWake = p.NoWake,
             On = p.On,
             Size = p.Size,
+            Env = p.Env,
+            Exclusive = p.Exclusive,
+            Baseline = p.Baseline,
+            BaselineRef = p.BaselineRef,
         };
 
     /// <summary>
@@ -1135,7 +1251,7 @@ public static partial class Cli
     {
         var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
         var detail = h.Reachable
-            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}")
+            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}{StaleText(h)}")
                 + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                 + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores) + DeclaredSizeNote(m, h)
             : h.Error ?? "";
@@ -1166,8 +1282,13 @@ public static partial class Cli
             Size = MachineSize.Word(MachineSize.Effective(m, h.MemTotalGb, h.Cores)),
             SizeSource = MachineSize.Declared(m) is null ? "probe" : "config",
             SuitedFor = MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores),
+            SlotsStale = h.Reachable && h.SlotsStale > 0 ? h.SlotsStale : null,
         };
     }
+
+    /// <summary>" (1 stale: reclaimed by the next claim)" after a health row's slots when the probe saw stale slots; empty otherwise.</summary>
+    private static string StaleText(MachineHealth h) =>
+        h.SlotsStale > 0 ? string.Create(CultureInfo.InvariantCulture, $" ({h.SlotsStale} stale: reclaimed by the next claim)") : "";
 
     /// <summary>With a size: in machines.yml, " (size: heavy in machines.yml; probe: medium)" after the suited text; empty without one (the line stays as before).</summary>
     private static string DeclaredSizeNote(Machine m, MachineHealth h) =>
@@ -1175,8 +1296,8 @@ public static partial class Cli
             ? $" (size: {MachineSize.Word(declared)} in machines.yml; probe: {MachineSize.Word(MachineSize.Classify(h.MemTotalGb, h.Cores))})"
             : "";
 
-    /// <summary>Slots a job could take now: max_jobs minus the slots in use (never below 0).</summary>
-    private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsUsed);
+    /// <summary>Slots a job could take now: max_jobs minus the slots in use, stale ones not counted (never below 0).</summary>
+    private static int FreeSlots(Machine m, MachineHealth h) => Math.Max(0, m.MaxJobs - h.SlotsLive);
 
     private static string Load(MachineHealth h) => h.LoadKnown ? string.Create(CultureInfo.InvariantCulture, $"load {h.LoadRatio:0.00}") : "load ?";
 

@@ -27,6 +27,24 @@ not be empty or contain control characters, and names that hijack the program lo
 `PATHEXT`) are refused. That list is best effort, a guard against mistakes rather than a complete one. `path_prepend` entries must be absolute. Both are written by you in your own config: they are a
 convenience for your machines, not a boundary against someone who can edit that file.
 
+A job's own variables (`lanq run --env NAME=VALUE`, or `env:` in a repository's `lanq.yml`, since 0.9.0) come from the
+command line or the repository, so they are not trusted the same way. A job can set only names listed in your
+`policy.allowed_env` (empty by default), and never a name on a hard deny table that wins over that list: the
+machine-level names above plus `PATH`, the runtime startup and module-path variables of Node, .NET, Java, Python, Perl
+and Ruby, the Go toolchain and module settings and `CC`/`CXX`/`CGO_*`, Rust (`RUSTFMT`, `RUSTUP_TOOLCHAIN`, `RUSTC`,
+`RUSTDOC`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_HOME`,
+`CARGO_TARGET_*`, `CARGO_BUILD_*`, `CARGO_REGISTRIES_*`, `CARGO_SOURCE_*`), build tools (`JAVA_OPTS`,
+`GRADLE_USER_HOME`, `GRADLE_OPTS`, `MAVEN_OPTS`, `MAVEN_ARGS`, `MAKEFILES`, `MAKEFLAGS`, `DOTNET_HOST_PATH`,
+`NUGET_PLUGIN_PATHS`, `COMPLUS_*`, `DOTNET_MSBUILD_SDK_RESOLVER_*`), TLS trust and proxies
+(`NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`,
+`CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), package indexes (`PIP_*`, `UV_INDEX_URL`,
+`UV_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_FIND_LINKS`, `UV_PYTHON`), OpenSSL and glibc module paths, profile and temp folders (`HOME`, `USERPROFILE`, `APPDATA`, `TEMP`, `XDG_CONFIG_HOME`, ...), `IFS`,
+`CDPATH`, and every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_`, `MSBUILD`, `CORECLR_`, `COR_` or `LANQ_`.
+Each `NAME=VALUE` is secret-scanned, values are capped (4,096 characters each, 16,384 in all) and quoted as data like
+machine values. The table guards against the obvious ways a variable can make an allowlisted command run other code;
+it is not a sandbox, and an allowlisted name can still change what a build does. Values are visible to other users of
+the worker (its process list) and are repeated in suggested commands, so they must never hold secrets.
+
 In git mode a worker receives the repository's history, not just the current files: the first job for a repository
 on a machine sends the full history of HEAD, later jobs only the new commits. The secret scan covers the command
 line, the uncommitted changes (content and names), the names of committed files in HEAD (`.env`, `id_rsa`,
@@ -34,7 +52,11 @@ line, the uncommitted changes (content and names), the names of committed files 
 samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, allowed), and the content of `.npmrc` /
 `.pypirc` / `.yarnrc.yml` files, committed or uncommitted (refused only for a literal token or password; `${NPM_TOKEN}`-style
 references pass, and the value is never printed). It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
-bundle. Archive mode sends only the current files, never history.
+bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
+sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).
+A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_ref:`), never a commit id, `HEAD` or
+revision syntax, so the file cannot pick an arbitrary old commit to send; `--baseline-ref` on your own command line can
+name any commit.
 
 `lanq makeready` runs the embedded lanq-makeready scripts, which are byte-identical to a GitHub release whose SHA-256
 values a test pins; they are updated only through `scripts/sync-makeready.sh`, which checks the release's
@@ -55,6 +77,11 @@ SHA-256 with the hash lanq computed from its own copy, and runs exactly the byte
 A changed or unreadable helper is never run (the script falls back to taskkill and Stop-Process), and the load sits in
 `try`/`catch`, so cleanup still removes the job's folder and frees its slot. A job can still leave programs running or
 change that account's other files, which is one more reason to give the build account nothing but its work folder.
+
+To fit the Windows command-line limit, every Windows slot claim (a normal job's and an `--exclusive` job's) carries its
+fixed PowerShell slot functions compressed (deflate, then base64) and dot-sources them from memory, as the helper install above already ships its text compressed.
+Some endpoint-protection tools flag that pattern. The inflated text is lanq's constant claim code, nothing taken from
+the job or the repository, and AMSI scans it as such when it runs.
 
 Wake-on-LAN is opt-in per machine (`wake:` in the config). The magic packet is a plain, unauthenticated UDP broadcast
 that only works inside the LAN: anyone on the LAN who knows a machine's MAC address can send the same packet, so

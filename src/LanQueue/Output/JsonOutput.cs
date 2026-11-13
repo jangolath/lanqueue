@@ -33,8 +33,15 @@ internal record HealthJson(
     /// </summary>
     public bool LoadKnown { get; init; } = true;
 
-    /// <summary>max_jobs minus the slots in use (0 for a machine that is down).</summary>
+    /// <summary>max_jobs minus the slots in use, stale ones not counted (0 for a machine that is down).</summary>
     public int FreeSlots { get; init; }
+
+    /// <summary>
+    /// Of slotsUsed, the slot files left by a crashed run (more than 30 minutes past their deadline): they do not count against freeSlots,
+    /// and the next claim reclaims them. Only when above 0 (0.9.0).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SlotsStale { get; init; }
 
     /// <summary>
     /// light, medium, heavy or unknown: the machine's effective size (its size: in machines.yml when it has one, else the probed class; see
@@ -149,6 +156,40 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>What to do next (see <see cref="NextStepJson"/>): always present on a single run's object; absent in the shards of --shards (the top level carries them).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<NextStepJson>? NextSteps { get; init; }
+
+    /// <summary>--env only, on a single run's object (the top level of --shards carries it for every shard) (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
+
+    /// <summary>--baseline only (0.9.0), on a single run's object and on each shard of --shards: the rerun at the base commit after the job (shard) ended Failed. Absent when not asked for or not run.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BaselineJson? Baseline { get; init; }
+}
+
+/// <summary>
+/// lanq run --baseline (0.9.0): the rerun of a failed job (shard, plan job) at the base commit. Every member is always written (null where it
+/// does not apply). Information only: the run's own status and exit code never change.
+/// </summary>
+/// <param name="Ref">What the base came from: the default branch found (origin/main) or --baseline-ref as given.</param>
+/// <param name="Sha">The base commit's full id, or null when it could not be found (a shallow clone).</param>
+/// <param name="Status">The rerun's own status (Completed, Failed, TimedOut, InfraError, NoCapacity, Cancelled, ...), or null when it never started.</param>
+/// <param name="ExitCode">The rerun's exit code as lanq run would exit with it, or null when it never started.</param>
+/// <param name="DurationSeconds">How long the rerun's command ran, or null when it never started.</param>
+/// <param name="Verdict">new (the base completed), preexisting (it failed there too), inconclusive (anything else) or skipped (the snapshot is the base commit; nothing ran). Values may be added. Null only in a dry run (nothing ran yet).</param>
+/// <param name="Message">The same line lanq prints after "[lanq] baseline: ".</param>
+internal sealed record BaselineJson(
+    string Ref, string? Sha, string? Status, int? ExitCode, string? Machine, string? JobId, string? LogPath, double? DurationSeconds, string? Verdict, string Message)
+{
+    /// <summary>
+    /// True when the rerun ran on the machine the job failed on, false when on another (the verdict may then reflect the machine, and the
+    /// message says so). Absent when the rerun ran nowhere.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? SameMachine { get; init; }
 }
 
 /// <summary>
@@ -172,6 +213,14 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
 
     /// <summary>What to do next for the whole run (see <see cref="NextStepJson"/>).</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+
+    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>
@@ -198,9 +247,9 @@ internal sealed record ShardTimingJson(
 
 /// <summary>One machine in excluded (NoCapacity only).</summary>
 /// <param name="Reason">
-/// missing_capability, wrong_size, size_unknown, windows_unsafe_args, mem_exceeds_total, mem_unknown, tool_missing (permanent); unreachable,
-/// asleep, unreadable, paused, outside_hours, window_closing, low_disk, low_memory, memory_pressure, load, mem_below_request, busy, avoided,
-/// held (waiting may help).
+/// missing_capability, wrong_size, size_unknown, windows_unsafe_args, env_conflict, windows_command_too_long, mem_exceeds_total, mem_unknown,
+/// tool_missing (permanent); unreachable, asleep, unreadable, paused, outside_hours, window_closing, low_disk, low_memory, memory_pressure,
+/// load, mem_below_request, busy, avoided, held (waiting may help).
 /// </param>
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
@@ -254,11 +303,23 @@ internal sealed record PlanJson(string Status, int ExitCode)
 
     /// <summary>What to do next (see <see cref="NextStepJson"/>): WouldRun proceeds with the same command without --dry-run.</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+
+    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
+
+    /// <summary>--baseline only (0.9.0): the base a failure would be rerun at (ref, sha, message; verdict skipped when the snapshot is the base, else null). Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BaselineJson? Baseline { get; init; }
 }
 
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
 /// <param name="FreeSlots">max_jobs minus the slots in use.</param>
-/// <param name="JobSlots">How many copies of the job (shards) it could take now; 0 when not eligible.</param>
+/// <param name="JobSlots">How many copies of the job (shards) it could take now; for an --exclusive job the slots it would take (max_jobs); 0 when not eligible.</param>
 internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots);
 
 /// <summary>--shards --dry-run: the shards one machine would take at the start.</summary>
@@ -333,6 +394,18 @@ internal sealed record PlanFileJobJson(
     /// <summary>shards: auto with target_minutes only: how N was picked.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ShardTimingJson? ShardTiming { get; init; }
+
+    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
+
+    /// <summary>baseline: true only (0.9.0), single job: its rerun at the base commit after it ended Failed (a sharded job has one per failed shard). Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BaselineJson? Baseline { get; init; }
 }
 
 /// <summary>
@@ -399,6 +472,14 @@ internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> Aft
 
     /// <summary>NoCapacity only: false when the job can never run as configured.</summary>
     public bool? Retryable { get; init; }
+
+    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given (this field lists names only; suggested commands in nextSteps repeat the command line, values included). Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>
@@ -510,6 +591,7 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(RunJson))]
 [JsonSerializable(typeof(ShardRunJson))]
 [JsonSerializable(typeof(ExcludedJson))]
+[JsonSerializable(typeof(BaselineJson))]
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]

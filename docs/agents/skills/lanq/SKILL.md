@@ -83,6 +83,31 @@ developer its `reason` and stop.
   summarises the local job log: per machine `medianSeconds`, `p90Seconds` and `speedFactor`; per command `runs`,
   results and `timing` (the work and per-shard overhead). Both are safe to run.
 
+## Job variables, exclusive jobs and baselines
+
+- `--env NAME=VALUE` (repeatable) sets a variable for the job (and every shard). Use only names the developer already
+  lists in the machines file's `policy.allowed_env`; anything else is refused (exit 2) and is the developer's call.
+  Never edit `allowed_env` or the machines file to get a name through. Values are settings (`CONFIGURATION=Release`),
+  never secrets: other users of a worker can see them, and suggested commands in `nextSteps` repeat them. The JSON
+  `env` field lists the names only.
+- `--exclusive` gives the job every slot of a machine, so nothing else runs there. It waits until a machine is idle
+  (no reservation), so on a busy pool it may end `NoCapacity` (75, retryable). With `--shards`, one shard per machine.
+- `--baseline` (or `--baseline-ref origin/main`): when the job ends `Failed`, lanq reruns the same command at the base
+  commit (the merge-base with the default branch) and adds `baseline` to the JSON: `verdict` is `new` (the base
+  passes: the change broke it), `preexisting` (it fails at the base too), `inconclusive` or `skipped`. `status` and
+  the exit code never change. A red run takes about twice as long.
+
+```bash
+lanq run --json --log-tail 60 --no-wake --needs dotnet --baseline -- dotnet test 2>/dev/null; echo "exit=$?"
+```
+
+Report a `preexisting` failure as pre-existing ("also fails at the base commit") and do not try to fix it unless that
+is your task. A `new` verdict with `baseline.sameMachine: false` ran on another machine than the failure: report it
+with that caveat (the failure may be machine-specific), not as certainly new. `excluded` reasons `env_conflict` (a machine's own `env:` sets the same variable) and
+`windows_command_too_long` (the values are too long for a Windows machine) mean: report to the developer. Follow
+`nextSteps` for env refusals: an `ask_developer` step means stop and report; never drop variables or edit the machines
+file or `lanq.yml` to get through.
+
 ## Route jobs and run a plan file
 
 - `--size light,medium` or `--min-size heavy` keeps a job to machines of that size (the machine's `size:` in the
@@ -153,8 +178,9 @@ than one case.
 
 - Exit `0`: the job passed. Say so in one line.
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from `logTail`; open
-  the file at `logPath` only if the tail does not show them.
-- `2`: refused by policy (command, directory, secret scan, bad flag). Report the message and stop.
+  the file at `logPath` only if the tail does not show them. With `--baseline`, also report `baseline.verdict`.
+- `2`: refused by policy (command, directory, secret scan, bad flag, an `--env` name not allowed). Report the message
+  and stop.
 - `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. Run `lanq doctor --remote --json` once
   (local checks plus each worker's tools in the job environment; `lanq doctor --json` is local only, no network) and
   report the `checks` whose `level` is `fail`, with their `fix`.
@@ -169,7 +195,9 @@ than one case.
 
 ## What not to do
 
-- Do not edit the lanq machines file, the allowlists, `known_hosts` or any ssh or key setting. The developer owns them.
+- Do not edit the lanq machines file, the allowlists (`policy.allowed_env` included), `known_hosts` or any ssh or key
+  setting. The developer owns them. Never edit them, or `lanq.yml`, to get an `--env` through.
+- Do not put secrets in `--env` values.
 - Do not run `lanq makeready --add`, `lanq makeready --setup` or anything with `--yes`: adding machines is the
   developer's job.
 - Do not run a `nextSteps` command whose `safeToRunUnattended` is `false`, and run a safe one at most once.

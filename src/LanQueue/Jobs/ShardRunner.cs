@@ -3,6 +3,7 @@ using System.Globalization;
 using LanQueue.Config;
 using LanQueue.Fetch;
 using LanQueue.Health;
+using LanQueue.Payload;
 using LanQueue.Policy;
 using LanQueue.Scheduling;
 
@@ -69,6 +70,9 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
 
     /// <summary>True when the shard's job may still be running on its machine (the connection dropped while it ran and its cleanup did not finish).</summary>
     public bool MayStillRun { get; init; }
+
+    /// <summary>lanq run --baseline: the shard's rerun at the base commit after it ended Failed; else null.</summary>
+    public BaselineResult? Baseline { get; init; }
 }
 
 /// <summary>A whole lanq run --shards: the overall status and exit code (see <see cref="JobRunner.Aggregate"/>) and every shard, in index order.</summary>
@@ -144,6 +148,12 @@ public sealed partial class JobRunner
             return Refused(count, refusal.Message, refusal.Refused) with { Timing = timing };
         }
 
+        var (baseCommit, badBase) = await ResolveBaseAsync("shard", template, ct).ConfigureAwait(false);
+        if (badBase is not null)
+        {
+            return Refused(count, badBase.Message, badBase) with { Timing = timing };
+        }
+
         var payloadId = NewId();
         var (prepared, failed) = await PrepareAsync(payloadId, template, output, ct).ConfigureAwait(false);
         if (prepared is null)
@@ -158,7 +168,7 @@ public sealed partial class JobRunner
 
         await using (prepared.ConfigureAwait(false))
         {
-            return await ShardsOnPreparedAsync(template, shards, options, prepared, payloadId, timing, ct).ConfigureAwait(false);
+            return await ShardsOnPreparedAsync(template, shards, options, prepared, payloadId, timing, ct, baseCommit).ConfigureAwait(false);
         }
     }
 
@@ -192,9 +202,14 @@ public sealed partial class JobRunner
         return await ShardsOnPreparedAsync(template, shards, options, prepared, NewId(), timing, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Dispatches the checked shards on the shared payload and aggregates their results.</summary>
+    /// <summary>
+    /// Dispatches the checked shards on the shared payload and aggregates their results. With <paramref name="baseCommit"/> (lanq run --shards
+    /// --baseline) every shard that ended Failed is then rerun at the base, with the same LANQ_SHARD/LANQ_SHARDS (a plan reruns its own after
+    /// the whole plan, so it passes null).
+    /// </summary>
     private async Task<ShardRunResult> ShardsOnPreparedAsync(
-        JobRequest template, List<ShardInfo> shards, ShardOptions options, PreparedPayload prepared, string runId, ShardTimingResult? timing, CancellationToken ct)
+        JobRequest template, List<ShardInfo> shards, ShardOptions options, PreparedPayload prepared, string runId, ShardTimingResult? timing, CancellationToken ct,
+        BaseCommit? baseCommit = null)
     {
         // Every shard (and every retried attempt) records the template's key and this run's id in jobs.jsonl.
         template = template with { CommandKey = JobHistory.Key(template.Argv), RunId = runId };
@@ -202,8 +217,32 @@ public sealed partial class JobRunner
         // DispatchShards returns only once every shard it started has finished (and cleaned up), so the payload outlives them all.
         var results = await DispatchShards(template, shards, options, prepared, ct).ConfigureAwait(false);
         // Ctrl+C that came after every shard had already finished does not turn a real result into Cancelled.
-        return Aggregate(shards.Count, results, ct.IsCancellationRequested && results.Any(r => r.Status == Cancelled)) with { Timing = timing };
+        var result = Aggregate(shards.Count, results, ct.IsCancellationRequested && results.Any(r => r.Status == Cancelled)) with { Timing = timing };
+        return baseCommit is null ? result : await WithShardBaselinesAsync(template, result, baseCommit, prepared.Payload, ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// --baseline on a sharded run: the shards that ended Failed (their own exit, never another status), rerun at the base all at once; each
+    /// result goes on its shard. The run's status, exit code and message stay as they are. Nothing reruns after Ctrl+C (each is inconclusive).
+    /// </summary>
+    private async Task<ShardRunResult> WithShardBaselinesAsync(JobRequest template, ShardRunResult result, BaseCommit baseCommit, JobPayload snapshot, CancellationToken ct)
+    {
+        var failed = result.Shards.Where(s => s.Status == nameof(JobStatus.Failed) && s.JobId is not null).ToList();
+        // After Ctrl+C each failed shard still gets its baseline object: inconclusive, "cancelled (Ctrl+C) before it started" (nothing runs).
+        if (failed.Count == 0)
+        {
+            return result;
+        }
+
+        var targets = failed.Select(s => new BaselineTarget(ShardRequest(template, new ShardInfo(s.Index, result.Count)), baseCommit, s.JobId!, s.Machine)).ToList();
+        var baselines = await RunBaselinesAsync(targets, snapshot, ct).ConfigureAwait(false);
+        var byIndex = failed.Zip(baselines).ToDictionary(x => x.First.Index, x => x.Second);
+        return result with { Shards = [.. result.Shards.Select(s => byIndex.TryGetValue(s.Index, out var b) ? s with { Baseline = b } : s)] };
+    }
+
+    /// <summary>One shard's request of a sharded job: {shard}/{shards} substituted, LANQ_SHARD/LANQ_SHARDS, and the template's command key.</summary>
+    private static JobRequest ShardRequest(JobRequest template, ShardInfo shard) =>
+        template with { Argv = shard.Substitute(template.Argv), Shard = shard, CommandKey = template.CommandKey ?? JobHistory.Key(template.Argv) };
 
     /// <summary>
     /// --shards auto: the free slots (<see cref="Scheduler.FreeFor"/>) on every machine that can take the job right now (capabilities, allowed
@@ -225,7 +264,7 @@ public sealed partial class JobRunner
     /// </summary>
     private (int Count, string FreeWhy, ShardTimingResult? Timing) PickShardCount(JobRequest template, IReadOnlyList<Assessment> assessed, int? targetMinutes)
     {
-        var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards);
+        var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards, template.Exclusive);
         var why = AutoShardWhy(total, free);
         if (targetMinutes is not { } minutes)
         {
@@ -233,21 +272,22 @@ public sealed partial class JobRunner
         }
 
         var history = JobHistory.For(log, template.CommandKey ?? JobHistory.Key(template.Argv), JobHistory.Dir(template.Directory), clock.GetUtcNow());
-        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template.MinMemGb, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
+        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
         return (timing.Picked, why, timing);
     }
 
     /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, its size rule, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
-    private static JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
+    private JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
         NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
 
     /// <summary>
     /// The machines shards can go to now, in rank order, each with its free slots for this job (<see cref="Scheduler.FreeFor"/>, counting
     /// this run's own shards there: <paramref name="ours"/> placed, <paramref name="oursNotRunning"/> placed but not running yet); only those above 0.
+    /// An exclusive template's shards take a whole machine each, so a machine offers at most one.
     /// </summary>
-    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, double? memGb, Func<string, int> ours, Func<string, int> oursNotRunning) =>
+    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, JobRequest template, Func<string, int> ours, Func<string, int> oursNotRunning) =>
         [.. Scheduler.Rank(assessed)
-            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, memGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name))))
+            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, template.MinMemGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name), template.Exclusive)))
             .Where(x => x.Item2 > 0)];
 
     /// <summary>Why --shards auto picked its N: "free slots: build-01 2, micro-02 1" (and the cap), or that no machine can take the job right now.</summary>
@@ -500,7 +540,7 @@ public sealed partial class JobRunner
                     // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
                     var free = Placeable(
-                        assessed, template.MinMemGb, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
+                        assessed, template, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
                     var first = firstRound == -1;
                     if (first)

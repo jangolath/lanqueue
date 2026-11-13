@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.8.1/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.9.0/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.8.1 --repo jangolath/lanqueue
+gh release download v0.9.0 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.8.1    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.9.0    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -221,6 +221,9 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | `lanq run --needs a,b [--dir D] [--wait S] [--timeout M] [--mem GB] [--fetch PATTERN ...] [--no-wake] [--json] -- CMD...` | Runs one allowlisted command on the best machine and returns its exit code; `--fetch` brings files back; `--no-wake` never wakes a sleeping machine for it. |
 | `lanq run ... --size light,medium -- CMD...` or `lanq run ... --min-size heavy -- CMD...` | Only machines of that size class (`--size`: one of the listed classes; `--min-size`: that class or larger). A machine's `size:` in `machines.yml` wins over its probed size; see [Routing jobs](#routing-jobs). |
 | `lanq run ... --on m[,m] -- CMD...` | Only the named machines (an unknown name is refused before any network). Every other rule still applies. |
+| `lanq run ... --env NAME=VALUE ... -- CMD...` | Sets a variable for this job only; the name must be in `policy.allowed_env`. See [Job variables](#job-variables---env). |
+| `lanq run ... --exclusive -- CMD...` | Takes every slot of the machine, so nothing else runs there meanwhile. See [Exclusive jobs](#exclusive-jobs---exclusive). |
+| `lanq run ... --baseline [--baseline-ref REF] -- CMD...` | After a failure, runs the same command at the base commit and says whether the failure is new. See [Is this failure new?](#is-this-failure-new---baseline) |
 | `lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--dry-run] [--json]` | Runs the jobs of the repository's `lanq.yml` side by side on one snapshot, ordered by `after:`, with one result; see [docs/PLANS.md](docs/PLANS.md). |
 | `lanq run ... --json --log-tail N -- CMD...` | Adds the last N lines (1 to 200) of the job's log to the JSON object as `logTail`; `logPath` is always there. |
 | `lanq run ... --dry-run [--json] -- CMD...` | Says what `lanq run` would do now (the checks, the snapshot scan, the machine, every excluded machine and why, `--shards` N and placement) and does none of it. |
@@ -485,7 +488,7 @@ Scripts and coding agents should prefer `--json`; [docs/JSON.md](docs/JSON.md) i
 
 `state` is `ok`, `hold` or `down`; `reasons` is empty when `ok`; `memFreeGb` and `localTime` (the worker's own clock)
 are `null` when the worker does not report them; so are `cores` and `memTotalGb` (then `size` is `unknown`).
-`freeSlots` is `maxJobs` minus `slotsUsed` (0 for a machine that is down), and `size` is `light`, `medium`, `heavy`
+`freeSlots` is `maxJobs` minus the live slots in use (0 for a machine that is down); since 0.9.0 `slotsStale` (only when above 0) counts the slots in `slotsUsed` that a crashed run left more than 30 minutes past their deadline, which the next claim reclaims, and `size` is `light`, `medium`, `heavy`
 or `unknown`: the machine's `size:` in `machines.yml` when it has one (`sizeSource` `config`), else the probed class
 (`sizeSource` `probe`). `loadKnown` is `false` only when a Windows worker could not measure its load at all (then
 `load` means nothing). With `--needs a,b`, `--mem GB`, `--size` and/or `--min-size`, each row also has `eligible`, `why` and `reason` (null when
@@ -510,6 +513,11 @@ With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","
 (also when the job never started, the command line was refused or the config could not be read), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
 problem (timed out, cut short, the machine's hours ended, the ssh connection was lost) and `fetchSkippedMore` when more than 200 files were skipped.
 Without `--fetch` none of these keys appear.
+
+Since 0.9.0, with `--env` the object has `env` (the variable names, never their values); with `--exclusive`,
+`"exclusive":true`; and with `--baseline`, after a failure, a `baseline` object (`ref`, `sha`, `status`, `exitCode`,
+`machine`, `jobId`, `logPath`, `durationSeconds`, `verdict`, `message`). Each is left out when it does not apply
+([docs/JSON.md](docs/JSON.md#baseline)).
 
 `status` is `Completed`, `Failed`, `Rejected`, `NoCapacity`, `InfraError`, `TimedOut`, `WindowClosed` or `Cancelled`;
 `exitCode` is `lanq`'s own exit code; `machine` is `null` when no machine took the job. Stdout always carries exactly
@@ -568,7 +576,7 @@ Where each safety check sits (numbers are the diagram steps):
 | 2 | Command and directory must match your allowlists; permission-skipping flags are refused. Nothing has touched the network yet. |
 | 3 | The command line and the uncommitted overlay are secret-scanned, and committed file names are checked; a hit refuses the job before anything is sent. |
 | 4-5 | Machines that are unreachable, paused, loaded, outside their hours (or about to close), low on disk or memory, under memory pressure or missing a capability are skipped. |
-| 6 | `max_jobs` is enforced with an atomic slot file per machine; a slot left by a crashed run is reclaimed 30 minutes after its recorded deadline. |
+| 6 | `max_jobs` is enforced with an atomic slot file per machine; a slot left by a crashed run counts as stale 30 minutes after its recorded deadline: it no longer makes the machine busy, and the next claim reclaims it. |
 | 4-10 | Every ssh/scp call is key-only, non-interactive and uses `StrictHostKeyChecking=yes`. |
 | 11 | Cleanup runs even when the job fails, is cancelled or times out (best effort if the network is down). |
 
@@ -597,8 +605,10 @@ lanq keeps its state on your computer, in `<state>` (`$LANQ_HOME`, else `%LOCALA
   and `status`, and since 0.7.0 `v` (2), `key` (the command; for `--shards` its arguments with `{shard}` and
   `{shards}`), `dir`, `shard`, `shards` and `runId` (shared by the shards of one run), and `runSeconds` (how long the
   command itself ran, without the wait, upload, prepare, fetch or cleanup), and since 0.8.0 `planJob` and `planRun`
-  for the jobs of a `lanq run --plan` (the job's name in `lanq.yml`, and an id shared by one plan run). A field that
-  does not apply is left out.
+  for the jobs of a `lanq run --plan` (the job's name in `lanq.yml`, and an id shared by one plan run), and since 0.9.0
+  `envNames` (the names of the job's `--env` variables, never their values), `exclusive` and, on a `--baseline` rerun,
+  `baselineOf` (the failed job's id) and `commit` (the base commit's short id). A field that does not apply is left
+  out. Baseline reruns ran another commit, so `lanq stats`, `--target-minutes` and a plan's order leave them out.
   At 4 MiB the file moves to `jobs.1.jsonl` (replacing the one before), so there are at most two files; lanq reads
   both, and lanq 0.6 reads only `jobs.jsonl`. `jobs.jsonl.lock` makes two lanq processes take turns writing. A job
   that cannot be recorded (the file is locked for long) gets a warning; its result does not change. A line lanq cannot
@@ -644,7 +654,8 @@ worker's cache keeps `refs/lanq/base` on that snapshot so the objects stay put. 
 (`git bundle create … --not <base>`), as long as the base is still a local ancestor of the new snapshot. The worker
 runs `git bundle verify` before fetching; if its cache no longer has the base (for example it was deleted), the job
 falls back once to a full bundle automatically and the log says so. Rewritten history (rebase, amend, reset) or a
-missing `bases.json` simply mean a full bundle; deleting `bases.json` is always safe.
+missing `bases.json` simply mean a full bundle; deleting `bases.json` is always safe. A `--baseline` rerun of an older
+commit leaves the worker's newer base (and `bases.json`) as it was, so the next normal job stays incremental.
 
 `lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
 (plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
@@ -794,6 +805,9 @@ directories; a drive path such as `C:/Users/build/.cargo/bin` on Windows). Value
 `NAME=value` is one single-quoted word passed to `env`, on Windows a single-quoted PowerShell string, so quotes,
 `$( )` or backticks in a value are never run.
 
+`env:` here is per machine and set by you. For a setting one job needs (a configuration, a test filter), use
+[`--env`](#job-variables---env) instead. A machine whose `env:` sets the same name is not used for that job.
+
 ## Sharding long work across the pool
 
 A long test suite can run as N pieces at once, one per free slot, while your dev PC keeps working:
@@ -859,6 +873,204 @@ lanq run --plan --dry-run                          # what lanq.yml would do now
 `lanq health --json` shows each machine's effective `size` and where it came from (`sizeSource`: `probe` or `config`);
 for a machine with `size:` the text line adds both, for example `(size: medium in machines.yml; probe: heavy)`.
 
+## Job variables (--env)
+
+Since 0.9.0 a job can set its own environment variables, for settings such as the build configuration or a test
+filter. You decide which names jobs may set, in `machines.yml`:
+
+```yaml
+policy:
+  allowed_env: [CONFIGURATION, TEST_FILTER, "MYAPP_*"]   # exact names, or a prefix ending in *
+```
+
+```bash
+lanq run --needs dotnet --env CONFIGURATION=Release --env MYAPP_SEED=42 -- dotnet test
+```
+
+The job sees `CONFIGURATION` and `MYAPP_SEED`; with `--shards` every shard does. In `lanq.yml` the same is `env:`
+(see [docs/PLANS.md](docs/PLANS.md#environment-variables-env)). The variables are set after the machine's own `env:`
+and before lanq's `LANQ_*`, quoted as data like the machine's values.
+
+What is refused, and why:
+
+- **A name not in `policy.allowed_env`** (`Rejected`, 2, an `ask_developer` step): "--env TEST_FILTER is not in
+  policy.allowed_env (your machines.yml)". The list is empty by default, so every `--env` is refused until you list
+  names. A repository's `lanq.yml` comes with the code and can set only the names you allowed.
+- **A name on lanq's deny table** (2), even when `allowed_env` lists it. These variables can make an allowlisted
+  command run other code, trust another server, or move where tools read their config:
+  - the program loader and shell startup: `LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`, `PS4`, `IFS`, `CDPATH`, `PATH`, ...;
+  - runtime startup hooks and module paths: Node (`NODE_OPTIONS`, `NODE_PATH`), .NET (`DOTNET_STARTUP_HOOKS`,
+    `DOTNET_ROOT*`, `DOTNET_HOST_PATH`, `CORECLR_*`, `COR_*`, `COMPLUS_*`), Java (`JAVA_TOOL_OPTIONS`, `JAVA_OPTS`,
+    `CLASSPATH`, ...), Python (`PYTHONSTARTUP`, `PYTHONPATH`, ...), Perl and Ruby;
+  - toolchains and build tools: Go (`GOFLAGS`, `GOROOT`, `GOPROXY`, ..., `CC`, `CXX`, `CGO_*`), Rust (`RUSTFMT`,
+    `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTDOC`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
+    `CARGO_ENCODED_RUSTFLAGS`, `CARGO_HOME`, `CARGO_TARGET_*`, `CARGO_BUILD_*`, `CARGO_REGISTRIES_*`,
+    `CARGO_SOURCE_*`), Gradle and Maven (`GRADLE_OPTS`, `MAVEN_OPTS`, `MAVEN_ARGS`), `MAKEFLAGS`, `NUGET_PLUGIN_PATHS`,
+    `DOTNET_MSBUILD_SDK_RESOLVER_*`, `MSBUILD*`, `GRADLE_USER_HOME`, `MAKEFILES`;
+  - TLS trust and proxies: `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+    `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`;
+  - package indexes and interpreters: every name starting `PIP_`, and `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`,
+    `UV_INDEX`, `UV_DEFAULT_INDEX`, `UV_FIND_LINKS`, `UV_PYTHON`;
+  - OpenSSL and glibc module paths;
+  - profile and temp folders: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TMPDIR`,
+    `XDG_CONFIG_HOME`, ...;
+  - every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_` or `LANQ_`.
+
+  `NODE_ENV`, `GOOS` and `GOARCH` stay allowed. An `allowed_env` entry the table fully covers (`GIT_*`, `HOME`) stops
+  the config from loading (so do `PIP_*`, `CARGO_BUILD_*`, `CARGO_REGISTRIES_*` and `CARGO_SOURCE_*`); a prefix that only partly overlaps (`NODE_*`,
+  `UV_*`, `CARGO_*`) loads, and `lanq doctor` notes it with an
+  `OK` line: `policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH,
+  NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused` (fix: nothing to change if that is intended; list exact names to
+  make it plain). The table is a guard against the obvious routes, not a sandbox. On the command line a deny-table
+  hit is a `fix_command` step ("this variable can never be set by a job; drop it or ask the developer"); from
+  `lanq.yml` it is `ask_developer` (the developer drops it from that job's `env:`).
+- **A value that is empty, has control characters, is over 4,096 characters, or brings the job's variables over 16,384
+  in all** (2). Windows PowerShell 5.1 cannot set an empty variable.
+- **A value that looks like a secret** (2, the value is never echoed), such as `MYAPP_PASSWORD=...` or a token.
+  `--env` is for settings, never secrets: values are visible to other users of the worker (its process list), the dry
+  run prints them, and a suggested command in `nextSteps` repeats your command line, values included. The JSON `env`
+  field and `jobs.jsonl` list names only.
+
+Two cases rule out a machine rather than the job, both permanent and both judged from the config:
+
+- `env_conflict`: the machine's own `env:` in `machines.yml` sets the same name. Which value would win is a guess, so
+  lanq does not use that machine for the job. If every machine that could take the job clashes, the run ends at once
+  with `NoCapacity` (75, `retryable: false`) and an `ask_developer` step: "ask the developer: they can drop --env
+  CONFIGURATION or remove it from the machine's env (build-01, big-01)".
+- `windows_command_too_long`: on a Windows machine, lanq's largest job script for that machine plus the job's
+  variables would pass the 8,000-character limit (the check uses the worst-case script, not the job's own
+  arguments). The job goes to another machine; if none is left, it is `Rejected` (2) with the length (and, when other
+  machines were ruled out by `env_conflict`, each of them and its variable), and the step is `ask_developer`: "ask the
+  developer: they can shorten or drop the --env values, or change machines.yml".
+
+`--dry-run` shows the `--env` flags as given (after the secret scan) and every machine they rule out.
+
+## Exclusive jobs (--exclusive)
+
+A job that needs a machine to itself (a benchmark, a load test, a suite that uses fixed ports) can take every slot:
+
+```bash
+lanq run --needs dotnet --exclusive --on big-01 --wait 3600 -- dotnet test tests/Perf
+```
+
+lanq claims `slot-1` to `slot-<max_jobs>` on the machine, all or nothing, so no other lanq job, yours or anyone
+else's, starts there while it runs. A claim that finds any slot taken removes the slots it just created and tries
+again later. It also backs out when a live `slot-N` above its own `max_jobs` exists: another developer whose
+`machines.yml` gives the same `work_root` a higher `max_jobs` is running a job there. That check is one look when the
+claim is made: such a developer can still start a job in a higher slot afterwards, beside the exclusive job. Everyone
+who shares a worker should use the same `max_jobs` for it.
+
+- **It waits for an idle machine.** A machine with any live slot in use is `busy` for this job ("busy (slots 1/4;
+  --exclusive needs all 4 free)"), and waiting can help. Stale slots (below) do not count. Nothing is reserved for it:
+  other jobs keep taking free slots while it waits, so on a machine that is never idle it waits out `--wait` and ends `NoCapacity` (75). Pin it with
+  `--on` to a machine that is idle, give it a long `--wait`, or run it in quiet hours.
+- **With `--shards`** each shard takes a whole machine. `--shards auto` counts the idle machines that can take the
+  job; a fixed `--shards N` above the number of machines that can take it as configured (capabilities, `size:`,
+  `--env`) is refused (2) before any network: "--exclusive --shards 6: only 4 machines can take this job". That count
+  does not include `--mem` or the Windows-arguments rule, so shards beyond what those leave wait for an idle machine.
+- `--mem`, holds, hours, size and every other rule still apply. In a plan, the dry run marks the machine full, so a
+  sibling job waits for another machine.
+
+`lanq unlock`, the stale-slot reclaim and `lanq health` treat each of its slots as an ordinary slot.
+
+**Stale slots.** A slot file more than 30 minutes (1,800 seconds) past its recorded deadline was left by a crashed
+lanq. Since 0.9.0 the probe counts such slots separately (`slots_stale=`), and they do not make a machine busy, for an
+exclusive job or any other: the next claim that passes them reclaims them. `lanq health` shows `slots free 4/4 (4
+stale: reclaimed by the next claim)`, `health --json` adds `slotsStale` (only when above 0) while `freeSlots` counts
+live slots only, and a busy reason reads `busy (slots 3/4, 1 stale: reclaimed by the next claim)` (for an exclusive
+job, `busy (slots 2/4, 1 stale: reclaimed by the next claim; --exclusive needs all 4 free)`).
+
+When a claim reports that it could not reclaim a stale slot, lanq says so once per machine per run and counts that
+machine's stale slots as busy for the rest of that run. The claim reports it (`RECLAIM=STUCK slot-N`) only when the
+slot's `.reclaim` lock is older than about a minute (a dead reclaimer's), no lock could be made, or the file could not be
+moved or deleted. A younger `.reclaim` lock is a reclaim in progress and is not reported, and a claim that simply
+lost the slot to another job never marks the machine. The count in the line is the number of slots the claim named:
+
+```text
+[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file permissions); counting it as busy for this run; lanq unlock build-01 clears it
+```
+
+The busy reason then reads `busy (slots 2/2, 1 stale, not reclaimable)` (for an exclusive job, `busy (slots 1/2, 1
+stale, not reclaimable; --exclusive needs all 2 free)`); both stale notes can appear together. `lanq health` does not
+change. A slot file above `max_jobs` that cannot be read counts as live, on Windows as on Linux.
+
+## Is this failure new? (--baseline)
+
+A red run on your branch raises one question first: did my change break this, or was it broken already?
+
+```bash
+lanq run --needs dotnet --baseline -- dotnet test tests/Unit
+```
+
+When the job ends `Failed` (its own non-zero exit), lanq runs the same request again (the same command, `--dir`,
+`--needs`, size, `--on`, `--env`, `--exclusive`, `--timeout`) on the **base commit**, a clean tree without your
+changes, and prints a verdict before the status line:
+
+```text
+[baseline] [lanq] the job failed; running the same command at 1a2b3c4 (origin/main) to see whether the failure is new
+[baseline build-01] ...
+[lanq] baseline: at 1a2b3c4 (origin/main) the same command Failed (exit 1) on build-01 in 75.2s: this failure is pre-existing
+[lanq] Next: the job exited 1; read logTail or the log (...) and fix the code; pre-existing: it fails at the base commit too (log: ...)
+[lanq] log: /home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log
+[lanq] Failed: exit 1
+```
+
+Here the merge-base is the tip of `origin/main`, so the base is named `(origin/main)`; when your branch started
+further back it reads `(merge-base with origin/main)`.
+
+- **The base** is the merge-base of HEAD and the default branch: `origin/HEAD`, else `origin/main`, `origin/master`,
+  `main`, `master`, the first that exists. `--baseline-ref REF` (a branch, tag or commit; it implies `--baseline`)
+  uses the merge-base of HEAD and REF, so a branch that moved on still compares with where you started. On the base
+  commit itself with uncommitted changes, the base is HEAD without them.
+- **The verdict:** `new` (the base completed), `preexisting` (the base failed too, with any exit code),
+  `inconclusive` (anything else: it timed out, found no machine, could not be read or sent, or you pressed Ctrl+C) or
+  `skipped` (you are on the base commit with nothing uncommitted, so there is nothing to compare).
+- **Information only.** The run's status and exit code never change: a `preexisting` failure is still `Failed` with
+  the job's own code. The verdict is in the `[lanq] baseline:` line, the `baseline` object in `--json` and the
+  `fix_code` reason in `nextSteps`.
+- **When it runs:** only after `Failed`. Never after `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`,
+  `Rejected` or `Cancelled`, and never after a pass.
+- **Shards:** only the failed shards rerun, together, with the same `LANQ_SHARD` and `LANQ_SHARDS`. The base's tests
+  may split differently, so read a shard verdict as a hint. **Plans:** a job with `baseline: true` that failed reruns
+  after the whole plan has ended; jobs skipped after it do not.
+- **Where:** the machine that failed, so that the verdict reflects the commit and not the machine. While that
+  machine could take the rerun but is busy, the rerun waits for it for up to 2 looks of about 15 seconds each, never
+  past what is left of its own `--wait`, printing `[lanq] waiting for a slot on build-01, where the job failed, before
+  taking another machine (look 1 of 2)`. While other reruns of the same run hold slots the line is `[lanq] waiting
+  for a slot on build-01, where the job failed (the other baseline reruns hold some)` instead. After that it takes
+  any machine that can run it. With `--wait 0`, the default, it does not wait for that machine at all: it takes any machine that can
+  run it now, and with none free it ends `NoCapacity`, which makes the verdict `inconclusive`. A machine that is held
+  or can never take the job is not waited for.
+- **Rerun lines** are prefixed `[baseline]` (`[baseline 2/4]` for a shard, `[baseline unit 2/4]` in a plan). On
+  another machine than the one that failed, the JSON has `sameMachine: false` and the message ends `(on big-01, not
+  build-01 where it failed: the result may reflect the machine)`.
+- **Ctrl+C:** a rerun that has not started yet is `inconclusive: cancelled (Ctrl+C) before it started` (in the JSON,
+  `status` `null` if it had not begun, `Cancelled` and 130 if it was waiting for or claiming a slot); one that is
+  running is stopped and cleaned up (`inconclusive: cancelled (Ctrl+C); its cleanup ran`, `Cancelled`, 130). The run still exits with
+  the job's own code.
+- **Cost:** a red run takes about twice as long. That is why it is opt-in.
+- **Refused before anything is sent** (2): a REF that is empty, over 256 characters, holds control characters,
+  starts with `-` or contains `..` ("--baseline-ref must name one branch, tag or commit (for example --baseline-ref
+  origin/main or --baseline-ref v1.2.0)."); a REF that is not a commit; a repository with no commit yet; no default
+  branch found; or a history with no common commit. A **shallow clone** (CI often fetches one) that lacks the
+  merge-base is not refused, because the job itself can run: the baseline is `inconclusive` ("could not find the base
+  commit (shallow clone?)"). Fetch more history (`git fetch --deepen` or `--unshallow`) to get a verdict.
+- The base commit is sent like any snapshot, after the committed-name and package-config secret scans; a hit makes the
+  baseline `inconclusive` ("the base commit was not sent: Refused: possible secrets in payload (...)", the value never
+  shown) and sends nothing. On an archive worker this sends the base commit's files: older files than your snapshot.
+- **In `lanq.yml`**, `baseline_ref:` must name a branch or tag (it must resolve under `refs/heads/`, `refs/remotes/`
+  or `refs/tags/`): a commit id, `HEAD` or `*_HEAD`, and revision characters (`~ ^ : @ { } \ * ? [` and space) are
+  refused with `lanq.yml: job 'x' (line N): baseline_ref must name a branch or tag (a commit can be given on the
+  command line with --baseline-ref)`. A repository's file should not be able to pick any old commit to send to a
+  worker (an archive worker receives that commit's whole tree); you can still name any commit on the command line.
+  How the keys combine is in [docs/PLANS.md](docs/PLANS.md#baseline-is-the-failure-new).
+- `--dry-run` prints `Baseline: on failure, rerun at 1a2b3c4 (merge-base with origin/main) (a dry run runs
+  nothing)`, or that it would be skipped. Reruns are recorded in `jobs.jsonl` with `baselineOf` and `commit`, and
+  left out of `lanq stats` and `--target-minutes`.
+
+The verdict is per job (or shard), not per test: a `preexisting` verdict means the same command failed at the base,
+not that the same tests did. Read both logs when it matters.
+
 ## Keeping your keys safe
 
 `lanq` never stores or sends your key; it only calls `ssh` and `scp`. The aim is that a synced folder, a stolen
@@ -914,6 +1126,9 @@ lanq run --needs dotnet --dir tests --wait 120 -- dotnet test  # wait up to 2 mi
 lanq run --needs dotnet --timeout 30 -- dotnet test            # stop the job after 30 minutes (exit 124)
 lanq run --needs gpu --dry-run -- dotnet test                  # which machine would take it, and why not the others?
 lanq run --needs dotnet --min-size heavy -- dotnet test        # only a heavy machine (--size light,medium, --on big-01)
+lanq run --needs dotnet --env CONFIGURATION=Release -- dotnet test   # a job variable (the name must be in policy.allowed_env)
+lanq run --needs dotnet --exclusive --on big-01 --wait 3600 -- dotnet test tests/Perf   # big-01 to itself, once it is idle
+lanq run --needs dotnet --baseline -- dotnet test              # on failure: was it already failing at the base commit?
 lanq run --plan                                                # every job of the repository's lanq.yml (docs/PLANS.md)
 lanq stats                                                     # jobs, times and speed per machine and per command
 lanq doctor --remote                                           # is my setup right, and does each worker find its tools?
@@ -1026,6 +1241,17 @@ policy:
 After a run, at most once a day, lanq deletes its own per-job logs in the state folder's `logs/` that are older than
 this, and the oldest beyond 5,000 (see [Local state](#local-state)).
 
+Added in 0.9.0:
+
+```yaml
+policy:
+  allowed_env: [CONFIGURATION, TEST_FILTER, "MYAPP_*"]   # names a job may set with --env or lanq.yml env:; default none
+```
+
+Exact names, or a prefix ending in `*`, compared ignoring case. A name on lanq's deny table can never be set, even
+when listed, and an entry the table fully covers (`GIT_*`, `HOME`, anything `LANQ_*`) is a config error. See
+[Job variables](#job-variables---env).
+
 A file named `PAUSE` in a machine's `work_root` holds that machine (see "Sharing a machine with the people who use it").
 
 Unknown keys are an error (so a `password:` field is refused rather than ignored), and so is a duplicate key. A key
@@ -1064,6 +1290,11 @@ Each default below is enforced in code and covered by a unit test.
   never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
   guarantee: apart from `.npmrc`, `.pypirc` and `.yarnrc.yml` it does not read the content of committed files, it does not look at files that were committed and later
   deleted (they are still in the history a bundle carries), and it cannot recognise every secret format.
+- **Job variables are opt-in by name.** `--env` (and `lanq.yml` `env:`) can set only names you list in
+  `policy.allowed_env` (empty by default), never a name on the hard deny table (loader, runtime startup, toolchain,
+  profile and `GIT_*`/`SSH_*` variables; see [Job variables](#job-variables---env)), and each `NAME=VALUE` goes
+  through the secret scan. Values reach the job as data, quoted like the machine's `env:`. They are not secret-safe:
+  other users of the worker can see them in its process list.
 - **No permission-skipping agent flags.** Any argument containing `dangerously`, `skip-permissions`,
   `bypassPermissions`, `--yolo`, `bypass-approvals`, `danger-full-access`, `approval_policy=never` or
   `--ask-for-approval never` is rejected, even for an allowlisted command.
@@ -1118,7 +1349,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   content (except `.npmrc`, `.pypirc` and `.yarnrc.yml`), and older commits are not scanned at all. **A git bundle carries the repository's full history** the first
   time a machine sees the repository (later bundles carry only new commits), so a secret that was ever committed and
   then deleted still reaches the worker; rewrite that history (and rotate the secret) or use `transfer: archive`,
-  which sends only the current files. It is a safety net, not a guarantee.
+  which sends only the current files (a `--baseline` rerun sends the base commit's files). It is a safety net, not a
+  guarantee.
 - The allowlist limits what `lanq` will start, not what an allowlisted program does. Build and package tools such as
   `dotnet test`, `dotnet build`, `npm test` and `npm ci` execute project code (test code, MSBuild targets, npm
   lifecycle scripts) with the remote user's rights. Only run code you trust, and use a dedicated low-privilege
@@ -1137,18 +1369,24 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   lists are refused with a message giving the limit and the actual size. A Windows machine whose `env:` and
   `path_prepend:` alone would already pass that limit in the job script is refused when the config loads, with the
   machine, the settings and how much is over; `lanq doctor --remote` reports its own script's overflow as a FAIL line.
+  A job's `--env` values count too: a Windows machine they push over the limit is not used for that job
+  (`windows_command_too_long`).
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
   have yet (see "Incremental bundles"). Archive mode sends the whole working snapshot each time, with no history and
   no cache.
 - A crashed orchestrator can leave a slot file behind. Each slot file records its own deadline (the job's
   `--timeout` plus 40 minutes for transfer and cleanup, on the worker's clock), and a slot more than 30 minutes past it
-  is reclaimed by the next job that needs a slot (its job is killed first if it is somehow still running). Slot files written by lanq before 0.4 carry no deadline and are never
+  is reclaimed by the next claim that passes it (its job is killed first if it is somehow still running); until then
+  it does not count as in use (see [Stale slots](#exclusive-jobs---exclusive)). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
 - No persistent queue: `--wait` polls every 15 seconds.
 - Plan files (`lanq run --plan`) pass nothing between jobs: each job runs in its own throw-away folder, maybe on
-  another machine, and `after:` only orders jobs (a test job builds what it needs itself). There is no way to reserve a
-  machine for one job alone (other jobs and other people's runs share its slots up to `max_jobs`), and no per-job
-  environment variables (`env:` is per machine, in `machines.yml`).
+  another machine, and `after:` only orders jobs (a test job builds what it needs itself).
+- `--exclusive` has no reservation: it waits until a machine happens to be idle, and other jobs keep taking free slots
+  meanwhile, so on a busy pool it can wait out `--wait`. Its check for slots above its own `max_jobs` is one look at
+  claim time, so everyone who shares a worker should use the same `max_jobs` for it.
+- `--baseline` compares jobs, not tests: it says whether the same command failed at the base commit, not whether the
+  same tests failed. With `--shards`, the base may split its tests differently.
 - Wake-on-LAN is best effort and was exercised only against fakes and a loopback UDP socket, not real hardware. `lanq`
   cannot know whether a packet woke anything beyond the machine answering ssh later. The automatic wake judges
   `allowed_hours` on your PC's clock (an asleep worker cannot report its own), so keep both in the same time zone.

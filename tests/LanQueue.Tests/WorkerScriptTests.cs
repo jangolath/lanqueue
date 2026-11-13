@@ -440,11 +440,17 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var m = T.Windows();
         m.Capabilities = ["dotnet"];
-        foreach (var script in new[] { RemoteScripts.Execute(m, "j1", ".", ["dotnet", "test"]), RemoteScripts.StopJob(m, "j1"), RemoteScripts.Cleanup(m, "j1", "1", T.RepoId), RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromHours(1)), RemoteScripts.Doctor(m), RemoteScripts.Unlock(m, all: false) })
+        foreach (var script in new[] { RemoteScripts.Execute(m, "j1", ".", ["dotnet", "test"]), RemoteScripts.StopJob(m, "j1"), RemoteScripts.Cleanup(m, "j1", "1", T.RepoId), RemoteScripts.WindowsSlotFunctions, RemoteScripts.Doctor(m), RemoteScripts.Unlock(m, all: false) })
         {
             Assert.Contains("-ceq'" + RemoteScripts.WindowsJobHelperBase64 + "'", script, StringComparison.Ordinal);
             Assert.Contains("[scriptblock]::Create(", script, StringComparison.Ordinal);
             Assert.DoesNotContain(". $LqH", script, StringComparison.Ordinal);
+        }
+
+        // The claims carry the slot functions (with the check above) deflated: exactly that text, dot-sourced.
+        foreach (var claim in new[] { RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromHours(1)), RemoteScripts.AcquireAll(m, "j1", TimeSpan.FromHours(1)) })
+        {
+            Assert.Contains(RemoteScripts.WindowsSlotFunctionsPacked, claim, StringComparison.Ordinal);
         }
 
         Assert.Equal(64, RemoteScripts.WindowsJobHelperHash.Length);

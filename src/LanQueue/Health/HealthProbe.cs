@@ -37,6 +37,22 @@ public sealed record MachineHealth(
     /// <summary>Available memory in GB, or null when the worker did not report it (older or unusual hosts).</summary>
     public double? MemFreeGb { get; init; }
 
+    /// <summary>
+    /// Of <see cref="SlotsUsed"/>, the slot files whose deadline is more than <see cref="Jobs.RemoteScripts.StaleSlotGraceSeconds"/> past (by
+    /// the worker's clock, by the reclaim's own rules): left by a crashed run, and reclaimed by the next claim that passes them (0.9.0).
+    /// 0 when none, or from an older probe.
+    /// </summary>
+    public int SlotsStale { get; init; }
+
+    /// <summary>
+    /// Stale slots a claim of this run could not reclaim (a dead reclaimer's .reclaim lock, or file permissions): counted as used for the rest
+    /// of the run, and named in the busy reason. Set by the runner, never by the probe; 0 otherwise.
+    /// </summary>
+    public int SlotsStuck { get; init; }
+
+    /// <summary>The slots really in use: <see cref="SlotsUsed"/> minus <see cref="SlotsStale"/>. What scheduling judges by.</summary>
+    public int SlotsLive => Math.Max(0, SlotsUsed - SlotsStale);
+
     /// <summary>Total memory in GB, or null when the worker did not report it (an older probe, or an unreadable value).</summary>
     public double? MemTotalGb { get; init; }
 
@@ -206,6 +222,7 @@ public sealed class HealthProbe(ISshClient ssh, TimeProvider clock, WakeService?
         {
             LoadKnown = values.GetValueOrDefault("load_source") != "none",
             MemFreeGb = OptionalNum(values, "mem_free_gb"),
+            SlotsStale = OptionalNum(values, "slots_stale") is { } stale and >= 0 && stale == Math.Floor(stale) ? (int)Math.Min(stale, slotsRaw) : 0,
             MemTotalGb = OptionalNum(values, "mem_total_gb") is { } total and > 0 and < 1_048_576 ? total : null,
             Cores = OptionalNum(values, "cores") is { } cores and >= 1 and <= 65_536 && cores == Math.Floor(cores) ? (int)cores : null,
             SwapFreeGb = OptionalNum(values, "swap_free_gb"),
