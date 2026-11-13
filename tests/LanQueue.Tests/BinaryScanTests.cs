@@ -560,6 +560,30 @@ public sealed class BinaryScanTests : IDisposable
         Assert.All(cases, c => Assert.True(Has(p, "private-key-block", c.Name), c.Name + ": " + string.Join("; ", p.BinaryFindings)));
     }
 
+    /// <summary>
+    /// An indented key (a YAML block scalar) ends at its indented END line: an unrelated edit further down does not re-flag it, and a key
+    /// replaced in place is still found. A one-line key (JSON, escaped) has no block at all.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task IndentedKeyBlockEndsAtItsEndLine()
+    {
+        static string Yaml(char body, string tail) =>
+            "deploy:\n  key: |\n    -----BEGIN RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat("    " + new string(body, 64) + "\n", 4))
+            + "    -----END RSA PRIVATE KEY-----\nother: " + tail + "\n";
+        const string Json = "{\"key\": \"-----BEGIN RSA PRIVATE KEY-----\\nMIIEpAIBAAKCAQEA\\n-----END RSA PRIVATE KEY-----\\n\"}\n";
+        Write("values.dat", Yaml('A', "one"));
+        Write("one.dat", Json + "setting: one\n");
+        Commit();
+
+        Write("values.dat", Yaml('A', "two"));
+        Write("one.dat", Json + "setting: two\n");
+        Assert.Empty((await Snapshot()).BinaryFindings); // unchanged keys, unrelated edits after them
+
+        Write("values.dat", Yaml('B', "one"));
+        var p = await Snapshot();
+        Assert.True(Has(p, "private-key-block", "values.dat"), string.Join("; ", p.BinaryFindings));
+    }
+
     /// <summary>A file lanq could not read from git: refused with a git fsck hint, not the "take the secret out" one.</summary>
     [Fact]
     public void ScanIncompleteHasItsOwnHint()

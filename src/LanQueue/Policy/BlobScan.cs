@@ -194,7 +194,7 @@ internal static class BlobScan
     /// <summary>
     /// The lines of a modified file's new version to scan: those its old version does not have, as the diff's added lines. One exception:
     /// an old line that starts a secret block (<c>-----BEGIN ... PRIVATE KEY</c>, <see cref="SecretScanner.StartsASecretBlock"/>) is
-    /// scanned again when any line of its block (up to the next <c>-----END</c> line) is new, so a key replaced in place (same header, new
+    /// scanned again when any line of its block (up to the next line holding <c>-----END</c>) is new, so a key replaced in place (same header, new
     /// body) is found. An unchanged block or single-line secret stays known and is not re-flagged.
     /// </summary>
     internal static List<string> NewContent(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
@@ -213,14 +213,24 @@ internal static class BlobScan
         return result;
     }
 
+    /// <summary>The longest block <see cref="BlockChanged"/> looks at: a key with no END line within it is judged on these lines only.</summary>
+    private const int MaxBlockLines = 512;
+
     /// <summary>
-    /// Whether any line of the block that starts at <paramref name="begin"/> (up to the next line starting with <c>-----END</c>, or the end)
-    /// is new: an OpenSSH key's first body line is the same for every key of a type, a PGP block starts with headers and a blank line, an
-    /// encrypted PEM with Proc-Type and DEK-Info, and a change may be only in the middle.
+    /// Whether any line of the block that starts at <paramref name="begin"/> is new: an OpenSSH key's first body line is the same for every
+    /// key of a type, a PGP block starts with headers and a blank line, an encrypted PEM with Proc-Type and DEK-Info, and a change may be only
+    /// in the middle. The block ends at the first line that holds <c>-----END</c> anywhere (an indented key in a YAML block scalar too), and
+    /// after at most <see cref="MaxBlockLines"/> lines; a BEGIN line that itself holds <c>-----END</c> (a one-line JSON or escaped key) has
+    /// no block, so an unclosed BEGIN can never reach a far-away edit.
     /// </summary>
     private static bool BlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
     {
-        for (var j = begin + 1; j < lines.Count && !lines[j].StartsWith("-----END", StringComparison.Ordinal); j++)
+        if (lines[begin].Contains("-----END", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        for (var j = begin + 1; j < lines.Count && j <= begin + MaxBlockLines && !lines[j].Contains("-----END", StringComparison.Ordinal); j++)
         {
             if (!known.Contains(lines[j]))
             {
