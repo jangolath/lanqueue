@@ -84,6 +84,19 @@ public static partial class Cli
             selection = selection with { Jobs = narrowed };
         }
 
+        // --fetch-dir, --fetch-max, --fetch-max-files (0.10.0): the developer's choice for every selected job that fetches (lanq.yml may only
+        // lower the limits and never names the folder). Refused when no selected job fetches.
+        if (p.FetchDir is not null || p.FetchMaxBytes is not null || p.FetchMaxFiles is not null)
+        {
+            if (!PlanFetch.AnyFetches(selection.Jobs))
+            {
+                return await PlanRefused(p, PlanFetch.NoFetchingJob, RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+            }
+
+            var fetchDir = p.FetchDir is null ? null : Path.GetFullPath(p.FetchDir);
+            selection = selection with { Jobs = [.. selection.Jobs.Select(j => PlanFetch.Apply(j, fetchDir, p.FetchMaxBytes, p.FetchMaxFiles))] };
+        }
+
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
         var ordered = PlanGraph.Order(selection, expected);
         var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name])

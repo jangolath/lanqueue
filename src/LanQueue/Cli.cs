@@ -142,18 +142,19 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     public string? BaselineRef { get; init; }
 
     /// <summary>
-    /// The run options that come from lanq.yml with --plan, and so are refused with it. --on, --size and --min-size are not among them (0.10.0):
-    /// with --plan they narrow every job (see <see cref="Plan.PlanNarrowing"/>).
+    /// The run options that come from lanq.yml with --plan, and so are refused with it. Not among them (0.10.0): --on, --size and --min-size,
+    /// which narrow every job (see <see cref="Plan.PlanNarrowing"/>), and --fetch-dir, --fetch-max and --fetch-max-files, the developer's own
+    /// choice for every fetching job (lanq.yml may only lower the limits and never names the folder; see <see cref="Plan.PlanFetch"/>).
     /// </summary>
     internal static readonly string[] PlanFileOptions =
     [
-        "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
-        "--fetch-max-files", "--env", "--exclusive", "--baseline", "--baseline-ref",
+        "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--env", "--exclusive", "--baseline",
+        "--baseline-ref",
     ];
 
     /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
     internal const string PlanTakes =
-        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
+        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -457,7 +458,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
         }
 
-        if (fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
+        // With --plan these apply to the plan's fetching jobs (fetch: in lanq.yml); the plan refuses them when none of its jobs fetches.
+        if (!plan && fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
         {
             throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
         }
@@ -624,6 +626,7 @@ public static partial class Cli
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq run --plan ... [--on big-01,build-01] [--size light,medium | --min-size heavy] [--plan-timeout M]
+          lanq run --plan ... [--fetch-dir DIR] [--fetch-max 1G] [--fetch-max-files 2000]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
@@ -744,6 +747,10 @@ public static partial class Cli
         after the snapshot to the last baseline: when it is reached the running jobs are stopped and cleaned up and end TimedOut, jobs waiting
         for a slot end TimedOut, jobs not started are Skipped, unfinished baselines are inconclusive, and the plan is TimedOut (124) unless a
         Failed or Rejected job decides it; --json adds planTimeoutMinutes and planTimedOut. A job's own --timeout still applies.
+        run --plan --fetch-dir DIR, --fetch-max SIZE and --fetch-max-files N apply to every job with fetch: (refused when no selected job
+        fetches) and replace lanq.yml's values, up to 2G and 5000 files. lanq.yml fetch_max and fetch_max_files may only lower the limits (at
+        most 200M and 500 files; larger is refused, exit 2) and there is no fetch_dir key: a repository never picks where files land on your
+        disk. No plan-wide total: at worst the fetching jobs times the per-job limit (32 jobs at the defaults: 6.4 GB).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 

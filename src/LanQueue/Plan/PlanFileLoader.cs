@@ -46,11 +46,13 @@ public static partial class PlanFileLoader
     internal static readonly string[] TopKeys = ["version", "plan_timeout", "defaults", "jobs"];
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
-    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref"];
+    internal static readonly string[] DefaultKeys =
+        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
-        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "env", "exclusive", "baseline", "baseline_ref"];
+        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "fetch_max",
+        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -176,6 +178,7 @@ public static partial class PlanFileLoader
         }
 
         var defaultValues = defaults is null ? [] : Keys(defaults, DefaultKeys, label, "defaults: ", "in defaults:").ToDictionary(x => x.Key.Value!, x => x.Value, StringComparer.Ordinal);
+        CheckDefaultFetchLimits(defaultValues, label);
 
         // Names first: after: may name a job further down the file.
         var named = new List<(string Name, int Line, YamlMappingNode Body)>();
@@ -215,6 +218,41 @@ public static partial class PlanFileLoader
         }
 
         return new PlanFile(path, Version, expanded, Warnings(expanded)) { PlanTimeoutMinutes = planTimeout };
+    }
+
+    /// <summary>
+    /// defaults: fetch_max and fetch_max_files are judged even when no job fetches: by the CLI's own parser (--fetch-max, --fetch-max-files),
+    /// and never above the defaults (a repository may only lower them).
+    /// </summary>
+    private static void CheckDefaultFetchLimits(Dictionary<string, YamlNode> defaults, string label)
+    {
+        foreach (var (key, option) in new[] { ("fetch_max", "--fetch-max"), ("fetch_max_files", "--fetch-max-files") })
+        {
+            if (!defaults.TryGetValue(key, out var node))
+            {
+                continue;
+            }
+
+            if (node is not YamlScalarNode { Value: { } text })
+            {
+                throw new PlanFileException($"{label}: defaults: {key}: must be a single value (line {node.Start.Line}).");
+            }
+
+            ParsedArgs parsed;
+            try
+            {
+                parsed = ParsedArgs.Parse(["run", "--fetch", "x", option, text, "--", "x"]);
+            }
+            catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
+            {
+                throw new PlanFileException($"{label}: defaults: {key} (line {node.Start.Line}): {ex.Message}");
+            }
+
+            if (parsed.FetchMaxBytes > Fetch.FetchLimits.DefaultMaxTotalBytes || parsed.FetchMaxFiles > Fetch.FetchLimits.DefaultMaxFiles)
+            {
+                throw new PlanFileException($"{label}: defaults: {key} (line {node.Start.Line}): {PlanFetch.RaiseRefused}");
+            }
+        }
     }
 
     /// <summary>
@@ -338,6 +376,14 @@ public static partial class PlanFileLoader
             if (key == "<<")
             {
                 throw new PlanFileException($"{label}: {where}merge keys (<<) are not supported (line {k.Start.Line}); write the keys out, or put shared values under defaults:.");
+            }
+
+            if (key == "fetch_dir")
+            {
+                // Where fetched files land on the developer's disk is never the repository's choice (0.10.0).
+                throw new PlanFileException(
+                    $"{label}: {where}fetch_dir is not a lanq.yml key (line {k.Start.Line}): where fetched files land on your computer is the developer's choice, "
+                    + "never the repository's; pass it on the command line: lanq run --plan --fetch-dir DIR");
             }
 
             if (!allowed.Contains(key, StringComparer.Ordinal))
@@ -498,6 +544,17 @@ public static partial class PlanFileLoader
             }
         }
 
+        // fetch_max and fetch_max_files (0.10.0) are --fetch-max and --fetch-max-files. A job's own value is passed as written (without fetch:
+        // the CLI's own rule refuses it); one from defaults: applies only to the jobs that fetch.
+        var fetches = values.ContainsKey("fetch");
+        foreach (var (key, option) in new[] { ("fetch_max", "--fetch-max"), ("fetch_max_files", "--fetch-max-files") })
+        {
+            if (values.TryGetValue(key, out var limit) && (fetches || own.ContainsKey(key)))
+            {
+                args.AddRange([option, Scalar(limit, key)]);
+            }
+        }
+
         // env: merged by name, the job's value winning (an exception to "a job's value replaces the default": a job that sets one variable
         // keeps the others defaults: sets). Each becomes one --env NAME=VALUE, judged by --env's own rules.
         foreach (var (envName, envValue) in Env(defaults.GetValueOrDefault("env"), own.GetValueOrDefault("env"), Error))
@@ -516,6 +573,12 @@ public static partial class PlanFileLoader
         catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
         {
             throw Error(ex.Message);
+        }
+
+        // A repository may only lower the fetch limits: a larger one is the developer's choice, on the command line (decision 16).
+        if (parsed.FetchMaxBytes > Fetch.FetchLimits.DefaultMaxTotalBytes || parsed.FetchMaxFiles > Fetch.FetchLimits.DefaultMaxFiles)
+        {
+            throw Error(PlanFetch.RaiseRefused);
         }
 
         return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed);
