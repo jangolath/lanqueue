@@ -37,6 +37,21 @@
   lanq's own: a worker that sends one is ignored. The schema stays `lanq-makeready/v1` and the report still has no
   `nextSteps`. `suggestedMachine` is advice for the developer; an agent never writes it into `machines.yml`.
 
+### Docs
+
+- The .NET shard recipe in docs/SHARDING.md split classes by their position in a sorted list, and `sort -u` /
+  `Sort-Object -Unique` sort by the machine's locale or culture: shards on machines with different locales could run
+  some classes twice and others never while the run stayed green. A class now goes to shard
+  `cksum(class) mod N + 1` (the POSIX `cksum` of its full name), identical in sh and PowerShell on every locale, and a
+  class keeps its shard when others are added. If you copied the old scripts, replace them. The recipe also gains a
+  guard script (`check-test-split.sh PROJECT N`) that fails unless every test lands in exactly one shard, and the
+  durations recipe's sorts are now ordinal (`LC_ALL=C`, `[StringComparer]::Ordinal`).
+
+### Project
+
+- lanq's repository has its own `lanq.yml`: a `guard` job, four Linux shards and two Windows shards of the test suite,
+  running the scripts in `scripts/lanq/` (the same files as the SHARDING.md recipe). It names no machines.
+
 ## 0.9.1 (2026-11-13)
 
 ### Behaviour changes

@@ -1,0 +1,26 @@
+# lanq's own test plan: lanq run --plan --json (see docs/PLANS.md, and docs/SHARDING.md for the shard scripts).
+# Your machines.yml must allow exactly these commands (policy.allowed_commands):
+#   "sh scripts/lanq/dotnet-test-shard.sh"
+#   "sh scripts/lanq/check-test-split.sh"
+#   "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1"
+# and tag workers linux or windows in capabilities. The shard counts are fixed (not auto), so baselines and history
+# compare like with like; guard's N matches unit-linux. Never edit this file or the scripts to turn a red run green.
+version: 1
+defaults:
+  needs: [dotnet]
+  timeout: 30
+  baseline: true
+jobs:
+  guard:
+    command: [sh, scripts/lanq/check-test-split.sh, tests/LanQueue.Tests/LanQueue.Tests.csproj, "4"]
+    needs: [dotnet, linux]
+  unit-linux:
+    command: [sh, scripts/lanq/dotnet-test-shard.sh, tests/LanQueue.Tests/LanQueue.Tests.csproj]
+    needs: [dotnet, linux]
+    shards: 4
+    fetch: ["tests/LanQueue.Tests/TestResults/*.trx"]
+  unit-windows:
+    command: [powershell, -NoProfile, -ExecutionPolicy, Bypass, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, tests/LanQueue.Tests/LanQueue.Tests.csproj]
+    needs: [dotnet, windows]
+    shards: 2
+    fetch: ["tests/LanQueue.Tests/TestResults/*.trx"]

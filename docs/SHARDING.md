@@ -251,27 +251,70 @@ capability tag (`--needs linux`).
 
 ### .NET
 
-`dotnet test` has no built-in sharding. Split by test class: list the tests, take every Nth class, run those with
+`dotnet test` has no built-in sharding. Split by test class: list the tests, give each class a shard, run those with
 `--filter`. Build once inside the job and test with `--no-build`, so listing and running do not each build again.
 (Every shard still builds once on its own worker: the worktree is fresh. On small boxes the build can be most of a
 shard's time, so prefer fewer, larger shards there, or keep the build local and send only test projects that build
 fast.)
 
+A class goes to shard `cksum(class) mod N + 1`: the POSIX `cksum` CRC of its full name (UTF-8, no trailing newline;
+CRC-32 with polynomial `0x04C11DB7`, most significant bit first, the length appended low byte first, inverted). It
+depends only on the name and N, never on the machine's locale or the order `--list-tests` prints, and a class keeps its
+shard when other classes are added or removed. sh uses the system `cksum`; PowerShell computes the same CRC itself.
+Check values: `LanQueue.Tests.JobEnvTests` 825328188, `LanQueue.Tests.JobEnvironmentTests` 1308070396,
+`LanQueue.Tests.PlanFileTests` 3273765563, the empty string 4294967295 (`printf '%s' NAME | cksum`).
+
+Before 0.9.2 this recipe split by position in a sorted class list. `sort -u` and `Sort-Object -Unique` sort by the
+machine's locale or culture (`JobEnvTests` and `JobEnvironmentTests` swap places between `LC_ALL=C` and `en_US`), so
+shards on machines with different locales could run some classes twice and others never, and the run stayed green.
+If you copied it, replace your scripts with these. A hash split is less even than dealing by position (on lanq's own 73
+classes, 4 shards hold 430 to 950 tests); for balance use the durations recipe below.
+
 `scripts/lanq/dotnet-test-shard.sh` (Linux workers):
 
 ```sh
 #!/bin/sh
+# lanq run --shards (or a lanq.yml job with shards:): run this shard's test classes.
+# A class goes to shard (cksum(class) mod N) + 1: the POSIX cksum of its full name (UTF-8, no newline), the same on
+# every machine and locale, and a class keeps its shard when others are added.
+#   sh dotnet-test-shard.sh PROJECT            build, then test this shard's classes (LANQ_SHARD of LANQ_SHARDS)
+#   sh dotnet-test-shard.sh PROJECT --list     no build: list this shard's tests (check-test-split.sh uses it)
+#   sh dotnet-test-shard.sh --assign N FILE    "cksum shard class" for each class name in FILE (no dotnet)
 set -eu
+
+shard_of() { # CLASS N
+  sum=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+  echo $((sum % $2 + 1))
+}
+
+if [ "${1:-}" = "--assign" ]; then
+  n=${2:?usage: dotnet-test-shard.sh --assign N FILE}
+  while IFS= read -r c || [ -n "$c" ]; do
+    printf '%s %s %s\n' "$(printf '%s' "$c" | cksum | cut -d' ' -f1)" "$(shard_of "$c" "$n")" "$c"
+  done < "${3:?usage: dotnet-test-shard.sh --assign N FILE}"
+  exit 0
+fi
+
 : "${LANQ_SHARD:?run this through lanq run --shards}"
 : "${LANQ_SHARDS:?run this through lanq run --shards}"
-PROJECT=${1:?usage: dotnet-test-shard.sh path/to/Tests.csproj}
-dotnet build "$PROJECT" -c Release -v q -nologo
-classes=$(dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo \
-  | sed -n 's/^    //p' | sed 's/(.*//' | sed 's/\.[^.]*$//' | sort -u \
-  | awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '(NR - 1) % n == i - 1')
-[ -n "$classes" ] || { echo "shard $LANQ_SHARD/$LANQ_SHARDS: no test classes"; exit 0; }
-filter=$(printf '%s\n' "$classes" | sed 's/.*/FullyQualifiedName~&./' | paste -sd'|' -)
-echo "shard $LANQ_SHARD/$LANQ_SHARDS: $(printf '%s\n' "$classes" | wc -l | tr -d ' ') test classes"
+PROJECT=${1:?usage: dotnet-test-shard.sh path/to/Tests.csproj [--list]}
+LIST=${2:-}
+[ -n "$LIST" ] || dotnet build "$PROJECT" -c Release -v q -nologo
+names=$(dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo)
+
+# Fully qualified test names (indented four spaces) -> class names, each once (a set: the order does not matter).
+classes=$(printf '%s\n' "$names" | sed -n 's/^    //p' | sed 's/(.*//' | sed 's/\.[^.]*$//' | awk 'NF && !seen[$0]++')
+mine=$(printf '%s\n' "$classes" | while IFS= read -r c; do
+  if [ -n "$c" ] && [ "$(shard_of "$c" "$LANQ_SHARDS")" -eq "$LANQ_SHARD" ]; then printf '%s\n' "$c"; fi
+done)
+[ -n "$mine" ] || { echo "shard $LANQ_SHARD/$LANQ_SHARDS: no test classes"; exit 0; }
+
+# The trailing dot: FullyQualifiedName~Ns.Class. never matches a longer class name.
+filter=$(printf '%s\n' "$mine" | sed 's/.*/FullyQualifiedName~&./' | paste -sd'|' -)
+if [ -n "$LIST" ]; then
+  exec dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo --filter "$filter"
+fi
+echo "shard $LANQ_SHARD/$LANQ_SHARDS: $(printf '%s\n' "$mine" | wc -l | tr -d ' ') test classes"
 exec dotnet test "$PROJECT" -c Release --no-build --filter "$filter" -nologo --logger "trx;LogFileName=shard-$LANQ_SHARD.trx"
 ```
 
@@ -279,17 +322,72 @@ exec dotnet test "$PROJECT" -c Release --no-build --filter "$filter" -nologo --l
 because the default policy on Windows 10 refuses scripts):
 
 ```powershell
-param([Parameter(Mandatory)][string]$Project)
+# lanq run --shards (or a lanq.yml job with shards:): run this shard's test classes.
+# A class goes to shard (cksum(class) mod N) + 1: the POSIX cksum of its full name (UTF-8, no newline), the same on
+# every machine and culture, and identical to dotnet-test-shard.sh.
+#   dotnet-test-shard.ps1 -Project PROJECT          build, then test this shard's classes (LANQ_SHARD of LANQ_SHARDS)
+#   dotnet-test-shard.ps1 -Project PROJECT -List    no build: list this shard's tests
+#   dotnet-test-shard.ps1 -AssignFile FILE -Shards N   "cksum shard class" for each class name in FILE (no dotnet)
+param([string]$Project, [switch]$List, [string]$AssignFile, [int]$Shards = 0)
 $ErrorActionPreference = 'Stop'
+
+# POSIX cksum: CRC-32, polynomial 0x04C11DB7, MSB first, over the bytes and then the length (low byte first, no
+# trailing zero bytes), inverted. Integers are [long] masked to 32 bits (PowerShell has no unsigned shifts).
+$script:Mask = [long]4294967295
+$script:CrcTable = New-Object 'long[]' 256
+for ($t = 0; $t -lt 256; $t++) {
+    $c = [long]$t -shl 24
+    for ($k = 0; $k -lt 8; $k++) {
+        if ($c -band [long]2147483648) { $c = (($c -shl 1) -bxor [long]79764919) -band $script:Mask } else { $c = ($c -shl 1) -band $script:Mask }
+    }
+    $script:CrcTable[$t] = $c
+}
+
+function Get-PosixCksum([string]$Text) {
+    $crc = [long]0
+    $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes($Text)
+    foreach ($b in $bytes) { $crc = (($crc -shl 8) -band $script:Mask) -bxor $script:CrcTable[(($crc -shr 24) -bxor $b) -band 255] }
+    for ($n = [long]$bytes.Length; $n -ne 0; $n = $n -shr 8) {
+        $crc = (($crc -shl 8) -band $script:Mask) -bxor $script:CrcTable[(($crc -shr 24) -bxor ($n -band 255)) -band 255]
+    }
+    return (-bnot $crc) -band $script:Mask
+}
+
+function Get-Shard([string]$Class, [int]$N) { return [int]((Get-PosixCksum $Class) % $N) + 1 }
+
+if ($AssignFile) {
+    foreach ($c in [System.IO.File]::ReadAllLines($AssignFile, (New-Object System.Text.UTF8Encoding $false))) {
+        [string]::Format([cultureinfo]::InvariantCulture, '{0} {1} {2}', (Get-PosixCksum $c), (Get-Shard $c $Shards), $c)
+    }
+    exit 0
+}
+
+if (-not $Project) { throw 'usage: dotnet-test-shard.ps1 -Project path/to/Tests.csproj [-List]' }
 if (-not $env:LANQ_SHARD -or -not $env:LANQ_SHARDS) { throw 'run this through lanq run --shards' }
-$i = [int]$env:LANQ_SHARD; $n = [int]$env:LANQ_SHARDS
-dotnet build $Project -c Release -v q -nologo
+$i = [int]::Parse($env:LANQ_SHARD, [cultureinfo]::InvariantCulture); $n = [int]::Parse($env:LANQ_SHARDS, [cultureinfo]::InvariantCulture)
+if (-not $List) {
+    dotnet build $Project -c Release -v q -nologo
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+$names = dotnet test $Project -c Release --no-build --list-tests -nologo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-$names = dotnet test $Project -c Release --no-build --list-tests -nologo | Where-Object { $_ -like '    *' }
-$classes = @($names | ForEach-Object { ($_.Trim() -replace '\(.*$', '') -replace '\.[^.]*$', '' } | Sort-Object -Unique)
-$mine = @(for ($k = 0; $k -lt $classes.Count; $k++) { if ($k % $n -eq $i - 1) { $classes[$k] } })
+
+# Fully qualified test names (indented four spaces) -> class names, each once (an ordinal set: the order does not matter).
+$seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+$mine = @(foreach ($line in $names) {
+    if ($line -clike '    *') {
+        $class = ($line.Trim() -creplace '\(.*$', '') -creplace '\.[^.]*$', ''
+        if ($class -and $seen.Add($class) -and (Get-Shard $class $n) -eq $i) { $class }
+    }
+})
 if ($mine.Count -eq 0) { "shard $i/$n`: no test classes"; exit 0 }
+
+# The trailing dot: FullyQualifiedName~Ns.Class. never matches a longer class name.
 $filter = ($mine | ForEach-Object { "FullyQualifiedName~$_." }) -join '|'
+if ($List) {
+    dotnet test $Project -c Release --no-build --list-tests -nologo --filter $filter
+    exit $LASTEXITCODE
+}
 "shard $i/$n`: $($mine.Count) test classes"
 dotnet test $Project -c Release --no-build --filter $filter -nologo --logger "trx;LogFileName=shard-$i.trx"
 exit $LASTEXITCODE
@@ -300,11 +398,64 @@ lanq run --needs dotnet,linux --shards auto --fetch 'tests/**/TestResults/*.trx'
 lanq run --needs dotnet,windows --shards 2 -- powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1 -Project tests/App.Tests/App.Tests.csproj
 ```
 
-Both scripts were checked against an xUnit project with VSTest (`dotnet test --list-tests` prints one fully qualified
-test name per line, indented four spaces; parameters in parentheses are dropped). Classes are split by position in a
-sorted list, so the split is stable while the set of classes does not change. If one class dominates, split by
-namespace buckets you choose instead (a `case "$LANQ_SHARD" in 1) filter=...` table in the script). With Microsoft
-Testing Platform projects, check `--list-tests` output on your project before relying on the `sed`.
+`scripts/lanq/check-test-split.sh PROJECT N`, a guard job (or a CI step) that proves the filters themselves: it builds,
+lists every test, lists each shard's tests through the shard script's own `--filter`, and fails unless every test is
+in exactly one shard:
+
+```sh
+#!/bin/sh
+# The guard for dotnet-test-shard.sh: every test of PROJECT lands in exactly one of N shards.
+#   sh check-test-split.sh PROJECT N
+# Builds once, lists every test, then lists each shard's tests through the shard script's own filter
+# (dotnet test --list-tests --filter), and fails unless the shards together list exactly the full list: none
+# missing, none twice. It runs in the machine's own locale.
+set -eu
+PROJECT=${1:?usage: check-test-split.sh path/to/Tests.csproj N}
+N=${2:?usage: check-test-split.sh path/to/Tests.csproj N}
+case $N in '' | *[!0-9]* | 0) echo "check-test-split: N must be a whole number above 0, not '$N'" >&2; exit 2 ;; esac
+dir=$(dirname "$0")
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+dotnet build "$PROJECT" -c Release -v q -nologo
+dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo > "$tmp/out"
+sed -n 's/^    //p' "$tmp/out" | LC_ALL=C sort > "$tmp/all"
+[ -s "$tmp/all" ] || { echo "check-test-split: dotnet test --list-tests listed no tests" >&2; exit 1; }
+
+: > "$tmp/shards"
+i=1
+while [ "$i" -le "$N" ]; do
+  LANQ_SHARD=$i LANQ_SHARDS=$N sh "$dir/dotnet-test-shard.sh" "$PROJECT" --list > "$tmp/out.$i"
+  sed -n 's/^    //p' "$tmp/out.$i" >> "$tmp/shards"
+  echo "shard $i/$N: $(sed -n 's/^    //p' "$tmp/out.$i" | wc -l | tr -d ' ') test(s)"
+  i=$((i + 1))
+done
+LC_ALL=C sort "$tmp/shards" > "$tmp/union"
+
+total=$(wc -l < "$tmp/all" | tr -d ' ')
+if cmp -s "$tmp/all" "$tmp/union"; then
+  echo "check-test-split: OK, $total test(s) in exactly one of $N shard(s)"
+  exit 0
+fi
+echo "check-test-split: FAILED, the $N shard(s) do not list each of the $total test(s) exactly once" >&2
+echo "missing from every shard (first 20):" >&2
+LC_ALL=C comm -23 "$tmp/all" "$tmp/union" | head -n 20 >&2
+echo "in more than one shard, or unknown (first 20):" >&2
+LC_ALL=C comm -13 "$tmp/all" "$tmp/union" | head -n 20 >&2
+exit 1
+```
+
+These are the files lanq's own repository runs (its [`lanq.yml`](../lanq.yml) has a `guard` job with the same N as its
+Linux shards, and a Windows job, since some tests run only on Windows). They were checked against an xUnit project on
+VSTest: `dotnet test --list-tests` prints one fully qualified test name per line, indented four spaces (parameters in
+parentheses are dropped), and it honours `--filter`. With Microsoft Testing Platform projects, check `--list-tests`
+output on your project before relying on the `sed`. If one class dominates, split by namespace buckets you choose
+instead (a `case "$LANQ_SHARD" in 1) filter=...` table in the script).
+
+What a `--baseline` rerun of a failed shard still cannot match: a class keeps its shard while N is unchanged, so the
+rerun at the base runs the same classes, minus classes added, removed or renamed since the base; tests added inside a
+class run only on the snapshot; and with `--shards auto` N can differ between runs (the rerun reuses the failed
+shard's own `LANQ_SHARDS`, so this only affects comparisons across runs).
 
 ### Node: Jest, Vitest, Playwright
 
@@ -335,7 +486,7 @@ Without the plugin, a script can split the file list:
 ```sh
 #!/bin/sh
 set -eu
-files=$(find tests -name 'test_*.py' | sort | awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '(NR - 1) % n == i - 1')
+files=$(find tests -name 'test_*.py' | LC_ALL=C sort | awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '(NR - 1) % n == i - 1')
 [ -n "$files" ] || exit 0
 exec python -m pytest $files
 ```
@@ -454,7 +605,8 @@ foreach ($f in Get-ChildItem -Recurse -Filter *.trx $args[0]) {
     if ($class[$r.testId] -and $r.duration) { $t[$class[$r.testId]] += [TimeSpan]::Parse($r.duration).TotalSeconds }
   }
 }
-$t.Keys | Sort-Object | ForEach-Object { [string]::Format([cultureinfo]::InvariantCulture, '{0} {1:0.0}', $_, $t[$_]) } | Set-Content test-durations.txt
+[string[]]$keys = $t.Keys; [Array]::Sort($keys, [StringComparer]::Ordinal)   # ordinal: the same order on every machine
+$keys | ForEach-Object { [string]::Format([cultureinfo]::InvariantCulture, '{0} {1:0.0}', $_, $t[$_]) } | Set-Content test-durations.txt
 ```
 
 A small helper deals names to shards by those durations, longest first, each to the shard with the least time so
@@ -465,7 +617,7 @@ far (the same for every shard):
 # scripts/lanq/shard-by-durations.sh DURATIONS: reads names on stdin, prints this shard's ($LANQ_SHARD of $LANQ_SHARDS).
 # A name missing from DURATIONS (a new class or package) counts as 10 s.
 set -eu
-awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '
+LC_ALL=C awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '
   FILENAME == ARGV[1] { d[$1] = $2; next }
   { k++; name[k] = $1; t[k] = ($1 in d) ? d[$1] + 0 : 10 }
   END {
@@ -478,13 +630,14 @@ awk -v n="$LANQ_SHARDS" -v i="$LANQ_SHARD" '
   }' "$1" -
 ```
 
-In `dotnet-test-shard.sh` above, replace the `awk` that takes every Nth class with
-`sh scripts/lanq/shard-by-durations.sh test-durations.txt`. A long class list makes a long `--filter`: Windows caps a
+In `dotnet-test-shard.sh` above, replace the loop that computes `mine` with
+`mine=$(printf '%s\n' "$classes" | sh scripts/lanq/shard-by-durations.sh test-durations.txt)` (`LC_ALL=C` keeps its tie
+order the same on every machine). A long class list makes a long `--filter`: Windows caps a
 command line at 32,767 characters and cmd.exe at 8,191, so write the filter into a `.runsettings` file and pass that
 instead (`TreatNoTestsAsError` makes a shard that ran no tests fail):
 
 ```sh
-filter=$(printf '%s\n' "$classes" | sed 's/.*/FullyQualifiedName~&./' | paste -sd'|' -)
+filter=$(printf '%s\n' "$mine" | sed 's/.*/FullyQualifiedName~&./' | paste -sd'|' -)
 printf '<RunSettings><RunConfiguration><TestCaseFilter>%s</TestCaseFilter><TreatNoTestsAsError>true</TreatNoTestsAsError></RunConfiguration></RunSettings>\n' "$filter" > shard.runsettings
 exec dotnet test "$PROJECT" -c Release --no-build --settings shard.runsettings -nologo --logger "trx;LogFileName=shard-$LANQ_SHARD.trx"
 ```
