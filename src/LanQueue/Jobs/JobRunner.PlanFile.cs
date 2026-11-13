@@ -244,7 +244,21 @@ public sealed partial class JobRunner
             string? fullRef = null;
             if (request.BaselineRef is { } named)
             {
-                var checkedRef = await payloads.BranchOrTagAsync(request.RepoDir, named, ct).ConfigureAwait(false);
+                NamedRef checkedRef;
+                try
+                {
+                    checkedRef = await payloads.BranchOrTagAsync(request.RepoDir, named, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+                {
+                    // A git call that failed to run or timed out (GitTimeoutException): refused as a --baseline base that cannot be read is.
+                    return (bases, new PlanRunResult(nameof(JobStatus.Rejected), 2, SafeLine($"job '{spec.Name}': --baseline: could not read the repository: {ex.Message}"), [])
+                    {
+                        Decided = spec.Name,
+                        RejectKind = Jobs.RejectKind.Arguments,
+                    });
+                }
+
                 if (checkedRef.FullRef is null)
                 {
                     return (bases, new PlanRunResult(nameof(JobStatus.Rejected), 2, $"{spec.Where ?? $"job '{spec.Name}'"}: {checkedRef.Error ?? BaseRef.PlanRefMessage}", [])

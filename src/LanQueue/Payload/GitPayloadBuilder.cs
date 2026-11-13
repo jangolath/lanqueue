@@ -9,6 +9,27 @@ namespace LanQueue.Payload;
 /// </summary>
 public sealed class GitPayloadBuilder : IPayloadBuilder
 {
+    /// <summary>
+    /// Every local git call is bounded (0.9.1): git reads no stdin (closed at once), never prompts (GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never)
+    /// and never pages (GIT_PAGER=cat), and a call that outlives its limit is killed with its process tree and fails with
+    /// <see cref="GitTimeoutException"/>. This limit is for metadata (rev-parse, show-ref, merge-base, ls-tree, cat-file, update-ref, ...).
+    /// </summary>
+    internal static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>The limit for the calls that read the whole working tree or diff it (add -A, diff): hashing large untracked files takes a while.</summary>
+    internal static readonly TimeSpan WorkTreeTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>The limit for building a payload file (bundle create, and the archive's cat-file --batch stream), which grows with the repository.</summary>
+    internal static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>The limit for one git call, by its subcommand.</summary>
+    internal static TimeSpan TimeoutFor(string subcommand) => subcommand switch
+    {
+        "add" or "diff" => WorkTreeTimeout,
+        "bundle" => BuildTimeout,
+        _ => MetadataTimeout,
+    };
+
     public async Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct)
     {
         Directory.CreateDirectory(outputDir);
@@ -149,9 +170,19 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
     }
 
     /// <inheritdoc/>
-    public async Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) =>
-        IsObjectId(ancestor) && IsObjectId(descendant)
-        && (await GitRun(repoDir, null, ct, "merge-base", "--is-ancestor", ancestor, descendant).ConfigureAwait(false)).Code == 0;
+    /// <remarks>A git call that timed out answers false: the caller then records HEAD as the worker's base, which is always safe.</remarks>
+    public async Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct)
+    {
+        try
+        {
+            return IsObjectId(ancestor) && IsObjectId(descendant)
+                && (await GitRun(repoDir, null, ct, "merge-base", "--is-ancestor", ancestor, descendant).ConfigureAwait(false)).Code == 0;
+        }
+        catch (GitTimeoutException)
+        {
+            return false;
+        }
+    }
 
     internal static bool IsObjectId(string s) =>
         s.Length is 40 or 64 && s.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
@@ -218,7 +249,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 return new ArchiveBuild(archivePath, symlinks, submodules);
             }
 
-            var psi = new ProcessStartInfo("git")
+            var psi = NonInteractive(new ProcessStartInfo("git")
             {
                 WorkingDirectory = top,
                 RedirectStandardInput = true,
@@ -226,10 +257,16 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            };
+            });
             psi.ArgumentList.Add("cat-file");
             psi.ArgumentList.Add("--batch");
             using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start git.");
+
+            // The whole stream is bounded by BuildTimeout: on expiry every read below is cancelled and git is killed (finally).
+            var outer = ct;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(outer);
+            cts.CancelAfter(BuildTimeout);
+            ct = cts.Token;
             try
             {
                 var err = p.StandardError.ReadToEndAsync(ct);
@@ -263,12 +300,13 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                     throw new InvalidOperationException("git cat-file failed: " + (await err.ConfigureAwait(false)).Trim());
                 }
             }
+            catch (OperationCanceledException) when (!outer.IsCancellationRequested)
+            {
+                throw new GitTimeoutException("cat-file", BuildTimeout);
+            }
             finally
             {
-                if (!p.HasExited)
-                {
-                    p.Kill(entireProcessTree: true);
-                }
+                Kill(p);
             }
 
             return new ArchiveBuild(archivePath, symlinks, submodules);
@@ -445,17 +483,27 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         return code == 0 ? output : throw new InvalidOperationException($"git {args[0]} failed: {error.Trim()}");
     }
 
-    internal static async Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)
+    internal static Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args) =>
+        RunAsync("git", dir, env, TimeoutFor(args[0]), ct, args);
+
+    /// <summary>
+    /// Runs <paramref name="exe"/> (git, or a stand-in in tests) without a shell: stdin closed at once, stdout and stderr read concurrently (no
+    /// pipe deadlock), and the whole call, reads included, bounded by <paramref name="timeout"/>. On expiry the process tree is killed and
+    /// <see cref="GitTimeoutException"/> is thrown; on <paramref name="ct"/> (Ctrl+C) it is killed too and the cancellation propagates.
+    /// </summary>
+    internal static async Task<(int Code, string Output, string Error)> RunAsync(
+        string exe, string dir, IReadOnlyDictionary<string, string>? env, TimeSpan timeout, CancellationToken ct, IReadOnlyList<string> args)
     {
-        var psi = new ProcessStartInfo("git")
+        var psi = NonInteractive(new ProcessStartInfo(exe)
         {
             WorkingDirectory = dir,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8,
             UseShellExecute = false,
             CreateNoWindow = true,
-        };
+        });
         foreach (var a in args)
         {
             psi.ArgumentList.Add(a);
@@ -469,10 +517,70 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             }
         }
 
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start git.");
-        var err = p.StandardError.ReadToEndAsync(ct);
-        var output = await p.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
-        await p.WaitForExitAsync(ct).ConfigureAwait(false);
-        return (p.ExitCode, output, await err.ConfigureAwait(false));
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Could not start {exe}.");
+        p.StandardInput.Close();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        var output = p.StandardOutput.ReadToEndAsync(cts.Token);
+        var err = p.StandardError.ReadToEndAsync(cts.Token);
+        try
+        {
+            await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            return (p.ExitCode, await output.ConfigureAwait(false), await err.ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
+            Kill(p);
+            try
+            {
+                await Task.WhenAll(output, err).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+            {
+                // the reads were cancelled with the call, or the pipes closed with the killed process
+            }
+
+            ct.ThrowIfCancellationRequested();
+            throw new GitTimeoutException(args.Count > 0 ? args[0] : exe, timeout);
+        }
     }
+
+    /// <summary>
+    /// git may never wait for a person: no terminal prompt (GIT_TERMINAL_PROMPT=0), no Git Credential Manager dialog (GCM_INTERACTIVE=never),
+    /// and no pager (GIT_PAGER=cat; its output is redirected anyway). Every caller also redirects stdin.
+    /// </summary>
+    private static ProcessStartInfo NonInteractive(ProcessStartInfo psi)
+    {
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        psi.Environment["GCM_INTERACTIVE"] = "never";
+        psi.Environment["GIT_PAGER"] = "cat";
+        return psi;
+    }
+
+    private static void Kill(Process p)
+    {
+        try
+        {
+            if (!p.HasExited)
+            {
+                p.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            // it exited on its own in the meantime, or cannot be killed: nothing more to do
+        }
+    }
+}
+
+/// <summary>
+/// A local git call that outlived its limit and was killed (<see cref="GitPayloadBuilder.TimeoutFor"/>). An <see cref="InvalidOperationException"/>,
+/// so every path that reports a failed git call (InfraError 70 for a snapshot or bundle, Rejected 2 for a --baseline base) reports this one too.
+/// </summary>
+public sealed class GitTimeoutException(string subcommand, TimeSpan timeout)
+    : InvalidOperationException($"git {subcommand} did not finish within {Ssh.ProcessSshClient.Describe(timeout)} and was stopped (lanq never gives git any input; look for a stale lock or a slow disk)")
+{
+    public string Subcommand => subcommand;
+
+    public TimeSpan Timeout => timeout;
 }

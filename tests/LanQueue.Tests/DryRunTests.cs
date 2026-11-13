@@ -436,6 +436,7 @@ public sealed class DryRunTests : IDisposable
     [InlineData("never", 75, "NoCapacity")]
     [InlineData("refused", 2, "Rejected")]
     [InlineData("snapshot", 70, "InfraError")]
+    [InlineData("git-timeout", 70, "InfraError")]
     [InlineData("cancelled", 130, "Cancelled")]
     public async Task DryRunExitCodes(string scenario, int code, string status)
     {
@@ -444,6 +445,7 @@ public sealed class DryRunTests : IDisposable
         IPayloadBuilder payloads = scenario switch
         {
             "snapshot" => new ScriptedPayloads(_ => throw new InvalidOperationException("git rev-parse failed: not a git repository")),
+            "git-timeout" => new ScriptedPayloads(_ => throw new GitTimeoutException("rev-parse", TimeSpan.FromSeconds(60))),
             "cancelled" => new ScriptedPayloads(ct =>
             {
                 cts.Cancel();
@@ -461,6 +463,11 @@ public sealed class DryRunTests : IDisposable
 
             Assert.Equal(code, exit);
             Assert.StartsWith($"[lanq] {status}: ", Lines(stderr)[^1], StringComparison.Ordinal);
+            if (scenario == "git-timeout")
+            {
+                Assert.Contains("Could not snapshot the repository: git rev-parse did not finish within 1 min and was stopped", Lines(stderr)[^1], StringComparison.Ordinal);
+            }
+
             if (json)
             {
                 var r = Json(stdout);
