@@ -363,7 +363,7 @@ Every key is always there (`null` where it does not apply), except `logTail`, `e
 | `shardCountWhy` | string or null | `--shards auto` only: why that N, as the `[lanq] --shards auto:` line of `lanq run` says it (with `--target-minutes`, the timing reasoning first, then the free slots). `null` for `--shards N` and without `--shards`. |
 | `shardTiming` | object or null | `--shards auto --target-minutes M` only: how N was picked from earlier runs ([shardTiming](#shardtiming)). `null` otherwise. |
 | `placement` | array or null | `--shards` only: where the shards would start now, each `{"machine", "shards": [numbers]}`; empty when none could start. |
-| `machines` | array | Every machine as judged for the job, in config order: `{machine, eligible, reason, why, permanent, freeSlots, jobSlots}` ([reason codes](#reason-codes)). Empty when the run was refused before any machine was looked at. |
+| `machines` | array | Every machine as judged for the job, in config order: `{machine, eligible, reason, why, permanent, freeSlots, jobSlots}` ([reason codes](#reason-codes)). With `--exclusive`, `jobSlots` on an eligible machine is its `max_jobs`: the slots the job would take. Empty when the run was refused before any machine was looked at. |
 | `wouldWake` | string or null | The sleeping machine `lanq run` would wake (with `--wait` above 0, no `--no-wake`, and no awake machine able to take the job). |
 | `retryable` | boolean or null | `NoCapacity` only, as for [a run](#nocapacity-retryable-and-excluded). |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty (a dry run starts no job). |
