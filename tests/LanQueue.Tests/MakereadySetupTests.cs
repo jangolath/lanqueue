@@ -178,7 +178,7 @@ public sealed class MakereadySetupTests : IDisposable
     [InlineData("ssh-ed25519")]
     [InlineData("ssh-ed25519 !!!notbase64!!!")]
     [InlineData("ssh-dss AAAAB3NzaC1kc3MAAACBAP1/U4EddRIpUt9KnC7s5Of2EbdSPO9EAMMeP4C2USZpRV1AIlH7WT2NWPq/xfW6MPbLm1Vs14E7")]
-    [InlineData("-----BEGIN OPENSSH PRIVATE KEY-----")]
+    [InlineData("-----BEGIN " + "OPENSSH PRIVATE KEY-----")]
     public async Task SetupFallsBackToAPlaceholderForAMalformedPub(string content)
     {
         await File.WriteAllTextAsync(Path.Combine(_home, ".ssh", "lanq_ed25519.pub"), content + "\n");

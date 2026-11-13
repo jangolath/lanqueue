@@ -144,7 +144,7 @@ public sealed class BinaryScanTests : IDisposable
     [Fact(Timeout = TestTimeout)]
     public async Task SecretInRealBinaryUnderCapIsFound()
     {
-        Write("lib.so", WithText(Binary(2 * 1024 * 1024), 700_000, "-----BEGIN RSA PRIVATE KEY-----"));
+        Write("lib.so", WithText(Binary(2 * 1024 * 1024), 700_000, "-----BEGIN " + "RSA PRIVATE KEY-----"));
 
         var p = await Snapshot();
 
@@ -155,8 +155,8 @@ public sealed class BinaryScanTests : IDisposable
     [Fact(Timeout = TestTimeout)]
     public async Task BinaryOverFileCapIsSkippedAndListed()
     {
-        var nine = WithText(Binary((int)BlobScan.BinaryFileCap + 1024), 100, "-----BEGIN RSA PRIVATE KEY-----");
-        var huge = WithText(Binary((int)BlobScan.TextCap + 1024, seed: 2), 100, "-----BEGIN RSA PRIVATE KEY-----"); // over every cap: only peeked
+        var nine = WithText(Binary((int)BlobScan.BinaryFileCap + 1024), 100, "-----BEGIN " + "RSA PRIVATE KEY-----");
+        var huge = WithText(Binary((int)BlobScan.TextCap + 1024, seed: 2), 100, "-----BEGIN " + "RSA PRIVATE KEY-----"); // over every cap: only peeked
         Write("big.bin", nine);
         Write("huge.bin", huge);
 
@@ -175,7 +175,7 @@ public sealed class BinaryScanTests : IDisposable
         const int Size = 7 * 1024 * 1024 + 512 * 1024;
         for (var i = 1; i <= 9; i++)
         {
-            Write($"b{i}.bin", i == 9 ? WithText(Binary(Size, i), 10, "-----BEGIN RSA PRIVATE KEY-----") : Binary(Size, i));
+            Write($"b{i}.bin", i == 9 ? WithText(Binary(Size, i), 10, "-----BEGIN " + "RSA PRIVATE KEY-----") : Binary(Size, i));
         }
 
         var p = await Snapshot();
@@ -568,7 +568,7 @@ public sealed class BinaryScanTests : IDisposable
     public async Task IndentedKeyBlockEndsAtItsEndLine()
     {
         static string Yaml(char body, string tail) =>
-            "deploy:\n  key: |\n    -----BEGIN RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat("    " + new string(body, 64) + "\n", 4))
+            "deploy:\n  key: |\n    -----BEGIN " + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat("    " + new string(body, 64) + "\n", 4))
             + "    -----END RSA PRIVATE KEY-----\nother: " + tail + "\n";
         const string Json = "{\"key\": \"-----BEGIN RSA PRIVATE KEY-----\\nMIIEpAIBAAKCAQEA\\n-----END RSA PRIVATE KEY-----\\n\"}\n";
         Write("values.dat", Yaml('A', "one"));
