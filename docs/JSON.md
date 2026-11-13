@@ -26,7 +26,7 @@ single-machine `lanq makeready --json` report, which is the lanq-makeready scrip
 - **Null versus absent.** In lanq's own objects a key that is listed below is always there; when it has no value it is
   `null` (for example `machine` when no machine took the job). The exceptions are marked "conditional": they are left
   out entirely when they do not apply (`shard`, `attempts`, `retryable`, `excluded`, `logTail` and the `--fetch` keys
-  on a run, `env`, `exclusive` and `baseline` wherever they appear (0.9.0), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
+  on a run, `env`, `exclusive` and `baseline` wherever they appear and `sameMachine` inside `baseline` (0.9.0), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
   `makeready --all`, `commandsMore` in `lanq stats`, and in a plan run `retryable` and `excluded` at the top and
   `logTail`, `retryable`, `excluded`, the `--fetch` keys and `shardTiming` on a job). In a dry run, `shardCountWhy` and
   `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail`, `env`
@@ -237,12 +237,12 @@ again at the base commit, and the run object (each failed shard's entry with `--
 {"status":"Failed","exitCode":1,"machine":"build-01","jobId":"20261109-221503-a1b2c3","durationSeconds":212.4,"message":"exit 1",
  "logPath":"/home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log",
  "baseline":{"ref":"origin/main","sha":"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d","status":"Failed","exitCode":1,"machine":"build-01",
-  "jobId":"20261109-222004-d4e5f6","logPath":"/home/me/.local/state/lanq/logs/20261109-222004-d4e5f6.log","durationSeconds":75.2,
+  "jobId":"20261109-222004-d4e5f6","logPath":"/home/me/.local/state/lanq/logs/20261109-222004-d4e5f6.log","durationSeconds":75.2,"sameMachine":true,
   "verdict":"preexisting","message":"at 1a2b3c4 (merge-base with origin/main) the same command Failed (exit 1) on build-01 in 75.2s: this failure is pre-existing"},
  "nextSteps":[{"action":"fix_code","reason":"the job exited 1; read logTail or the log (/home/me/.local/state/lanq/logs/20261109-221503-a1b2c3.log) and fix the code; pre-existing: it fails at the base commit too (log: /home/me/.local/state/lanq/logs/20261109-222004-d4e5f6.log)","safeToRunUnattended":false}]}
 ```
 
-Every key of `baseline` is always there, `null` where it does not apply.
+Every key of `baseline` except `sameMachine` is always there, `null` where it does not apply.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -253,11 +253,28 @@ Every key of `baseline` is always there, `null` where it does not apply.
 | `machine`, `jobId`, `logPath` | string or null | The rerun's, as in [lanq run](#lanq-run---json); `null` when it never started. |
 | `durationSeconds` | number or null | How long the rerun's command ran; `null` when it never started. |
 | `verdict` | string or null | `new` (the base completed), `preexisting` (the base failed too, any exit code), `inconclusive` (anything else: it timed out, found no machine, the base could not be read or sent, Ctrl+C) or `skipped` (the snapshot is the base commit; nothing ran). Values may be added. `null` only in a dry run, where nothing ran. |
-| `message` | string | The same line lanq prints after `[lanq] baseline:`. |
+| `message` | string | The same line lanq prints after `[lanq] baseline:`. On another machine than the one the job failed on it ends `(on big-01, not build-01 where it failed: the result may reflect the machine)`. |
+| `sameMachine` | boolean | Conditional: `true` when the rerun ran on the machine the job failed on, `false` on another machine. Left out when the rerun ran nowhere (skipped, base not found, cancelled before it started, `NoCapacity`). With `false`, the verdict may reflect the machine rather than the commit. |
+
+The rerun waits up to 2 looks (about 15 seconds each, within its own `--wait`) for a slot on the machine the job failed
+on, while that machine could take it but is busy, then takes any eligible machine. A held machine, or one that can
+never take the job, is not waited for.
+
+Some `inconclusive` messages: `cancelled (Ctrl+C) before it started` (`status` `null`, on every path: single, shards,
+plans), `cancelled (Ctrl+C); its cleanup ran` (`status` `Cancelled`, `exitCode` 130), a rerun that found no machine
+(`status` `NoCapacity`, `exitCode` 75), and `the base commit was not sent: Refused: possible secrets in payload (...)`
+(the value is never shown).
 
 The verdict is information only: the run's `status` and `exitCode` stay the job's own. It also appears in the
-`fix_code` step's `reason`: `; new: the base commit passes`, `; pre-existing: it fails at the base commit too (log:
-PATH)`, `; baseline inconclusive: ...` or `; baseline skipped: the snapshot is the base commit`.
+`fix_code` step's `reason`:
+
+| Verdict | Added to the reason |
+| --- | --- |
+| `new`, same machine | `; new: the base commit passes` |
+| `new`, another machine | `; new: the base commit passes (on big-01, not build-01 where it failed: the result may reflect the machine)` |
+| `preexisting` | `; pre-existing: it fails at the base commit too (log: PATH)` |
+| `skipped` | `; baseline skipped: the snapshot is the base commit` |
+| `inconclusive` | `; baseline inconclusive: <message>` |
 
 A `--baseline-ref` that is not a commit, no default branch, or a history with no common commit is `Rejected` (2)
 before anything is sent. A plan's reruns run after the whole plan has ended, only for failed jobs that asked for one.

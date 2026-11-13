@@ -55,7 +55,7 @@ Open more of the file at `logPath` only if the tail does not show the failure. N
 | `status` | Exit | Next action |
 | --- | --- | --- |
 | `Completed` | 0 | Report success in one line. |
-| `Failed` | job's code | Summarise the failures from `logTail`. Fix the code if that is your task; do not re-run unchanged. With `--baseline`, read `baseline.verdict`: `preexisting` = it fails at the base commit too: report it as pre-existing and do not try to fix it unless that is your task; `new` = your change broke it; `inconclusive` or `skipped` = no answer, say so. |
+| `Failed` | job's code | Summarise the failures from `logTail`. Fix the code if that is your task; do not re-run unchanged. With `--baseline`, read `baseline.verdict`: `preexisting` = it fails at the base commit too: report it as pre-existing and do not try to fix it unless that is your task; `new` = your change broke it, but with `baseline.sameMachine: false` report it with the caveat that the failure may be machine-specific, not as certainly new; `inconclusive` or `skipped` = no answer, say so. |
 | `Rejected` | 2 | Report the message and stop. Do not look for a way around it. An `--env` name "not in policy.allowed_env": tell the developer; never add it yourself. |
 | `NoCapacity` | 75 | `retryable: false`: stop and tell the developer (`excluded` says why; `env_conflict` and `windows_command_too_long` mean your `--env` clashes with a machine's config or is too long for it: report it, do not edit anything). `true`: run the `wait` step once, then tell the developer. |
 | `InfraError` | 70 | Do not retry in a loop. Run `lanq doctor --remote --json` and report the `fail` checks with their `fix`. |
@@ -94,7 +94,8 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
 - Never put secrets, tokens or key material in files, command lines or `--env` values lanq will ship. lanq refuses
   the ones it recognises.
 - A `preexisting` baseline verdict means the failure was there before your change. Report it as such; fix it only if
-  that is your task.
+  that is your task. A `new` verdict with `sameMachine: false` ran on another machine: report the caveat (it may be
+  machine-specific) and do not treat it as certainly caused by your change.
 - Do not shard a command that is not idempotent or that writes shared state (deploy, migrate a shared database,
   publish, push).
 - Use `--no-wake` unless the developer has said waking machines is fine.

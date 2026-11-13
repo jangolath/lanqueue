@@ -654,7 +654,8 @@ worker's cache keeps `refs/lanq/base` on that snapshot so the objects stay put. 
 (`git bundle create … --not <base>`), as long as the base is still a local ancestor of the new snapshot. The worker
 runs `git bundle verify` before fetching; if its cache no longer has the base (for example it was deleted), the job
 falls back once to a full bundle automatically and the log says so. Rewritten history (rebase, amend, reset) or a
-missing `bases.json` simply mean a full bundle; deleting `bases.json` is always safe.
+missing `bases.json` simply mean a full bundle; deleting `bases.json` is always safe. A `--baseline` rerun of an older
+commit leaves the worker's newer base (and `bases.json`) as it was, so the next normal job stays incremental.
 
 `lanq health` checks `git --version` on `git` machines, and on `archive` machines that `tar` is GNU tar or bsdtar
 (plus `gzip` on Linux), and holds a machine that lacks the tool, with the reason.
@@ -984,15 +985,27 @@ changes, and prints a verdict before the status line:
 - **Shards:** only the failed shards rerun, together, with the same `LANQ_SHARD` and `LANQ_SHARDS`. The base's tests
   may split differently, so read a shard verdict as a hint. **Plans:** a job with `baseline: true` that failed reruns
   after the whole plan has ended; jobs skipped after it do not.
-- **Where:** the machine that failed when it can take the rerun, else any machine that can. The rerun gets its own
-  `--wait`.
+- **Where:** the machine that failed, so that the verdict reflects the commit and not the machine. While that
+  machine could take the rerun but is busy, the rerun waits for it for up to 2 looks (about 15 seconds each, counted
+  in its own `--wait`), printing `[lanq] waiting for a slot on build-01, where the job failed, before taking another
+  machine (look 1 of 2)`. After that it takes any machine that can run it. A machine that is held or can never take
+  the job is not waited for. Rerun lines are prefixed `[baseline]` (`[baseline 2/4]` for a shard, `[baseline unit
+  2/4]` in a plan), and while several reruns wait, the line ends `(the other baseline reruns hold some)`. On another machine the line and the JSON say so (`sameMachine: false`), and the message
+  ends `(on big-01, not build-01 where it failed: the result may reflect the machine)`. The rerun gets its own
+  `--wait`; with `--wait 0` it can end `NoCapacity`, which makes the verdict `inconclusive`.
+- **Ctrl+C:** a rerun that has not started yet is `inconclusive: cancelled (Ctrl+C) before it started`; one that is
+  running is stopped and cleaned up (`inconclusive: cancelled (Ctrl+C); its cleanup ran`). The run still exits with
+  the job's own code.
 - **Cost:** a red run takes about twice as long. That is why it is opt-in.
 - **Refused before anything is sent** (2): a REF that is not a commit, no default branch found, or a history with no
   common commit. A **shallow clone** (CI often fetches one) that lacks the merge-base is not refused, because the job
   itself can run: the baseline is `inconclusive` ("could not find the base commit (shallow clone?)"). Fetch more
   history (`git fetch --deepen` or `--unshallow`) to get a verdict.
 - The base commit is sent like any snapshot, after the committed-name and package-config secret scans; a hit makes the
-  baseline `inconclusive` and sends nothing.
+  baseline `inconclusive` ("the base commit was not sent: Refused: possible secrets in payload (...)", the value never
+  shown) and sends nothing.
+- In `lanq.yml`, `baseline: false` and `baseline_ref:` on the same job is an error ("baseline_ref has no effect with
+  baseline: false; drop one."); a `baseline_ref` inherited from `defaults:` is turned off quietly.
 - `--dry-run` prints `Baseline: on failure, rerun at 1a2b3c4 (merge-base with origin/main)`, or that it would be
   skipped. Reruns are recorded in `jobs.jsonl` with `baselineOf` and `commit`, and left out of `lanq stats` and
   `--target-minutes`.

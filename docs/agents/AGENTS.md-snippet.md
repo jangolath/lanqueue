@@ -37,7 +37,8 @@
   run, lanq reruns it at the base commit: `baseline.verdict` is `new`, `preexisting`, `inconclusive` or `skipped`;
   status and exit code never change) and `--env NAME=VALUE`, only for names already in the developer's
   `policy.allowed_env`, never with a secret. Report a `preexisting` failure as such and do not fix it unless that is
-  your task. `excluded` reasons `env_conflict` and `windows_command_too_long`: report them to the developer.
+  your task. A `new` verdict with `sameMachine: false` (rerun on another machine): report it with that caveat, not
+  as certainly new. `excluded` reasons `env_conflict` and `windows_command_too_long`: report them to the developer.
 - Never edit the lanq machines file, the allowlists (`policy.allowed_env` included) or any ssh/key configuration, and
   never edit `lanq.yml` or the machines file to get around a refusal or to get an `--env` through. Never run `lanq makeready --add`,
   `--setup` or any `--yes`: adding machines is the developer's job. Never pass permission-skipping flags.

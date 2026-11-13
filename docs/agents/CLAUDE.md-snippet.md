@@ -83,7 +83,8 @@
 - `--baseline` (or `--baseline-ref REF`): when the job (a shard, a plan job) ends `Failed`, lanq reruns the same command
   at the base commit and adds `baseline` to the JSON. `verdict` `new`: the change broke it; `preexisting`: it fails at
   the base commit too, so report it as pre-existing and do not try to fix it unless that is your task; `inconclusive`
-  or `skipped`: no answer. Status and exit code never change; a red run takes about twice as long.
+  or `skipped`: no answer. A `new` verdict with `sameMachine: false` ran on another machine: report it with that
+  caveat (the failure may be machine-specific), not as certainly new. Status and exit code never change; a red run takes about twice as long.
 - `excluded` reason `env_conflict` (a machine's own `env:` sets the same variable) or `windows_command_too_long` (the
   values are too long for a Windows machine): report it to the developer with the machines named.
 

@@ -57,7 +57,19 @@
   (anything else: timed out, no machine, the base could not be read or sent, Ctrl+C) or `skipped`. It is information
   only: the run's status and exit code never change.
 - Shards: only the failed shards rerun, with the same `LANQ_SHARD`/`LANQ_SHARDS`. Plans: only the failed jobs that
-  asked for it, after the whole plan has ended. Reruns prefer the machine that failed and get their own `--wait`.
+  asked for it, after the whole plan has ended. Each rerun gets its own `--wait`.
+- A rerun goes to the machine the job failed on: while that machine could take it but is busy, it waits up to 2 looks
+  (about 15 s each) for a slot there, then takes any eligible machine. A held or ruled-out machine is not waited for.
+  On another machine, `baseline.sameMachine` is `false` and the message and the `new` reason end `(on big-01, not
+  build-01 where it failed: the result may reflect the machine)`. Waiting lines are prefixed `[baseline]`,
+  `[baseline 2/4]` or `[baseline unit 2/4]`.
+- Ctrl+C: a rerun not yet started is `inconclusive: cancelled (Ctrl+C) before it started` on every path (single,
+  shards, plans); a running one is stopped and cleaned up (`Cancelled`, 130, inconclusive). A rerun that finds no
+  machine is `NoCapacity` (75), inconclusive.
+- `lanq.yml`: `baseline: false` with `baseline_ref:` on the same job is an error; an inherited `baseline_ref` is turned
+  off quietly.
+- A rerun of an older commit leaves the worker's newer stored base (and `bases.json`) alone, so the next normal job
+  still gets a small incremental bundle.
 - Output: a `[lanq] baseline: ...` line per rerun before the status line, a `baseline` object in `--json` (run, each
   shard, each plan job), and the verdict in the `fix_code` reason. `--dry-run` prints the base (`Baseline: on failure,
   rerun at 1a2b3c4 (merge-base with origin/main)`).
@@ -68,7 +80,7 @@
 
 - Run, shard and plan job objects (and the dry runs) gain `env` (the variable names only, never values),
   `exclusive: true` and `baseline` (`{ref, sha, status, exitCode, machine, jobId, logPath, durationSeconds, verdict,
-  message}`). Each is left out when it does not apply.
+  message}`, plus `sameMachine` when the rerun ran somewhere). Each is left out when it does not apply.
 - New permanent reason codes `env_conflict` and `windows_command_too_long`.
 - `jobs.jsonl` gains optional `envNames`, `exclusive`, and on baseline reruns `baselineOf` (the failed job's id) and
   `commit` (the base's short id); `v` stays 2. `lanq stats`, `--target-minutes` and the plan's history order leave

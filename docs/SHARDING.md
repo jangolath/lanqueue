@@ -80,7 +80,8 @@ Linux workers, `lanq init`, `lanq makeready --all`) is in [TEAM-QUICKSTART.md](T
   rule, so when those rule out more machines the extra shards wait for one to be idle. There is no reservation: a
   shard waits while any slot of a machine is in use.
 - **`--baseline`** reruns only the shards that ended `Failed`, together, at the base commit, with the same
-  `LANQ_SHARD` and `LANQ_SHARDS`. Each failed shard gets its own verdict (`baseline` in its `shards` entry). The base
+  `LANQ_SHARD` and `LANQ_SHARDS`, each preferring the machine it failed on (`sameMachine` says whether it got it).
+  Each failed shard gets its own verdict (`baseline` in its `shards` entry), also after Ctrl+C (`inconclusive`). The base
   commit may have other tests, so its split can differ: read a shard's verdict as a hint, and check its log.
 
 ### Output

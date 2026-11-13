@@ -72,7 +72,8 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
   to the developer.
 - --exclusive gives a job a whole machine; it waits for an idle one (no reservation).
 - --baseline reruns a Failed job at the base commit. baseline.verdict "preexisting": report the failure as
-  pre-existing and do not fix it unless that is your task. Status and exit code never change.
+  pre-existing and do not fix it unless that is your task. "new" with sameMachine false ran on another machine:
+  report it with that caveat (it may be machine-specific), not as certainly new. Status and exit code never change.
 - Never edit or delete lanq's jobs.jsonl or logs/ folder.
 ```
 
@@ -99,7 +100,7 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | --- | --- | --- |
 | `--env NAME=VALUE` | use it with names already in `policy.allowed_env` | A name not listed is `Rejected` (2) with an `ask_developer` step. The agent never edits `allowed_env`, `machines.yml` or `lanq.yml` to get one through. Values are settings, not secrets: other users of a worker can see them, and `nextSteps` commands repeat them. |
 | `--exclusive` | use it when the job needs a whole machine | It waits for an idle machine (no reservation), so it may end `NoCapacity` (75, retryable) on a busy pool. |
-| `--baseline`, `--baseline-ref REF` | use them | After a `Failed` run, a rerun at the base commit adds `baseline.verdict`: `new`, `preexisting`, `inconclusive` or `skipped`. Status and exit code never change. It doubles the time of a red run. |
+| `--baseline`, `--baseline-ref REF` | use them | After a `Failed` run, a rerun at the base commit adds `baseline.verdict`: `new`, `preexisting`, `inconclusive` or `skipped`. Status and exit code never change. It doubles the time of a red run. A `new` verdict with `sameMachine: false` ran on another machine: the agent reports it with that caveat, not as certainly new. |
 
 ## Failure playbook
 

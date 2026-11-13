@@ -89,7 +89,8 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 **Defaults are replaced, not merged.** A job's own value replaces the default as a whole: `needs: [node]` on a job
 drops `needs: [dotnet]` from `defaults:` (write `needs: [dotnet, node]` for both). `size` and `min_size` are one
 setting, so either one on a job drops both defaults. `baseline: false` on a job turns off both `baseline` and a
-`baseline_ref` from `defaults:`. **`env` is the exception:** it is merged by name (see below).
+`baseline_ref` from `defaults:`; `baseline: false` with `baseline_ref:` on the same job is an error (`lanq.yml: job 'x'
+(line N): baseline_ref has no effect with baseline: false; drop one.`). **`env` is the exception:** it is merged by name (see below).
 
 **No machine settings.** `lanq.yml` has no keys for hosts, `ssh`, keys, `path_prepend`, `wake`, `priority`,
 `work_root`, `max_jobs` or `policy`. Writing one is an unknown-key error that points to `machines.yml`. `env:` here is
@@ -151,7 +152,9 @@ defaults:
 A job with `baseline: true` that ends `Failed` is run again at the base commit (the merge-base of HEAD and the default
 branch, or of HEAD and `baseline_ref`) once the whole plan has ended, and its result gets a verdict: `new`,
 `preexisting`, `inconclusive` or `skipped`. Only failed jobs rerun (for a sharded job, only its failed shards), never
-a job `Skipped` after them, and nothing reruns after Ctrl+C. The verdict never changes the plan's status or exit
+a job `Skipped` after them, and nothing reruns after Ctrl+C (each failed job that asked gets an `inconclusive`
+"cancelled (Ctrl+C) before it started"). A rerun waits briefly for the machine the job failed on (its lines start
+`[baseline unit]` or `[baseline unit 2/4]`). The verdict never changes the plan's status or exit
 code. A `baseline_ref` that is not a commit refuses the plan (2) before anything is sent, in the dry run too. See the
 README's [Is this failure new?](../README.md#is-this-failure-new---baseline).
 

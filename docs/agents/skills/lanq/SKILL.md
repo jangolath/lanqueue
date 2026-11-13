@@ -102,7 +102,8 @@ lanq run --json --log-tail 60 --no-wake --needs dotnet --baseline -- dotnet test
 ```
 
 Report a `preexisting` failure as pre-existing ("also fails at the base commit") and do not try to fix it unless that
-is your task. `excluded` reasons `env_conflict` (a machine's own `env:` sets the same variable) and
+is your task. A `new` verdict with `baseline.sameMachine: false` ran on another machine than the failure: report it
+with that caveat (the failure may be machine-specific), not as certainly new. `excluded` reasons `env_conflict` (a machine's own `env:` sets the same variable) and
 `windows_command_too_long` (the values are too long for a Windows machine) mean: report to the developer.
 
 ## Route jobs and run a plan file
