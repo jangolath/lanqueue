@@ -313,9 +313,12 @@ or when the shards together list fewer tests than the whole suite.
 
 ```yaml
   guard:
-    command: [sh, scripts/lanq/check-test-split.sh]
+    command: [sh, scripts/lanq/check-test-split.sh, tests/App.Tests/App.Tests.csproj, "4"]
     size: [light, medium]
 ```
+
+`check-test-split.sh` is in [SHARDING.md](SHARDING.md#net); lanq's own [`lanq.yml`](../lanq.yml) runs it with the same
+N as its Linux shards, plus a Windows job so Windows-only tests are not dropped.
 
 Make the later jobs depend on it (`after: [guard]`) when they are expensive, or let it run alongside when they are not.
 

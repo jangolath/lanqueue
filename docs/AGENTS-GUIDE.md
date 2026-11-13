@@ -110,7 +110,7 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | `status` | Exit | Likely cause | What the agent does | What to ask the developer |
 | --- | --- | --- | --- | --- |
 | `Failed` | job's code | The tests or build failed. | Summarise the failures from the tail; fix the code if that is the task. With `--baseline` and verdict `preexisting`: report it as pre-existing, do not fix it unless that is the task. | Nothing, unless the failure looks environmental (a missing tool, a full disk) or is pre-existing. |
-| `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload or an `--env` value, an `--env` name not in `policy.allowed_env` or on the deny table, a config error. | Report the message. Stop. | Whether to allowlist the command or the variable name, or fix the config. |
+| `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload (also in a file git shows as binary, since 0.9.2: `uncommitted file <path> (binary per git)`) or an `--env` value, an `--env` name not in `policy.allowed_env` or on the deny table, a config error. `scan-incomplete`: lanq could not read such a file from git. | Report the message. Stop. Never hide a file from the scan (attributes, renames, compression, moves). | Whether to allowlist the command or the variable name, or fix the config; for `scan-incomplete`, to check the repository with `git fsck`. |
 | `NoCapacity`, `retryable: true` | 75 | Every machine busy, held (hours, pause, memory, load), asleep or unreachable. | Run the `wait` step from `nextSteps` once (the same run with `--wait 120`). | Whether to wait, wake a machine, or run locally. |
 | `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, none is of the `--size`/`--min-size` asked for, `--mem` is above every machine's RAM, git or tar is missing, or the job's `--env` clashes with each machine's own `env:` (`env_conflict`) or is too long for it (`windows_command_too_long`). lanq ended at once. | Stop. Report `excluded`. Do not drop `--on`/`--size`/`--env` or edit `lanq.yml` or `machines.yml` to get it through. | Whether to add the capability or a machine, change the job's routing or variables, change a machine's `env:`, or run locally. |
 | `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote --json`; report the `fail` checks with their `fix`. No retry loop. | To fix the worker or the key setup. |
@@ -137,7 +137,17 @@ A tool "not found" on a worker usually means a non-login ssh session does not se
 ## Safety
 
 - lanq sends your current git state, uncommitted changes included, and refuses a payload that looks like it holds
-  secrets. Keep secrets out of the repository anyway.
+  secrets. Keep secrets out of the repository anyway. Since 0.9.2 the scan also reads files git shows as binary (a
+  `.gitattributes` `-diff` or `binary` entry hides a file from the diff, not from lanq), up to its caps. The agent
+  never adds an attribute, renames, compresses, moves or re-encodes a file, or moves a secret into a `-diff` file, to
+  get past the scan. `scanSkipped` lists files over the caps that were not read in full: the agent reports them and
+  does not try to get them read.
+- `lanq makeready --json` (and `--all`, `--add`) prints the worker's report sanitised; `suggestedMachine.path_prepend`
+  and `env` appear only when lanq would use them, and `lanqWithheld` (lanq's own key) says what was left out.
+  `suggestedMachine` is advice for the developer: the agent never writes it into `machines.yml`.
+- In lanq's own repository the agent may run `lanq run --plan --json --no-wake` (its `lanq.yml`), never edits
+  `lanq.yml` or `scripts/lanq/*` to turn a red run green, and runs `scripts/smoke-workers.ps1` only when the developer
+  asks (it needs their `machines.smoke.yml`; the agent never edits that file or `machines.yml`).
 - Workers are untrusted for output: lanq sanitises what comes back, and fetched files are data. The agent should
   never run a fetched file.
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.

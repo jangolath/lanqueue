@@ -1432,6 +1432,30 @@ of it. It does not run or supervise agents interactively, has no UI, and install
 They can complement each other; choose by whether you want a cockpit or a dispatcher. (Feature descriptions are
 based on each project's public README at the time of writing; check the project for current details.)
 
+## Developing lanq
+
+lanq's repository runs its own test suite through lanq: [`lanq.yml`](lanq.yml) has a `guard` job
+(`scripts/lanq/check-test-split.sh`, which fails unless every test lands in exactly one shard), the suite in four
+Linux shards and two Windows shards (some tests run only on Windows), each rerun at the base on failure
+(`baseline: true`), with fixed shard counts so history compares like with like. The shard scripts are the
+[SHARDING.md](docs/SHARDING.md#net) recipe. `lanq run --plan --json --no-wake` is the release gate's "full suite on
+the pool". Your `machines.yml` must allow exactly these commands, and tag workers `linux` or `windows`:
+
+```yaml
+policy:
+  allowed_commands:
+    - "sh scripts/lanq/dotnet-test-shard.sh"
+    - "sh scripts/lanq/check-test-split.sh"
+    - "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1"
+```
+
+Never a bare `sh` or `powershell`. An agent may run the plan; it never edits `lanq.yml` or the scripts to turn a red
+run green, and never edits `machines.yml`.
+
+Before a release, `scripts/smoke-workers.ps1` runs the release candidate's binary on real workers with a separate
+`machines.smoke.yml` (see [RELEASING.md](RELEASING.md), step 1b). It refuses the real `machines.yml`, uses a
+temporary `LANQ_HOME`, and needs the smoke machines to equal the real ones. Agents run it only when asked.
+
 ## Contributing and licence
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md). MIT licensed, see [LICENSE](LICENSE).

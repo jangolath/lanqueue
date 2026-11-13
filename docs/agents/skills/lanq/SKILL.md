@@ -180,7 +180,7 @@ than one case.
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from `logTail`; open
   the file at `logPath` only if the tail does not show them. With `--baseline`, also report `baseline.verdict`.
 - `2`: refused by policy (command, directory, secret scan, bad flag, an `--env` name not allowed). Report the message
-  and stop.
+  and stop. A secret in a file git shows as binary is named `uncommitted file <path> (binary per git)`.
 - `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. Run `lanq doctor --remote --json` once
   (local checks plus each worker's tools in the job environment; `lanq doctor --json` is local only, no network) and
   report the `checks` whose `level` is `fail`, with their `fix`.
@@ -198,6 +198,13 @@ than one case.
 - Do not edit the lanq machines file, the allowlists (`policy.allowed_env` included), `known_hosts` or any ssh or key
   setting. The developer owns them. Never edit them, or `lanq.yml`, to get an `--env` through.
 - Do not put secrets in `--env` values.
+- Do not try to get past the secret scan: it reads files git shows as binary too (0.9.2). Never add a `.gitattributes`
+  entry, rename, compress, move or re-encode a file, or move a secret into a `-diff` file. Report `scanSkipped` (files
+  over the scan's caps, not read in full) and a `scan-incomplete` refusal (lanq could not read a file from git); do
+  not try to fix them.
+- Do not write `lanq makeready` JSON `suggestedMachine` into the machines file: it is advice for the developer.
+  `lanqWithheld` lists what lanq left out of the report.
+- Do not edit `lanq.yml` or the scripts it runs (shard scripts included) to turn a red run green.
 - Do not run `lanq makeready --add`, `lanq makeready --setup` or anything with `--yes`: adding machines is the
   developer's job.
 - Do not run a `nextSteps` command whose `safeToRunUnattended` is `false`, and run a safe one at most once.

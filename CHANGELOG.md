@@ -49,6 +49,13 @@
   class keeps its shard when others are added. If you copied the old scripts, replace them. The recipe also gains a
   guard script (`check-test-split.sh PROJECT N`) that fails unless every test lands in exactly one shard, and the
   durations recipe's sorts are now ordinal (`LC_ALL=C`, `[StringComparer]::Ordinal`).
+- README (security model, `lanq makeready --json`, a new "Developing lanq" section with the allowlist lines),
+  SECURITY.md, docs/JSON.md (`scanSkipped`, `lanqWithheld`), PLANS.md, SHARDING.md, CONTRIBUTING.md and the AI guide
+  (AGENTS.md, docs/AGENTS-GUIDE.md, both snippets, the skill, llms.txt): an agent never adds a `.gitattributes`
+  entry, renames, compresses, moves or re-encodes a file (or moves a secret into a `-diff` file) to get past the scan;
+  it reports `scanSkipped` and `scan-incomplete` instead of fixing them; it never writes `suggestedMachine` into
+  `machines.yml`; it may run lanq's own plan but never edits `lanq.yml` or its scripts to turn a red run green; and it
+  runs the release smoke only when asked, never editing `machines.yml` or `machines.smoke.yml`.
 
 ### Project
 

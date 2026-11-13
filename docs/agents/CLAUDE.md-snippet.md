@@ -55,7 +55,11 @@
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
   commands run through lanq. lanq rejects them anyway.
 - Never put secrets, tokens or key material in files, command lines or `--env` values that lanq will ship; it refuses
-  the ones it recognises.
+  the ones it recognises, also inside files git shows as binary (0.9.2). Never add a `.gitattributes` entry, rename,
+  compress, move or re-encode a file, or move a secret into a `-diff` file, to get past the scan. Report `scanSkipped`
+  (files not read in full) and a `scan-incomplete` refusal; do not try to fix them.
+- `lanq makeready` JSON `suggestedMachine` is advice for the developer: never write it into the machines file.
+- Never edit `lanq.yml` or the scripts it runs to turn a red run green.
 - Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder (in lanq's state folder); read them through
   `lanq stats --json` and `logPath`.
 
