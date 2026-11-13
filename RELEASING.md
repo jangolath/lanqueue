@@ -20,6 +20,48 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
 ## Cutting a release
 
 1. Make sure `main` is green.
+
+   **1b. Smoke the release candidate on real workers.** Push the release branch, run the release dry run on it, then
+   the smoke with that run's Windows binary, and paste its table into the release PR:
+
+   ```powershell
+   gh workflow run release.yml --ref <release branch>
+   gh run list --workflow release.yml --branch <release branch> --limit 1   # wait for it; note its id
+   pwsh scripts/smoke-workers.ps1 -Run <run id> -Config <folder of machines.yml>\machines.smoke.yml   # or powershell -File
+   ```
+
+   The script downloads the run's `native-win-x64` artifact and checks the run's `headSha` against the branch head on
+   `origin`, so it smokes exactly the commit being released (the dry run's version string is `0.0.0-dryrun.N`). It
+   never runs the installed `lanq`. It refuses your real `machines.yml` (by resolved path, links followed) and checks it
+   is unchanged at the end, runs with a temporary `LANQ_HOME`, and refuses unless each smoke machine's `ssh`,
+   `work_root` and `max_jobs` equal the real config's (so its slot locks are the ones real jobs use). It prints a
+   PASS/FAIL/SKIP table and exits 0 only when nothing failed; a scenario whose machine kind is missing is skipped with a
+   note. Every smoke job has `--timeout 5`, and the script ends with `lanq unlock` on each smoke machine and a check
+   that no slot of a smoke job is left.
+
+   The smoke config is yours and lives outside every repository: `machines.smoke.yml` next to `machines.yml`, with
+   the same machines (copy their entries unchanged) and this policy:
+
+   ```yaml
+   # machines.smoke.yml: only for scripts/smoke-workers.ps1 (RELEASING.md step 1b). The machines below must be copies of
+   # the entries in machines.yml: the same name, ssh, work_root and max_jobs (the script refuses any difference).
+   policy:
+     allowed_commands:
+       - "sh smoke/check.sh"
+       - "powershell -NoProfile -ExecutionPolicy Bypass -File smoke/check.ps1"
+     allowed_directories: ["."]
+     allowed_env: [SMOKE_VALUE]
+   machines:
+     # - name: build-01
+     #   os: linux
+     #   ssh: build@10.20.30.11
+     #   work_root: /srv/lanq
+     #   capabilities: [dotnet, linux]
+     #   max_jobs: 2
+   ```
+
+   Use at least one Linux and one Windows machine and one with `max_jobs` of 2 or more. An agent runs the smoke only
+   when the developer asks, and never edits `machines.yml` or `machines.smoke.yml`.
 2. Date the release's section in `CHANGELOG.md`: the heading must be `## X.Y.Z (YYYY-MM-DD)`
    (for example `## 0.6.0 (2026-11-10)`, not `## 0.6.0 (unreleased)`) with the release's notes under it, merged to
    `main` before tagging.

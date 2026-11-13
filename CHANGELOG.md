@@ -54,6 +54,11 @@
 
 - lanq's repository has its own `lanq.yml`: a `guard` job, four Linux shards and two Windows shards of the test suite,
   running the scripts in `scripts/lanq/` (the same files as the SHARDING.md recipe). It names no machines.
+- `scripts/smoke-workers.ps1` (Windows PowerShell 5.1 and PowerShell 7) smokes a release candidate on real workers,
+  as RELEASING.md's new step 1b: it runs the release dry run's `native-win-x64` binary (checked by the run's `headSha`
+  against the release branch), with the owner's separate `machines.smoke.yml` and a temporary `LANQ_HOME`. It refuses
+  the real `machines.yml` (by resolved path) and checks it is unchanged, refuses unless the smoke machines' `ssh`,
+  `work_root` and `max_jobs` equal the real ones, and prints a PASS/FAIL/SKIP table. Agents run it only when asked.
 
 ## 0.9.1 (2026-11-13)
 
