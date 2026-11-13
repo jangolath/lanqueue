@@ -271,7 +271,9 @@ reruns. When it runs out, lanq prints `[lanq] plan_timeout: 60 min reached; stop
 The plan is then `TimedOut` (124) unless a `Failed` or `Rejected` job decides it. This holds even when nothing was
 running when the time ran out, for example between `after:` waves or while every job was waiting. Each job's own
 `timeout:` still applies. `--wait` cannot outlast the plan's limit. Ctrl+C before the limit still ends the plan
-`Cancelled` (130).
+`Cancelled` (130). If the limit comes while the last job is only cleaning up, it stops nothing: lanq adds
+`[lanq] plan_timeout: nothing was stopped; every job had already ended` and the plan keeps its own status, without
+`planTimedOut`. After `--fail-fast` the limit still bounds the baseline reruns that follow.
 
 `--json` adds `planTimeoutMinutes` (whenever a limit is set) and `planTimedOut: true` (when it was reached). The dry
 run shows the limit on a `Timeout:` line. It warns when history's expected critical path (the longest `after:` chain

@@ -336,6 +336,12 @@ public sealed partial class JobRunner
                 }
 
                 deadline?.Close();
+                if (deadline is { Expired: true } && !result.PlanTimedOut)
+                {
+                    // The limit came while the last job was only cleaning up: the "stopping" line above stopped nothing; say so.
+                    output("[lanq] plan_timeout: nothing was stopped; every job had already ended");
+                }
+
                 return result;
             }
             finally

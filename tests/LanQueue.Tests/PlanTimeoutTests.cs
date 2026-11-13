@@ -453,6 +453,12 @@ public sealed partial class PlanFileRunTests
         Assert.Equal("Completed", Assert.Single(Log.ReadAll()).Status);
         Assert.StartsWith("[lanq] Completed: ", Lines(stderr)[^1], StringComparison.Ordinal);
 
+        // What the user sees: the limit was reached, then that it stopped nothing, before the status line.
+        var lines = Lines(stderr).ToList();
+        var reached = lines.IndexOf("[lanq] plan_timeout: 1 min reached; stopping 1 started job(s)");
+        var nothing = lines.IndexOf("[lanq] plan_timeout: nothing was stopped; every job had already ended");
+        Assert.True(reached >= 0 && nothing > reached && nothing < lines.Count - 1, stderr);
+
         // And the rule itself: nothing TimedOut, Skipped or Cancelled means the result is returned as it is.
         var green = JobRunner.AggregatePlan([new PlanJobOutcome("build", "Completed", 0, "exit 0", [])], cancelled: false);
         var after = JobRunner.PlanTimedOutResult(green, new PlanDeadline(1));
@@ -466,13 +472,19 @@ public sealed partial class PlanFileRunTests
     {
         Plan(Three);
         var failLint = new TaskCompletionSource();
-        var cleanups = 0;
+        // Cleanups that start after lint is recorded: lint's own cleanup runs before its record is written, so it never counts here; only
+        // a job --fail-fast stopped does.
+        var stoppedCleanups = 0;
         var ssh = new PoolSsh
         {
             OnExecute = async (e, c) => JobOf(e) == "lint" ? await failLint.Task.ContinueWith(_ => e.Exit(3), TaskScheduler.Default) : await Hang(e, c),
             OnCleanup = _ =>
             {
-                Interlocked.Increment(ref cleanups);
+                if (Log.ReadAll().Any(r => r.PlanJob == "lint"))
+                {
+                    Interlocked.Increment(ref stoppedCleanups);
+                }
+
                 return new SshResult(0, "");
             },
         };
@@ -482,8 +494,8 @@ public sealed partial class PlanFileRunTests
         await Until(() => ssh.Executes.Count == 3);
         failLint.SetResult();
 
-        // The other jobs' cleanups show --fail-fast has stopped them (it holds the deadline before it cancels anything); then the limit comes.
-        await Until(() => Volatile.Read(ref cleanups) >= 2);
+        // A stopped job's cleanup shows --fail-fast has stopped the others (it holds the deadline before it cancels anything). Then the limit comes.
+        await Until(() => Volatile.Read(ref stoppedCleanups) >= 1);
         fire.SetResult();
         var (code, stdout, stderr) = await run;
 
@@ -497,5 +509,107 @@ public sealed partial class PlanFileRunTests
         Assert.StartsWith("cancelled by --fail-fast", jobs["unit"].GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.DoesNotContain(Log.ReadAll(), r => r.Status == "TimedOut");
         Assert.DoesNotContain("min reached", stderr, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A plan of build (baseline: true, fails) and unit (hangs) with --fail-fast. build fails, so --fail-fast holds the deadline and stops unit.
+    /// The second cleanup (unit's) blocks until the test lets it go, and returns a gate the test opens.
+    /// </summary>
+    private (PoolSsh Ssh, BaselinePayloads Payloads, TaskCompletionSource FailBuild, ManualResetEventSlim InHold, ManualResetEventSlim Release) HeldByFailFast()
+    {
+        Plan("""
+            version: 1
+            defaults:
+              needs: [node]
+            jobs:
+              build:
+                command: npm run build
+                baseline: true
+              unit:
+                command: npm run unit
+            """);
+        var payloads = new BaselinePayloads(new RunnerTests.FakePayloads(""));
+        var failBuild = new TaskCompletionSource();
+        var inHold = new ManualResetEventSlim();
+        var release = new ManualResetEventSlim();
+        var cleanups = 0;
+        PoolSsh ssh = null!;
+        ssh = new PoolSsh
+        {
+            // The head build fails when the test says so; everything else (unit, and build's rerun at the base) hangs until cancelled.
+            OnExecute = async (e, c) => JobOf(e) == "build" && !payloads.IsBase(ssh, e)
+                ? await failBuild.Task.ContinueWith(_ => e.Exit(2), TaskScheduler.Default)
+                : await Hang(e, c),
+            OnCleanup = _ =>
+            {
+                if (Interlocked.Increment(ref cleanups) == 2)
+                {
+                    inHold.Set(); // unit's cleanup: --fail-fast holds the deadline while it runs
+                    release.Wait(TimeSpan.FromSeconds(30));
+                }
+
+                return new SshResult(0, "");
+            },
+        };
+        return (ssh, payloads, failBuild, inHold, release);
+    }
+
+    /// <summary>
+    /// --fail-fast, then baselines, with the limit due during the hold: it is reached as soon as the hold is released, so the baseline is cut
+    /// short (inconclusive, plan_timeout), the plan is flagged, and build's own failure still decides the status.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task FailFastThenBaselinesExpireAtRelease()
+    {
+        var (ssh, payloads, failBuild, inHold, release) = HeldByFailFast();
+        var fire = new TaskCompletionSource();
+
+        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"]);
+        await Until(() => ssh.Executes.Count == 2);
+        failBuild.SetResult();
+        Assert.True(inHold.Wait(TimeSpan.FromSeconds(30)));
+        fire.SetResult(); // due while held: nothing is stopped as TimedOut
+        await Task.Delay(200);
+        release.Set();
+        var (code, stdout, stderr) = await run;
+
+        Assert.Equal(2, code);
+        var json = Json(stdout);
+        Assert.Equal("Failed", json.GetProperty("status").GetString());
+        Assert.True(json.GetProperty("planTimedOut").GetBoolean());
+        var jobs = JobsOf(json);
+        Assert.Equal("Cancelled", jobs["unit"].GetProperty("status").GetString()); // stopped by --fail-fast, not the limit
+        Assert.StartsWith("cancelled by --fail-fast", jobs["unit"].GetProperty("message").GetString(), StringComparison.Ordinal);
+        var baseline = jobs["build"].GetProperty("baseline");
+        Assert.Equal("inconclusive", baseline.GetProperty("verdict").GetString());
+        Assert.Contains("plan_timeout reached", baseline.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("[lanq] plan_timeout: 1 min reached", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain(Log.ReadAll(), r => r.PlanJob == "unit"); // a job --fail-fast cancelled is not recorded
+    }
+
+    /// <summary>Ctrl+C while --fail-fast holds the deadline (and the limit waits on it): no deadlock, and the plan ends Cancelled 130.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task CtrlCDuringHoldIsCancelled()
+    {
+        var (ssh, payloads, failBuild, inHold, release) = HeldByFailFast();
+        var fire = new TaskCompletionSource();
+        using var cts = new CancellationTokenSource();
+
+        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"], ct: cts.Token);
+        await Until(() => ssh.Executes.Count == 2);
+        failBuild.SetResult();
+        Assert.True(inHold.Wait(TimeSpan.FromSeconds(30)));
+        fire.SetResult(); // the timer now waits for the hold to end
+        await Task.Delay(200);
+        await cts.CancelAsync();
+        release.Set();
+        var (code, stdout, stderr) = await run;
+
+        Assert.Equal(130, code);
+        var json = Json(stdout);
+        Assert.Equal("Cancelled", json.GetProperty("status").GetString());
+        Assert.False(json.TryGetProperty("planTimedOut", out _));
+        Assert.DoesNotContain("min reached", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain(ssh.Executes, e => payloads.IsBase(ssh, e)); // nothing reran after Ctrl+C
     }
 }
