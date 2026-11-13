@@ -17,6 +17,7 @@ jobs:
     command: [powershell, -NoProfile, -ExecutionPolicy, Bypass, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, tests/LanQueue.Tests/LanQueue.Tests.csproj]
     shards: 2
     fetch: ["tests/LanQueue.Tests/TestResults/*.trx"]
+    results: { format: trx, path: "tests/LanQueue.Tests/TestResults/*.trx" }
   # With Linux workers (tagged linux), uncomment this job too, and allow "sh scripts/lanq/dotnet-test-shard.sh" and
   # "sh scripts/lanq/check-test-split.sh". It is left out by default because lanq.yml has no conditions: on a pool
   # with no Linux machine it could never run, and the plan would fail. CI runs both guards on Linux and Windows.
@@ -25,6 +26,7 @@ jobs:
   #   needs: [dotnet, linux]
   #   shards: 4
   #   fetch: ["tests/LanQueue.Tests/TestResults/*.trx"]
+  #   results: { format: trx, path: "tests/LanQueue.Tests/TestResults/*.trx" }
   # guard-linux:
   #   command: [sh, scripts/lanq/check-test-split.sh, tests/LanQueue.Tests/LanQueue.Tests.csproj, "4"]
   #   needs: [dotnet, linux]
