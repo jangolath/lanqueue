@@ -90,7 +90,7 @@ public class CliTests
     [InlineData("run", "--plan", "--", "npx", "jest")]
     [InlineData("run", "--plan", "--needs", "node")]
     [InlineData("run", "--plan-file", "ci/lanq.yml", "--shards", "2")]
-    [InlineData("run", "--plan", "--on", "big-01")]
+    [InlineData("run", "--plan", "--mem", "4")]
     [InlineData("run", "--plan", "--fetch", "x")]
     public void RoutingAndPlanOptionsStayWhereTheyBelong(params string[] args) =>
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(args));

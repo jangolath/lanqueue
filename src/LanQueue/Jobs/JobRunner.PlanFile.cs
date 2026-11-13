@@ -177,6 +177,12 @@ public sealed record PlanRunResult(string Status, int ExitCode, string Message, 
     public RejectKind? RejectKind { get; init; }
 
     public InfraKind? InfraKind { get; init; }
+
+    /// <summary>
+    /// NoCapacity from --on / --size / --min-size narrowing only (0.10.0): the selected jobs the narrowing still leaves a machine, in file order
+    /// (the suggested rerun's --only, which replaces any --only typed); null otherwise.
+    /// </summary>
+    public IReadOnlyList<string>? Runnable { get; init; }
 }
 
 public sealed partial class JobRunner

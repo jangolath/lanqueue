@@ -53,6 +53,37 @@ public static partial class Cli
             return await PlanRefused(p, ex.Message, RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
         }
 
+        // --on, --size, --min-size (0.10.0): narrow every selected job, never widen one. An unknown --on name is refused before any network; a
+        // job the narrowing leaves no machine ends the plan below, before the snapshot.
+        IReadOnlyList<string>? on = null;
+        if (p.On is not null)
+        {
+            var (names, unknown) = Scheduling.Pinning.Resolve(config, p.On);
+            if (unknown is not null)
+            {
+                return await PlanRefused(p, unknown, RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+            }
+
+            on = names;
+        }
+
+        var noMachine = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (on is not null || p.Size is not null)
+        {
+            var narrowed = new List<PlanJob>(selection.Jobs.Count);
+            foreach (var j in selection.Jobs)
+            {
+                var (job, why) = PlanNarrowing.Narrow(j, config, on, string.Join(',', p.On ?? []), p.Size);
+                narrowed.Add(job);
+                if (why is not null)
+                {
+                    noMachine[j.Name] = why;
+                }
+            }
+
+            selection = selection with { Jobs = narrowed };
+        }
+
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
         var ordered = PlanGraph.Order(selection, expected);
         var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name])
@@ -61,9 +92,10 @@ public static partial class Cli
             Where = string.Create(CultureInfo.InvariantCulture, $"{Path.GetFileName(plan.Path)}: job '{j.Name}' (line {j.Line})"),
         }).ToList();
         var jobArgs = ordered.ToDictionary(j => j.Name, j => j.Args, StringComparer.Ordinal);
+        var narrowedOut = noMachine.Count > 0 ? NarrowedOut(specs, noMachine) : null;
         if (p.DryRun)
         {
-            return await PlanFileDryRun(p, config, ssh, payloads, log, home, plan, selection, ordered, specs, expected, stdout, stderr, ct, clock).ConfigureAwait(false);
+            return await PlanFileDryRun(p, config, ssh, payloads, log, home, plan, selection, ordered, specs, expected, stdout, stderr, ct, clock, narrowedOut).ConfigureAwait(false);
         }
 
         var jobOutput = p.Json ? stderr : stdout;
@@ -92,24 +124,32 @@ public static partial class Cli
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), Out, delay, clock, new BaseStore(Path.Combine(home, "bases.json")));
         var started = System.Diagnostics.Stopwatch.StartNew();
         PlanRunResult result;
-        try
+        if (narrowedOut is not null)
         {
-            result = await runner.RunPlanAsync(specs, p.FailFast, ct).ConfigureAwait(false);
+            // Nothing was checked further, snapshotted, sent or claimed.
+            result = narrowedOut;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        else
         {
-            // Ctrl+C before any job started (during the snapshot): nothing ran, nothing to clean up.
-            result = new PlanRunResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C) before any job started", []);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-        {
-            result = new PlanRunResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), [])
+            try
             {
-                InfraKind = InfraKind.Unexpected,
-            };
-        }
+                result = await runner.RunPlanAsync(specs, p.FailFast, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Ctrl+C before any job started (during the snapshot): nothing ran, nothing to clean up.
+                result = new PlanRunResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C) before any job started", []);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                result = new PlanRunResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), [])
+                {
+                    InfraKind = InfraKind.Unexpected,
+                };
+            }
 
-        PruneLogs(log, config, stderr);
+            PruneLogs(log, config, stderr);
+        }
         if (result.Jobs.Count > 0)
         {
             await jobOutput.WriteAsync(PlanTable(result)).ConfigureAwait(false);
@@ -153,6 +193,23 @@ public static partial class Cli
         }
 
         return RequestOf(job.Args, repoDir, request) with { Wait = TimeSpan.FromSeconds(p.WaitSeconds), NoWake = p.NoWake };
+    }
+
+    /// <summary>
+    /// The plan ended before the snapshot because --on / --size / --min-size leave some job no machine (<see cref="PlanNarrowing.Narrow"/>): each
+    /// such job NoCapacity (75, not retryable, nothing excluded: no machine was looked at), the rest Skipped, and <see cref="PlanRunResult.Runnable"/>
+    /// the jobs the narrowing leaves a machine, in file order (the suggested rerun's --only).
+    /// </summary>
+    internal static PlanRunResult NarrowedOut(IReadOnlyList<PlanJobSpec> ordered, IReadOnlyDictionary<string, string> noMachine)
+    {
+        var first = ordered.Where(j => noMachine.ContainsKey(j.Name)).MinBy(j => j.FileOrder)!.Name;
+        List<PlanJobOutcome> jobs = [.. ordered.Select(j => noMachine.TryGetValue(j.Name, out var why)
+            ? new PlanJobOutcome(j.Name, nameof(JobStatus.NoCapacity), 75, why, j.After) { Retryable = false, Excluded = [], FileOrder = j.FileOrder }
+            : new PlanJobOutcome(j.Name, PlanJobOutcome.Skipped, 0, $"not started: {noMachine[first]}, so the plan did not start", j.After) { FileOrder = j.FileOrder })];
+        return JobRunner.AggregatePlan(jobs, cancelled: false) with
+        {
+            Runnable = [.. ordered.Where(j => !noMachine.ContainsKey(j.Name)).OrderBy(j => j.FileOrder).Select(j => j.Name)],
+        };
     }
 
     /// <summary>A plan refused before any job ran (the plan file, --only, bad arguments or config): the status line, Next lines and one JSON object.</summary>
@@ -306,30 +363,50 @@ public static partial class Cli
     private static async Task<int> PlanFileDryRun(
         ParsedArgs p, FleetConfig config, ISshClient ssh, IPayloadBuilder payloads, JobLog log, string home, PlanFile plan, PlanSelection selection,
         IReadOnlyList<PlanJob> ordered, IReadOnlyList<PlanJobSpec> specs, Func<PlanJob, double?> expected, TextWriter stdout, TextWriter stderr, CancellationToken ct,
-        TimeProvider? clock)
+        TimeProvider? clock, PlanRunResult? narrowedOut = null)
     {
         var time = clock ?? TimeProvider.System;
 
         // No waker, no BaseStore file, no output: as lanq run --dry-run.
         var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, time), log, Path.Combine(home, "tmp"), _ => { }, clock: time);
         PlanDryResult dry;
-        try
+        if (narrowedOut is not null)
         {
-            dry = await runner.PlanFileDryAsync(specs, ct).ConfigureAwait(false);
+            // --on / --size / --min-size leave a job no machine: the plan would end before the snapshot, so nothing is looked at.
+            dry = new PlanDryResult(narrowedOut.Status, narrowedOut.ExitCode, narrowedOut.Message, [.. ordered.Zip(narrowedOut.Jobs).Select(x => new PlanJobDry(
+                x.First.Name,
+                x.First.After.Count > 0 ? "after" : "now",
+                x.Second.Status == PlanJobOutcome.Skipped ? PlanJobDry.Pending : x.Second.Status,
+                x.Second.Message)
+            {
+                Retryable = x.Second.Status == PlanJobOutcome.Skipped ? null : false,
+                ShardCount = x.First.Args.Shards?.Count,
+            })])
+            {
+                Decided = narrowedOut.Decided,
+                Retryable = false,
+            };
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        else
         {
-            dry = new PlanDryResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C); nothing was sent", []);
-        }
-        catch (Exception ex)
-        {
-            dry = new PlanDryResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), []) { InfraKind = InfraKind.Unexpected };
+            try
+            {
+                dry = await runner.PlanFileDryAsync(specs, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                dry = new PlanDryResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C); nothing was sent", []);
+            }
+            catch (Exception ex)
+            {
+                dry = new PlanDryResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), []) { InfraKind = InfraKind.Unexpected };
+            }
         }
 
         var history = ordered.Any(j => expected(j) is not null);
         await (p.Json ? stderr : stdout).WriteAsync(PlanFileDryText(plan, selection, ordered, dry, expected, history, runner.ScanSkipped.Count)).ConfigureAwait(false);
         var decided = dry.Decided is { } d ? ordered.FirstOrDefault(j => j.Name == d)?.Args : null;
-        var next = NextSteps.ForPlanFileDry(p, dry.Status, JobRunner.SafeLine(dry.Message), dry.Retryable, dry.RejectKind, dry.InfraKind, decided);
+        var next = NextSteps.ForPlanFileDry(p, dry.Status, JobRunner.SafeLine(dry.Message), dry.Retryable, dry.RejectKind, dry.InfraKind, decided, narrowedOut);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {dry.Status}: {JobRunner.SafeLine(dry.Message)}").ConfigureAwait(false);
         if (p.Json)

@@ -451,6 +451,8 @@ internal static class NextSteps
                 return [Step(NextAction.FixCode, $"{failed.Count} job(s) failed: {string.Join("; ", failed)}; read their logTail or logs and fix the code")];
             case nameof(JobStatus.Rejected):
                 return Rejected(p, r.RejectKind, r.Message);
+            case nameof(JobStatus.NoCapacity) when r.Runnable is { } runnable:
+                return Narrowed(p, r, runnable);
             case nameof(JobStatus.NoCapacity) when r.Retryable == false:
                 return
                 [
@@ -496,9 +498,41 @@ internal static class NextSteps
             : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"}){BaselineSentence(j.Baseline)}");
     }
 
-    /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>
-    public static List<NextStepJson> ForPlanFileDry(ParsedArgs p, string status, string message, bool? retryable, RejectKind? reject, InfraKind? infra, ParsedArgs? decided)
+    /// <summary>
+    /// lanq run --plan narrowed by --on / --size / --min-size so that some job has no machine (0.10.0): ask the developer (narrowing never widens,
+    /// and lanq.yml is never edited to widen a job), then the same plan for only the jobs that can still run: --only REPLACES any --only typed,
+    /// and the narrowing is kept. The rerun leaves the other jobs out, which the reason says.
+    /// </summary>
+    private static List<NextStepJson> Narrowed(ParsedArgs p, PlanRunResult r, IReadOnlyList<string> runnable)
     {
+        var why = string.Join("; ", r.Jobs.Where(j => j.Status == nameof(JobStatus.NoCapacity)).Select(j => j.Message));
+        List<NextStepJson> steps =
+        [
+            Step(NextAction.AskDeveloper, why + "; --on, --size and --min-size only narrow a plan's jobs, never widen them: the developer decides whether to narrow less or to leave "
+                + "that job out (never edit lanq.yml to widen a job)"),
+        ];
+        if (SuggestedCommand.RerunPlan(p, runnable) is { } rerun)
+        {
+            var left = r.Jobs.Where(j => j.Status == nameof(JobStatus.NoCapacity)).Select(j => j.Name);
+            steps.Add(Step(
+                NextAction.FixCommand,
+                $"run only the job(s) the narrowing leaves a machine ({string.Join(", ", runnable)}); {string.Join(", ", left)} would not run, so report that it was left out",
+                rerun));
+        }
+
+        return steps;
+    }
+
+    /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>
+    /// <param name="narrowedOut">The plan's narrowing left a job no machine (<see cref="Narrowed"/>, which then gives the steps), or null.</param>
+    public static List<NextStepJson> ForPlanFileDry(
+        ParsedArgs p, string status, string message, bool? retryable, RejectKind? reject, InfraKind? infra, ParsedArgs? decided, PlanRunResult? narrowedOut = null)
+    {
+        if (narrowedOut is { Runnable: { } runnable })
+        {
+            return Narrowed(p, narrowedOut, runnable);
+        }
+
         var health = decided is null ? SuggestedCommand.Health([], null, p.ConfigPath) : SuggestedCommand.Health(decided.Needs, decided.MemGb, p.ConfigPath, decided.On, decided.Size);
         return status switch
         {

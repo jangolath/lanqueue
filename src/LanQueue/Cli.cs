@@ -135,12 +135,19 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --baseline-ref REF (lanq.yml baseline_ref:): the branch, tag or commit to compare with; null means the default branch.</summary>
     public string? BaselineRef { get; init; }
 
-    /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
+    /// <summary>
+    /// The run options that come from lanq.yml with --plan, and so are refused with it. --on, --size and --min-size are not among them (0.10.0):
+    /// with --plan they narrow every job (see <see cref="Plan.PlanNarrowing"/>).
+    /// </summary>
     internal static readonly string[] PlanFileOptions =
     [
-        "--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
+        "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
         "--fetch-max-files", "--env", "--exclusive", "--baseline", "--baseline-ref",
     ];
+
+    /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
+    internal const string PlanTakes =
+        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -549,7 +556,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
         if (seen.FirstOrDefault(o => PlanFileOptions.Contains(o)) is { } option)
         {
-            throw new ArgumentException($"with --plan each job's {option} comes from lanq.yml; leave {option} out (lanq run --plan takes --plan-file, --only, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config).");
+            throw new ArgumentException($"with --plan each job's {option} comes from lanq.yml; leave {option} out ({PlanTakes}).");
         }
     }
 
@@ -594,6 +601,7 @@ public static partial class Cli
           lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
+          lanq run --plan ... [--on big-01,build-01] [--size light,medium | --min-size heavy]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
@@ -706,6 +714,10 @@ public static partial class Cli
         after the first job that does not complete; --wait counts only while no job of the plan holds a slot. Lines are prefixed [job machine];
         a summary table, then the status line. Exit 0 only when every job completed, else the first failed job's own code, then 2, 124, 70, 75,
         130. --json prints one object (status, exitCode, plan, durationSeconds, message, order, jobs, warnings, nextSteps).
+        run --plan --on / --size / --min-size narrow every job, never widen one: a job's own on: is intersected with --on (--on alone when it
+        has none), its size classes with the command line's; the dry run prints each job's narrowed line. An unknown --on name is refused (2)
+        before any network; a job left with no machine ends the plan before the snapshot (75, retryable: false; the suggested rerun's --only
+        lists the jobs that can still run and replaces any --only given).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 
