@@ -94,6 +94,10 @@ public static class BaseRef
         return found.Count switch
         {
             1 => new NamedRef(found[0], null),
+            // heads/main, tags/v1.0, remotes/origin/main: git's own short forms, refused here (they would be refs/heads/heads/main);
+            // say which full ref to write instead.
+            0 when new[] { "heads/", "tags/", "remotes/" }.FirstOrDefault(p => name.StartsWith(p, StringComparison.Ordinal) && name.Length > p.Length) is not null =>
+                new NamedRef(null, $"baseline_ref {name}: write refs/{name}"),
             0 => refused,
             _ when heads && tags => new NamedRef(null, $"baseline_ref {name} is both a branch and a tag; write refs/heads/{name} or refs/tags/{name}"),
             _ => new NamedRef(null, $"baseline_ref {name} names more than one ref ({string.Join(", ", found)}); write one of them"),

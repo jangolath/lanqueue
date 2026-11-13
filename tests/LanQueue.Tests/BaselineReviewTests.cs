@@ -504,6 +504,21 @@ public sealed class BaselineReviewTests : IDisposable
         Assert.Null((await BaseRef.BranchOrTagAsync(repo.Dir, "refs/heads/nope", ct)).FullRef);
         Assert.Null((await BaseRef.BranchOrTagAsync(repo.Dir, "refs/lanq/x", ct)).FullRef);
 
+        // git's own short forms with a namespace part: refused, naming the full ref to write.
+        var bare = Path.Combine(repo.Dir, ".out", "origin.git");
+        repo.Git("init", "-q", "--bare", bare);
+        repo.Git("remote", "add", "origin", bare);
+        repo.Git("push", "-q", "origin", "main");
+        repo.Git("fetch", "-q", "origin");
+        repo.Git("tag", "v1.0", c1);
+        foreach (var (shortForm, full) in new[] { ("heads/main", "refs/heads/main"), ("tags/v1.0", "refs/tags/v1.0"), ("remotes/origin/main", "refs/remotes/origin/main") })
+        {
+            var hint = await BaseRef.BranchOrTagAsync(repo.Dir, shortForm, ct);
+            Assert.Null(hint.FullRef);
+            Assert.Equal($"baseline_ref {shortForm}: write {full}", hint.Error);
+            Assert.Equal(full, (await BaseRef.BranchOrTagAsync(repo.Dir, full, ct)).FullRef);
+        }
+
         // Through a plan: the 40-hex tag resolves to the tag's commit (c1), never to the object c2; it is shown as written.
         var (runner, ssh, payloads, _) = Pool();
         payloads.Resolution = null; // the real resolution
