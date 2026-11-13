@@ -1718,7 +1718,8 @@ public sealed partial class JobRunner(
 
     /// <summary>
     /// Builds the archive at most once per payload, on first use (several shards may ask at once), and reports what a tar.gz could not carry.
-    /// Builds run one at a time with the bundle builds (<paramref name="builds"/>). A build that failed is tried once more on the next request.
+    /// Builds run one at a time with the bundle builds (<paramref name="builds"/>). A build that failed is tried once more on the next request,
+    /// unless it timed out.
     /// </summary>
     private sealed class LazyArchive(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, Action<string> output, SemaphoreSlim builds)
     {
@@ -1748,7 +1749,7 @@ public sealed partial class JobRunner(
             lock (_gate)
             {
                 first = _task is null;
-                if (_task is null || ((_task.IsFaulted || _task.IsCanceled) && _started < MaxBuilds))
+                if (_task is null || ((_task.IsFaulted || _task.IsCanceled) && _started < MaxBuilds && !TimedOut(_task)))
                 {
                     _started++;
                     _task = Serialised(builds, () => builder.BuildArchiveAsync(jobId, repoDir, dir, sha, ct), ct);
@@ -1793,7 +1794,8 @@ public sealed partial class JobRunner(
     /// <summary>
     /// Builds each distinct bundle (full, or incremental on one base) at most once per payload, on first use (several shards may ask at once).
     /// Builds run one at a time (<paramref name="builds"/>, shared with the archive): each bundle build creates and deletes the payload's
-    /// local ref refs/lanq/&lt;payload id&gt;, so two at once would race on it. A build that failed is tried once more on the next request.
+    /// local ref refs/lanq/&lt;payload id&gt;, so two at once would race on it. A build that failed is tried once more on the next request,
+    /// unless it timed out.
     /// </summary>
     private sealed class LazyBundles(IPayloadBuilder builder, string jobId, string repoDir, string dir, string sha, SemaphoreSlim builds)
     {
@@ -1808,7 +1810,7 @@ public sealed partial class JobRunner(
             var key = baseSha ?? "";
             lock (_gate)
             {
-                if (!_built.TryGetValue(key, out var entry) || ((entry.Task.IsFaulted || entry.Task.IsCanceled) && entry.Started < MaxBuilds))
+                if (!_built.TryGetValue(key, out var entry) || ((entry.Task.IsFaulted || entry.Task.IsCanceled) && entry.Started < MaxBuilds && !TimedOut(entry.Task)))
                 {
                     entry = (Serialised(builds, () => builder.BuildBundleAsync(jobId, repoDir, dir, sha, baseSha, ct), ct), entry.Started + 1);
                     _built[key] = entry;
@@ -1842,6 +1844,9 @@ public sealed partial class JobRunner(
 
     /// <summary>A failed bundle or archive build is tried at most this many times in all (once more after the first failure).</summary>
     private const int MaxBuilds = 2;
+
+    /// <summary>A build whose git call timed out (<see cref="GitTimeoutException"/>) is final: another try would only wait as long again.</summary>
+    private static bool TimedOut(Task task) => task.Exception?.InnerExceptions.Any(e => e is GitTimeoutException) == true;
 
     /// <summary>Runs one build while holding <paramref name="gate"/>: bundle and archive builds of one payload never overlap.</summary>
     private static async Task<T> Serialised<T>(SemaphoreSlim gate, Func<Task<T>> build, CancellationToken ct)

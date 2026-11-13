@@ -13,7 +13,7 @@ namespace LanQueue;
 public static partial class Cli
 {
     /// <summary>The lanq-makeready release embedded in this build (see scripts/sync-makeready.sh).</summary>
-    internal const string MakereadyVersion = "0.3.0";
+    internal const string MakereadyVersion = "0.4.0";
 
     internal static readonly TimeSpan MakereadyTimeout = TimeSpan.FromSeconds(120);
 
@@ -567,12 +567,53 @@ public static partial class Cli
             }
         }
 
+        if (FixScriptLine(report) is { } fix)
+        {
+            yield return "";
+            yield return fix;
+        }
+
         yield return "";
         yield return report.WorkerReady ? "Ready: at least one transfer mode works."
             : report.Summary is not null ? "Not ready yet: fix the MUST FIX steps above on that PC, then run lanq makeready again."
             : "Not ready yet: fix the FAIL items above on that PC, then run lanq makeready again.";
         yield return WorkerUntouched;
     }
+
+    /// <summary>
+    /// One line pointing the PC's owner at lanq-makeready-fix (lanq-makeready 0.4.0+) when a WARN/FAIL check may be one its fix list covers
+    /// (Windows: ssh.start, ssh.auto, power.sleep, longpaths.on, git.longpaths, ssh.aclkeys; Linux: ssh.start, power.sleep), else null. Only
+    /// "may": the fix script has its own preconditions (systemd, where git is installed, the file's owner, ...), so its dry run says what it
+    /// can do. lanq never embeds, sends or runs the fix script: it refuses to run over SSH and asks before each change, at that PC.
+    /// </summary>
+    internal static string? FixScriptLine(MakereadyReport report)
+    {
+        var os = report.SuggestedMachine?.Os;
+        var ids = (report.Checks ?? [])
+            .Where(c => c.Status is "WARN" or "FAIL")
+            .Select(c => FixScriptFix(os, c.Id, c.Detail ?? ""))
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var dryRun = os == "windows" ? "lanq-makeready-fix.ps1 -WhatIf" : "sh lanq-makeready-fix.sh --dry-run";
+        return ids.Count == 0 ? null
+            : $"May be fixable at that PC (lanq-makeready-fix: {string.Join(", ", ids)}): its owner can run {dryRun} there to see what it can do, "
+                + "local and interactive only (see lanq-makeready's README). lanq never runs it.";
+    }
+
+    /// <summary>The lanq-makeready-fix 0.4.0 fix id that may fix a WARN/FAIL scanner check (its fix table, mapped to the scanner's check ids), or null.</summary>
+    private static string? FixScriptFix(string? os, string? id, string detail) => (os, id) switch
+    {
+        ("windows", "ssh.server") when detail.Contains("not running", StringComparison.Ordinal) => "ssh.start",
+        ("windows", "ssh.server") when detail.StartsWith("running, start type", StringComparison.Ordinal) => "ssh.auto",
+        ("windows", "power.sleep") => "power.sleep",
+        ("windows", "longpaths") => "longpaths.on",
+        ("windows", "git") when detail.Contains("core.longpaths", StringComparison.Ordinal) => "git.longpaths", // not git.install
+        ("windows", "ssh.keys") when detail.Contains("too-open permissions", StringComparison.Ordinal) => "ssh.aclkeys", // not ssh.nokeys
+        ("linux", "ssh.server") when detail.Contains("not running", StringComparison.Ordinal) => "ssh.start",
+        ("linux", "power.sleep") => "power.sleep",
+        _ => null,
+    };
 
     private static string List(IEnumerable<string> items) => string.Join(", ", items) is { Length: > 0 } s ? s : "none";
 

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text;
 
 namespace LanQueue.Payload;
@@ -9,6 +10,30 @@ namespace LanQueue.Payload;
 /// </summary>
 public sealed class GitPayloadBuilder : IPayloadBuilder
 {
+    /// <summary>
+    /// Every local git call is bounded (0.9.1): git reads no stdin (closed at once), never prompts (GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never)
+    /// and never pages (GIT_PAGER=cat), and a call that outlives its limit is killed with its process tree and fails with
+    /// <see cref="GitTimeoutException"/>. This limit is for metadata (rev-parse, show-ref, ls-tree, cat-file, update-ref, ...).
+    /// </summary>
+    internal static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>The limit for the calls that read the whole working tree or diff it (add -A, diff), or walk the history (rev-list, merge-base).</summary>
+    internal static readonly TimeSpan WorkTreeTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>The limit for building a payload file (bundle create, and the archive's cat-file --batch stream), which grows with the repository.</summary>
+    internal static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The limit for one git call, by its subcommand. History walks (rev-list, merge-base) get the longer limit too: on a large history
+    /// without a commit-graph they can take minutes.
+    /// </summary>
+    internal static TimeSpan TimeoutFor(string subcommand) => subcommand switch
+    {
+        "add" or "diff" or "rev-list" or "merge-base" => WorkTreeTimeout,
+        "bundle" => BuildTimeout,
+        _ => MetadataTimeout,
+    };
+
     public async Task<JobPayload> BuildAsync(string jobId, string repoDir, string outputDir, PayloadKinds kinds, CancellationToken ct)
     {
         Directory.CreateDirectory(outputDir);
@@ -33,11 +58,11 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             var headTree = (await Git(top, null, ct, "rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
             var changed = tree == headTree
                 ? []
-                : (await Git(top, env, ct, "diff", "--cached", "--name-only", "HEAD").ConfigureAwait(false))
+                : (await Git(top, env, ct, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD").ConfigureAwait(false))
                     .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var diff = tree == headTree
                 ? ""
-                : await Git(top, env, ct, "diff", "--cached", "--no-color", "-U0", "HEAD").ConfigureAwait(false);
+                : await Git(top, env, ct, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "HEAD").ConfigureAwait(false);
             var sha = tree == headTree
                 ? head
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
@@ -61,7 +86,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         }
         finally
         {
-            File.Delete(tmpIndex);
+            // A git killed mid-write (timeout, Ctrl+C) can leave the index lock behind. Best effort: the real error must win.
+            TryDelete(tmpIndex);
+            TryDelete(tmpIndex + ".lock");
         }
     }
 
@@ -109,49 +136,87 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         var bundle = Path.Combine(outputDir, usedBase is null ? jobId + ".bundle" : $"{jobId}-{usedBase}.bundle");
         var refName = $"refs/lanq/{jobId}";
         await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
+        ExceptionDispatchInfo? failed = null;
         try
         {
             string[] args = ["bundle", "create", bundle, refName, .. exclude.Count > 0 ? ["--not", .. exclude] : Array.Empty<string>()];
             await Git(top, null, ct, args).ConfigureAwait(false);
         }
-        finally
+        catch (Exception ex)
+        {
+            // A failed or killed bundle create (timeout, Ctrl+C) can leave its lock file; the next try must not trip over it. Best effort:
+            // a delete that fails (Windows, a handle still open) must not replace the GitTimeoutException, which ends the retries.
+            TryDelete(bundle + ".lock");
+            failed = ExceptionDispatchInfo.Capture(ex);
+        }
+
+        if (failed is null)
+        {
+            await Git(top, null, CancellationToken.None, "update-ref", "-d", refName).ConfigureAwait(false);
+            return new BundleBuild(bundle, usedBase);
+        }
+
+        // The build already failed: removing the temporary ref is best effort, and its own failure only adds a note to the real error.
+        try
         {
             await Git(top, null, CancellationToken.None, "update-ref", "-d", refName).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            throw WithLeftoverRef(failed.SourceException, refName);
+        }
 
-        return new BundleBuild(bundle, usedBase);
+        failed.Throw();
+        throw failed.SourceException; // not reached
     }
 
     /// <summary>The commits to exclude for an incremental bundle on <paramref name="baseSha"/>, or none when only a full bundle is safe.</summary>
     private static async Task<IReadOnlyList<string>> IncrementalExcludesAsync(string top, string baseSha, string sha, CancellationToken ct)
     {
-        if (!IsObjectId(baseSha) || (await GitRun(top, null, ct, "cat-file", "-e", baseSha + "^{commit}").ConfigureAwait(false)).Code != 0)
+        try
         {
-            return [];
-        }
-
-        if ((await GitRun(top, null, ct, "merge-base", "--is-ancestor", baseSha, sha).ConfigureAwait(false)).Code == 0)
-        {
-            if (!string.Equals(baseSha, sha, StringComparison.Ordinal))
+            if (!IsObjectId(baseSha) || (await GitRun(top, null, ct, "cat-file", "-e", baseSha + "^{commit}").ConfigureAwait(false)).Code != 0)
             {
-                return [baseSha];
+                return [];
             }
-        }
-        else if ((await GitRun(top, null, ct, "merge-base", "--is-ancestor", sha, baseSha).ConfigureAwait(false)).Code != 0)
-        {
-            return [];
-        }
 
-        // The snapshot is the base itself, or an ancestor of it (lanq run --baseline's base commit, sent after a snapshot on top of it): the
-        // worker has every commit up to the base, so only the snapshot commit's own objects go, on its parents (a root commit: a full bundle).
-        return (await Git(top, null, ct, "rev-parse", sha + "^@").ConfigureAwait(false))
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if ((await GitRun(top, null, ct, "merge-base", "--is-ancestor", baseSha, sha).ConfigureAwait(false)).Code == 0)
+            {
+                if (!string.Equals(baseSha, sha, StringComparison.Ordinal))
+                {
+                    return [baseSha];
+                }
+            }
+            else if ((await GitRun(top, null, ct, "merge-base", "--is-ancestor", sha, baseSha).ConfigureAwait(false)).Code != 0)
+            {
+                return [];
+            }
+
+            // The snapshot is the base itself, or an ancestor of it (lanq run --baseline's base commit, sent after a snapshot on top of it): the
+            // worker has every commit up to the base, so only the snapshot commit's own objects go, on its parents (a root commit: a full bundle).
+            return (await Git(top, null, ct, "rev-parse", sha + "^@").ConfigureAwait(false))
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        }
+        catch (GitTimeoutException)
+        {
+            return []; // a full bundle is always safe
+        }
     }
 
     /// <inheritdoc/>
-    public async Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) =>
-        IsObjectId(ancestor) && IsObjectId(descendant)
-        && (await GitRun(repoDir, null, ct, "merge-base", "--is-ancestor", ancestor, descendant).ConfigureAwait(false)).Code == 0;
+    /// <remarks>A git call that timed out answers false: the caller then records HEAD as the worker's base, which is always safe.</remarks>
+    public async Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct)
+    {
+        try
+        {
+            return IsObjectId(ancestor) && IsObjectId(descendant)
+                && (await GitRun(repoDir, null, ct, "merge-base", "--is-ancestor", ancestor, descendant).ConfigureAwait(false)).Code == 0;
+        }
+        catch (GitTimeoutException)
+        {
+            return false;
+        }
+    }
 
     internal static bool IsObjectId(string s) =>
         s.Length is 40 or 64 && s.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
@@ -184,8 +249,10 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
     /// Writes every regular file of the snapshot tree. Content is streamed from one long-lived cat-file process straight into the
     /// tar entry (exactly the blob's size is read), so memory stays about one file. Symlinks and submodules are counted, not archived.
     /// </summary>
-    private static async Task<ArchiveBuild> WriteArchiveAsync(string top, string tree, string archivePath, CancellationToken ct)
+    /// <param name="timeout">The limit of the cat-file --batch stream: <see cref="BuildTimeout"/> unless a test gives a shorter one.</param>
+    internal static async Task<ArchiveBuild> WriteArchiveAsync(string top, string tree, string archivePath, CancellationToken ct, TimeSpan? timeout = null)
     {
+        var limit = timeout ?? BuildTimeout;
         var listing = await Git(top, null, ct, "ls-tree", "-r", "-z", tree).ConfigureAwait(false);
         var wanted = new List<(string Sha, string Path, bool Exec)>();
         int symlinks = 0, submodules = 0;
@@ -218,7 +285,7 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 return new ArchiveBuild(archivePath, symlinks, submodules);
             }
 
-            var psi = new ProcessStartInfo("git")
+            var psi = NonInteractive(new ProcessStartInfo("git")
             {
                 WorkingDirectory = top,
                 RedirectStandardInput = true,
@@ -226,10 +293,16 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            };
+            });
             psi.ArgumentList.Add("cat-file");
             psi.ArgumentList.Add("--batch");
             using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start git.");
+
+            // The whole stream is bounded by BuildTimeout: on expiry every read below is cancelled and git is killed (finally).
+            var outer = ct;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(outer);
+            cts.CancelAfter(limit);
+            ct = cts.Token;
             try
             {
                 var err = p.StandardError.ReadToEndAsync(ct);
@@ -263,19 +336,21 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                     throw new InvalidOperationException("git cat-file failed: " + (await err.ConfigureAwait(false)).Trim());
                 }
             }
+            catch (OperationCanceledException) when (!outer.IsCancellationRequested)
+            {
+                throw new GitTimeoutException("cat-file", limit);
+            }
             finally
             {
-                if (!p.HasExited)
-                {
-                    p.Kill(entireProcessTree: true);
-                }
+                Kill(p);
+                WaitBriefly(p);
             }
 
             return new ArchiveBuild(archivePath, symlinks, submodules);
         }
         catch
         {
-            File.Delete(archivePath);
+            TryDelete(archivePath); // best effort: the real error (a GitTimeoutException ends the retries) must win
             throw;
         }
     }
@@ -445,17 +520,27 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         return code == 0 ? output : throw new InvalidOperationException($"git {args[0]} failed: {error.Trim()}");
     }
 
-    internal static async Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args)
+    internal static Task<(int Code, string Output, string Error)> GitRun(string dir, Dictionary<string, string>? env, CancellationToken ct, params string[] args) =>
+        RunAsync("git", dir, env, TimeoutFor(args[0]), ct, args);
+
+    /// <summary>
+    /// Runs <paramref name="exe"/> (git, or a stand-in in tests) without a shell: stdin closed at once, stdout and stderr read concurrently (no
+    /// pipe deadlock), and the whole call, reads included, bounded by <paramref name="timeout"/>. On expiry the process tree is killed and
+    /// <see cref="GitTimeoutException"/> is thrown; on <paramref name="ct"/> (Ctrl+C) it is killed too and the cancellation propagates.
+    /// </summary>
+    internal static async Task<(int Code, string Output, string Error)> RunAsync(
+        string exe, string dir, IReadOnlyDictionary<string, string>? env, TimeSpan timeout, CancellationToken ct, IReadOnlyList<string> args)
     {
-        var psi = new ProcessStartInfo("git")
+        var psi = NonInteractive(new ProcessStartInfo(exe)
         {
             WorkingDirectory = dir,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8,
             UseShellExecute = false,
             CreateNoWindow = true,
-        };
+        });
         foreach (var a in args)
         {
             psi.ArgumentList.Add(a);
@@ -469,10 +554,124 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             }
         }
 
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("Could not start git.");
-        var err = p.StandardError.ReadToEndAsync(ct);
-        var output = await p.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
-        await p.WaitForExitAsync(ct).ConfigureAwait(false);
-        return (p.ExitCode, output, await err.ConfigureAwait(false));
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Could not start {exe}.");
+        p.StandardInput.Close();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        var output = p.StandardOutput.ReadToEndAsync(cts.Token);
+        var err = p.StandardError.ReadToEndAsync(cts.Token);
+        try
+        {
+            await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            return (p.ExitCode, await output.ConfigureAwait(false), await err.ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
+            Kill(p);
+            WaitBriefly(p); // so its file handles (index, locks) are released before the caller cleans up
+            try
+            {
+                await Task.WhenAll(output, err).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+            {
+                // the reads were cancelled with the call, or the pipes closed with the killed process
+            }
+
+            ct.ThrowIfCancellationRequested();
+            throw new GitTimeoutException(args.Count > 0 ? args[0] : exe, timeout);
+        }
     }
+
+    /// <summary>Removed from git's environment (0.9.1): lanq's local git calls always work on the repository they run in.</summary>
+    internal static readonly string[] InheritedGitVariables =
+        ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE"];
+
+    /// <summary>
+    /// git may never wait for a person: no terminal prompt (GIT_TERMINAL_PROMPT=0), no Git Credential Manager dialog (GCM_INTERACTIVE=never),
+    /// and no pager (GIT_PAGER=cat; its output is redirected anyway). Every caller also redirects stdin.
+    /// </summary>
+    private static ProcessStartInfo NonInteractive(ProcessStartInfo psi)
+    {
+        // Inherited variables that would point git at another repository, object store, index or diff program. lanq sets GIT_INDEX_FILE
+        // itself, after this, for the snapshot's temporary index.
+        foreach (var name in InheritedGitVariables)
+        {
+            psi.Environment.Remove(name);
+        }
+
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        psi.Environment["GCM_INTERACTIVE"] = "never";
+        psi.Environment["GIT_PAGER"] = "cat";
+        return psi;
+    }
+
+    /// <summary>
+    /// <paramref name="error"/> with a note that the temporary ref <paramref name="refName"/> was left in the local repository (nothing prunes
+    /// refs/lanq/* later) and how to delete it. A GitTimeoutException stays one (it ends the build's retries); another InvalidOperationException
+    /// gets the note in a new one; anything else (Ctrl+C) is returned as it is.
+    /// </summary>
+    internal static Exception WithLeftoverRef(Exception error, string refName)
+    {
+        var note = $"; the local ref {refName} was left behind (delete it with: git update-ref -d {refName})";
+        return error switch
+        {
+            GitTimeoutException t => new GitTimeoutException(t.Subcommand, t.Timeout, note),
+            InvalidOperationException => new InvalidOperationException(error.Message + note, error),
+            _ => error,
+        };
+    }
+
+    /// <summary>Waits at most 5 s for a killed process to be gone.</summary>
+    private static void WaitBriefly(Process p)
+    {
+        try
+        {
+            p.WaitForExit(5000);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // nothing to wait for
+        }
+    }
+
+    /// <summary>Deletes a leftover file, best effort: a cleanup failure never replaces the error being reported.</summary>
+    internal static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // still held by a process that was just killed, or not ours to delete: left behind
+        }
+    }
+
+    private static void Kill(Process p)
+    {
+        try
+        {
+            // Always the whole tree, even when git itself has exited: on Windows a child it started may still run and hold the pipes (on
+            // Linux an orphan is reparented and outside the tree, so there this only reaches children of a git still running).
+            p.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            // it has exited (InvalidOperationException), or cannot be killed: nothing more to do
+        }
+    }
+}
+
+/// <summary>
+/// A local git call that outlived its limit and was killed (<see cref="GitPayloadBuilder.TimeoutFor"/>). An <see cref="InvalidOperationException"/>,
+/// so every path that reports a failed git call (InfraError 70 for a snapshot or bundle, Rejected 2 for a --baseline base) reports this one too.
+/// </summary>
+/// <param name="note">Appended to the message (a ref left behind by the failed build).</param>
+public sealed class GitTimeoutException(string subcommand, TimeSpan timeout, string note = "")
+    : InvalidOperationException($"git {subcommand} did not finish within {Ssh.ProcessSshClient.Describe(timeout)} and was stopped (lanq never gives git any input; look for a stale lock or a slow disk){note}")
+{
+    public string Subcommand => subcommand;
+
+    public TimeSpan Timeout => timeout;
 }

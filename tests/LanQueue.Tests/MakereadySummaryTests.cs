@@ -210,4 +210,85 @@ public class MakereadySummaryTests
         using var doc = JsonDocument.Parse(V020);
         Assert.Equal("0.2.0", doc.RootElement.GetProperty("tool").GetProperty("version").GetString());
     }
+
+    private const string Local = "local and interactive only (see lanq-makeready's README). lanq never runs it.";
+
+    private static string Pointer(string ids, bool windows) =>
+        $"May be fixable at that PC (lanq-makeready-fix: {ids}): its owner can run "
+        + (windows ? "lanq-makeready-fix.ps1 -WhatIf" : "sh lanq-makeready-fix.sh --dry-run") + " there to see what it can do, " + Local;
+
+    private static string Check(string id, string status, string detail) =>
+        $$"""{ "id": "{{id}}", "title": "T", "status": "{{status}}", "detail": "{{detail}}", "advice": "", "needsAdmin": false },""";
+
+    /// <summary>
+    /// 0.9.1: a WARN/FAIL check that lanq-makeready-fix may fix gets one pointer line for the PC's owner, naming the fix ids, before the closing
+    /// lines. On the 0.2.0 Windows fixture only git (core.longpaths) qualifies: OpenSSH not installed and no administrators_authorized_keys
+    /// are not fixes it makes.
+    /// </summary>
+    [Fact]
+    public async Task AFixableCheckPointsTheOwnerAtTheFixScript()
+    {
+        var (_, o, _) = await Run(V020, "--ssh", "me@new-pc.lan", "--os", "windows");
+        var lines = Lines(o).ToList();
+        var at = lines.IndexOf(Pointer("git.longpaths", windows: true));
+        Assert.True(at >= 0, o);
+        Assert.True(at < lines.IndexOf("lanq never changes a worker. Fixes are for the PC's owner to run on that PC."));
+        Assert.Single(lines, l => l.Contains("lanq-makeready-fix", StringComparison.Ordinal));
+    }
+
+    public static TheoryData<string, string, string, string, string?> FixCases() => new()
+    {
+        { "linux", "power.sleep", "WARN", "may sleep: logind IdleAction=suspend", "power.sleep" },
+        { "linux", "ssh.server", "FAIL", "sshd installed but not running", "ssh.start" },
+        { "linux", "power.sleep", "OK", "will not sleep (masked)", null },
+        { "linux", "longpaths", "WARN", "LongPathsEnabled is off", null }, // a Windows-only fix
+        { "linux", "git", "WARN", "not found", null },
+        { "windows", "ssh.server", "FAIL", "installed but not running", "ssh.start" },
+        { "windows", "ssh.server", "WARN", "running, start type Manual; default shell: powershell", "ssh.auto" },
+        { "windows", "ssh.server", "FAIL", "not installed", null },
+        { "windows", "ssh.keys", "WARN", "administrators_authorized_keys has too-open permissions", "ssh.aclkeys" },
+        { "windows", "ssh.keys", "WARN", "user is an administrator; administrators_authorized_keys not found", null },
+        { "windows", "longpaths", "WARN", "LongPathsEnabled is off", "longpaths.on" },
+        { "windows", "power.sleep", "WARN", "sleeps after 30 min, hibernates after 0 min (0 = never)", "power.sleep" },
+        { "windows", "power.sleep", "SKIP", "could not read powercfg", null },
+        { "windows", "git", "WARN", "not found (needed for transfer: git only)", null },
+    };
+
+    [Theory]
+    [MemberData(nameof(FixCases))]
+    public async Task OnlyChecksTheFixScriptMayFixArePointedAtByFixId(string os, string id, string status, string detail, string? fix)
+    {
+        var report = MakereadyTests.Report(extraChecks: Check(id, status, detail));
+        if (os == "windows")
+        {
+            report = report.Replace("\"os\": \"linux\"", "\"os\": \"windows\"", StringComparison.Ordinal);
+        }
+
+        var (_, o, _) = await Run(report, "build-01");
+        if (fix is null)
+        {
+            Assert.DoesNotContain("lanq-makeready-fix", o, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains(Pointer(fix, os == "windows"), Lines(o));
+        }
+    }
+
+    [Fact]
+    public async Task SeveralChecksAreNamedOnceEachInReportOrder()
+    {
+        var report = MakereadyTests.Report(extraChecks: Check("longpaths", "WARN", "LongPathsEnabled is off") + Check("power.sleep", "WARN", "sleeps after 30 min")
+            + Check("longpaths", "FAIL", "LongPathsEnabled is off")).Replace("\"os\": \"linux\"", "\"os\": \"windows\"", StringComparison.Ordinal);
+        var (_, o, _) = await Run(report, "build-01");
+        Assert.Contains(Pointer("longpaths.on, power.sleep", windows: true), Lines(o));
+    }
+
+    [Fact]
+    public async Task JsonNeverCarriesTheFixPointer()
+    {
+        var (_, o, _) = await Run(V020, "--ssh", "me@new-pc.lan", "--os", "windows", "--json");
+        Assert.DoesNotContain("lanq-makeready-fix", o, StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(o);
+    }
 }

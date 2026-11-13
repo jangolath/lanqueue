@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.9.1 (2026-11-13)
+
+### Behaviour changes
+
+- `lanq makeready` runs lanq-makeready 0.4.0 (embedded, SHA-256 pinned as before). The scanner's only change is its
+  version string. Only the read-only scanner is embedded: lanq-makeready 0.4.0's new fix script
+  (`lanq-makeready-fix.ps1` / `.sh`) is never built into lanq or sent over SSH.
+- When a `WARN`/`FAIL` check may be one the fix script fixes, the `lanq makeready` text adds one line for the PC's
+  owner, for example `May be fixable at that PC (lanq-makeready-fix: power.sleep, longpaths.on): its owner can run
+  lanq-makeready-fix.ps1 -WhatIf there to see what it can do, local and interactive only (see lanq-makeready's README).
+  lanq never runs it.` (`sh lanq-makeready-fix.sh --dry-run` on Linux). It names the fix ids: on Windows `ssh.start`,
+  `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths` and `ssh.aclkeys`; on Linux `ssh.start` and
+  `power.sleep`. The fix script has its own preconditions and may still decline; its dry run says what it can do.
+  `--json` is unchanged (it is the scanner's report as sent), and no `nextSteps` command runs the fix script.
+
+### Fixes
+
+- Every local git call lanq makes (the snapshot, bundles, archives, `--baseline` base resolution and `baseline_ref`
+  checks) now has a limit: 60 s for metadata calls (`rev-parse`, `show-ref`, `ls-tree`, `cat-file`, `update-ref`, ...),
+  10 min for `add -A` and `diff` over the working tree and for the history walks `rev-list` and `merge-base`, and
+  30 min for `bundle create` and the archive's `cat-file --batch` stream. git gets a closed stdin,
+  `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and `GIT_PAGER=cat`, so it can never wait for input (a run under
+  PowerShell `Start-Job` could hang before). A git call that outlives its limit is killed with its process tree and
+  reported through the existing paths: `InfraError` (70) for the snapshot (`Could not snapshot the repository: git
+  rev-parse did not finish within 1 min and was stopped ...`) or a bundle, `Rejected` (2) for a `--baseline` base or a
+  `lanq.yml` `baseline_ref` that cannot be read. A timed-out archive or bundle build is not tried again, an
+  incremental-bundle check that times out falls back to a full bundle, and a lock file a killed `bundle create` or
+  snapshot index write leaves behind is removed. Ctrl+C now also stops a running local git call.
+- lanq's local git calls no longer inherit `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_EXTERNAL_DIFF` or `GIT_INDEX_FILE` from the calling shell, so the snapshot is
+  always of the repository lanq runs in; the diffs read for the secret scan use `--no-ext-diff --no-textconv`.
+
+### Docs
+
+- AGENTS.md, docs/AGENTS-GUIDE.md, the snippets, the skill and llms.txt: an agent never runs lanq-makeready-fix; it is
+  the PC owner's, run at that PC, local and interactive only.
+
 ## 0.9.0 (2026-11-13)
 
 ### Per-job environment variables

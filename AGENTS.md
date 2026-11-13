@@ -35,6 +35,9 @@ Ask the developer first: `lanq wake`, `lanq health --wake`, `lanq run` without `
 For the developer only, never you: `lanq makeready --setup` and `--add`, any `--yes`, `lanq init`, editing
 `machines.yml` or `lanq.yml`, `ssh` to a worker yourself.
 
+Never run lanq-makeready-fix (`lanq-makeready-fix.ps1` / `.sh`), not even when `lanq makeready` points to it: it
+belongs to the PC's owner, who runs it at that PC, local and interactive only. Report the pointer to the developer.
+
 ## Reading results without pasting logs
 
 stdout is one JSON object (see [docs/JSON.md](docs/JSON.md)). `--log-tail 60` puts the log's last 60 lines in it as
@@ -94,7 +97,7 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
 - Do not edit `machines.yml`, the allowlists (`policy.allowed_commands`, `policy.allowed_directories`,
   `policy.allowed_env`), `known_hosts` or any SSH key or agent setting. The developer owns them. Never edit `lanq.yml`
   or `machines.yml` to get around a refusal, a `NoCapacity` or a size or `--on` rule, or to get an `--env` through.
-  Never run `lanq makeready --add`, `--setup` or `--yes`.
+  Never run `lanq makeready --add`, `--setup` or `--yes`, and never run lanq-makeready-fix (the PC owner's, local only).
 - Never pass permission-skipping flags (such as `--dangerously-skip-permissions`) to any command. lanq refuses them.
 - Never put secrets, tokens or key material in files, command lines or `--env` values lanq will ship. lanq refuses
   the ones it recognises.
