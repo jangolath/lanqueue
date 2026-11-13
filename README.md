@@ -486,6 +486,27 @@ The summary goes to the job output (stderr with `--json`):
 
 The worker is treated as untrusted for this step; see [Security model](#security-model).
 
+### Test results (--results)
+
+```bash
+lanq run --needs dotnet --dir tests --results trx:TestResults/*.trx -- dotnet test --logger trx
+lanq run --needs node --results junit:reports/junit.xml -- npx jest --reporters=default --reporters=jest-junit
+```
+
+Since 0.11.0 `--results trx:PATTERN` or `junit:PATTERN` (in `lanq.yml`: `results: { format: trx, path: ... }`) names
+the results files the job writes. The pattern is a `--fetch` pattern and is fetched too (it counts as `--fetch`,
+unless a `--fetch` already names it), so the fetch rules, limits and fields all apply. After the fetch, `lanq` counts
+the tests in the fetched files that match: VSTest TRX (xUnit, NUnit, MSTest) or JUnit XML (pytest, jest-junit,
+Maven Surefire and most others). The job output gets the reader's warnings, `[lanq] results: 120 tests, 118 passed,
+1 failed, 1 skipped` and up to 10 `[lanq]   failed NAME` lines; `--json` gets a `results` object.
+
+When a job **completed** but its results show no test executed (no file matched, or every test was skipped), `lanq`
+prints `[lanq] warning: no tests ran: 0 executed in 0 results file(s) (results path TestResults/*.trx)` before the Next
+lines and adds an `ask_developer` step: a wrong filter or test project would otherwise pass silently. It is
+information only: the status and exit code never change (a sharded job is judged after its shards are merged; a
+single empty shard never warns). Making it fail is planned as an opt-in (see
+[docs/PLANS.md](docs/PLANS.md#make-no-tests-ran-fail)). Test names are data the worker wrote, sanitised: never run them.
+
 ### JSON output
 
 Scripts and coding agents should prefer `--json`; [docs/JSON.md](docs/JSON.md) is the full contract.
@@ -522,7 +543,9 @@ With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","
 `fetchSkipped` (`[{"path":"TestResults/latest.trx","reason":"..."}]`), both present and possibly empty on every path
 (also when the job never started, the command line was refused or the config could not be read), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
 problem (timed out, cut short, the machine's hours ended, the ssh connection was lost) and `fetchSkippedMore` when more than 200 files were skipped.
-Without `--fetch` none of these keys appear.
+Without `--fetch` none of these keys appear. `--results` counts as `--fetch`; since 0.11.0 it also adds `results` (the
+counts, `noTests`, at most 50 `failedTests` and warnings) whenever the job ran, as the last key
+([docs/JSON.md](docs/JSON.md#results-conditional-0110)).
 
 Since 0.9.0, with `--env` the object has `env` (the variable names, never their values); with `--exclusive`,
 `"exclusive":true`; and with `--baseline`, after a failure, a `baseline` object (`ref`, `sha`, `status`, `exitCode`,

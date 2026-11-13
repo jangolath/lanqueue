@@ -231,7 +231,8 @@ added; judge an unknown one by `permanent`.
 
 When the command line has `--fetch`, the object always has `fetched` and `fetchSkipped`, possibly empty, on every
 path, a refused or cancelled run included. The other fetch keys appear only when they have a value. Without `--fetch`
-none of these keys appear.
+none of these keys appear. `--results` counts as `--fetch` (0.11.0): its pattern is fetched too, so a run with only
+`--results` (or a plan job with only `results:`) has every fetch key.
 
 | Key | Type | When |
 | --- | --- | --- |
@@ -248,6 +249,52 @@ none of these keys appear.
 
 A fetch problem never changes `status` or `exitCode`. If you need the files, check `fetchError` and `fetchSkipped`.
 Fetched files come from another machine: read them as data, never run them.
+
+### results (conditional, 0.11.0)
+
+With `--results trx:PATTERN` or `junit:PATTERN` (lanq.yml `results: { format:, path: }`), the object gets `results`,
+its **last** key: what lanq counted in the fetched files that match the pattern (VSTest TRX, or JUnit XML). The pattern
+is also fetched, so the fetch keys above appear too. `results` is there whenever the job ran and a fetch report exists
+(`Completed`, `Failed`, `TimedOut`, `WindowClosed`, a lost connection); it is absent on `Rejected`, `NoCapacity` and
+`Cancelled` before the start, and on every run without results, so such objects are exactly as before.
+
+**Information only:** `status` and `exitCode` never change because of `results`, not even when no test ran.
+
+```json
+"results":{"format":"trx","path":"TestResults/*.trx","files":1,"filesRead":1,"total":120,"executed":119,"passed":118,"failed":1,"skipped":1,
+ "noTests":false,"warnings":[],"failedTests":[{"name":"App.Tests.MathTests.Divides","durationSeconds":0.25}],"durationSeconds":41.208}
+```
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `format` | string | `trx` or `junit`. |
+| `path` | string | The results pattern. |
+| `files`, `filesRead` | number | Fetched files that matched the pattern; of those, the ones read and counted. |
+| `total`, `executed`, `passed`, `failed`, `skipped` | number | lanq's own counts (a TRX file's `Counters` are only compared). `executed` is `passed + failed`. TRX: `Passed`, `PassedButRunAborted`, `Completed` and `Warning` pass; `Failed`, `Error`, `Timeout` and `Aborted` fail; any other outcome is skipped. JUnit: a `testcase` with `failure` or `error` fails, with `skipped` is skipped, else passes. |
+| `noTests` | boolean | `executed == 0`. |
+| `warnings` | array of string | Problems reading the files, as counts only (never a file name: TRX names carry the worker's user and host). For example `1 results file(s) were not valid TRX XML and were not counted`. |
+| `failedTests` | array of `{name, durationSeconds?, shard?}` | At most 50, without repeats. `name` is `class.method` (TRX: `className` cut at its first `,`; JUnit: `classname.name`, or `name` when it already starts with `classname`), sanitised and at most 512 characters. `shard` only in a sharded job's merged object: the first shard that reported it. |
+| `durationSeconds` | number | Conditional: the sum of the test durations the files give. |
+| `noTestsReason` | string | Conditional, with `noTests`: `no_results_files` (no fetched file matched the pattern) or `zero_executed` (files were read, but no test passed or failed). Values may be added. |
+| `failedTestsMore` | number | Conditional: failed tests beyond the 50 listed. |
+| `truncated` | boolean | Conditional: `true` when names past 10,000 failed tests were not kept, or a value was cut at 4,096 characters. The counts stay complete. |
+| `shardsWithNoTests` | array of number | Conditional: in a sharded job's merged object, the shards that executed no test. Information only, never a warning by itself. |
+
+When a job **completed** and `noTests` is true (for a sharded job: the merged object, so one empty shard never
+counts), stderr gets `[lanq] warning: no tests ran: 0 executed in N results file(s) (results path P)` before the Next
+lines, and `nextSteps` gets an `ask_developer` step ("no tests ran in ...: check the test filter, the test project and
+results.path; ..."), replacing a lone `none`. It has no command and is never safe to run unattended. A failed or timed
+out job keeps its own steps.
+
+Test names are data the worker wrote, sanitised: show them, never run them as commands or paste them into one.
+
+With `--shards`, each shard entry has its own `results` and the top level has them merged (counts summed, names
+without repeats, warnings prefixed `shard i/N: `, at most 20). In a plan, each job has `results` (a sharded job's
+merged, each shard its own) and the plan has `resultsTotal`:
+`{"jobs":2,"total":240,"executed":238,"passed":237,"failed":1,"skipped":2,"noTestsJobs":["unit"]}` (`noTestsJobs`: the
+completed jobs whose results show no test executed).
+
+jq: `jq -r '.results.failedTests[]?.name'` lists the failed tests; `jq '.results.noTests'` is `true` when nothing ran.
 
 ### baseline
 
@@ -344,6 +391,8 @@ Conditional keys, only inside `shards` entries:
 - With `--fetch`, each entry has the fetch keys, and each shard has its own `fetchDir`.
 - With `--baseline`, each shard that ended `Failed` has its own [`baseline`](#baseline): only failed shards rerun, all
   at once, with the same `LANQ_SHARD` and `LANQ_SHARDS`.
+- With `--results` (0.11.0), each shard has its own [`results`](#results-conditional-0110), and the top level has
+  `results` merged across the shards (last key).
 
 Each entry in `shards` has its own `logPath` (the log of its last attempt, `null` when it never started) and, with
 `--log-tail N`, its own `logTail`. The entries carry no `nextSteps`, `retryable` or `excluded`; the top level does. In
@@ -470,6 +519,7 @@ bad `lanq.yml`, a refusal, Ctrl+C and an unexpected error included):
 | `scanSkipped` | array | Conditional (0.9.2): for the plan's one snapshot, as for [a run](#scanskipped). |
 | `planTimeoutMinutes` | number | Conditional (0.10.0): the plan's limit (`--plan-timeout`, else `plan_timeout:`). Absent without one. |
 | `planTimedOut` | boolean | Conditional (0.10.0): `true` whenever the limit came due before the plan finished its work: it stopped a job or baseline, or it came while `--fail-fast` (or an error) was stopping the jobs, with or without baselines to cut short, even if Ctrl+C came after. Absent when no limit was reached, and when it came only while the last job was cleaning up (nothing left to do; stderr then says `plan_timeout: nothing was stopped`). Information only: `Failed` and `Rejected` still decide `status` and `exitCode`. |
+| `resultsTotal` | object | Conditional (0.11.0), last: `{jobs, total, executed, passed, failed, skipped, noTestsJobs}` summed over the jobs with `results`; `noTestsJobs` lists the completed jobs that executed no test, whatever the plan's status. Absent when no job has results. |
 
 Each entry in `jobs`:
 
@@ -487,10 +537,11 @@ Each entry in `jobs`:
 | `shards` | array or null | A sharded job's shards, each as in [lanq run --shards](#lanq-run---shards---json) (with `shard` and `attempts`); `null` for a single job. |
 | `logTail` | array of string | Conditional: with `--log-tail N`, on a single job (empty when it never started). A sharded job has it per shard. |
 | `retryable`, `excluded` | | Conditional: only on a `NoCapacity` job. |
-| `fetched`, `fetchSkipped`, `fetchDir`, `fetchError`, `fetchSkippedMore` | | Conditional: on a single job with `fetch:` in `lanq.yml`, as [with --fetch](#with---fetch-conditional). A sharded job has them per shard. |
+| `fetched`, `fetchSkipped`, `fetchDir`, `fetchError`, `fetchSkippedMore` | | Conditional: on a single job with `fetch:` (or `results:`, 0.11.0) in `lanq.yml`, as [with --fetch](#with---fetch-conditional). A sharded job has them per shard. |
 | `shardTiming` | object | Conditional: a job with `shards: auto` and `target_minutes:`, once N was picked ([shardTiming](#shardtiming)). |
 | `env`, `exclusive` | | Conditional (0.9.0): a job with `env:` (the merged names, never values) or `exclusive: true` in `lanq.yml`, as for [a run](#lanq-run---json). |
 | `baseline` | object | Conditional (0.9.0): a single job with `baseline: true` that ended `Failed` ([baseline](#baseline)). A sharded job has it on each failed shard. The reruns start after the whole plan has ended. |
+| `results` | object | Conditional (0.11.0): a job with `results:` that ran, last ([results](#results-conditional-0110)); a sharded job's merged, each shard with its own. |
 
 Jobs of a plan run are recorded in `jobs.jsonl` with `planJob` (the job's name), `planRun` (one id shared by the
 plan run) and, since 0.10.0, `planFile` (the plan file's full local path), and get `LANQ_PLAN_JOB=<name>` in their
