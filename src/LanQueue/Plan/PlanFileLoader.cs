@@ -438,22 +438,27 @@ public static partial class PlanFileLoader
             args.Add("--exclusive");
         }
 
-        // baseline: true is --baseline, baseline_ref: REF is --baseline-ref REF (which implies it, as on the command line). A job's own
-        // baseline: false turns both off, even a baseline_ref: from defaults:.
-        var baselineOff = values.TryGetValue("baseline", out var baselineNode) && !Flag(baselineNode, "baseline", Error);
-        if (baselineOff && own.ContainsKey("baseline") && own.ContainsKey("baseline_ref"))
+        // baseline: true is --baseline, baseline_ref: REF is --baseline-ref REF (which implies it, as on the command line). The job's own keys
+        // decide before the defaults': its own baseline_ref: turns the baseline on (with its own baseline: false as well it is refused), its
+        // own baseline: false turns it off (an inherited defaults: baseline_ref: quietly too), and its own baseline: true keeps an inherited
+        // ref. With neither key on the job, defaults: decide the same way.
+        bool? FlagOf(Dictionary<string, YamlNode> keys) => keys.TryGetValue("baseline", out var n) ? Flag(n, "baseline", Error) : null;
+        string? RefOf(Dictionary<string, YamlNode> keys) => keys.TryGetValue("baseline_ref", out var n) ? Scalar(n, "baseline_ref") : null;
+        var (ownOn, ownRef) = (FlagOf(own), RefOf(own));
+        if (ownOn == false && ownRef is not null)
         {
-            // Both on the job itself: one of them is a mistake. (An inherited defaults: baseline_ref is turned off quietly.)
             throw Error("baseline_ref has no effect with baseline: false; drop one.");
         }
 
-        if (!baselineOff && values.TryGetValue("baseline_ref", out var baselineRef))
+        var (defaultOn, defaultRef) = (FlagOf(defaults), RefOf(defaults));
+        var (baselineOn, baselineRef) = ownOn == false ? (false, null)
+            : ownRef is not null ? (true, ownRef)
+            : ownOn == true ? (true, defaultOn == false ? null : defaultRef)
+            : defaultOn == false ? (false, null)
+            : (defaultRef is not null || defaultOn == true, defaultRef);
+        if (baselineOn)
         {
-            args.AddRange(["--baseline-ref", Scalar(baselineRef, "baseline_ref")]);
-        }
-        else if (baselineNode is not null && !baselineOff)
-        {
-            args.Add("--baseline");
+            args.AddRange(baselineRef is null ? ["--baseline"] : ["--baseline-ref", baselineRef]);
         }
 
         // --timeout's own parser throws a FormatException for a word; say what the CLI says for a number out of range instead.

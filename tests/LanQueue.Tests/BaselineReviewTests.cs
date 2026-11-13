@@ -39,6 +39,9 @@ public sealed class BaselineReviewTests : IDisposable
 
     private readonly List<IDisposable> _owned = [];
 
+    /// <summary>Every pause the runner asked for (with waitAtOnce).</summary>
+    private readonly List<TimeSpan> _delays = [];
+
     public BaselineReviewTests() => Directory.CreateDirectory(Path.Combine(_dir, "repo", ".git"));
 
     public void Dispose()
@@ -82,9 +85,20 @@ public sealed class BaselineReviewTests : IDisposable
 
                 OnLine(line);
             },
-            delay: waitAtOnce ? (_, _) => Task.CompletedTask : (_, ct) => Task.Delay(Timeout.InfiniteTimeSpan, ct),
+            delay: waitAtOnce ? RecordPause : (_, ct) => Task.Delay(Timeout.InfiniteTimeSpan, ct),
             bases: bases);
         return (runner, ssh, payloads, bases);
+    }
+
+    /// <summary>A pause that ends at once and is recorded in <see cref="_delays"/>.</summary>
+    private Task RecordPause(TimeSpan pause, CancellationToken ct)
+    {
+        lock (_delays)
+        {
+            _delays.Add(pause);
+        }
+
+        return Task.CompletedTask;
     }
 
     private JobRequest Npm() => new(["node"], ["npm", "test"], ".", Repo, TimeSpan.Zero) { Baseline = true };
@@ -110,7 +124,7 @@ public sealed class BaselineReviewTests : IDisposable
             return Task.FromResult(e.Exit(isBase ? 0 : 3));
         };
 
-        var r = await runner.RunAsync(Npm(), CancellationToken.None);
+        var r = await runner.RunAsync(Npm() with { Wait = TimeSpan.FromMinutes(1) }, CancellationToken.None);
 
         Assert.Equal("build-01", r.Machine);
         var b = r.Baseline!;
@@ -136,7 +150,7 @@ public sealed class BaselineReviewTests : IDisposable
             return Task.FromResult(e.Exit(isBase ? 0 : 3));
         };
 
-        var r = await runner.RunAsync(Npm(), CancellationToken.None);
+        var r = await runner.RunAsync(Npm() with { Wait = TimeSpan.FromMinutes(1) }, CancellationToken.None);
 
         var b = r.Baseline!;
         Assert.Equal(BaselineVerdict.New, b.Verdict);
@@ -150,6 +164,49 @@ public sealed class BaselineReviewTests : IDisposable
         Assert.Contains(Output(), l => l.Contains("(look 2 of 2)", StringComparison.Ordinal));
         var steps = NextSteps.ForRun(ParsedArgs.Parse(["run", "--baseline", "--", "npm", "test"]), NextSteps.Outcome(r));
         Assert.EndsWith("; new: the base commit passes (on big-01, not build-01 where it failed: the result may reflect the machine)", Assert.Single(steps).Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>--wait 0: no wait for the machine that failed; the rerun takes another machine that can take it now.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task WithWaitZeroTheRerunDoesNotWaitForTheFailedMachine()
+    {
+        var (runner, ssh, payloads, _) = Pool(waitAtOnce: true);
+        var headDone = false;
+        ssh.RefuseSlot = m => !headDone ? m.Name == "big-01" : m.Name == "build-01";
+        ssh.OnExecute = (e, _) =>
+        {
+            var isBase = payloads.IsBase(ssh, e);
+            headDone = true;
+            return Task.FromResult(e.Exit(isBase ? 0 : 3));
+        };
+
+        var r = await runner.RunAsync(Npm(), CancellationToken.None);
+
+        Assert.Equal("big-01", r.Baseline!.Machine);
+        Assert.False(r.Baseline.SameMachine);
+        Assert.DoesNotContain(Output(), l => l.Contains("waiting for a slot on", StringComparison.Ordinal));
+        Assert.Empty(_delays);
+    }
+
+    /// <summary>The wait for the machine that failed never goes past what is left of --wait: each pause is at most that.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task TheWaitForTheFailedMachineIsCappedByWait()
+    {
+        var (runner, ssh, payloads, _) = Pool(waitAtOnce: true);
+        var headDone = false;
+        ssh.RefuseSlot = m => !headDone ? m.Name == "big-01" : m.Name == "build-01";
+        ssh.OnExecute = (e, _) =>
+        {
+            var isBase = payloads.IsBase(ssh, e);
+            headDone = true;
+            return Task.FromResult(e.Exit(isBase ? 0 : 3));
+        };
+
+        var r = await runner.RunAsync(Npm() with { Wait = TimeSpan.FromSeconds(5) }, CancellationToken.None);
+
+        Assert.Equal("big-01", r.Baseline!.Machine);
+        Assert.Equal(JobRunner.PreferRounds, _delays.Count);
+        Assert.All(_delays, d => Assert.True(d > TimeSpan.Zero && d <= TimeSpan.FromSeconds(5), d.ToString()));
     }
 
     [Fact]
@@ -189,7 +246,7 @@ public sealed class BaselineReviewTests : IDisposable
         var r = await runner.RunShardsAsync(Jest(), new ShardOptions(2), CancellationToken.None);
 
         Assert.All(r.Shards, s => Assert.Equal(BaselineVerdict.New, s.Baseline!.Verdict));
-        Assert.Contains(Output(), l => l.Contains("waiting for a slot on micro-01, where the job failed (the other baseline reruns hold some)", StringComparison.Ordinal));
+        Assert.Contains(Output(), l => l.Contains("waiting for a slot (the other baseline reruns hold some)", StringComparison.Ordinal));
         Assert.Equal(1, ssh.Peak["micro-01"]);
     }
 
@@ -366,6 +423,97 @@ public sealed class BaselineReviewTests : IDisposable
             """).Jobs[0];
         Assert.False(job.Args.Baseline);
         Assert.Equal(["run", "--", "npm", "test"], job.RunArgs);
+    }
+
+    /// <summary>A job's own keys decide before the defaults' (baseline_ref implies baseline: true).</summary>
+    [Theory]
+    [InlineData("baseline: false", "baseline_ref: rel", "run --baseline-ref rel")] // the job's own ref wins over an inherited false
+    [InlineData("baseline_ref: rel", "baseline: false", "run")] // the job's own false turns an inherited ref off, quietly
+    [InlineData("baseline_ref: rel", "baseline: true", "run --baseline-ref rel")] // the job's own true keeps the inherited ref
+    [InlineData("baseline: true", "", "run --baseline")]
+    [InlineData("baseline_ref: rel", "", "run --baseline-ref rel")]
+    [InlineData("baseline: false", "", "run")]
+    [InlineData("baseline_ref: rel", "baseline_ref: mine", "run --baseline-ref mine")]
+    [InlineData("baseline: true", "baseline: false", "run")]
+    [InlineData("needs: [node]", "baseline_ref: mine", "run --needs node --baseline-ref mine")]
+    public void JobKeysDecideBeforeTheDefaults(string defaults, string job, string expected)
+    {
+        var yaml = "version: 1\ndefaults:\n  " + defaults + "\njobs:\n  x:\n    command: npm test\n" + (job.Length > 0 ? "    " + job + "\n" : "");
+        var parsed = PlanFileLoader.Parse(yaml).Jobs[0];
+        Assert.Equal(expected + " -- npm test", string.Join(' ', parsed.RunArgs));
+        Assert.Equal(expected.Contains("--baseline", StringComparison.Ordinal), parsed.Args.Baseline);
+    }
+
+    // ---- lanq.yml baseline_ref: a branch or tag, never a commit ----
+
+    [Fact]
+    public async Task OnlyBranchAndTagNamesCount()
+    {
+        var repo = new TempRepo();
+        _owned.Add(repo);
+        var c1 = repo.Git("rev-parse", "HEAD").Trim();
+        repo.Commit("b.txt", "b", "two");
+        repo.Git("tag", "v1.0", c1);
+        repo.Git("branch", "release", c1);
+        var bare = Path.Combine(repo.Dir, ".out", "origin.git");
+        repo.Git("init", "-q", "--bare", bare);
+        repo.Git("remote", "add", "origin", bare);
+        repo.Git("push", "-q", "origin", "main");
+        repo.Git("fetch", "-q", "origin");
+        var ct = CancellationToken.None;
+
+        foreach (var name in new[] { "main", "release", "v1.0", "origin/main", "refs/heads/main" })
+        {
+            Assert.True(await BaseRef.IsBranchOrTagAsync(repo.Dir, name, ct), name);
+        }
+
+        foreach (var name in new[] { c1, c1[..7], "HEAD", "HEAD~1", "main~1", "main^", "v1.0^{}", "main@{1}", "-main", "no-such", "main..release", ":/two" })
+        {
+            Assert.False(await BaseRef.IsBranchOrTagAsync(repo.Dir, name, ct), name);
+        }
+
+        // The command line still takes a commit.
+        var bySha = await BaseRef.ResolveAsync(repo.Dir, c1, ct);
+        Assert.Equal(c1, bySha.Base!.Sha);
+    }
+
+    /// <summary>lanq.yml's baseline_ref naming a commit refuses the plan before anything is sent; a branch name runs.</summary>
+    [Theory(Timeout = TestTimeout)]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PlanBaselineRefMustBeABranchOrTag(bool commit)
+    {
+        var repo = new TempRepo();
+        _owned.Add(repo);
+        var c1 = repo.Git("rev-parse", "HEAD").Trim();
+        repo.Commit("b.txt", "b", "two");
+        File.WriteAllText(Path.Combine(repo.Dir, "lanq.yml"), "version: 1\njobs:\n  x:\n    command: npm test\n    needs: [node]\n    baseline_ref: " + (commit ? c1 : "main") + "\n");
+        var (_, ssh, payloads, _) = Pool();
+        ssh.OnExecute = (e, _) => Task.FromResult(e.Exit(0));
+        var o = new StringWriter();
+        var err = new StringWriter();
+
+        var code = await LanQueue.Cli.RunPlanFile(
+            ParsedArgs.Parse(["run", "--plan", "--json"]), ConfigLoader.Parse(BaselineTests.Fleet), ssh, payloads, new HealthProbe(ssh, TimeProvider.System), Log, _dir,
+            repo.Dir, o, err, CancellationToken.None, (_, c) => Task.Delay(Timeout.InfiniteTimeSpan, c));
+
+        using var doc = JsonDocument.Parse(o.ToString());
+        if (commit)
+        {
+            Assert.Equal(2, code);
+            Assert.Equal("Rejected", doc.RootElement.GetProperty("status").GetString());
+            Assert.Equal(
+                "lanq.yml: job 'x' (line 3): baseline_ref must name a branch or tag (a commit can be given on the command line with --baseline-ref)",
+                doc.RootElement.GetProperty("message").GetString());
+            Assert.StartsWith("fix lanq.yml: ", doc.RootElement.GetProperty("nextSteps")[0].GetProperty("reason").GetString(), StringComparison.Ordinal);
+            Assert.Empty(ssh.Calls);
+            Assert.Equal(0, payloads.Resolved);
+        }
+        else
+        {
+            Assert.Equal(0, code);
+            Assert.Equal(1, payloads.Resolved);
+        }
     }
 
     // ---- L6: the remaining gaps ----

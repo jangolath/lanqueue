@@ -68,4 +68,7 @@ public interface IPayloadBuilder
     /// is unknown). A worker that fetched an older commit than its recorded base keeps that base (lanq run --baseline), and so does lanq.
     /// </summary>
     Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) => Task.FromResult(false);
+
+    /// <summary>Whether <paramref name="name"/> names a branch or tag (<see cref="BaseRef.IsBranchOrTagAsync"/>): lanq.yml's baseline_ref must.</summary>
+    Task<bool> IsBranchOrTagAsync(string repoDir, string name, CancellationToken ct) => BaseRef.IsBranchOrTagAsync(repoDir, name, ct);
 }

@@ -49,6 +49,31 @@ public static class BaseRef
             ? "--baseline-ref must name one branch, tag or commit (for example --baseline-ref origin/main or --baseline-ref v1.2.0)."
             : null;
 
+    /// <summary>Why a lanq.yml baseline_ref was refused (after "lanq.yml: job 'x' (line N): ").</summary>
+    public const string PlanRefMessage = "baseline_ref must name a branch or tag (a commit can be given on the command line with --baseline-ref)";
+
+    /// <summary>The namespaces a lanq.yml baseline_ref may resolve in.</summary>
+    private static readonly string[] NamedRefs = ["refs/heads/", "refs/remotes/", "refs/tags/"];
+
+    /// <summary>
+    /// Whether <paramref name="name"/> is a branch or tag name: it passes <see cref="CheckRefText"/>, has no revision syntax (~ ^ : @{ and the
+    /// like), is not HEAD or another pseudo-ref, and git resolves it to a full ref under refs/heads/, refs/remotes/ or refs/tags/. A commit id
+    /// (full or abbreviated), HEAD, HEAD~n
+    /// or anything else is not.
+    /// </summary>
+    public static async Task<bool> IsBranchOrTagAsync(string repoDir, string name, CancellationToken ct)
+    {
+        // HEAD and the other pseudo-refs (FETCH_HEAD, ORIG_HEAD, ...) follow whatever is checked out or fetched: not a branch or tag name.
+        if (name == "HEAD" || name.EndsWith("_HEAD", StringComparison.Ordinal) || CheckRefText(name) is not null || name.IndexOfAny(['~', '^', ':', '@', '{', '}', '\\', '*', '?', '[', ' ']) >= 0)
+        {
+            return false;
+        }
+
+        var (code, output, _) = await GitPayloadBuilder.GitRun(repoDir, null, ct, "rev-parse", "--symbolic-full-name", name).ConfigureAwait(false);
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return code == 0 && lines.Length == 1 && NamedRefs.Any(p => lines[0].StartsWith(p, StringComparison.Ordinal) && lines[0].Length > p.Length);
+    }
+
     /// <param name="repoDir">Any folder inside the repository.</param>
     /// <param name="named">--baseline-ref, or null for the default branch.</param>
     public static async Task<BaseResolution> ResolveAsync(string repoDir, string? named, CancellationToken ct)

@@ -726,7 +726,9 @@ public sealed partial class JobRunner(
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
-            var holdForPreferred = prefer is not null && preferLooks < PreferRounds
+            // Never longer than what is left of --wait (with --wait 0, not at all: any machine that can take it now).
+            var waitLeft = req.Wait - deadline.Elapsed;
+            var holdForPreferred = prefer is not null && preferLooks < PreferRounds && waitLeft > TimeSpan.Zero
                 && assessed.FirstOrDefault(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal)) is { } preferred
                 && (preferred.Eligible || preferred.Reason == Exclusion.Busy);
             if (holdForPreferred)
@@ -775,7 +777,7 @@ public sealed partial class JobRunner(
                 say(req.Progress is { AnyHolding: true } busy
                     ? $"[lanq] waiting for a slot on {prefer}, where the job failed ({busy.Holders} hold some)"
                     : string.Create(CultureInfo.InvariantCulture, $"[lanq] waiting for a slot on {prefer}, where the job failed, before taking another machine (look {preferLooks} of {PreferRounds})"));
-                await PauseAsync(req, ct).ConfigureAwait(false);
+                await PauseAsync(req, ct, waitLeft).ConfigureAwait(false);
                 continue;
             }
 
@@ -836,9 +838,10 @@ public sealed partial class JobRunner(
     internal static long RoundStart() => Stopwatch.GetTimestamp() - (long)(ProbeShareWindow.TotalSeconds * Stopwatch.Frequency);
 
     /// <summary>The 15 s between two looks at the machines; in a plan cut short when a job of the plan gives back a slot.</summary>
-    private async Task PauseAsync(JobRequest req, CancellationToken ct)
+    /// <param name="atMost">A shorter pause when less than 15 s is left (the wait for a baseline's preferred machine); null for 15 s.</param>
+    private async Task PauseAsync(JobRequest req, CancellationToken ct, TimeSpan? atMost = null)
     {
-        var timer = delay(TimeSpan.FromSeconds(15), ct);
+        var timer = delay(atMost is { } most && most < TimeSpan.FromSeconds(15) ? most : TimeSpan.FromSeconds(15), ct);
         if (req.Progress is { } plan)
         {
             await Task.WhenAny(timer, plan.Released).ConfigureAwait(false);

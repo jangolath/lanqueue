@@ -105,6 +105,9 @@ public sealed record PlanJobSpec(string Name, JobRequest Request, ShardOptions? 
 {
     /// <summary>The job's place in lanq.yml (0 for the first job in the file): breaks ties in <see cref="JobRunner.AggregatePlan"/>.</summary>
     public int FileOrder { get; init; }
+
+    /// <summary>Where the job is defined, for refusals found once the repository is read ("lanq.yml: job 'x' (line 14)"); null means "job 'x'".</summary>
+    public string? Where { get; init; }
 }
 
 /// <summary>
@@ -235,6 +238,18 @@ public sealed partial class JobRunner
         foreach (var spec in ordered.Where(j => j.Request.Baseline))
         {
             var key = spec.Request.BaselineRef ?? "";
+
+            // A baseline_ref from lanq.yml (a file of the repository, not the developer's own command line) must name a branch or tag: a commit
+            // id or HEAD~n could pick any old commit and send its tree to a worker. --baseline-ref on the command line takes any commit.
+            if (spec.Request.BaselineRef is { } named && !await payloads.IsBranchOrTagAsync(spec.Request.RepoDir, named, ct).ConfigureAwait(false))
+            {
+                return (bases, new PlanRunResult(nameof(JobStatus.Rejected), 2, $"{spec.Where ?? $"job '{spec.Name}'"}: {BaseRef.PlanRefMessage}", [])
+                {
+                    Decided = spec.Name,
+                    RejectKind = Jobs.RejectKind.PlanFile,
+                });
+            }
+
             if (!byRef.TryGetValue(key, out var b))
             {
                 var (resolved, refused) = await ResolveBaseAsync("plan", spec.Request, ct).ConfigureAwait(false);
