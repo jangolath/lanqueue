@@ -375,7 +375,7 @@ public sealed class JobEnvTests : IDisposable
         Assert.Contains("drop --env CONFIGURATION or remove it from the machine's env (build-01, big-01, micro-01)", step.GetProperty("reason").GetString(), StringComparison.Ordinal);
     }
 
-    /// <summary>A plan job whose env: clashes with every machine is told to fix lanq.yml or machines.yml, not the command line.</summary>
+    /// <summary>A plan job whose env: clashes with every machine gets an ask_developer step pointing at lanq.yml or machines.yml, never at the command line.</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task APlanJobsClashPointsAtLanqYmlOrMachinesYml()
     {
@@ -392,7 +392,10 @@ public sealed class JobEnvTests : IDisposable
             var json = Json(o.ToString());
             Assert.Equal((75, "NoCapacity"), (code, json.GetProperty("status").GetString()));
             var reason = json.GetProperty("nextSteps")[0].GetProperty("reason").GetString()!;
-            Assert.Contains("fix lanq.yml or machines.yml", reason, StringComparison.Ordinal);
+            Assert.Equal("ask_developer", json.GetProperty("nextSteps")[0].GetProperty("action").GetString());
+            Assert.Contains("ask the developer: they can drop", reason, StringComparison.Ordinal);
+            Assert.Contains("lanq.yml", reason, StringComparison.Ordinal);
+            Assert.Contains("machines.yml", reason, StringComparison.Ordinal);
             Assert.DoesNotContain("fix the command line", reason, StringComparison.Ordinal);
         }
     }
@@ -430,7 +433,13 @@ public sealed class JobEnvTests : IDisposable
         Assert.Equal((JobStatus.Rejected, RejectKind.JobEnv), (only.Status, only.RejectKind));
         Assert.Matches("^the --env values make the Windows command [0-9]{1,3},[0-9]{3} characters \\(limit 8,000\\) on build-02$", only.Message);
         Assert.Empty(ssh.Calls);
-        Assert.Equal("fix_command", Assert.Single(NextSteps.ForRun(ParsedArgs.Parse(["run", "--", "dotnet", "test"]), NextSteps.Outcome(only))).Action);
+        var step = Assert.Single(NextSteps.ForRun(ParsedArgs.Parse(["run", "--", "dotnet", "test"]), NextSteps.Outcome(only)));
+        Assert.Equal("ask_developer", step.Action);
+        Assert.EndsWith("; ask the developer: they can shorten or drop the --env values, or change machines.yml", step.Reason, StringComparison.Ordinal);
+        Assert.Null(step.Argv);
+        var plan = Assert.Single(NextSteps.ForRun(ParsedArgs.Parse(["run", "--plan"]), NextSteps.Outcome(only)));
+        Assert.Equal("ask_developer", plan.Action);
+        Assert.EndsWith("; ask the developer: they can shorten or drop that job's env: values in lanq.yml, or change machines.yml", plan.Reason, StringComparison.Ordinal);
 
         // build-01 ruled out by a clash and build-02 by the length: refused (the values must change), not NoCapacity, and the message
         // names both causes and both machines.
@@ -526,10 +535,74 @@ public sealed class JobEnvTests : IDisposable
     public async Task BenignNamesNearTheDenyTablePassWhenAllowed()
     {
         var ssh = new FakeSsh { Handler = (m, cmd) => cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok") };
-        var p = ParsedArgs.Parse(["run", "--env", "NODE_ENV=test", "--env", "GOOS=linux", "--env", "GOARCH=arm64", "--", "dotnet", "test"]);
-        Assert.Equal(3, p.Env.Count);
-        var r = await Runner(Mixed("NODE_ENV", "GOOS", "GOARCH"), ssh).RunAsync(Req([.. p.Env]) with { On = ["build-01"] }, CancellationToken.None);
+        var p = ParsedArgs.Parse([
+            "run", "--env", "NODE_ENV=test", "--env", "GOOS=linux", "--env", "GOARCH=arm64", "--env", "CONFIGURATION=Release", "--env", "DOTNET_CLI_TELEMETRY_OPTOUT=1",
+            "--", "dotnet", "test"]);
+        Assert.Equal(5, p.Env.Count);
+        var r = await Runner(Mixed("NODE_ENV", "GOOS", "GOARCH", "CONFIGURATION", "DOTNET_*"), ssh).RunAsync(Req([.. p.Env]) with { On = ["build-01"] }, CancellationToken.None);
         Assert.Equal(JobStatus.Completed, r.Status);
+    }
+
+    [Theory]
+    [InlineData("NODE_*", "policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH, NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused")]
+    [InlineData("DOTNET_*", "policy.allowed_env DOTNET_*: names on lanq's deny list (DOTNET_STARTUP_HOOKS, DOTNET_ADDITIONAL_DEPS, DOTNET_SHARED_STORE, ...) stay refused")]
+    [InlineData("CARGO_*", "policy.allowed_env CARGO_*: names on lanq's deny list (CARGO_TARGET_*) stay refused")]
+    [InlineData("java_*", "policy.allowed_env java_*: names on lanq's deny list (JAVA_TOOL_OPTIONS, JAVA_OPTS) stay refused")]
+    [InlineData("MYAPP_*", null)]
+    [InlineData("NODE_ENV", null)]
+    [InlineData("GIT_*", null)] // refused at load, not warned about
+    public void APrefixThatCoversDeniedNamesIsAWarning(string pattern, string? warning) =>
+        Assert.Equal(warning, JobEnv.PatternWarning(pattern));
+
+    /// <summary>Each new deny-table entry is refused on the command line (the theory over the whole table covers the rest).</summary>
+    [Theory]
+    [InlineData("NODE_TLS_REJECT_UNAUTHORIZED")]
+    [InlineData("HTTPS_PROXY")]
+    [InlineData("no_proxy")]
+    [InlineData("SSL_CERT_FILE")]
+    [InlineData("DOTNET_HOST_PATH")]
+    [InlineData("NUGET_PLUGIN_PATHS")]
+    [InlineData("DOTNET_MSBUILD_SDK_RESOLVER_CLI_DIR")]
+    [InlineData("COMPlus_EnableDiagnostics")]
+    [InlineData("RUSTC_WRAPPER")]
+    [InlineData("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER")]
+    [InlineData("JAVA_OPTS")]
+    [InlineData("GRADLE_USER_HOME")]
+    [InlineData("MAKEFILES")]
+    public void TheTlsProxyDotnetRustAndJavaAdditionsAreDenied(string name)
+    {
+        Assert.True(JobEnv.IsJobDenied(name));
+        var ex = Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--env", name + "=x", "--", "dotnet", "test"]));
+        Assert.True(JobEnv.IsDeniedMessage(ex.Message));
+    }
+
+    /// <summary>
+    /// A deny-table refusal on the agent's own command line is "drop it or ask the developer"; from lanq.yml, or a name allowed_env lacks, it
+    /// is the developer's (ask_developer, no command).
+    /// </summary>
+    [Fact]
+    public void DenyAndPolicyRefusalsNeverTellTheAgentToEditConfig()
+    {
+        var parse = Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--env", "NODE_OPTIONS=--inspect", "--", "dotnet", "test"]));
+        var cli = Assert.Single(NextSteps.ArgumentsError(parse.Message));
+        Assert.Equal("fix_command", cli.Action);
+        Assert.Equal("this variable can never be set by a job; drop it or ask the developer: " + parse.Message, cli.Reason);
+
+        var run = ParsedArgs.Parse(["run", "--", "dotnet", "test"]);
+        var denied = new JobResult("j", JobStatus.Rejected, 2, null, JobEnv.DeniedMessage("NODE_OPTIONS")) { RejectKind = RejectKind.Policy };
+        var deniedStep = Assert.Single(NextSteps.ForRun(run, NextSteps.Outcome(denied)));
+        Assert.Equal(("fix_command", cli.Reason), (deniedStep.Action, deniedStep.Reason));
+
+        var notAllowed = new JobResult("j", JobStatus.Rejected, 2, null, JobEnv.NotAllowedMessage("TEST_FILTER")) { RejectKind = RejectKind.Policy };
+        var ask = Assert.Single(NextSteps.ForRun(run, NextSteps.Outcome(notAllowed)));
+        Assert.Equal("ask_developer", ask.Action);
+        Assert.Null(ask.Argv);
+
+        var yml = Assert.Throws<PlanFileException>(() => PlanFileLoader.Parse("version: 1\njobs:\n  unit:\n    command: dotnet test\n    env: {NODE_OPTIONS: --inspect}\n"));
+        var plan = new JobResult("j", JobStatus.Rejected, 2, null, yml.Message) { RejectKind = RejectKind.PlanFile };
+        var planStep = Assert.Single(NextSteps.ForRun(ParsedArgs.Parse(["run", "--plan"]), NextSteps.Outcome(plan)));
+        Assert.Equal("ask_developer", planStep.Action);
+        Assert.StartsWith("this variable can never be set by a job; the developer drops it from that job's env: in lanq.yml (", planStep.Reason, StringComparison.Ordinal);
     }
 
     [Theory]

@@ -47,11 +47,16 @@ public static partial class JobEnv
         // Node
         "NODE_OPTIONS", "NODE_PATH",
 
-        // .NET (machine env: and path_prepend: own where the runtime lives)
-        "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "DOTNET_SHARED_STORE", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64", "DOTNET_ROOT_X86",
+        // TLS trust and proxies: what a tool downloads, and from whom it accepts it
+        "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "HTTP_PROXY",
+        "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 
-        // Java
-        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH",
+        // .NET and NuGet (machine env: and path_prepend: own where the runtime lives)
+        "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS", "DOTNET_SHARED_STORE", "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT_ARM64", "DOTNET_ROOT_X86",
+        "DOTNET_HOST_PATH", "NUGET_PLUGIN_PATHS",
+
+        // Java, Gradle and make
+        "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS", "CLASSPATH", "GRADLE_USER_HOME", "MAKEFILES",
 
         // Python, Perl, Ruby
         "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONWARNINGS", "PYTHONBREAKPOINT", "PYTHONPLATLIBDIR",
@@ -61,7 +66,7 @@ public static partial class JobEnv
         "GOFLAGS", "GOROOT", "GOTOOLCHAIN", "GOPROXY", "GOSUMDB", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOENV", "GOPATH", "GOBIN", "CC", "CXX",
 
         // Rust
-        "RUSTFMT", "RUSTUP_TOOLCHAIN",
+        "RUSTFMT", "RUSTUP_TOOLCHAIN", "RUSTC_WRAPPER", "RUSTC",
 
         // Native libraries that load modules from a path (OpenSSL, glibc iconv)
         "OPENSSL_CONF", "OPENSSL_ENGINES", "OPENSSL_MODULES", "GCONV_PATH",
@@ -74,9 +79,15 @@ public static partial class JobEnv
         "IFS", "CDPATH",
     ];
 
-    /// <summary>The prefixes on the hard deny table: the loader ones, .NET profilers, git, ssh, npm and yarn settings, MSBuild, cgo, and lanq's own.</summary>
+    /// <summary>
+    /// The prefixes on the hard deny table: the loader ones, .NET profilers, runtime settings and SDK resolver, git, ssh, npm and yarn
+    /// settings, MSBuild, cgo, Cargo target runners and linkers, and lanq's own.
+    /// </summary>
     internal static readonly string[] JobDeniedPrefixes =
-        [.. MachineDeniedPrefixes, "CORECLR_", "COR_", "GIT_", "SSH_", "NPM_CONFIG_", "YARN_", "MSBUILD", "CGO_", "LANQ_"];
+    [
+        .. MachineDeniedPrefixes, "CORECLR_", "COR_", "COMPLUS_", "DOTNET_MSBUILD_SDK_RESOLVER_", "GIT_", "SSH_", "NPM_CONFIG_", "YARN_", "MSBUILD", "CGO_",
+        "CARGO_TARGET_", "LANQ_",
+    ];
 
     /// <summary>The longest value one --env may have (characters).</summary>
     public const int MaxValueLength = 4096;
@@ -100,9 +111,15 @@ public static partial class JobEnv
     private static bool Denied(string name, string[] names, string[] prefixes) =>
         names.Contains(name, StringComparer.OrdinalIgnoreCase) || prefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The words every deny-table refusal ends with (<see cref="DeniedMessage"/>), so a next step can tell it apart.</summary>
+    internal const string DeniedSuffix = "; lanq never sets it for a job.";
+
+    /// <summary>Whether a refusal message (possibly with a lanq.yml prefix) is a deny-table refusal.</summary>
+    public static bool IsDeniedMessage(string message) => message.EndsWith(DeniedSuffix, StringComparison.Ordinal);
+
     /// <summary>The refusal for a name on the hard deny table (the value is never shown).</summary>
     public static string DeniedMessage(string name) =>
-        $"--env {name} can make the command run other code or move where tools keep their files; lanq never sets it for a job.";
+        $"--env {name} can make the command run other code or move where tools keep their files" + DeniedSuffix;
 
     /// <summary>The refusal for a name policy.allowed_env does not list.</summary>
     public static string NotAllowedMessage(string name) =>
@@ -205,6 +222,28 @@ public static partial class JobEnv
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// A warning for a policy.allowed_env prefix pattern that covers names on the deny table, which stay refused ("policy.allowed_env NODE_*:
+    /// names on lanq's deny list (NODE_OPTIONS, NODE_PATH, NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused"), or null (an exact name, or a
+    /// prefix that covers none). Not an error: the pattern still lets the other names through.
+    /// </summary>
+    public static string? PatternWarning(string pattern)
+    {
+        if (!pattern.EndsWith('*') || PatternProblem(pattern) is not null)
+        {
+            return null;
+        }
+
+        var prefix = pattern[..^1];
+        var covered = JobDeniedNames.Where(n => n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            .Concat(JobDeniedPrefixes.Where(p => p.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Select(p => p + "*"))
+            .ToList();
+        const int Shown = 3;
+        return covered.Count == 0
+            ? null
+            : $"policy.allowed_env {pattern}: names on lanq's deny list ({string.Join(", ", covered.Take(Shown))}{(covered.Count > Shown ? ", ..." : "")}) stay refused";
     }
 
     /// <summary>Whether policy.allowed_env lets a job set <paramref name="name"/> (ignoring case; MYAPP_* allows names starting with MYAPP_). The deny table is separate and wins.</summary>

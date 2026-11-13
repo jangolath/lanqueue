@@ -184,6 +184,16 @@ public static partial class Cli
         }
 
         await say(DoctorCheck.Local("config", "ok", $"config: {config.Machines.Count} machine(s)")).ConfigureAwait(false);
+
+        // A policy.allowed_env prefix that covers names on the --env deny list: they stay refused, which may surprise; not an error.
+        foreach (var warning in config.Policy.AllowedEnv.Select(Policy.JobEnv.PatternWarning).OfType<string>())
+        {
+            await say(DoctorCheck.Local(
+                "allowed_env",
+                "warn",
+                warning,
+                "nothing to change if that is intended (the deny list always wins); list exact names in policy.allowed_env to make it plain")).ConfigureAwait(false);
+        }
         await say(LogsCheck(host, config.Policy.KeepLogsDays)).ConfigureAwait(false);
         foreach (var m in config.Machines)
         {
