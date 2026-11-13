@@ -115,9 +115,19 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --fail-fast: with --shards the first shard that does not complete cancels the rest (also in <see cref="Shards"/>); with --plan the first job.</summary>
     public bool FailFast { get; init; }
 
+    /// <summary>
+    /// lanq run --env NAME=VALUE (repeatable): the job's own variables, in the order given (<see cref="Policy.JobEnv.Parse"/>: split at the first
+    /// '=', a valid name not on the hard deny table, a non-empty value without control characters, no name twice). policy.allowed_env, the
+    /// secret scan and clashes with a machine's env: are checked when the job is (JobRunner's precheck). Shards inherit them.
+    /// </summary>
+    public IReadOnlyList<Policy.JobEnvVar> Env { get; init; } = [];
+
     /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
     internal static readonly string[] PlanFileOptions =
-        ["--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files"];
+    [
+        "--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
+        "--fetch-max-files", "--env",
+    ];
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -133,6 +143,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
+            "--env",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -186,6 +197,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var plan = false;
         string? planFile = null;
         List<string>? only = null;
+        var env = new List<string>();
         var seen = new List<string>();
         var shards = new Cli.ShardArgs();
         var command = own.Length > 0 ? own[0] : "help";
@@ -234,6 +246,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--fetch" when i + 1 < own.Length:
                     fetch.Add(own[++i]);
+                    break;
+                case "--env" when i + 1 < own.Length:
+                    env.Add(own[++i]);
                     break;
                 case "--fetch-dir" when i + 1 < own.Length:
                     fetchDir = own[++i];
@@ -382,6 +397,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             CheckPlanOptions(seen, plan, split >= 0);
         }
 
+        // After the option checks, so lanq health --env says "does not take --env" rather than judging the value.
+        var jobEnv = Policy.JobEnv.ParseAll(env);
+
         if (logTail is not null && !json)
         {
             throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
@@ -435,6 +453,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             Only = only,
             FailFast = shards.FailFast,
             LogTail = logTail,
+            Env = jobEnv,
             Raw = [.. args],
         };
     }
@@ -532,6 +551,7 @@ public static partial class Cli
           lanq run ... --json [--log-tail 60] -- dotnet test
           lanq run ... --dry-run [--json] -- dotnet test
           lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test
+          lanq run ... [--env NAME=VALUE ...] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq stats [--json] [--target-minutes M]
@@ -555,6 +575,11 @@ public static partial class Cli
         another size, or one that does not report its memory, can never take the job (wrong_size, size_unknown). --on m[,m] uses only the
         named machines (an unknown name is refused before any network); every other rule still applies (capabilities, size, --mem, holds,
         allowed hours, slots, wake). On health, --size / --min-size judge each machine like --needs and --on shows only those machines.
+        --env NAME=VALUE (repeatable; lanq.yml env:) sets a variable for the job only (shards too): the name must be in machines.yml
+        policy.allowed_env (exact, or a prefix ending in *) and not on lanq's deny list (loader, runtime and shell startup variables such as
+        NODE_OPTIONS, DOTNET_STARTUP_HOOKS, GIT_*, HOME, TEMP, LANQ_*), the value non-empty, free of control characters and secrets, and no
+        candidate machine's env: may set the same name. Settings only, never secrets: the value is in the job's environment on the worker. The
+        JSON and jobs.jsonl carry the names only. Refused with exit 2 otherwise.
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
@@ -845,6 +870,7 @@ public static partial class Cli
                         Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
                         NextSteps = next,
+                        Env = EnvNames(p.Env),
                     },
                     result.LogPath,
                     p.LogTail),
@@ -856,6 +882,9 @@ public static partial class Cli
         return result.CliExitCode;
     }
 
+    /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
+    internal static IReadOnlyList<string>? EnvNames(IReadOnlyList<Policy.JobEnvVar> env) => env.Count > 0 ? [.. env.Select(e => e.Name)] : null;
+
     /// <summary>The job lanq run (or its dry run) asks for, from its command line: one job, or the template of every shard.</summary>
     internal static JobRequest RequestOf(ParsedArgs p, string repoDir, FetchRequest? fetch) =>
         new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
@@ -863,6 +892,7 @@ public static partial class Cli
             NoWake = p.NoWake,
             On = p.On,
             Size = p.Size,
+            Env = p.Env,
         };
 
     /// <summary>

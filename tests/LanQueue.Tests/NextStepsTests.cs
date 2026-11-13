@@ -70,6 +70,7 @@ public sealed class NextStepsTests : IDisposable
             Args("run", "--json", "--wait", "300", "--no-wake", "--config", "fleet.yml", "--mem", "4", "--timeout", "10080", "--", "npx", "jest"),
             Args("run", "--json", "--on", "big-01,micro-01", "--min-size", "medium", "--needs", "node", "--", "npx", "jest"),
             Args("run", "--size", "light,medium", "--wait", "30", "--on", "micro-02", "--", "npx", "jest"),
+            Args("run", "--json", "--env", "CONFIGURATION=Release", "--env", "TEST_FILTER=a b|c", "--needs", "node", "--", "npx", "jest"),
         ];
         var unreachable = new ExcludedMachine("big-01", "unreachable", "ssh: connect to host big-01 port 22: Connection refused", false);
         var lacks = new ExcludedMachine("big-01", "missing_capability", "lacks gpu (capabilities: node)", true);

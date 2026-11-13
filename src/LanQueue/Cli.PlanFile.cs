@@ -232,7 +232,11 @@ public static partial class Cli
         Math.Round(elapsed.TotalSeconds, 1),
         JobRunner.SafeLine(result.Message),
         order,
-        [.. result.Jobs.Select(j => PlanJobJsonOf(j, specs.FirstOrDefault(s => s.Name == j.Name)?.Request.Fetch is not null, logTail))])
+        [.. result.Jobs.Select(j =>
+        {
+            var req = specs.FirstOrDefault(s => s.Name == j.Name)?.Request;
+            return PlanJobJsonOf(j, req?.Fetch is not null, logTail) with { Env = req is null ? null : EnvNames(req.Env) };
+        })])
         {
             Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
             Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
@@ -392,6 +396,7 @@ public static partial class Cli
             Machines = [.. x.Second.Assessed.Select(a => new PlanMachineJson(
                 JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } w ? JobRunner.SafeLine(w) : null, a.Permanent, a.FreeSlots, a.JobSlots))],
             Retryable = x.Second.Retryable,
+            Env = EnvNames(x.First.Args.Env),
         })],
     };
 }

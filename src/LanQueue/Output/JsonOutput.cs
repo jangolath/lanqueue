@@ -149,6 +149,10 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>What to do next (see <see cref="NextStepJson"/>): always present on a single run's object; absent in the shards of --shards (the top level carries them).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<NextStepJson>? NextSteps { get; init; }
+
+    /// <summary>--env only, on a single run's object (the top level of --shards carries it for every shard) (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
 }
 
 /// <summary>
@@ -172,6 +176,10 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
 
     /// <summary>What to do next for the whole run (see <see cref="NextStepJson"/>).</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+
+    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
 }
 
 /// <summary>
@@ -254,6 +262,10 @@ internal sealed record PlanJson(string Status, int ExitCode)
 
     /// <summary>What to do next (see <see cref="NextStepJson"/>): WouldRun proceeds with the same command without --dry-run.</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+
+    /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
 }
 
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
@@ -333,6 +345,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>shards: auto with target_minutes only: how N was picked.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ShardTimingJson? ShardTiming { get; init; }
+
+    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
 }
 
 /// <summary>
@@ -399,6 +415,10 @@ internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> Aft
 
     /// <summary>NoCapacity only: false when the job can never run as configured.</summary>
     public bool? Retryable { get; init; }
+
+    /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Env { get; init; }
 }
 
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>

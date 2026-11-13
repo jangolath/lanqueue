@@ -57,7 +57,7 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {plan.Status}: {JobRunner.SafeLine(plan.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next, Env = EnvNames(p.Env) }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
         return plan.ExitCode;
@@ -146,7 +146,7 @@ public static partial class Cli
         return sb.ToString();
     }
 
-    /// <summary>--timeout (when not the default), --fetch and --log-tail as lanq run would use them; null when none was given.</summary>
+    /// <summary>--timeout (when not the default), --fetch, --env and --log-tail as lanq run would use them; null when none was given.</summary>
     private static string? OptionsText(ParsedArgs p)
     {
         var parts = new List<string>();
@@ -161,6 +161,12 @@ public static partial class Cli
             parts.Add(string.Create(
                 CultureInfo.InvariantCulture,
                 $"--fetch {JobRunner.SafeLine(string.Join(", ", p.Fetch))} into {JobRunner.SafeLine(p.FetchDir ?? ".lanq/artifacts")}/<job id>/ (at most {p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles} files, {JobRunner.Size(bytes)}; a dry run fetches nothing)"));
+        }
+
+        if (p.Env.Count > 0)
+        {
+            // The values as typed: the run line holds them anyway, and this text is only printed once the secret scan passed.
+            parts.Add("--env " + JobRunner.SafeLine(string.Join(' ', p.Env.Select(e => e.Name + "=" + e.Value))));
         }
 
         if (p.LogTail is { } tail)

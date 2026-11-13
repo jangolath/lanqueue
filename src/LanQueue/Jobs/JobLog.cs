@@ -52,6 +52,10 @@ public sealed record JobRecord(
     /// <summary>lanq run --plan only (0.8.0): the id every job of one plan run shares (its snapshot's id).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? PlanRun { get; init; }
+
+    /// <summary>lanq run --env only (0.9.0): the names of the job's own variables, in the order given. Never their values.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? EnvNames { get; init; }
 }
 
 /// <summary>What <see cref="JobLog.Read"/> found: the records (oldest file first), how many lines could not be read, and the files read.</summary>

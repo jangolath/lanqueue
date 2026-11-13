@@ -48,6 +48,12 @@ public sealed class PolicyConfig
 
     public List<string> AllowedCommands { get; set; } = [];
     public List<string> AllowedDirectories { get; set; } = [];
+
+    /// <summary>
+    /// The variables a job may set with --env (or lanq.yml env:): exact names, or prefixes ending in * (MYAPP_*), compared ignoring case.
+    /// Empty (the default) refuses every --env. Names on lanq's hard deny table (Policy/JobEnv.cs) are refused even when listed.
+    /// </summary>
+    public List<string> AllowedEnv { get; set; } = [];
 }
 
 /// <summary>wake: (optional per machine) Wake-on-LAN for a sleeping worker. Validated by ConfigLoader.</summary>

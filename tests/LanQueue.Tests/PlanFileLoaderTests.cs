@@ -127,12 +127,11 @@ public sealed class PlanFileLoaderTests : IDisposable
     [InlineData("hosts: [10.20.30.41]")]
     [InlineData("ssh: build@10.20.30.41")]
     [InlineData("key_env: LANQ_KEY")]
-    [InlineData("env: {TOKEN: x}")]
     [InlineData("password: hunter2")]
     [InlineData("path_prepend: [/opt/bin]")]
     [InlineData("wake: {mac: \"02:00:00:00:00:41\"}")]
     [InlineData("priority: normal")]
-    public void HostsSecretsAndEnvKeysAreUnknownKeys(string line)
+    public void HostsSecretsAndMachineKeysAreUnknownKeys(string line)
     {
         foreach (var yaml in new[]
         {

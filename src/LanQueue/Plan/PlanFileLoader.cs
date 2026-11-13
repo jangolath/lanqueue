@@ -15,13 +15,15 @@ namespace LanQueue.Plan;
 /// <see cref="Locate"/>: nothing is probed, sent or run. The file is untrusted input (it comes with the repository), so it can only say what
 /// a lanq run command line can: each job expands to exactly that command line (<see cref="PlanJob.RunArgs"/>) and goes through
 /// <see cref="ParsedArgs.Parse"/>; the allowlist, allowed dirs, secret scans and the Windows rule then apply as for any run. There are no keys
-/// for ssh, hosts, keys, env, paths, wake, priority or policy: every key not listed here is refused with its line and a did-you-mean.
+/// for ssh, hosts, keys, paths, wake, priority or policy: every key not listed here is refused with its line and a did-you-mean. env: is a
+/// job's own variables (--env flags), never a machine's: machines.yml policy.allowed_env decides which names a job may set.
 /// </summary>
 /// <remarks>
 /// Read with YamlDotNet's RepresentationModel (no reflection, as <see cref="ConfigLoader"/>), through <see cref="StandardTagParser"/> (only
 /// the standard tags), with no anchors or aliases (<see cref="RefuseAnchors"/>), and <see cref="YamlShape.Check"/> (no empty values or entries, no deep nesting). At most
 /// <see cref="MaxBytes"/> and one document; a mapping with <c>version: 1</c> (required), optional <c>defaults:</c> and <c>jobs:</c> (1 to
-/// <see cref="MaxJobs"/>). A job's own value REPLACES the default (lists are not merged; size and min_size are one setting).
+/// <see cref="MaxJobs"/>). A job's own value REPLACES the default (lists are not merged; size and min_size are one setting), except env:,
+/// which is merged by name (the job's value wins).
 /// </remarks>
 public static partial class PlanFileLoader
 {
@@ -44,16 +46,16 @@ public static partial class PlanFileLoader
     internal static readonly string[] TopKeys = ["version", "defaults", "jobs"];
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
-    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout"];
+    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
-        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch"];
+        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "env"];
 
-    /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong.</summary>
+    /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
     [
-        "ssh", "host", "hosts", "key", "keys", "key_env", "env", "path", "path_prepend", "wake", "priority", "policy", "work_root", "machines", "allowed_commands",
+        "ssh", "host", "hosts", "key", "keys", "key_env", "path", "path_prepend", "wake", "priority", "policy", "work_root", "machines", "allowed_commands",
         "allowed_directories", "password", "token", "secret", "secrets", "max_jobs", "transfer", "allowed_hours",
     ];
 
@@ -330,7 +332,7 @@ public static partial class PlanFileLoader
         var lower = key.ToLowerInvariant();
         var close = allowed.Select(a => (Key: a, Distance: Distance(lower, a))).Where(x => x.Distance <= 2).OrderBy(x => x.Distance).ThenBy(x => Array.IndexOf(allowed, x.Key)).FirstOrDefault();
         var hint = MachineKeys.Contains(lower, StringComparer.Ordinal)
-            ? "; machines, ssh, keys, env and other machine settings belong in your machines.yml, never in a repository's plan file."
+            ? "; machines, ssh, keys, paths and other machine settings belong in your machines.yml, never in a repository's plan file."
             : close.Key is not null ? $"; did you mean '{close.Key}'?" : ".";
 
         return hint + " Keys here: " + string.Join(", ", allowed) + ".";
@@ -368,7 +370,8 @@ public static partial class PlanFileLoader
         var own = Keys(body, JobKeys, label, where, "in a job").ToDictionary(x => x.Key.Value!, x => x.Value, StringComparer.Ordinal);
         PlanFileException Error(string message) => new($"{label}: {where}{message}");
 
-        // A job's own value replaces the default; size and min_size are one setting, so either one on the job drops both defaults.
+        // A job's own value replaces the default; size and min_size are one setting, so either one on the job drops both defaults. env: is
+        // the exception (see Env below): the job's variables are merged with the defaults' by name, so it is read from both, not from here.
         var values = new Dictionary<string, YamlNode>(defaults, StringComparer.Ordinal);
         if (own.ContainsKey("size") || own.ContainsKey("min_size"))
         {
@@ -440,6 +443,13 @@ public static partial class PlanFileLoader
             {
                 args.AddRange(["--fetch", pattern]);
             }
+        }
+
+        // env: merged by name, the job's value winning (an exception to "a job's value replaces the default": a job that sets one variable
+        // keeps the others defaults: sets). Each becomes one --env NAME=VALUE, judged by --env's own rules.
+        foreach (var (envName, envValue) in Env(defaults.GetValueOrDefault("env"), own.GetValueOrDefault("env"), Error))
+        {
+            args.AddRange(["--env", envName + "=" + envValue]);
         }
 
         args.Add("--");
@@ -514,6 +524,59 @@ public static partial class PlanFileLoader
             : throw error($"fetch: each entry must be a single pattern (line {item.Start.Line}).")).ToList(),
         _ => throw error($"fetch: must be a pattern or a list of patterns (line {node.Start.Line})."),
     };
+
+    /// <summary>
+    /// env: of defaults: and of the job, merged by name ignoring case (the job's value wins and its spelling of the name is kept), defaults'
+    /// names first in file order, then the job's new ones. Each value is a single value, taken as written (3 is "3", true is "true").
+    /// </summary>
+    private static List<(string Name, string Value)> Env(YamlNode? defaults, YamlNode? own, Func<string, PlanFileException> error)
+    {
+        var merged = new List<(string Name, string Value)>();
+        foreach (var node in new[] { defaults, own })
+        {
+            if (node is null)
+            {
+                continue;
+            }
+
+            if (node is not YamlMappingNode map)
+            {
+                throw error($"env: must be a mapping of NAME: value, for example env: {{ CONFIGURATION: Release }} (line {node.Start.Line}).");
+            }
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (k, v) in map.Children)
+            {
+                // A name that is not one is never quoted back: it may be a value written in the wrong place.
+                if (k is not YamlScalarNode { Value: { } name } || !Policy.JobEnv.IsValidName(name))
+                {
+                    throw error($"env: a variable name must be letters, digits and _ and not start with a digit (line {k.Start.Line}).");
+                }
+
+                if (v is not YamlScalarNode { Value: { } value })
+                {
+                    throw error($"env: {name} must be a single value (line {v.Start.Line}).");
+                }
+
+                if (!seen.Add(name))
+                {
+                    throw error($"env: {name} is listed twice (names are compared ignoring case, as on Windows) (line {k.Start.Line}).");
+                }
+
+                var at = merged.FindIndex(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
+                if (at >= 0)
+                {
+                    merged[at] = (name, value);
+                }
+                else
+                {
+                    merged.Add((name, value));
+                }
+            }
+        }
+
+        return merged;
+    }
 
     /// <summary>fail_fast: true or false.</summary>
     private static bool Flag(YamlNode node, string key, Func<string, PlanFileException> error) => node is YamlScalarNode { Value: { } v } && bool.TryParse(v, out var b)

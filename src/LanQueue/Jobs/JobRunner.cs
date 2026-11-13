@@ -116,6 +116,13 @@ public sealed record JobRequest(
     /// <summary>lanq run --plan: called once the job holds its first slot or begins waiting for one (the next job's start waits for it).</summary>
     public Action? Placed { get; init; }
 
+    /// <summary>
+    /// lanq run --env (lanq.yml env:): the job's own variables, in the order given (parsed and deny-checked by <see cref="JobEnv.Parse"/>;
+    /// policy.allowed_env, the secret scan and clashes with a machine's env: are checked in <see cref="JobRunner"/>'s precheck). Shards and
+    /// plan jobs carry their template's. Only the names are ever logged.
+    /// </summary>
+    public IReadOnlyList<JobEnvVar> Env { get; init; } = [];
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -237,7 +244,10 @@ public sealed partial class JobRunner(
     /// <summary>What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>).</summary>
     private static JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe) { Size = req.Size };
 
-    /// <summary>The checks on the command line alone (--on names, policy, secrets in it, Windows-safe arguments), before any network or git work; null when it may run.</summary>
+    /// <summary>
+    /// The checks on the command line alone (--on names, policy, secrets in it, --env (<see cref="PrecheckEnv"/>), Windows-safe arguments), before
+    /// any network or git work; null when it may run.
+    /// </summary>
     private JobResult? Precheck(string jobId, JobRequest req)
     {
         if (Pinning.Resolve(config, req.On).Error is { } unknown)
@@ -258,6 +268,11 @@ public sealed partial class JobRunner(
             return Rejected(jobId, commandFindings);
         }
 
+        if (PrecheckEnv(jobId, req) is { } envRefused)
+        {
+            return envRefused;
+        }
+
         // Arguments unsafe on Windows (" < > ^ %, or & | for a program that is not an .exe) can still run on a Linux worker; refuse only
         // when no non-Windows machine has the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
@@ -268,6 +283,68 @@ public sealed partial class JobRunner(
 
         // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
         return NeverByConfig(req) is { } never ? NoCapacity(jobId, never, "") : null;
+    }
+
+    /// <summary>
+    /// The checks on the job's --env (<see cref="JobRequest.Env"/>), after the command line's: the hard deny table again (Policy), then
+    /// policy.allowed_env (Policy), the secret scan of each NAME=VALUE (Secret; the value is never shown), a name that a candidate machine's
+    /// env: in machines.yml sets too (Arguments: which one wins would be a guess), and the Windows command-line cap with the job's variables
+    /// on each Windows candidate (Arguments). Null when the job sets none or every check passes.
+    /// </summary>
+    private JobResult? PrecheckEnv(string jobId, JobRequest req)
+    {
+        if (req.Env.Count == 0)
+        {
+            return null;
+        }
+
+        JobResult Refused(string message, RejectKind kind) => new(jobId, JobStatus.Rejected, 2, null, message) { RejectKind = kind };
+        foreach (var e in req.Env)
+        {
+            // Parse refused these already; a request built some other way gets the same answer.
+            if (!JobEnv.IsValidName(e.Name))
+            {
+                return Refused("--env NAME=VALUE: the name must be letters, digits and _ and not start with a digit.", Jobs.RejectKind.Arguments);
+            }
+
+            if (JobEnv.IsJobDenied(e.Name))
+            {
+                return Refused(JobEnv.DeniedMessage(e.Name), Jobs.RejectKind.Policy);
+            }
+
+            if (!JobEnv.IsAllowed(config.Policy.AllowedEnv, e.Name))
+            {
+                return Refused(JobEnv.NotAllowedMessage(e.Name), Jobs.RejectKind.Policy);
+            }
+        }
+
+        var findings = req.Env.SelectMany(e => SecretScanner.ScanText(e.Name + "=" + e.Value, "--env " + e.Name)).ToList();
+        if (findings.Count > 0)
+        {
+            return Rejected(jobId, findings);
+        }
+
+        var candidates = Candidates(req);
+        foreach (var m in candidates)
+        {
+            if (req.Env.FirstOrDefault(e => m.Env.Keys.Contains(e.Name, StringComparer.OrdinalIgnoreCase)) is { } clash)
+            {
+                return Refused($"--env {clash.Name}: {m.Name}'s env in machines.yml sets it too; drop one", Jobs.RejectKind.Arguments);
+            }
+        }
+
+        foreach (var m in candidates.Where(m => m.Os == MachineOs.Windows))
+        {
+            var size = RemoteScripts.WorstCaseWindowsCommandLength(m, req.Env);
+            if (size > RemoteScripts.MaxWindowsCommandLength)
+            {
+                return Refused(
+                    string.Create(CultureInfo.InvariantCulture, $"the --env values make the Windows command {size:N0} characters (limit {RemoteScripts.MaxWindowsCommandLength:N0}) on {m.Name}"),
+                    Jobs.RejectKind.Arguments);
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -830,6 +907,7 @@ public sealed partial class JobRunner(
                 RunSeconds = result.RunSeconds,
                 PlanJob = req.PlanJob,
                 PlanRun = req.PlanRun,
+                EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
             });
             return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
         }
@@ -852,7 +930,7 @@ public sealed partial class JobRunner(
         try
         {
             // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
-            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob));
+            executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob, env: req.Env));
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -911,7 +989,7 @@ public sealed partial class JobRunner(
         // The worker enforces the same limit itself, a margin later, so a job outlives a vanished lanq by at most that margin.
         // A fresh nonce in the wrapper's marker lines, so a job printing "LANQ_EXIT=..." or "LANQ_WINARGS=..." itself is only output.
         var nonce = RemoteScripts.NewMarkerNonce();
-        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob, nonce));
+        executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, timeout + WorkerDeadlineMargin, req.Shard, req.PlanJob, nonce, req.Env));
         // The wrapper's exit marker counts only as the FINAL output line (or glued to the end of it): a line carrying one is held back until
         // the next line arrives, which shows it was not final, and is then passed on unchanged as ordinary output. The final one is taken off.
         var heldGate = new object();

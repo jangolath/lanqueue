@@ -583,8 +583,12 @@ public static partial class RemoteScripts
     /// and nowhere else (not in the job's environment), so a job that prints a marker-like line cannot pass it off as the wrapper's. Null
     /// leaves it out (tests that run the wrapper by hand).
     /// </param>
+    /// <param name="env">
+    /// lanq run --env: the job's own variables (already checked: <see cref="JobEnv"/>), set in the given order after the machine's env: and
+    /// before LANQ_JOB, LANQ_SHARD(S) and LANQ_PLAN_JOB, so lanq's own variables always win. Null or empty sets none.
+    /// </param>
     public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null, string? planJob = null,
-        string? nonce = null)
+        string? nonce = null, IReadOnlyList<JobEnvVar>? env = null)
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
@@ -608,6 +612,7 @@ public static partial class RemoteScripts
                 $p=Get-Item -LiteralPath $here
                 while($p.FullName.Length -gt $wr.Length){if($p.Attributes -band [IO.FileAttributes]::ReparsePoint){exit 126};$p=$p.Parent}
                 {{JobEnvironmentPowerShell(m)}}
+                {{JobEnvPowerShell(env)}}
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
                 {{ShardEnvironmentPowerShell(shard)}}
                 {{PlanJobEnvironmentPowerShell(planJob)}}
@@ -645,7 +650,7 @@ public static partial class RemoteScripts
             T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
             exec 3<&0
-            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
+            $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob, env)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
             printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
@@ -675,9 +680,12 @@ public static partial class RemoteScripts
     /// is a single POSIX-quoted word, and lanq's own script variables (S, P, rc, IFS...) are never touched. An empty PATH adds no
     /// trailing ':' (which would mean the current directory).
     /// </summary>
-    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null)
+    internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null, IReadOnlyList<JobEnvVar>? env = null)
     {
         var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
+
+        // The job's --env, in the order given: after the machine's (a clash is refused before this), before lanq's own.
+        words.AddRange((env ?? []).Select(e => ShellQuote.Posix(SafeJobEnvName(e.Name) + "=" + e.Value)));
         if (jobId is not null)
         {
             // After the machine's own env: words, so the marker wins even if one named it (config refuses LANQ_* names anyway).
@@ -789,6 +797,27 @@ public static partial class RemoteScripts
 
     private static string ShardEnvironmentPowerShell(ShardInfo? shard) =>
         shard is null ? "" : string.Join('\n', ShardVariables(shard).Select(v => $"$env:{v.Name} = '{v.Value}'"));
+
+    /// <summary>A job's --env name, checked again here (a valid name, not on the deny table) before it is written into a script.</summary>
+    private static string SafeJobEnvName(string name) =>
+        JobEnv.IsValidName(name) && !JobEnv.IsJobDenied(name) ? name : throw new ArgumentException("Invalid job variable name.", nameof(name));
+
+    /// <summary>A job's --env as PowerShell lines ($env:NAME = 'value'), in the order given; empty for none.</summary>
+    private static string JobEnvPowerShell(IReadOnlyList<JobEnvVar>? env) =>
+        string.Join('\n', (env ?? []).Select(e => $"$env:{SafeJobEnvName(e.Name)} = {ShellQuote.PowerShell(e.Value)}"));
+
+    /// <summary>The shortest job arguments that still bring the native .exe check into the Windows job script (a one-letter program and a |).</summary>
+    private static readonly string[] WorstCaseArgv = ["x", "|"];
+
+    /// <summary>
+    /// The Windows job script's encoded length at its largest for a machine, before any job arguments: the largest LANQ_SHARD / LANQ_SHARDS,
+    /// the longest LANQ_PLAN_JOB, and the native .exe check a job given &amp; or | carries, plus the job's own <paramref name="env"/> (none for
+    /// the config check). Over <see cref="MaxWindowsCommandLength"/> every such job there would fail.
+    /// </summary>
+    internal static int WorstCaseWindowsCommandLength(Machine m, IReadOnlyList<JobEnvVar>? env = null) =>
+        WindowsCommand(Execute(
+            m, "20260101-000000-000000", ".", WorstCaseArgv, JobRequest.DefaultTimeout, new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards),
+            new string('x', Plan.PlanFileLoader.MaxNameLength), new string('0', 16), env)).Length;
 
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
     internal static string JobEnvironmentPowerShell(Machine m)
