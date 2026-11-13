@@ -44,7 +44,8 @@
   `lanq doctor --remote --json` once and report the `fail` checks with their `fix`; `124` timed out or the machine's
   hours ended (`TimedOut`, `WindowClosed`: report it); `130` Ctrl+C (`Cancelled`: stop). `--wait` above 0 can
   wake a sleeping PC as a last resort; leave out `--no-wake` only if the developer has said waking is fine.
-- Never edit the lanq machines file, the allowlists or any ssh/key configuration. The developer owns them. Never run
+- Never edit the lanq machines file, the allowlists (`policy.allowed_env` included) or any ssh/key configuration. The
+  developer owns them. Never run
   `lanq makeready --add`, `lanq makeready --setup` or any `--yes`: adding a machine is the developer's job. If a
   command is refused, say so and stop; do not look for a way around it, and never edit `lanq.yml` or the machines
   file to get one through.
@@ -52,7 +53,8 @@
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
   commands run through lanq. lanq rejects them anyway.
-- Never put secrets, tokens or key material in files or command lines that lanq will ship; it refuses them.
+- Never put secrets, tokens or key material in files, command lines or `--env` values that lanq will ship; it refuses
+  the ones it recognises.
 - Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder (in lanq's state folder); read them through
   `lanq stats --json` and `logPath`.
 
@@ -69,6 +71,21 @@
   Report each job whose `status` is not `Completed` by `name`, with its `message`; a `Skipped` job never started
   because a job before it did not complete. A suggested re-run only adds `--only`.
 - `lanq.yml` is the team's file; do not edit it (or the machines file) to get around a refusal or a `NoCapacity`.
+
+## Job variables, exclusive jobs and baselines
+
+- `--env NAME=VALUE` (repeatable; shards get it too): only for names the developer already lists in the machines
+  file's `policy.allowed_env`. A name that is not there is refused (exit 2): tell the developer, and never edit
+  `allowed_env`, the machines file or `lanq.yml` to get it through. Values are settings, never secrets: other users of
+  a worker can see them, and suggested commands in `nextSteps` repeat them (the JSON `env` field lists names only).
+- `--exclusive`: the job takes every slot of its machine. It waits for an idle machine (no reservation), so on a busy
+  pool it may end `NoCapacity` (75, retryable). With `--shards`, each shard gets its own machine.
+- `--baseline` (or `--baseline-ref REF`): when the job (a shard, a plan job) ends `Failed`, lanq reruns the same command
+  at the base commit and adds `baseline` to the JSON. `verdict` `new`: the change broke it; `preexisting`: it fails at
+  the base commit too, so report it as pre-existing and do not try to fix it unless that is your task; `inconclusive`
+  or `skipped`: no answer. Status and exit code never change; a red run takes about twice as long.
+- `excluded` reason `env_conflict` (a machine's own `env:` sets the same variable) or `windows_command_too_long` (the
+  values are too long for a Windows machine): report it to the developer with the machines named.
 
 ## Shard long work across the pool (lanq run --shards)
 

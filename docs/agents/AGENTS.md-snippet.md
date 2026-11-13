@@ -33,8 +33,13 @@
   machines; every other rule still applies). When the repository has a `lanq.yml`, run its jobs with
   `lanq run --plan --json --no-wake` (`--only a,b` for some, `--dry-run` to preview); stdout is one object with `jobs[]`.
   Report each job whose `status` is not `Completed` by `name`, with its `message` (a `Skipped` job never started).
-- Never edit the lanq machines file, the allowlists or any ssh/key configuration, and never edit `lanq.yml` or the
-  machines file to get around a refusal. Never run `lanq makeready --add`,
+- You may add `--exclusive` (the job takes a whole machine; it waits for an idle one), `--baseline` (after a `Failed`
+  run, lanq reruns it at the base commit: `baseline.verdict` is `new`, `preexisting`, `inconclusive` or `skipped`;
+  status and exit code never change) and `--env NAME=VALUE`, only for names already in the developer's
+  `policy.allowed_env`, never with a secret. Report a `preexisting` failure as such and do not fix it unless that is
+  your task. `excluded` reasons `env_conflict` and `windows_command_too_long`: report them to the developer.
+- Never edit the lanq machines file, the allowlists (`policy.allowed_env` included) or any ssh/key configuration, and
+  never edit `lanq.yml` or the machines file to get around a refusal or to get an `--env` through. Never run `lanq makeready --add`,
   `--setup` or any `--yes`: adding machines is the developer's job. Never pass permission-skipping flags.
   Never shard a command that is not idempotent or writes shared state (deploy, migrate, publish, push).
   Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder.

@@ -17,12 +17,15 @@ and returns the job's exit code. The developer sets up the pool and owns its con
 4. The repository has a `lanq.yml`: `lanq run --plan --json --no-wake` runs its jobs (`--only a,b` for some of them),
    previewed with `--plan --dry-run --json`. See [docs/PLANS.md](docs/PLANS.md).
 5. Act on `status`, the exit code and `nextSteps` (below). Report the result in a line or two.
+6. Unsure whether a failure is yours? Add `--baseline`: after a `Failed` run lanq reruns the same command at the base
+   commit and reports `baseline.verdict` (see [Job options](#job-options---env---exclusive---baseline)).
 
 ## Commands
 
 You may run: `lanq health --json` (also with `--needs`, `--mem`, `--on`, `--size`, `--min-size`), `lanq run --json ...`
 (with `--needs`, `--dir`, `--wait`, `--timeout`, `--mem`, `--on`, `--size`, `--min-size`, `--no-wake`, `--fetch`,
-`--log-tail`, `--dry-run`, `--shards`, `--shard-retries 1`, `--fail-fast`, `--target-minutes`), `lanq run --plan --json
+`--log-tail`, `--dry-run`, `--shards`, `--shard-retries 1`, `--fail-fast`, `--target-minutes`, `--exclusive`,
+`--baseline`, `--baseline-ref`, and `--env NAME=VALUE` only for names already in `policy.allowed_env`), `lanq run --plan --json
 --no-wake` (with `--only`, `--dry-run`, `--fail-fast`, `--log-tail`), `lanq doctor --json`, `lanq doctor --remote
 --json`, `lanq stats --json`, `lanq --version`.
 
@@ -52,9 +55,9 @@ Open more of the file at `logPath` only if the tail does not show the failure. N
 | `status` | Exit | Next action |
 | --- | --- | --- |
 | `Completed` | 0 | Report success in one line. |
-| `Failed` | job's code | Summarise the failures from `logTail`. Fix the code if that is your task; do not re-run unchanged. |
-| `Rejected` | 2 | Report the message and stop. Do not look for a way around it. |
-| `NoCapacity` | 75 | `retryable: false`: stop and tell the developer (`excluded` says why). `true`: run the `wait` step once, then tell the developer. |
+| `Failed` | job's code | Summarise the failures from `logTail`. Fix the code if that is your task; do not re-run unchanged. With `--baseline`, read `baseline.verdict`: `preexisting` = it fails at the base commit too: report it as pre-existing and do not try to fix it unless that is your task; `new` = your change broke it; `inconclusive` or `skipped` = no answer, say so. |
+| `Rejected` | 2 | Report the message and stop. Do not look for a way around it. An `--env` name "not in policy.allowed_env": tell the developer; never add it yourself. |
+| `NoCapacity` | 75 | `retryable: false`: stop and tell the developer (`excluded` says why; `env_conflict` and `windows_command_too_long` mean your `--env` clashes with a machine's config or is too long for it: report it, do not edit anything). `true`: run the `wait` step once, then tell the developer. |
 | `InfraError` | 70 | Do not retry in a loop. Run `lanq doctor --remote --json` and report the `fail` checks with their `fix`. |
 | `TimedOut` | 124 | Report it. Ask before raising `--timeout`. |
 | `WindowClosed` | 124 | The machine's allowed hours ended. Report it; do not retry until the developer says so. |
@@ -68,13 +71,30 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
 `machine`. For `--plan`, read the overall `status`, then report each entry in `jobs` that is not `Completed` by `name`
 (a `Skipped` job never started; its `message` says why). If stdout is empty or not JSON, report an infrastructure problem.
 
+## Job options: --env, --exclusive, --baseline
+
+- `--env NAME=VALUE` sets a variable for the job. Use only names the developer already lists in `machines.yml`
+  `policy.allowed_env`; a name that is not there is `Rejected` (2). Values are settings (a configuration, a test
+  filter), never secrets: other users of the worker can see them, and `nextSteps` commands repeat them.
+- `--exclusive` gives the job a whole machine. It waits until a machine is idle and has no reservation, so on a busy
+  pool it can end `NoCapacity` after `--wait`. Use it only when the job needs it (benchmarks, fixed ports).
+- `--baseline` (or `--baseline-ref REF`) reruns a `Failed` job at the base commit and adds `baseline` to the JSON. It
+  never changes `status` or the exit code. It doubles the time of a red run, so use it when the question matters.
+- `excluded` reason `env_conflict` (a machine's own `env:` sets the same variable) or `windows_command_too_long` (the
+  values are too long for a Windows machine): report it to the developer with the machines named. Do not drop or
+  shorten the variable to get through unless the developer says so.
+
 ## Hard rules
 
-- Do not edit `machines.yml`, the allowlists (`policy.allowed_commands`, `policy.allowed_directories`), `known_hosts`
-  or any SSH key or agent setting. The developer owns them. Never edit `lanq.yml` or `machines.yml` to get around a
-  refusal, a `NoCapacity` or a size or `--on` rule. Never run `lanq makeready --add`, `--setup` or `--yes`.
+- Do not edit `machines.yml`, the allowlists (`policy.allowed_commands`, `policy.allowed_directories`,
+  `policy.allowed_env`), `known_hosts` or any SSH key or agent setting. The developer owns them. Never edit `lanq.yml`
+  or `machines.yml` to get around a refusal, a `NoCapacity` or a size or `--on` rule, or to get an `--env` through.
+  Never run `lanq makeready --add`, `--setup` or `--yes`.
 - Never pass permission-skipping flags (such as `--dangerously-skip-permissions`) to any command. lanq refuses them.
-- Never put secrets, tokens or key material in files or command lines lanq will ship. lanq refuses them too.
+- Never put secrets, tokens or key material in files, command lines or `--env` values lanq will ship. lanq refuses
+  the ones it recognises.
+- A `preexisting` baseline verdict means the failure was there before your change. Report it as such; fix it only if
+  that is your task.
 - Do not shard a command that is not idempotent or that writes shared state (deploy, migrate a shared database,
   publish, push).
 - Use `--no-wake` unless the developer has said waking machines is fine.

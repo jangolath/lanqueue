@@ -12,13 +12,14 @@ JSON field is in [JSON.md](JSON.md).
 
 | | The developer | The agent |
 | --- | --- | --- |
-| `machines.yml`, `policy.allowed_commands`, `policy.allowed_directories` | writes and owns | never edits |
+| `machines.yml`, `policy.allowed_commands`, `policy.allowed_directories`, `policy.allowed_env` | writes and owns | never edits, not even to get an `--env` through |
 | `lanq.yml` (the repository's plan file) | writes and reviews with the team | never edits to get around a refusal |
 | SSH keys, ssh-agent, `known_hosts` | sets up | never touches |
 | Workers (OpenSSH, tools, `PAUSE` files) | sets up, or asks each PC's owner | never touches |
 | `lanq makeready --setup`, `lanq makeready --add` (and its `--yes`), `lanq init` | runs | never |
 | `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake` | runs | only when asked |
-| `lanq health --json` (also `--needs`, `--on`, `--size`, `--min-size`), `lanq run --json` (also `--dry-run`, `--on`, `--size`, `--min-size`), `lanq run --plan --json --no-wake` (also `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
+| `lanq health --json` (also `--needs`, `--on`, `--size`, `--min-size`), `lanq run --json` (also `--dry-run`, `--on`, `--size`, `--min-size`, `--exclusive`, `--baseline`, `--baseline-ref`), `lanq run --plan --json --no-wake` (also `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
+| `lanq run --env NAME=VALUE` | lists the names jobs may set in `policy.allowed_env` | runs, only with names already listed; never secrets |
 | `jobs.jsonl`, `jobs.1.jsonl` and `logs/` in lanq's state folder | owns (lanq writes them) | never touches (reads them through `lanq stats --json` and `logPath`) |
 | `nextSteps` with `safeToRunUnattended: true` | | runs, at most once |
 
@@ -30,7 +31,8 @@ also keep the agent away from the config file, use your agent's permission setti
 
 1. Set up the pool: [TEAM-QUICKSTART.md](TEAM-QUICKSTART.md) for several machines, or the README's
    [Quick start](../README.md#quick-start) for one.
-2. Allowlist only what the agent should run, for example `dotnet test`, `npm test`, `npx jest`.
+2. Allowlist only what the agent should run, for example `dotnet test`, `npm test`, `npx jest`. If jobs need their own
+   variables (a configuration, a test filter), list those names in `policy.allowed_env`; the agent cannot add any.
 3. Put `machines.yml` at the per-user path, or set `LANQ_CONFIG` in the environment the agent's shell inherits. The
    agent should not need `--config`.
 4. Check it yourself first: `lanq doctor --remote`, then `lanq run --json --no-wake --needs <cap> -- <command>`.
@@ -65,6 +67,12 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 - Route with --size light,medium / --min-size heavy or --on <machine>. A repository with lanq.yml: lanq run --plan
   --json --no-wake [--only a,b] (preview with --dry-run); report each job in "jobs" whose status is not Completed,
   by name. Never edit lanq.yml or machines.yml to get around a refusal.
+- --env NAME=VALUE only for names already in policy.allowed_env; never edit allowed_env or machines.yml to get one
+  through, and never put a secret in a value. excluded reasons env_conflict and windows_command_too_long: report them
+  to the developer.
+- --exclusive gives a job a whole machine; it waits for an idle one (no reservation).
+- --baseline reruns a Failed job at the base commit. baseline.verdict "preexisting": report the failure as
+  pre-existing and do not fix it unless that is your task. Status and exit code never change.
 - Never edit or delete lanq's jobs.jsonl or logs/ folder.
 ```
 
@@ -82,16 +90,25 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
    ([PLANS.md](PLANS.md)), `--only a,b` some of them, `--dry-run` previews.
 3. Read the exit code, then `status`, then `nextSteps`. Read `logTail` only to explain a failure.
 4. Report in a line or two: status, machine, and the failing tests or the message. For a plan, each job that is not
-   `Completed`, by name, with its `message`.
+   `Completed`, by name, with its `message`. With `--baseline`, add the verdict: a `preexisting` failure was there
+   before the change, and the agent reports it rather than fixing it, unless that is the task.
+
+## Job options for agents
+
+| Option | The agent may | Notes |
+| --- | --- | --- |
+| `--env NAME=VALUE` | use it with names already in `policy.allowed_env` | A name not listed is `Rejected` (2) with an `ask_developer` step. The agent never edits `allowed_env`, `machines.yml` or `lanq.yml` to get one through. Values are settings, not secrets: other users of a worker can see them, and `nextSteps` commands repeat them. |
+| `--exclusive` | use it when the job needs a whole machine | It waits for an idle machine (no reservation), so it may end `NoCapacity` (75, retryable) on a busy pool. |
+| `--baseline`, `--baseline-ref REF` | use them | After a `Failed` run, a rerun at the base commit adds `baseline.verdict`: `new`, `preexisting`, `inconclusive` or `skipped`. Status and exit code never change. It doubles the time of a red run. |
 
 ## Failure playbook
 
 | `status` | Exit | Likely cause | What the agent does | What to ask the developer |
 | --- | --- | --- | --- | --- |
-| `Failed` | job's code | The tests or build failed. | Summarise the failures from the tail; fix the code if that is the task. | Nothing, unless the failure looks environmental (a missing tool, a full disk). |
-| `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload, a config error. | Report the message. Stop. | Whether to allowlist the command or fix the config. |
+| `Failed` | job's code | The tests or build failed. | Summarise the failures from the tail; fix the code if that is the task. With `--baseline` and verdict `preexisting`: report it as pre-existing, do not fix it unless that is the task. | Nothing, unless the failure looks environmental (a missing tool, a full disk) or is pre-existing. |
+| `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload or an `--env` value, an `--env` name not in `policy.allowed_env` or on the deny table, a config error. | Report the message. Stop. | Whether to allowlist the command or the variable name, or fix the config. |
 | `NoCapacity`, `retryable: true` | 75 | Every machine busy, held (hours, pause, memory, load), asleep or unreachable. | Run the `wait` step from `nextSteps` once (the same run with `--wait 120`). | Whether to wait, wake a machine, or run locally. |
-| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, none is of the `--size`/`--min-size` asked for, `--mem` is above every machine's RAM, git or tar is missing. lanq ended at once. | Stop. Report `excluded`. Do not drop `--on`/`--size` or edit `lanq.yml` to get it through. | Whether to add the capability or a machine, change the job's routing, or run locally. |
+| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, none is of the `--size`/`--min-size` asked for, `--mem` is above every machine's RAM, git or tar is missing, or the job's `--env` clashes with each machine's own `env:` (`env_conflict`) or is too long for it (`windows_command_too_long`). lanq ended at once. | Stop. Report `excluded`. Do not drop `--on`/`--size`/`--env` or edit `lanq.yml` or `machines.yml` to get it through. | Whether to add the capability or a machine, change the job's routing or variables, change a machine's `env:`, or run locally. |
 | `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote --json`; report the `fail` checks with their `fix`. No retry loop. | To fix the worker or the key setup. |
 | `TimedOut` | 124 | The job ran past `--timeout` (default 240 minutes). | Report it. | Whether a longer `--timeout` is fine. |
 | `WindowClosed` | 124 | The machine's allowed hours ended while the job ran. | Report it. | Whether to run it again later or elsewhere. |
