@@ -69,8 +69,9 @@ $classes = @(foreach ($line in $names) {
     }
 })
 if ($classes.Count -eq 0) { [Console]::Error.WriteLine('dotnet-test-shard: dotnet test --list-tests listed no test classes'); exit 1 }
-if (@($classes | Where-Object { $_ -cmatch '[^\x20-\x7E]' }).Count -gt 0) {
-    [Console]::Error.WriteLine('dotnet-test-shard: a test class name is not printable ASCII; rename it (both shard scripts refuse it)')
+# A ? too: a console code page that cannot show a character prints ? for it (CJK, for example), and such a filter matches nothing.
+if (@($classes | Where-Object { $_ -cmatch '[^\x20-\x7E]|\?' }).Count -gt 0) {
+    [Console]::Error.WriteLine('dotnet-test-shard: a test class name is not printable ASCII (or holds ?); rename it (both shard scripts refuse it)')
     exit 2
 }
 $mine = @($classes | Where-Object { ((Get-PosixCksum $_) % $n) + 1 -eq $i })

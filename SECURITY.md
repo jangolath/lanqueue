@@ -61,8 +61,8 @@ another encoding is not seen. A file over a cap is listed in `scanSkipped` and o
 a binary path or object git cannot produce refuses the job (fail closed). Such files are read smallest first, so large
 files cannot use up the totals before a small one; a single file over a per-file cap (8 MB binary, 32 MB text) is
 listed, not refused, so a secret placed in a very large binary or text file is not seen. In a modified file only new
-lines count, except that an unchanged private-key BEGIN line followed by new lines is scanned again, so a key replaced
-in place is found; in ordinary text files the diff shows only changed lines, so a key whose body is replaced while its
+lines count, except that an unchanged private-key BEGIN line is scanned again when any line of its block (up to its
+END line) is new, so a key replaced in place is found (PEM, OpenSSH and PGP blocks, encrypted ones included); in ordinary text files the diff shows only changed lines, so a key whose body is replaced while its
 BEGIN line stays the same is not recognised there. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).

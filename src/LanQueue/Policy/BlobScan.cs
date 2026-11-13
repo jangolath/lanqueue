@@ -194,8 +194,8 @@ internal static class BlobScan
     /// <summary>
     /// The lines of a modified file's new version to scan: those its old version does not have, as the diff's added lines. One exception:
     /// an old line that starts a secret block (<c>-----BEGIN ... PRIVATE KEY</c>, <see cref="SecretScanner.StartsASecretBlock"/>) is
-    /// scanned again when the line after it is new, so a key replaced in place (same header, new body) is found. An unchanged single-line
-    /// secret stays known and is not re-flagged.
+    /// scanned again when any line of its block (up to the next <c>-----END</c> line) is new, so a key replaced in place (same header, new
+    /// body) is found. An unchanged block or single-line secret stays known and is not re-flagged.
     /// </summary>
     internal static List<string> NewContent(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
     {
@@ -204,14 +204,31 @@ internal static class BlobScan
         for (var i = 0; i < lines.Count; i++)
         {
             var line = lines[i];
-            if (!known.Contains(line)
-                || (i + 1 < lines.Count && !known.Contains(lines[i + 1]) && SecretScanner.StartsASecretBlock(line)))
+            if (!known.Contains(line) || (SecretScanner.StartsASecretBlock(line) && BlockChanged(lines, i, known)))
             {
                 result.Add(line);
             }
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Whether any line of the block that starts at <paramref name="begin"/> (up to the next line starting with <c>-----END</c>, or the end)
+    /// is new: an OpenSSH key's first body line is the same for every key of a type, a PGP block starts with headers and a blank line, an
+    /// encrypted PEM with Proc-Type and DEK-Info, and a change may be only in the middle.
+    /// </summary>
+    private static bool BlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
+    {
+        for (var j = begin + 1; j < lines.Count && !lines[j].StartsWith("-----END", StringComparison.Ordinal); j++)
+        {
+            if (!known.Contains(lines[j]))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

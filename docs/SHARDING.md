@@ -313,8 +313,8 @@ names=$(dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo)
 # Fully qualified test names (indented four spaces) -> class names, each once (a set: the order does not matter).
 classes=$(printf '%s\n' "$names" | sed -n 's/^    //p' | sed 's/(.*//' | sed 's/\.[^.]*$//' | awk 'NF && !seen[$0]++')
 [ -n "$classes" ] || { echo "dotnet-test-shard: dotnet test --list-tests listed no test classes" >&2; exit 1; }
-if printf '%s\n' "$classes" | LC_ALL=C grep -q '[^ -~]'; then
-  echo "dotnet-test-shard: a test class name is not printable ASCII; rename it (both shard scripts refuse it)" >&2
+if printf '%s\n' "$classes" | LC_ALL=C grep -q '[^ -~]' || printf '%s\n' "$classes" | grep -qF '?'; then
+  echo "dotnet-test-shard: a test class name is not printable ASCII (or holds ?); rename it (both shard scripts refuse it)" >&2
   exit 2
 fi
 mine=$(printf '%s\n' "$classes" | while IFS= read -r c; do
@@ -408,8 +408,9 @@ $classes = @(foreach ($line in $names) {
     }
 })
 if ($classes.Count -eq 0) { [Console]::Error.WriteLine('dotnet-test-shard: dotnet test --list-tests listed no test classes'); exit 1 }
-if (@($classes | Where-Object { $_ -cmatch '[^\x20-\x7E]' }).Count -gt 0) {
-    [Console]::Error.WriteLine('dotnet-test-shard: a test class name is not printable ASCII; rename it (both shard scripts refuse it)')
+# A ? too: a console code page that cannot show a character prints ? for it (CJK, for example), and such a filter matches nothing.
+if (@($classes | Where-Object { $_ -cmatch '[^\x20-\x7E]|\?' }).Count -gt 0) {
+    [Console]::Error.WriteLine('dotnet-test-shard: a test class name is not printable ASCII (or holds ?); rename it (both shard scripts refuse it)')
     exit 2
 }
 $mine = @($classes | Where-Object { ((Get-PosixCksum $_) % $n) + 1 -eq $i })
@@ -530,7 +531,7 @@ exit 1
 
 Both shard scripts fail closed: a `LANQ_SHARD` or `LANQ_SHARDS` that is not a whole number from 1 to 999 (or a shard
 above the count) exits 2 before anything runs, no test classes at all exits 1, a class name that is not printable ASCII
-(which a Windows console could re-encode, splitting differently from sh) exits 2, and a shard's run passes
+or holds `?` (which a Windows console could re-encode, splitting differently from sh) exits 2, and a shard's run passes
 `RunConfiguration.TreatNoTestsAsError=true`, so a filter that matches nothing fails instead of passing.
 
 These are the files lanq's own repository runs (its [`lanq.yml`](../lanq.yml) has a PowerShell `guard` job with the

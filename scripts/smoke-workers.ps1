@@ -43,6 +43,24 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 1
 
+# Windows PowerShell 5.1 started from PowerShell 7 inherits 7's PSModulePath and then cannot load its own script-module
+# commands (Get-FileHash fails). Use 5.1's own module path, and avoid such commands anyway (Get-Sha256 below).
+if ($PSVersionTable.PSEdition -ne 'Core' -and [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $env:PSModulePath = (@(
+            [IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'), 'WindowsPowerShell', 'Modules'),
+            [IO.Path]::Combine($env:ProgramFiles, 'WindowsPowerShell', 'Modules'),
+            [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')) | Where-Object { $_ }) -join ';'
+}
+
+# The SHA-256 of a file as upper-case hex (.NET only: no module to load).
+function Get-Sha256([string]$Path) {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') } finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
 function Test-IsWindows {
     return [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 }
@@ -134,13 +152,13 @@ function Test-SamePath([string]$A, [string]$B) {
 
 # The refusal when -Config is one of the real configs (the same file, or the same content: a hard link or a copy), or $null.
 function Test-NotRealConfig([string]$SmokeConfig, [string[]]$RealConfigs) {
-    $smokeHash = (Get-FileHash -LiteralPath (Resolve-SmokePath $SmokeConfig) -Algorithm SHA256).Hash
+    $smokeHash = (Get-Sha256 (Resolve-SmokePath $SmokeConfig))
     foreach ($real in $RealConfigs) {
         if (-not $real -or -not (Test-Path -LiteralPath $real -PathType Leaf)) { continue }
         if (Test-SamePath $SmokeConfig $real) {
             return "-Config is your real config ($real); the smoke never runs on it. Give the separate smoke config (machines.smoke.yml)."
         }
-        if ((Get-FileHash -LiteralPath $real -Algorithm SHA256).Hash -eq $smokeHash) {
+        if ((Get-Sha256 $real) -eq $smokeHash) {
             return "-Config has the same content as your real config ($real): a hard link or a copy. The smoke config needs its own policy (machines.smoke.yml)."
         }
     }
@@ -326,6 +344,11 @@ function Wait-Smoke($Started, [int]$Minutes = 15) {
         return @{ Code = -1; Stdout = ''; Stderr = ''; TimedOut = $true }
     }
     $p.WaitForExit()
+    # The output pipes can stay open after the process ends (a child that kept them): wait at most a minute more for them.
+    if (-not $Started.Out.Wait(60000) -or -not $Started.Err.Wait(60000)) {
+        Stop-SmokeProcess $p
+        return @{ Code = -1; Stdout = ''; Stderr = ''; TimedOut = $true }
+    }
     return @{ Code = $p.ExitCode; Stdout = $Started.Out.Result; Stderr = $Started.Err.Result; TimedOut = $false }
 }
 
@@ -416,7 +439,7 @@ $realConfigs = Get-RealConfigPaths
 $refusal = Test-NotRealConfig $Config $realConfigs
 if ($refusal) { Write-Host "smoke-workers: $refusal"; exit 2 }
 $realHashes = @{}
-foreach ($r in $realConfigs) { $realHashes[$r] = (Get-FileHash -LiteralPath $r -Algorithm SHA256).Hash }
+foreach ($r in $realConfigs) { $realHashes[$r] = (Get-Sha256 $r) }
 try {
     $smokeMachines = Read-MachineIdentities $Config
     $realMachines = Read-MachineIdentities $realConfig
@@ -688,7 +711,7 @@ switch ($Mode) {
 } finally {
     foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
     foreach ($r in $realHashes.Keys) {
-        if ((Get-FileHash -LiteralPath $r -Algorithm SHA256).Hash -ne $realHashes[$r]) {
+        if ((Get-Sha256 $r) -ne $realHashes[$r]) {
             Write-Host "smoke-workers: FAIL: the real config $r changed during the smoke"
             $exitCode = 1
         }

@@ -221,6 +221,11 @@ public sealed partial class TestSplitTests : IDisposable
             Assert.Contains("not printable ASCII", output, StringComparison.Ordinal);
             Assert.DoesNotContain(File.ReadAllLines(log), l => l.Contains("--filter", StringComparison.Ordinal)); // no test ran
 
+            // A ? is what a console code page prints for a character it cannot show (CJK, for example): refused too.
+            env = FakeDotnet("    A.Q?Tests.M\n    A.BTests.M\n", out _);
+            (code, output) = Shard(shell, env, "1", "1", "tests/App.Tests.csproj");
+            Assert.True(code == 2, shell + " ?: " + output);
+
             env = FakeDotnet("    A.BTests.M\n    A.CTests.M(x: 1)\n", out log);
             (code, output) = Shard(shell, env, "1", "1", "tests/App.Tests.csproj");
             Assert.True(code == 0, shell + ": " + output);

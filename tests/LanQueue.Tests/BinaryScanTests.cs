@@ -520,6 +520,44 @@ public sealed class BinaryScanTests : IDisposable
         Write("deploy.dat", Pem('B'));
         var p = await Snapshot();
         Assert.True(Has(p, "private-key-block", "deploy.dat"), string.Join("; ", p.BinaryFindings));
+
+        // Blocks whose first lines after BEGIN stay the same: OpenSSH (the first body line is the same for every key of a type), PGP
+        // (headers and a blank line), traditional encrypted PEM (Proc-Type, DEK-Info), and a change only in the middle.
+        static string Block(string begin, string head, string body, string end) =>
+            "config\n" + begin + "\n" + head + body + end + "\ntail\n";
+        static string Body(char c, int changedLine = -1) =>
+            string.Concat(Enumerable.Range(0, 4).Select(k => new string(k == changedLine ? (char)(c + 1) : c, 64) + "\n"));
+        (string Name, string Old, string New)[] cases =
+        [
+            ("openssh.dat", Block("-----BEGIN OPENSSH PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n", Body('C'), "-----END OPENSSH PRIVATE KEY-----"),
+                Block("-----BEGIN OPENSSH PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n", Body('D'), "-----END OPENSSH PRIVATE KEY-----")),
+            ("pgp.dat", Block("-----BEGIN PGP PRIVATE KEY BLOCK-----", "Version: GnuPG v2\n\n", Body('E'), "-----END PGP PRIVATE KEY BLOCK-----"),
+                Block("-----BEGIN PGP PRIVATE KEY BLOCK-----", "Version: GnuPG v2\n\n", Body('F'), "-----END PGP PRIVATE KEY BLOCK-----")),
+            ("enc.dat", Block("-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\n", Body('G'), "-----END RSA PRIVATE KEY-----"),
+                Block("-----BEGIN RSA PRIVATE KEY-----", "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\n", Body('H'), "-----END RSA PRIVATE KEY-----")),
+            ("middle.dat", Block("-----BEGIN EC PRIVATE KEY-----", "", Body('J'), "-----END EC PRIVATE KEY-----"),
+                Block("-----BEGIN EC PRIVATE KEY-----", "", Body('J', changedLine: 2), "-----END EC PRIVATE KEY-----")),
+        ];
+        foreach (var (name, old, _) in cases)
+        {
+            Write(name, old);
+        }
+
+        Commit();
+        foreach (var (name, old, _) in cases)
+        {
+            Write(name, old.Replace("tail", "tail changed", StringComparison.Ordinal)); // the same key, something else changed
+        }
+
+        var unchanged = await Snapshot();
+        Assert.Empty(unchanged.BinaryFindings);
+        foreach (var (name, _, replaced) in cases)
+        {
+            Write(name, replaced);
+        }
+
+        p = await Snapshot();
+        Assert.All(cases, c => Assert.True(Has(p, "private-key-block", c.Name), c.Name + ": " + string.Join("; ", p.BinaryFindings)));
     }
 
     /// <summary>A file lanq could not read from git: refused with a git fsck hint, not the "take the secret out" one.</summary>
