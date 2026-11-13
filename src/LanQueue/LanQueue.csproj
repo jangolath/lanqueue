@@ -43,7 +43,7 @@
     and the committed lock files do not move with whichever SDK patch a machine has. Bump it deliberately (see RELEASING.md).
   -->
   <PropertyGroup>
-    <LanqRuntimePackVersion>10.0.14</LanqRuntimePackVersion>
+    <LanqRuntimePackVersion>10.0.15</LanqRuntimePackVersion>
   </PropertyGroup>
   <ItemGroup>
     <KnownILLinkPack Update="Microsoft.NET.ILLink.Tasks" ILLinkPackVersion="$(LanqRuntimePackVersion)" />

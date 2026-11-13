@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Dependencies
+
+- The native binaries carry the .NET 10.0.15 runtime (was 10.0.14).
+
 ### Fixes
 
 - `--shards` with `--mem`: a shard that started while lanq was probing the machines was counted as running, as if its
