@@ -471,28 +471,37 @@ public sealed class MakereadyAddTests : IDisposable
         Assert.Contains("note: a .NET SDK in /srv/shared/dotnet is not proposed for path_prepend: other local users can write there.", r.Err, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Report folders for path_prepend (os, folder, DOTNET_ROOT, taken): shared by the text and --add rule (<see cref="Cli.SuggestedDotnetDir"/>)
+    /// and the JSON filter (MakereadyJsonTests).
+    /// </summary>
+    public static TheoryData<string, string, string, bool> DotnetDirs => new()
+    {
+        { "linux", "/opt/build/dotnet", "/opt/build/dotnet", true },
+        { "windows", "D:/build/dotnet", "D:/build/dotnet", true },
+        { "windows", "D:/Program Files/dotnet", "D:/Program Files/dotnet", true },
+        { "linux", "/opt/build/dotnet", "/opt/other", false }, // DOTNET_ROOT differs
+        { "linux", "opt/build/dotnet", "opt/build/dotnet", false }, // relative
+        { "linux", "D:/build/dotnet", "D:/build/dotnet", false }, // a Windows folder on Linux
+        { "windows", "/opt/build/dotnet", "/opt/build/dotnet", false },
+        { "windows", @"D:\build\dotnet", @"D:\build\dotnet", false }, // backslashes
+        { "linux", "<redacted>/.dotnet", "<redacted>/.dotnet", false },
+        { "linux", "/opt/a\"b", "/opt/a\"b", false },
+        { "linux", "/opt/a\nb", "/opt/a\nb", false },
+        { "linux", "/opt/a\u007fb", "/opt/a\u007fb", false },
+        { "linux", "/opt/a/\n", "/opt/a/\n", false }, // \z, not $
+        { "windows", "D:/a;b", "D:/a;b", false }, // ConfigLoader refuses ';' on Windows
+        { "windows", "D:/a:b", "D:/a:b", false },
+        { "linux", "/opt/a:b", "/opt/a:b", false }, // and ':' on Linux
+        { "linux", "/opt/a?b", "/opt/a?b", false }, // what json_esc makes of a non-ASCII byte
+        { "linux", "/opt/caf\u00e9", "/opt/caf\u00e9", false }, // ASCII only
+        { "linux", "/opt/a\u2028b", "/opt/a\u2028b", false }, // line separator
+        { "linux", "/opt/a\u202eb", "/opt/a\u202eb", false }, // bidi override
+    };
+
     /// <summary>The folder comes from the worker: only exactly one absolute, clean folder with DOTNET_ROOT set to it is taken.</summary>
     [Theory]
-    [InlineData("linux", "/opt/build/dotnet", "/opt/build/dotnet", true)]
-    [InlineData("windows", "D:/build/dotnet", "D:/build/dotnet", true)]
-    [InlineData("windows", "D:/Program Files/dotnet", "D:/Program Files/dotnet", true)]
-    [InlineData("linux", "/opt/build/dotnet", "/opt/other", false)] // DOTNET_ROOT differs
-    [InlineData("linux", "opt/build/dotnet", "opt/build/dotnet", false)] // relative
-    [InlineData("linux", "D:/build/dotnet", "D:/build/dotnet", false)] // a Windows folder on Linux
-    [InlineData("windows", "/opt/build/dotnet", "/opt/build/dotnet", false)]
-    [InlineData("windows", @"D:\build\dotnet", @"D:\build\dotnet", false)] // backslashes
-    [InlineData("linux", "<redacted>/.dotnet", "<redacted>/.dotnet", false)]
-    [InlineData("linux", "/opt/a\"b", "/opt/a\"b", false)]
-    [InlineData("linux", "/opt/a\nb", "/opt/a\nb", false)]
-    [InlineData("linux", "/opt/a\u007fb", "/opt/a\u007fb", false)]
-    [InlineData("linux", "/opt/a/\n", "/opt/a/\n", false)] // \z, not $
-    [InlineData("windows", "D:/a;b", "D:/a;b", false)] // ConfigLoader refuses ';' on Windows
-    [InlineData("windows", "D:/a:b", "D:/a:b", false)]
-    [InlineData("linux", "/opt/a:b", "/opt/a:b", false)] // and ':' on Linux
-    [InlineData("linux", "/opt/a?b", "/opt/a?b", false)] // what json_esc makes of a non-ASCII byte
-    [InlineData("linux", "/opt/caf\u00e9", "/opt/caf\u00e9", false)] // ASCII only
-    [InlineData("linux", "/opt/a\u2028b", "/opt/a\u2028b", false)] // line separator
-    [InlineData("linux", "/opt/a\u202eb", "/opt/a\u202eb", false)] // bidi override
+    [MemberData(nameof(DotnetDirs))]
     public void OnlyACleanSuggestedDotnetFolderIsTaken(string os, string dir, string root, bool taken)
     {
         var s = new MakereadySuggestion("old-pc", os, null, "/srv/lq", ["dotnet"], 1, null, "git", null, null, [dir], new() { ["DOTNET_ROOT"] = root });

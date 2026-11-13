@@ -623,7 +623,10 @@ When there is no array to print, stdout gets an [error object](#error-object) in
 ### One machine
 
 `lanq makeready <machine> --json` and `lanq makeready --ssh user@host --os windows|linux --json` print the validated
-lanq-makeready report (schema `lanq-makeready/v1`), every field as the script sent it, indented over several lines.
+lanq-makeready report (schema `lanq-makeready/v1`), indented over several lines. Since 0.9.2 every string in it is
+sanitised (keys of `suggestedMachine.env` included), and `suggestedMachine.path_prepend` and `env` are filtered as the
+text and `--add` filter them; see [lanqWithheld](#lanqwithheld). The same report, filtered the same way, is in each
+`--all` row and in `--add --json`.
 Exit 0 when the machine is worker-ready, 1 when it is not. Its top-level keys:
 
 | Key | Type | Notes |
@@ -637,7 +640,19 @@ Exit 0 when the machine is worker-ready, 1 when it is not. Its top-level keys:
 | `suitedFor` | object | 0.2.0 and later: `tier` (`light`, `medium`, `heavy`), `containers`, `text`. |
 | `checks` | array | Each `id`, `title`, `status` (`OK`, `WARN`, `FAIL`, `SKIP`), `detail`, `advice`, `needsAdmin`. |
 | `capabilities` | array of string | Capabilities the script detected. |
-| `suggestedMachine` | object | A `machines.yml` entry: `name`, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`, `min_free_mem_gb`, `transfer`, `allowed_hours`, `wake` (`mac`), and (lanq-makeready 0.3.0+) `path_prepend` and `env` (`DOTNET_ROOT`) when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. |
+| `suggestedMachine` | object | A `machines.yml` entry: `name`, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`, `min_free_mem_gb`, `transfer`, `allowed_hours`, `wake` (`mac`), and (lanq-makeready 0.3.0+) `path_prepend` and `env` (`DOTNET_ROOT`) when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. Since 0.9.2 `path_prepend` and `env` are there only as exactly one usable folder with `env` exactly `{"DOTNET_ROOT": <that folder>}`; otherwise both are left out and listed in `lanqWithheld`. Advice for the developer: an agent never writes it into `machines.yml`. |
+| `lanqWithheld` | array | Conditional (0.9.2): lanq's own key, never the script's (a worker that sends one is ignored). Each `key` lanq left out of the report and the `reason`. Absent when nothing was left out. |
+
+### lanqWithheld
+
+```json
+"lanqWithheld":[{"key":"suggestedMachine.path_prepend","reason":"not one usable folder with DOTNET_ROOT set to it (a redacted home folder, a list, or characters lanq refuses in path_prepend)"},
+ {"key":"suggestedMachine.env","reason":"kept only as DOTNET_ROOT set to the one usable path_prepend folder"}]
+```
+
+`key` is `suggestedMachine.path_prepend` or `suggestedMachine.env` (more may be added). Before 0.9.2 these values were
+printed as the worker sent them. Values may now be absent where 0.9.1 printed them; both keys were always optional.
+`lanq makeready --add` looks the SDK up itself when the report hides it.
 
 The report is the script's output, not lanq's: its `summary.nextSteps` and `advice` are for the PC's owner to read,
 and it has no lanq `nextSteps` (this is the one `--json` object without them). The report has no `status` key. When
@@ -667,7 +682,7 @@ there is no report, stdout gets an [error object](#error-object) with lanq's `ne
 | `machines[].failures` | number | Blockers; 0 when ready or without a report. |
 | `machines[].exitCode` | number | What `lanq makeready <machine>` would exit with: 0, 1, 70 or 75. |
 | `machines[].problem` | string | Conditional: the top problem, or why there is no report. Absent when there is nothing. |
-| `machines[].report` | object | Conditional: the report exactly as the single-machine `--json` prints it. Absent without one. |
+| `machines[].report` | object | Conditional: the report exactly as the single-machine `--json` prints it (sanitised and filtered, with its `lanqWithheld`). Absent without one. |
 | `machines[].nextSteps` | array | What to do about this machine: `none` when OK or WARN. |
 | `nextSteps` | array | For the whole check. See [nextSteps](#nextsteps). |
 
@@ -695,7 +710,7 @@ prints one object on every path. Every key is always there, `null` when it has n
 | `entry` | array of string or null | The lines written (`Added`) or that would have been written, exactly; `null` before there was an entry. |
 | `afterLine` | number or null | The 1-based line of `machines.yml` the entry follows; `null` without an entry. |
 | `health` | object or null | One read-only probe of the added machine, as a [`lanq health --json`](#lanq-health---json) row; `null` unless `Added`. |
-| `report` | object or null | The validated `lanq-makeready/v1` report, as `lanq makeready --json` prints it; `null` when there was none. |
+| `report` | object or null | The validated `lanq-makeready/v1` report, as `lanq makeready --json` prints it (sanitised and filtered, with its `lanqWithheld`); `null` when there was none. |
 | `message` | string | One line. |
 | `nextSteps` | array | `Added` suggests `lanq doctor --remote --json` (and asks the developer to delete `example-01` when `lanq init`'s placeholder is still there). A NOT READY PC asks the developer, with `lanq makeready --ssh ...` for the details. Never `--add` or `--yes`. |
 

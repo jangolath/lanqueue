@@ -328,8 +328,9 @@ Linux: `ssh.start`, `power.sleep`), one more line names those fixes: *May be fix
 power.sleep, longpaths.on): its owner can run lanq-makeready-fix.ps1 -WhatIf there to see what it can do, local and
 interactive only (see lanq-makeready's README). lanq never runs it.* (`sh lanq-makeready-fix.sh --dry-run` on Linux.)
 "May": the fix script has its own preconditions and can still decline. (Since 0.9.1; not in `--json`.) It ends with: *lanq never changes a worker. Fixes are for the PC's
-owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead, every field as the script sent it (0.2.0's
-`summary`, `suitedFor`, `min_free_mem_gb` and `wake` included); when there is no report it prints exactly
+owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead (0.2.0's
+`summary`, `suitedFor`, `min_free_mem_gb` and `wake` included), every string sanitised and `suggestedMachine.path_prepend`/`env`
+kept only as the one usable folder with `DOTNET_ROOT` set to it, anything left out named in `lanqWithheld` (0.9.2; also in `--all` and `--add --json`); when there is no report it prints exactly
 one `{"status":...,"exitCode":...,"message":...}` object (`Rejected` 2, `InfraError` 70, `Held` 75, `Cancelled` 130). The report is
 treated as untrusted input: at most 1 MB, parsed without reflection, checked against the schema, every string
 sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-ready (git or archive transfer works),

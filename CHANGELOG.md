@@ -15,6 +15,11 @@
   about 1 MB with a 64-line overlap; a pattern timeout still refuses the run. A binary path git does not list, or an
   object it cannot produce, refuses the run (`scan-incomplete`). Symlinks, submodules, deleted files and mode-only
   changes read nothing.
+- `lanq makeready --json`, each `--all --json` row and `--add --json` now print the worker's report through one
+  output-only wrapper: every string is sanitised (control, bidi and zero-width characters become `?`, keys of
+  `suggestedMachine.env` included), as JSON.md always promised; before, the JSON paths printed them as the worker
+  sent them. `suggestedMachine.path_prepend` and `env` are kept only when the text and `--add` would use them (exactly
+  one usable folder, `env` exactly `DOTNET_ROOT` set to it).
 
 ### Behaviour changes
 
@@ -26,6 +31,11 @@
   most 5) and listed in the new conditional `scanSkipped` key (`path`, `bytes`, `reason`: `binary_over_file_cap`,
   `binary_over_total_cap` or `masked_text_over_cap`) of `lanq run --json`, at the top level of `--shards` and
   `--plan`, and in both dry runs, whose snapshot line also notes the count. Report it; do not try to "fix" it.
+- In `lanq makeready` JSON, `suggestedMachine.path_prepend` and `env` may now be absent where 0.9.1 printed them (a
+  list, a redacted home folder, a mismatched or extra variable, or characters lanq refuses). Both keys were always
+  optional. What was left out is listed in the new conditional report key `lanqWithheld` (`key`, `reason`), which is
+  lanq's own: a worker that sends one is ignored. The schema stays `lanq-makeready/v1` and the report still has no
+  `nextSteps`. `suggestedMachine` is advice for the developer; an agent never writes it into `machines.yml`.
 
 ## 0.9.1 (2026-11-13)
 

@@ -159,7 +159,30 @@ internal sealed record MakereadySuggestion(
     [property: JsonPropertyName("path_prepend")] List<string>? PathPrepend = null,
     [property: JsonPropertyName("env")] Dictionary<string, string>? Env = null);
 
+/// <summary>
+/// The report as lanq prints it in every <c>lanq makeready</c> JSON (one machine, each <c>--all</c> row, <c>--add</c>; 0.9.2): built only by
+/// <see cref="Cli.ReportForJson"/>, never read from a worker. It has the report's keys, every string sanitised, suggestedMachine.path_prepend
+/// and env only when lanq would use them, and <see cref="LanqWithheld"/>, lanq's own list of what it dropped. The parse type
+/// (<see cref="MakereadyReport"/>) has no such member, so a worker that sends "lanqWithheld" is ignored.
+/// </summary>
+internal sealed record MakereadyReportJson(
+    [property: JsonPropertyName("schema")] string? Schema,
+    [property: JsonPropertyName("tool")] MakereadyTool? Tool,
+    [property: JsonPropertyName("generatedAt")] string? GeneratedAt,
+    [property: JsonPropertyName("host")] MakereadyHost? Host,
+    [property: JsonPropertyName("verdicts")] MakereadyVerdicts? Verdicts,
+    [property: JsonPropertyName("summary")] MakereadySummary? Summary,
+    [property: JsonPropertyName("suitedFor")] MakereadySuitedFor? SuitedFor,
+    [property: JsonPropertyName("checks")] List<MakereadyCheck>? Checks,
+    [property: JsonPropertyName("capabilities")] List<string>? Capabilities,
+    [property: JsonPropertyName("suggestedMachine")] MakereadySuggestion? SuggestedMachine,
+    [property: JsonPropertyName("lanqWithheld")] List<MakereadyWithheld>? LanqWithheld);
+
+/// <summary>One key of the report lanq left out of its JSON (0.9.2): the dotted key and why.</summary>
+internal sealed record MakereadyWithheld([property: JsonPropertyName("key")] string Key, [property: JsonPropertyName("reason")] string Reason);
+
 /// <summary>Source-generated (de)serialization for the report: no reflection. Depth is capped well below the default.</summary>
 [JsonSourceGenerationOptions(MaxDepth = 16, WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(MakereadyReport))]
+[JsonSerializable(typeof(MakereadyReportJson))]
 internal sealed partial class MakereadyJson : JsonSerializerContext;

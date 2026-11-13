@@ -648,9 +648,9 @@ internal sealed partial class LanqJson : JsonSerializerContext;
 /// <param name="Failures">Blockers of a not-ready machine: the summary's blockers, else its FAIL checks (0 when ready or without a report).</param>
 /// <param name="ExitCode">What <c>lanq makeready &lt;machine&gt;</c> would exit with: 0, 1, 70 or 75.</param>
 /// <param name="Problem">The first FAIL check, else the first WARN (title: detail), or why there is no report; absent when there is nothing.</param>
-/// <param name="Report">The validated lanq-makeready/v1 report, exactly as <c>lanq makeready &lt;machine&gt; --json</c> prints it; absent without one.</param>
+/// <param name="Report">The validated lanq-makeready/v1 report, exactly as <c>lanq makeready &lt;machine&gt; --json</c> prints it (sanitised and filtered, 0.9.2); absent without one.</param>
 internal sealed record MakereadyRowJson(
-    string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReport? Report)
+    string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReportJson? Report)
 {
     /// <summary>What to do about this machine (see <see cref="NextStepJson"/>).</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
@@ -683,7 +683,7 @@ internal sealed record InitJson(string Status, int ExitCode, string? Path, strin
 /// <param name="Entry">The lines written (Added) or that would have been written, exactly; null before there was an entry.</param>
 /// <param name="AfterLine">The 1-based line of machines.yml the entry follows; null without an entry.</param>
 /// <param name="Health">One read-only probe of the added machine (as a lanq health --json row); null unless Added.</param>
-/// <param name="Report">The validated lanq-makeready/v1 report; null when there was none.</param>
+/// <param name="Report">The validated lanq-makeready/v1 report, as <c>lanq makeready --json</c> prints it (sanitised and filtered, 0.9.2); null when there was none.</param>
 internal sealed record MakereadyAddJson(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string Status,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int ExitCode,
@@ -692,7 +692,7 @@ internal sealed record MakereadyAddJson(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] IReadOnlyList<string>? Entry,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? AfterLine,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] HealthJson? Health,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] Makeready.MakereadyReport? Report,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] Makeready.MakereadyReportJson? Report,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string Message)
 {
     /// <summary>What to do next (see <see cref="NextStepJson"/>): Added suggests lanq doctor --remote; never --add or --yes.</summary>
