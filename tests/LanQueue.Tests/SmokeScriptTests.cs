@@ -278,6 +278,37 @@ public sealed class SmokeScriptTests : IDisposable
         Assert.Equal("ssh: connect to host <host of build-01> port 22 as <ssh of build-01> in <work_root of build-01>/jobs/x", o2.Trim());
     }
 
+    /// <summary>
+    /// Assert-LanqResult on real-shaped outcomes (the status lines of the second real smoke): the last stderr line must start with
+    /// "[lanq] Status" as plain text (a -like pattern took "[lanq]" for a character class), with the exit code, status and one JSON object.
+    /// </summary>
+    [PowerShellFact]
+    public void SmokeAssertsTheLanqContract()
+    {
+        string Check(int code, string status, string stdout, string stderr, int wantCode, string wantStatus, bool timedOut = false)
+        {
+            var r = $"@{{ Code = {code}; TimedOut = ${(timedOut ? "true" : "false")}; Stdout = '{stdout.Replace("'", "''", StringComparison.Ordinal)}'; Stderr = \"{stderr}\" }}";
+            var (exit, output) = WithFunctions($"try {{ $j = Assert-LanqResult ({r}) {wantCode} '{wantStatus}'; 'PASS ' + $j.status }} catch {{ 'FAIL ' + $_.Exception.Message }}");
+            Assert.Equal(0, exit);
+            return output.Trim();
+        }
+
+        static string Json(string status, int code) => $"{{\"status\":\"{status}\",\"exitCode\":{code},\"message\":\"m\",\"jobId\":\"j1\"}}";
+
+        Assert.Equal("PASS Completed", Check(0, "Completed", Json("Completed", 0), "SMOKE_START 1`n[lanq] Completed: exit 0`n", 0, "Completed"));
+        Assert.Equal("PASS Rejected", Check(2, "Rejected", Json("Rejected", 2), "[lanq] Rejected: Refused: possible secrets in payload (...). Nothing was sent.`n", 2, "Rejected"));
+        Assert.Equal("PASS Failed", Check(1, "Failed", Json("Failed", 1), "x`n[lanq] baseline: new`n[lanq] Failed: exit 1`n", 1, "Failed"));
+        Assert.Equal("PASS WouldRun", Check(0, "WouldRun", Json("WouldRun", 0), "[lanq] WouldRun: would run on build-01`n", 0, "WouldRun"));
+
+        Assert.StartsWith("FAIL the last stderr line", Check(0, "Completed", Json("Completed", 0), "[lanq] Failed: exit 1`n", 0, "Completed"), StringComparison.Ordinal);
+        Assert.StartsWith("FAIL the last stderr line", Check(0, "Completed", Json("Completed", 0), "q Completed: exit 0`n", 0, "Completed"), StringComparison.Ordinal); // not a pattern
+        Assert.StartsWith("FAIL the last stderr line", Check(0, "Completed", Json("Completed", 0), "", 0, "Completed"), StringComparison.Ordinal);
+        Assert.StartsWith("FAIL exit code 1", Check(1, "Completed", Json("Completed", 0), "[lanq] Completed: exit 0`n", 0, "Completed"), StringComparison.Ordinal);
+        Assert.StartsWith("FAIL status Failed", Check(1, "Failed", Json("Failed", 1), "[lanq] Failed: exit 1`n", 1, "Completed"), StringComparison.Ordinal);
+        Assert.StartsWith("FAIL stdout is not", Check(0, "Completed", Json("Completed", 0) + Json("Completed", 0), "[lanq] Completed: exit 0`n", 0, "Completed"), StringComparison.Ordinal);
+        Assert.StartsWith("FAIL lanq did not finish", Check(-1, "Completed", "", "", 0, "Completed", timedOut: true), StringComparison.Ordinal);
+    }
+
     /// <summary>The run must be a successful release workflow_dispatch run on the branch, at its head; the binary must carry +headSha.</summary>
     [PowerShellFact]
     public void SmokeRunAndBinaryAreBound()

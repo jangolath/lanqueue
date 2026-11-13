@@ -470,7 +470,8 @@ function Assert-LanqResult($R, [int]$Code, [string]$Status) {
     $last = @($R.Stderr.Replace("`r", '').Split("`n") | Where-Object { $_ })[-1]
     if ($R.Code -ne $Code) { throw "exit code $($R.Code), expected $Code ($($json.message))" }
     if ($json.status -ne $Status) { throw "status $($json.status), expected $Status ($($json.message))" }
-    if ($last -notlike "[lanq] $Status*") { throw "the last stderr line is '$last', expected '[lanq] $Status...'" }
+    # A plain prefix test: with -like, "[lanq]" would be a wildcard character class.
+    if (-not $last -or -not $last.StartsWith("[lanq] $Status", [StringComparison]::Ordinal)) { throw "the last stderr line is '$last', expected one starting '[lanq] $Status'" }
     return $json
 }
 
@@ -666,7 +667,7 @@ switch ($Mode) {
         [void](Write-SmokeFile 'repo/secret.dat' ("key = AKIA" + (-join ((1..16) | ForEach-Object { [char](Get-Random -Minimum 65 -Maximum 91) })) + "`n"))
         try {
             $j = Assert-LanqResult (Lanq (@('run') + $common + @('--on', $main, '--') + (Check $mainOs) + @('run', '1', '0'))) 2 'Rejected'
-            if ($j.message -notlike '*secret.dat (binary per git)*') { throw "the refusal does not name the file: $($j.message)" }
+            if (-not $j.message.Contains('uncommitted file secret.dat (binary per git)')) { throw "the refusal does not name the file: $($j.message)" }
         } finally { Remove-SmokeFile 'repo/secret.dat' }
         'Rejected/Secret, file named'
     }
@@ -699,6 +700,7 @@ switch ($Mode) {
         }
         $as = [long](Get-TailValue $a 'SMOKE_START (\d+)'); $ae = [long](Get-TailValue $a 'SMOKE_END (\d+)')
         $bs = [long](Get-TailValue $b 'SMOKE_START (\d+)'); $be = [long](Get-TailValue $b 'SMOKE_END (\d+)')
+        if (-not ($as -gt 0 -and $ae -gt $as -and $bs -gt 0 -and $be -gt $bs)) { throw "the jobs' start and end times are not all in their logs: [$as,$ae] and [$bs,$be]" }
         if (-not ($ae -le $bs -or $be -le $as)) { throw "intervals overlap: [$as,$ae] and [$bs,$be]" }
         'no overlap'
     }
@@ -719,6 +721,8 @@ switch ($Mode) {
     OnMachine '6 shards' $main 'machine' {
         $j = Assert-LanqResult (Lanq (@('run') + $common + @('--needs', $mainOs, '--wait', '300', '--shards', '2', '--') + (Check $mainOs) + @('run', '1', '0', '{shard}'))) 0 'Completed'
         if ($j.shardCount -ne 2) { throw "shardCount $($j.shardCount)" }
+        $done = @($j.shards | Where-Object { $_.status -eq 'Completed' } | ForEach-Object { [int]$_.shard } | Sort-Object)
+        if (($done -join ',') -ne '1,2') { throw "completed shards: $($done -join ',')" }
         '2 shards'
     }
 
@@ -732,6 +736,9 @@ switch ($Mode) {
         try {
             $j = Assert-LanqResult (Lanq @('run', '--plan', '--json', '--no-wake', '--wait', '300')) 0 'Completed'
             if (@($j.jobs).Count -ne 3) { throw "$(@($j.jobs).Count) jobs" }
+            $names = @($j.jobs | Where-Object { $_.status -eq 'Completed' } | ForEach-Object { $_.name } | Sort-Object)
+            if (($names -join ',') -ne 'first,second,sharded') { throw "completed jobs: $($names -join ',')" }
+            if (@($j.order)[0] -ne 'first') { throw "first in order: $(@($j.order)[0])" }
             [void](Assert-LanqResult (Lanq @('run', '--plan', '--dry-run', '--json', '--no-wake')) 0 'WouldRun')
         } finally { Remove-SmokeFile 'repo/lanq.yml' }
         'Completed; dry run WouldRun'
