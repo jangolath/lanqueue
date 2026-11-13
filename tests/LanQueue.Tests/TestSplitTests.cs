@@ -82,7 +82,7 @@ public sealed partial class TestSplitTests : IDisposable
     {
         var doc = File.ReadAllText(Path.Combine(T.RepoRoot, "docs", "SHARDING.md")).Replace("\r\n", "\n", StringComparison.Ordinal);
         var blocks = FenceRegex().Matches(doc).Select(m => m.Groups[1].Value).ToList();
-        foreach (var name in new[] { "dotnet-test-shard.sh", "dotnet-test-shard.ps1", "check-test-split.sh" })
+        foreach (var name in new[] { "dotnet-test-shard.sh", "dotnet-test-shard.ps1", "check-test-split.sh", "check-test-split.ps1" })
         {
             var script = File.ReadAllText(Script(name)).Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\n');
             Assert.Contains(script, blocks);
@@ -138,6 +138,102 @@ public sealed partial class TestSplitTests : IDisposable
         Assert.All(results, r => Assert.Equal(results[0].Select(x => (x.Cksum, x.Shard)), r.Select(x => (x.Cksum, x.Shard))));
         Assert.All(results[0], r => Assert.InRange(r.Shard, 1, 4));
         Assert.All(results[0], r => Assert.Equal((int)(r.Cksum % 4) + 1, r.Shard));
+    }
+
+    /// <summary>A fake dotnet (first on PATH) that logs its arguments and lists <paramref name="listed"/> for --list-tests.</summary>
+    private Dictionary<string, string> FakeDotnet(string listed, out string log)
+    {
+        var bin = Path.Combine(_dir, "fake-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(bin);
+        log = Path.Combine(bin, "calls.log");
+        var list = Path.Combine(bin, "list.txt");
+        File.WriteAllText(list, listed, new UTF8Encoding(false));
+        File.WriteAllText(Path.Combine(bin, "dotnet"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\ncase \"$*\" in *--list-tests*) cat \"$FAKE_LIST\" ;; esac\nexit 0\n", new UTF8Encoding(false));
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(Path.Combine(bin, "dotnet"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        File.WriteAllText(
+            Path.Combine(bin, "dotnet.ps1"),
+            "Add-Content -LiteralPath $env:FAKE_LOG -Value ($args -join ' ')\nif ($args -contains '--list-tests') { [IO.File]::ReadAllLines($env:FAKE_LIST, [Text.Encoding]::UTF8) }\nexit 0\n",
+            new UTF8Encoding(true));
+        return new Dictionary<string, string>
+        {
+            ["PATH"] = bin + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH"),
+            ["FAKE_LOG"] = log,
+            ["FAKE_LIST"] = list,
+        };
+    }
+
+    private static (int Code, string Output) Shard(string shell, Dictionary<string, string> env, string shard, string shards, params string[] args)
+    {
+        env["LANQ_SHARD"] = shard;
+        env["LANQ_SHARDS"] = shards;
+        return shell == "sh"
+            ? Shells.Exec(Shells.Sh!, [Script("dotnet-test-shard.sh").Replace('\\', '/'), .. args], env)
+            : Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Script("dotnet-test-shard.ps1"), .. args.Select(a => a == "--list" ? "-List" : a).Prepend("-Project").Take(args.Length + 1)], env);
+    }
+
+    private static IEnumerable<string> ShardShells() =>
+        new[] { Shells.Sh is null ? null : "sh", Shells.PowerShell is null ? null : "ps" }.OfType<string>();
+
+    /// <summary>A bad LANQ_SHARD/LANQ_SHARDS (or --assign N) exits 2 before dotnet is ever called.</summary>
+    [Fact]
+    public void ShardScriptsRefuseBadShardNumbers()
+    {
+        foreach (var shell in ShardShells())
+        {
+            foreach (var (shard, shards) in new[] { ("0", "4"), ("5", "4"), ("abc", "4"), ("1", "0"), ("1", "abc"), ("", "4"), ("1", ""), ("-1", "4"), ("1", "1000") })
+            {
+                var env = FakeDotnet("    A.BTests.M\n", out var log);
+                var (code, output) = Shard(shell, env, shard, shards, "tests/App.Tests.csproj");
+                Assert.True(code == 2, $"{shell} {shard}/{shards}: exit {code}: {output}");
+                Assert.False(File.Exists(log), $"{shell} {shard}/{shards}: dotnet was called");
+            }
+        }
+
+        var file = ClassFile(["A.BTests"]);
+        if (Shells.Sh is not null)
+        {
+            Assert.Equal(2, Shells.Exec(Shells.Sh, [Script("dotnet-test-shard.sh").Replace('\\', '/'), "--assign", "0", file.Replace('\\', '/')]).Code);
+        }
+
+        if (Shells.PowerShell is not null)
+        {
+            Assert.Equal(2, Shells.Exec(Shells.PowerShell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Script("dotnet-test-shard.ps1"), "-AssignFile", file, "-Shards", "abc"]).Code);
+        }
+    }
+
+    /// <summary>No test classes at all fails (1); a class name that is not printable ASCII is refused (2); a run passes TreatNoTestsAsError.</summary>
+    [Fact]
+    public void ShardScriptsFailClosed()
+    {
+        foreach (var shell in ShardShells())
+        {
+            var env = FakeDotnet("The following Tests are available:\n", out _);
+            Assert.Equal(1, Shard(shell, env, "1", "1", "tests/App.Tests.csproj").Code);
+
+            env = FakeDotnet("    A.CaféTests.M\n    A.BTests.M\n", out var log);
+            var (code, output) = Shard(shell, env, "1", "1", "tests/App.Tests.csproj");
+            Assert.True(code == 2, shell + ": " + output);
+            Assert.Contains("not printable ASCII", output, StringComparison.Ordinal);
+            Assert.DoesNotContain(File.ReadAllLines(log), l => l.Contains("--filter", StringComparison.Ordinal)); // no test ran
+
+            env = FakeDotnet("    A.BTests.M\n    A.CTests.M(x: 1)\n", out log);
+            (code, output) = Shard(shell, env, "1", "1", "tests/App.Tests.csproj");
+            Assert.True(code == 0, shell + ": " + output);
+            var run = File.ReadAllLines(log).Last();
+            Assert.Contains("--filter FullyQualifiedName~A.BTests.|FullyQualifiedName~A.CTests.", run, StringComparison.Ordinal);
+            Assert.EndsWith("-- RunConfiguration.TreatNoTestsAsError=true", run, StringComparison.Ordinal);
+
+            // --list: no build, and a list with the same filter (no TreatNoTestsAsError).
+            env = FakeDotnet("    A.BTests.M\n", out log);
+            Assert.Equal(0, Shard(shell, env, "1", "1", "tests/App.Tests.csproj", "--list").Code);
+            var calls = File.ReadAllLines(log);
+            Assert.DoesNotContain(calls, l => l.StartsWith("build", StringComparison.Ordinal));
+            Assert.Contains("--list-tests -nologo --filter FullyQualifiedName~A.BTests.", calls.Last(), StringComparison.Ordinal);
+        }
     }
 
     [Fact]

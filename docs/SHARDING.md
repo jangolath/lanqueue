@@ -280,23 +280,31 @@ classes, 4 shards hold 430 to 950 tests); for balance use the durations recipe b
 #   sh dotnet-test-shard.sh PROJECT            build, then test this shard's classes (LANQ_SHARD of LANQ_SHARDS)
 #   sh dotnet-test-shard.sh PROJECT --list     no build: list this shard's tests (check-test-split.sh uses it)
 #   sh dotnet-test-shard.sh --assign N FILE    "cksum shard class" for each class name in FILE (no dotnet)
+# It fails closed: a bad LANQ_SHARD/LANQ_SHARDS, no test classes at all, or a class name that is not printable ASCII
+# (which a Windows console could re-encode) stop it before any test runs, and a shard that runs no tests fails.
 set -eu
 
-shard_of() { # CLASS N
-  sum=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
-  echo $((sum % $2 + 1))
+# A whole number from 1 to 999, or exit 2.
+number() { # NAME VALUE
+  case $2 in
+    [1-9] | [1-9][0-9] | [1-9][0-9][0-9]) ;;
+    *) echo "dotnet-test-shard: $1 must be a whole number from 1 to 999, not '$2'" >&2; exit 2 ;;
+  esac
 }
 
 if [ "${1:-}" = "--assign" ]; then
-  n=${2:?usage: dotnet-test-shard.sh --assign N FILE}
+  n=${2:-}
+  number N "$n"
   while IFS= read -r c || [ -n "$c" ]; do
-    printf '%s %s %s\n' "$(printf '%s' "$c" | cksum | cut -d' ' -f1)" "$(shard_of "$c" "$n")" "$c"
+    sum=$(printf '%s' "$c" | cksum | cut -d' ' -f1)
+    printf '%s %s %s\n' "$sum" "$((sum % n + 1))" "$c"
   done < "${3:?usage: dotnet-test-shard.sh --assign N FILE}"
   exit 0
 fi
 
-: "${LANQ_SHARD:?run this through lanq run --shards}"
-: "${LANQ_SHARDS:?run this through lanq run --shards}"
+number LANQ_SHARDS "${LANQ_SHARDS:-}"
+number LANQ_SHARD "${LANQ_SHARD:-}"
+[ "$LANQ_SHARD" -le "$LANQ_SHARDS" ] || { echo "dotnet-test-shard: LANQ_SHARD $LANQ_SHARD is above LANQ_SHARDS $LANQ_SHARDS" >&2; exit 2; }
 PROJECT=${1:?usage: dotnet-test-shard.sh path/to/Tests.csproj [--list]}
 LIST=${2:-}
 [ -n "$LIST" ] || dotnet build "$PROJECT" -c Release -v q -nologo
@@ -304,8 +312,14 @@ names=$(dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo)
 
 # Fully qualified test names (indented four spaces) -> class names, each once (a set: the order does not matter).
 classes=$(printf '%s\n' "$names" | sed -n 's/^    //p' | sed 's/(.*//' | sed 's/\.[^.]*$//' | awk 'NF && !seen[$0]++')
+[ -n "$classes" ] || { echo "dotnet-test-shard: dotnet test --list-tests listed no test classes" >&2; exit 1; }
+if printf '%s\n' "$classes" | LC_ALL=C grep -q '[^ -~]'; then
+  echo "dotnet-test-shard: a test class name is not printable ASCII; rename it (both shard scripts refuse it)" >&2
+  exit 2
+fi
 mine=$(printf '%s\n' "$classes" | while IFS= read -r c; do
-  if [ -n "$c" ] && [ "$(shard_of "$c" "$LANQ_SHARDS")" -eq "$LANQ_SHARD" ]; then printf '%s\n' "$c"; fi
+  sum=$(printf '%s' "$c" | cksum | cut -d' ' -f1)
+  if [ $((sum % LANQ_SHARDS + 1)) -eq "$LANQ_SHARD" ]; then printf '%s\n' "$c"; fi
 done)
 [ -n "$mine" ] || { echo "shard $LANQ_SHARD/$LANQ_SHARDS: no test classes"; exit 0; }
 
@@ -315,7 +329,8 @@ if [ -n "$LIST" ]; then
   exec dotnet test "$PROJECT" -c Release --no-build --list-tests -nologo --filter "$filter"
 fi
 echo "shard $LANQ_SHARD/$LANQ_SHARDS: $(printf '%s\n' "$mine" | wc -l | tr -d ' ') test classes"
-exec dotnet test "$PROJECT" -c Release --no-build --filter "$filter" -nologo --logger "trx;LogFileName=shard-$LANQ_SHARD.trx"
+exec dotnet test "$PROJECT" -c Release --no-build --filter "$filter" -nologo --logger "trx;LogFileName=shard-$LANQ_SHARD.trx" \
+  -- RunConfiguration.TreatNoTestsAsError=true
 ```
 
 `scripts/lanq/dotnet-test-shard.ps1` (Windows workers; the `-ExecutionPolicy Bypass` on the command line is needed
@@ -326,9 +341,11 @@ because the default policy on Windows 10 refuses scripts):
 # A class goes to shard (cksum(class) mod N) + 1: the POSIX cksum of its full name (UTF-8, no newline), the same on
 # every machine and culture, and identical to dotnet-test-shard.sh.
 #   dotnet-test-shard.ps1 -Project PROJECT          build, then test this shard's classes (LANQ_SHARD of LANQ_SHARDS)
-#   dotnet-test-shard.ps1 -Project PROJECT -List    no build: list this shard's tests
+#   dotnet-test-shard.ps1 -Project PROJECT -List    no build: list this shard's tests (check-test-split.ps1 uses it)
 #   dotnet-test-shard.ps1 -AssignFile FILE -Shards N   "cksum shard class" for each class name in FILE (no dotnet)
-param([string]$Project, [switch]$List, [string]$AssignFile, [int]$Shards = 0)
+# It fails closed: a bad LANQ_SHARD/LANQ_SHARDS, no test classes at all, or a class name that is not printable ASCII
+# (which a Windows console could re-encode) stop it before any test runs, and a shard that runs no tests fails.
+param([string]$Project, [switch]$List, [string]$AssignFile, [string]$Shards = '')
 $ErrorActionPreference = 'Stop'
 
 # POSIX cksum: CRC-32, polynomial 0x04C11DB7, MSB first, over the bytes and then the length (low byte first, no
@@ -353,18 +370,28 @@ function Get-PosixCksum([string]$Text) {
     return (-bnot $crc) -band $script:Mask
 }
 
-function Get-Shard([string]$Class, [int]$N) { return [int]((Get-PosixCksum $Class) % $N) + 1 }
+# A whole number from 1 to 999, or exit 2.
+function Get-Number([string]$Name, [string]$Value) {
+    if ($Value -cnotmatch '^[1-9][0-9]{0,2}\z') {
+        [Console]::Error.WriteLine("dotnet-test-shard: $Name must be a whole number from 1 to 999, not '$Value'")
+        exit 2
+    }
+    return [int]::Parse($Value, [cultureinfo]::InvariantCulture)
+}
 
 if ($AssignFile) {
+    $n = Get-Number 'Shards' $Shards
     foreach ($c in [System.IO.File]::ReadAllLines($AssignFile, (New-Object System.Text.UTF8Encoding $false))) {
-        [string]::Format([cultureinfo]::InvariantCulture, '{0} {1} {2}', (Get-PosixCksum $c), (Get-Shard $c $Shards), $c)
+        $sum = Get-PosixCksum $c
+        [string]::Format([cultureinfo]::InvariantCulture, '{0} {1} {2}', $sum, ($sum % $n) + 1, $c)
     }
     exit 0
 }
 
-if (-not $Project) { throw 'usage: dotnet-test-shard.ps1 -Project path/to/Tests.csproj [-List]' }
-if (-not $env:LANQ_SHARD -or -not $env:LANQ_SHARDS) { throw 'run this through lanq run --shards' }
-$i = [int]::Parse($env:LANQ_SHARD, [cultureinfo]::InvariantCulture); $n = [int]::Parse($env:LANQ_SHARDS, [cultureinfo]::InvariantCulture)
+$n = Get-Number 'LANQ_SHARDS' $env:LANQ_SHARDS
+$i = Get-Number 'LANQ_SHARD' $env:LANQ_SHARD
+if ($i -gt $n) { [Console]::Error.WriteLine("dotnet-test-shard: LANQ_SHARD $i is above LANQ_SHARDS $n"); exit 2 }
+if (-not $Project) { [Console]::Error.WriteLine('usage: dotnet-test-shard.ps1 -Project path/to/Tests.csproj [-List]'); exit 2 }
 if (-not $List) {
     dotnet build $Project -c Release -v q -nologo
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -374,12 +401,18 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Fully qualified test names (indented four spaces) -> class names, each once (an ordinal set: the order does not matter).
 $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
-$mine = @(foreach ($line in $names) {
+$classes = @(foreach ($line in $names) {
     if ($line -clike '    *') {
         $class = ($line.Trim() -creplace '\(.*$', '') -creplace '\.[^.]*$', ''
-        if ($class -and $seen.Add($class) -and (Get-Shard $class $n) -eq $i) { $class }
+        if ($class -and $seen.Add($class)) { $class }
     }
 })
+if ($classes.Count -eq 0) { [Console]::Error.WriteLine('dotnet-test-shard: dotnet test --list-tests listed no test classes'); exit 1 }
+if (@($classes | Where-Object { $_ -cmatch '[^\x20-\x7E]' }).Count -gt 0) {
+    [Console]::Error.WriteLine('dotnet-test-shard: a test class name is not printable ASCII; rename it (both shard scripts refuse it)')
+    exit 2
+}
+$mine = @($classes | Where-Object { ((Get-PosixCksum $_) % $n) + 1 -eq $i })
 if ($mine.Count -eq 0) { "shard $i/$n`: no test classes"; exit 0 }
 
 # The trailing dot: FullyQualifiedName~Ns.Class. never matches a longer class name.
@@ -389,7 +422,7 @@ if ($List) {
     exit $LASTEXITCODE
 }
 "shard $i/$n`: $($mine.Count) test classes"
-dotnet test $Project -c Release --no-build --filter $filter -nologo --logger "trx;LogFileName=shard-$i.trx"
+dotnet test $Project -c Release --no-build --filter $filter -nologo --logger "trx;LogFileName=shard-$i.trx" '--' RunConfiguration.TreatNoTestsAsError=true
 exit $LASTEXITCODE
 ```
 
@@ -444,6 +477,61 @@ echo "in more than one shard, or unknown (first 20):" >&2
 LC_ALL=C comm -13 "$tmp/all" "$tmp/union" | head -n 20 >&2
 exit 1
 ```
+
+`scripts/lanq/check-test-split.ps1 -Project PROJECT -Shards N`, the same guard for the PowerShell script on Windows
+(lanq's CI runs both guards, the sh one on Linux with N 4 and this one on Windows with N 2):
+
+```powershell
+# The guard for dotnet-test-shard.ps1 (the Windows twin of check-test-split.sh): every test of PROJECT lands in
+# exactly one of N shards.
+#   check-test-split.ps1 -Project PROJECT -Shards N
+# Builds once, lists every test, then lists each shard's tests through the shard script's own filter
+# (dotnet test --list-tests --filter), and fails unless the shards together list exactly the full list: none
+# missing, none twice. It runs in the machine's own culture and console encoding.
+param([string]$Project, [string]$Shards)
+$ErrorActionPreference = 'Stop'
+if (-not $Project -or $Shards -cnotmatch '^[1-9][0-9]{0,2}\z') {
+    [Console]::Error.WriteLine('usage: check-test-split.ps1 -Project path/to/Tests.csproj -Shards N (1 to 999)')
+    exit 2
+}
+$n = [int]::Parse($Shards, [cultureinfo]::InvariantCulture)
+$shardScript = Join-Path $PSScriptRoot 'dotnet-test-shard.ps1'
+
+function Get-Listed($Lines) { @($Lines | Where-Object { $_ -clike '    *' } | ForEach-Object { $_.Substring(4) }) }
+
+dotnet build $Project -c Release -v q -nologo
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$all = Get-Listed (dotnet test $Project -c Release --no-build --list-tests -nologo)
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($all.Count -eq 0) { [Console]::Error.WriteLine('check-test-split: dotnet test --list-tests listed no tests'); exit 1 }
+
+$union = New-Object System.Collections.Generic.List[string]
+for ($i = 1; $i -le $n; $i++) {
+    $env:LANQ_SHARD = "$i"; $env:LANQ_SHARDS = "$n"
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $shardScript -Project $Project -List
+    if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("check-test-split: shard $i/$n failed (exit $LASTEXITCODE)"); exit 1 }
+    $listed = Get-Listed $out
+    "shard $i/$n`: $($listed.Count) test(s)"
+    $union.AddRange([string[]]$listed)
+}
+
+# Multisets compared in ordinal order (the full list itself may hold the same display name twice).
+$a = [string[]]$all; [Array]::Sort($a, [StringComparer]::Ordinal)
+$b = $union.ToArray(); [Array]::Sort($b, [StringComparer]::Ordinal)
+if ($a.Count -eq $b.Count -and [System.Linq.Enumerable]::SequenceEqual([string[]]$a, [string[]]$b)) {
+    "check-test-split: OK, $($a.Count) test(s) in exactly one of $n shard(s)"
+    exit 0
+}
+[Console]::Error.WriteLine("check-test-split: FAILED, the $n shard(s) list $($b.Count) test(s), the full list has $($a.Count)")
+$missing = @($a | Where-Object { [Array]::BinarySearch($b, $_, [StringComparer]::Ordinal) -lt 0 } | Select-Object -First 20)
+foreach ($m in $missing) { [Console]::Error.WriteLine("missing: $m") }
+exit 1
+```
+
+Both shard scripts fail closed: a `LANQ_SHARD` or `LANQ_SHARDS` that is not a whole number from 1 to 999 (or a shard
+above the count) exits 2 before anything runs, no test classes at all exits 1, a class name that is not printable ASCII
+(which a Windows console could re-encode, splitting differently from sh) exits 2, and a shard's run passes
+`RunConfiguration.TreatNoTestsAsError=true`, so a filter that matches nothing fails instead of passing.
 
 These are the files lanq's own repository runs (its [`lanq.yml`](../lanq.yml) has a `guard` job with the same N as its
 Linux shards, and a Windows job, since some tests run only on Windows). They were checked against an xUnit project on
