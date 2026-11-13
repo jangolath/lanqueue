@@ -145,7 +145,11 @@ internal sealed class SuggestedCommand
     /// --wait, and a run that could not wake a machine (--wait 0 without --no-wake) gets --no-wake, as <see cref="Rerun"/>. Nothing else
     /// changes. Safe (the developer already ran it, and lanq.yml is the same file).
     /// </summary>
-    public static SuggestedCommand? RerunPlan(ParsedArgs p, IReadOnlyCollection<string> only, int? waitSeconds = null)
+    /// <param name="safe">
+    /// Whether the rerun may run unattended (the default: it repeats the jobs that did not complete). False for a rerun that leaves jobs out
+    /// on purpose (after --on/--size/--min-size narrowing): the developer must agree to dropping them.
+    /// </param>
+    public static SuggestedCommand? RerunPlan(ParsedArgs p, IReadOnlyCollection<string> only, int? waitSeconds = null, bool safe = true)
     {
         if (p.Command != "run" || !p.Plan || only.Count == 0)
         {
@@ -159,7 +163,7 @@ internal sealed class SuggestedCommand
         }
 
         var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
-        return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: true);
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: safe);
     }
 
     /// <summary>
@@ -451,6 +455,8 @@ internal static class NextSteps
                 return [Step(NextAction.FixCode, $"{failed.Count} job(s) failed: {string.Join("; ", failed)}; read their logTail or logs and fix the code")];
             case nameof(JobStatus.Rejected):
                 return Rejected(p, r.RejectKind, r.Message);
+            case nameof(JobStatus.NoCapacity) when r.Runnable is { } runnable:
+                return Narrowed(p, r, runnable);
             case nameof(JobStatus.NoCapacity) when r.Retryable == false:
                 return
                 [
@@ -480,6 +486,15 @@ internal static class NextSteps
                 }
 
                 return Infra(p, new RunOutcome(r.Status, r.ExitCode, r.Message, null, r.InfraKind, false, null, null, null, null), health);
+            case nameof(JobStatus.TimedOut) when r.PlanTimedOut:
+                var stopped = r.Jobs.Where(j => j.Status == nameof(JobStatus.TimedOut)).Select(j => j.Name).ToList();
+                return
+                [
+                    Step(NextAction.FixCode, string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"plan_timeout {r.PlanTimeoutMinutes} min was reached before the plan ended ({(stopped.Count > 0 ? "stopped: " + string.Join(", ", stopped) : "no job was running")}); ")
+                        + "see logTail or the logs for where it was slow; if the plan is only slow, raise plan_timeout in lanq.yml or pass --plan-timeout (the developer decides)"),
+                ];
             case nameof(JobStatus.TimedOut):
                 var slow = r.Jobs.Where(j => j.Status == nameof(JobStatus.TimedOut)).Select(j => j.Name).ToList();
                 return [Step(NextAction.FixCode, $"{string.Join(", ", slow)} timed out; see logTail or the logs for where it hung; if a job is only slow, raise timeout: for job {slow.FirstOrDefault()} in lanq.yml")];
@@ -496,9 +511,46 @@ internal static class NextSteps
             : string.Create(CultureInfo.InvariantCulture, $"{j.Name} exited {j.ExitCode} (log: {j.LogPath ?? "none"}){BaselineSentence(j.Baseline)}");
     }
 
-    /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>
-    public static List<NextStepJson> ForPlanFileDry(ParsedArgs p, string status, string message, bool? retryable, RejectKind? reject, InfraKind? infra, ParsedArgs? decided)
+    /// <summary>
+    /// lanq run --plan narrowed by --on / --size / --min-size so that some job has no machine (0.10.0): ask the developer (narrowing never widens,
+    /// and lanq.yml is never edited to widen a job), then the same plan for only the jobs that can still run: --only REPLACES any --only typed,
+    /// and the narrowing is kept. The rerun leaves the other jobs out, which the reason says.
+    /// </summary>
+    private static List<NextStepJson> Narrowed(ParsedArgs p, PlanRunResult r, IReadOnlyList<string> runnable)
     {
+        var why = string.Join("; ", r.Jobs.Where(j => j.Status == nameof(JobStatus.NoCapacity)).Select(j => j.Message));
+        List<NextStepJson> steps =
+        [
+            Step(NextAction.AskDeveloper, why + "; --on, --size and --min-size only narrow a plan's jobs, never widen them: the developer decides whether to narrow less or to leave "
+                + "that job out (never edit lanq.yml to widen a job)"),
+        ];
+        // It leaves jobs out on purpose, so it is never safe unattended (a dry run of it is: it runs nothing).
+        if (SuggestedCommand.RerunPlan(p, runnable, safe: p.DryRun) is { } rerun)
+        {
+            var noMachine = r.Jobs.Where(j => j.Status == nameof(JobStatus.NoCapacity)).Select(j => j.Name).ToList();
+            var after = r.Jobs.Where(j => j.Status == PlanJobOutcome.Skipped && !runnable.Contains(j.Name)).Select(j => j.Name).ToList();
+            steps.Add(Step(
+                NextAction.FixCommand,
+                $"only if the developer agrees to leave job(s) out: run only the job(s) the narrowing leaves a machine ({string.Join(", ", runnable)}); "
+                + $"{string.Join(", ", noMachine)} would not run"
+                + (after.Count > 0 ? $", nor {string.Join(", ", after)}, which start(s) after it" : "")
+                + "; report what was left out",
+                rerun));
+        }
+
+        return steps;
+    }
+
+    /// <summary>lanq run --plan --dry-run: WouldRun proceeds with the same command without --dry-run; otherwise as the plan run would, without --only edits.</summary>
+    /// <param name="narrowedOut">The plan's narrowing left a job no machine (<see cref="Narrowed"/>, which then gives the steps), or null.</param>
+    public static List<NextStepJson> ForPlanFileDry(
+        ParsedArgs p, string status, string message, bool? retryable, RejectKind? reject, InfraKind? infra, ParsedArgs? decided, PlanRunResult? narrowedOut = null)
+    {
+        if (narrowedOut is { Runnable: { } runnable })
+        {
+            return Narrowed(p, narrowedOut, runnable);
+        }
+
         var health = decided is null ? SuggestedCommand.Health([], null, p.ConfigPath) : SuggestedCommand.Health(decided.Needs, decided.MemGb, p.ConfigPath, decided.On, decided.Size);
         return status switch
         {

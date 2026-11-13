@@ -53,17 +53,101 @@ public static partial class Cli
             return await PlanRefused(p, ex.Message, RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
         }
 
+        // --on, --size, --min-size (0.10.0): narrow every selected job, never widen one. An unknown --on name is refused before any network; a
+        // job the narrowing leaves no machine ends the plan below, before the snapshot.
+        IReadOnlyList<string>? on = null;
+        if (p.On is not null)
+        {
+            var (names, unknown) = Scheduling.Pinning.Resolve(config, p.On);
+            if (unknown is not null)
+            {
+                return await PlanRefused(p, unknown, RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+            }
+
+            on = names;
+        }
+
+        var noMachine = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (on is not null || p.Size is not null)
+        {
+            var narrowed = new List<PlanJob>(selection.Jobs.Count);
+            foreach (var j in selection.Jobs)
+            {
+                (PlanJob Job, string? NoMachine) narrowing;
+                try
+                {
+                    narrowing = PlanNarrowing.Narrow(j, config, on, string.Join(',', p.On ?? []), p.Size);
+                }
+                catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
+                {
+                    // The narrowed line no longer parses: refused, never a crash.
+                    return await PlanRefused(p, $"job '{j.Name}': {ex.Message}", RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+                }
+
+                var (job, why) = narrowing;
+                narrowed.Add(job);
+                if (why is not null)
+                {
+                    noMachine[j.Name] = why;
+                }
+            }
+
+            selection = selection with { Jobs = narrowed };
+        }
+
+        // --fetch-dir, --fetch-max, --fetch-max-files (0.10.0): the developer's choice for every selected job that fetches (lanq.yml may only
+        // lower the limits and never names the folder). Refused when no selected job fetches.
+        if (p.FetchDir is not null || p.FetchMaxBytes is not null || p.FetchMaxFiles is not null)
+        {
+            if (!PlanFetch.AnyFetches(selection.Jobs))
+            {
+                return await PlanRefused(p, PlanFetch.NoFetchingJob, RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+            }
+
+            var fetchDir = p.FetchDir is null ? null : Path.GetFullPath(p.FetchDir);
+            var fetching = new List<PlanJob>(selection.Jobs.Count);
+            foreach (var j in selection.Jobs)
+            {
+                try
+                {
+                    fetching.Add(PlanFetch.Apply(j, fetchDir, p.FetchMaxBytes, p.FetchMaxFiles));
+                }
+                catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException)
+                {
+                    return await PlanRefused(p, $"job '{j.Name}': {ex.Message}", RejectKind.Arguments, path, stdout, stderr).ConfigureAwait(false);
+                }
+            }
+
+            selection = selection with { Jobs = fetching };
+        }
+
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
         var ordered = PlanGraph.Order(selection, expected);
-        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name])
+        var planFile = Path.GetFullPath(plan.Path);
+        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun) with { PlanFile = planFile }, j.Args.Shards, selection.After[j.Name])
         {
             FileOrder = j.Index,
             Where = string.Create(CultureInfo.InvariantCulture, $"{Path.GetFileName(plan.Path)}: job '{j.Name}' (line {j.Line})"),
         }).ToList();
         var jobArgs = ordered.ToDictionary(j => j.Name, j => j.Args, StringComparer.Ordinal);
+        var narrowedOut = noMachine.Count > 0 ? NarrowedOut(specs, noMachine) : null;
+
+        // --plan-timeout (0.10.0) replaces lanq.yml's plan_timeout:.
+        var planTimeout = p.PlanTimeoutMinutes ?? plan.PlanTimeoutMinutes;
         if (p.DryRun)
         {
-            return await PlanFileDryRun(p, config, ssh, payloads, log, home, plan, selection, ordered, specs, expected, stdout, stderr, ct, clock).ConfigureAwait(false);
+            if (planTimeout is { } limit && CriticalPathSeconds(ordered, selection, expected) is { } chain && chain > limit * 60)
+            {
+                plan = plan with
+                {
+                    Warnings = [.. plan.Warnings, string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"history's expected critical path is about {Math.Ceiling(chain / 60):0} min, over plan_timeout {limit} min: the plan would likely time out")],
+                };
+            }
+
+            return await PlanFileDryRun(p, config, ssh, payloads, log, home, plan, selection, ordered, specs, expected, stdout, stderr, ct, clock, narrowedOut, planTimeout)
+                .ConfigureAwait(false);
         }
 
         var jobOutput = p.Json ? stderr : stdout;
@@ -89,27 +173,42 @@ public static partial class Cli
             await stderr.WriteLineAsync(JobRunner.SafeLine("[lanq] " + note)).ConfigureAwait(false);
         }
 
+        if (planTimeout is { } minutes && narrowedOut is null)
+        {
+            await stderr.WriteLineAsync(string.Create(
+                CultureInfo.InvariantCulture,
+                $"[lanq] plan_timeout: {minutes} min for the whole plan ({(p.PlanTimeoutMinutes is null ? "lanq.yml" : "--plan-timeout")}), from after the snapshot")).ConfigureAwait(false);
+        }
+
         var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), Out, delay, clock, new BaseStore(Path.Combine(home, "bases.json")));
         var started = System.Diagnostics.Stopwatch.StartNew();
         PlanRunResult result;
-        try
+        if (narrowedOut is not null)
         {
-            result = await runner.RunPlanAsync(specs, p.FailFast, ct).ConfigureAwait(false);
+            // Nothing was checked further, snapshotted, sent or claimed.
+            result = narrowedOut;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        else
         {
-            // Ctrl+C before any job started (during the snapshot): nothing ran, nothing to clean up.
-            result = new PlanRunResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C) before any job started", []);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-        {
-            result = new PlanRunResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), [])
+            try
             {
-                InfraKind = InfraKind.Unexpected,
-            };
-        }
+                result = await runner.RunPlanAsync(specs, p.FailFast, ct, planTimeout).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Ctrl+C before any job started (during the snapshot): nothing ran, nothing to clean up.
+                result = new PlanRunResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C) before any job started", []);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                result = new PlanRunResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), [])
+                {
+                    InfraKind = InfraKind.Unexpected,
+                };
+            }
 
-        PruneLogs(log, config, stderr);
+            PruneLogs(log, config, stderr);
+        }
         if (result.Jobs.Count > 0)
         {
             await jobOutput.WriteAsync(PlanTable(result)).ConfigureAwait(false);
@@ -130,7 +229,13 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            var json = PlanRunJsonOf(result, plan.Path, started.Elapsed, [.. ordered.Select(j => j.Name)], plan.Warnings, specs, p.LogTail) with { NextSteps = next, ScanSkipped = ScanSkippedJson(runner.ScanSkipped) };
+            var json = PlanRunJsonOf(result, plan.Path, started.Elapsed, [.. ordered.Select(j => j.Name)], plan.Warnings, specs, p.LogTail) with
+            {
+                NextSteps = next,
+                ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
+                PlanTimeoutMinutes = planTimeout,
+                PlanTimedOut = Flag(result.PlanTimedOut),
+            };
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.PlanFileRunJson)).ConfigureAwait(false);
         }
 
@@ -153,6 +258,36 @@ public static partial class Cli
         }
 
         return RequestOf(job.Args, repoDir, request) with { Wait = TimeSpan.FromSeconds(p.WaitSeconds), NoWake = p.NoWake };
+    }
+
+    /// <summary>
+    /// The plan ended before the snapshot because --on / --size / --min-size leave some job no machine (<see cref="PlanNarrowing.Narrow"/>): each
+    /// such job NoCapacity (75, not retryable, nothing excluded: no machine was looked at), the rest Skipped, and <see cref="PlanRunResult.Runnable"/>
+    /// the jobs the narrowing leaves a machine, in file order (the suggested rerun's --only).
+    /// </summary>
+    internal static PlanRunResult NarrowedOut(IReadOnlyList<PlanJobSpec> ordered, IReadOnlyDictionary<string, string> noMachine)
+    {
+        var first = ordered.Where(j => noMachine.ContainsKey(j.Name)).MinBy(j => j.FileOrder)!.Name;
+
+        // A job that starts after a narrowed-out job, directly or through others, cannot run either: --only would drop its after: edge and
+        // start it without its prerequisite.
+        var blocked = new HashSet<string>(noMachine.Keys, StringComparer.Ordinal);
+        for (var grew = true; grew;)
+        {
+            grew = false;
+            foreach (var j in ordered.Where(j => !blocked.Contains(j.Name) && j.After.Any(blocked.Contains)))
+            {
+                grew |= blocked.Add(j.Name);
+            }
+        }
+
+        List<PlanJobOutcome> jobs = [.. ordered.Select(j => noMachine.TryGetValue(j.Name, out var why)
+            ? new PlanJobOutcome(j.Name, nameof(JobStatus.NoCapacity), 75, why, j.After) { Retryable = false, Excluded = [], FileOrder = j.FileOrder }
+            : new PlanJobOutcome(j.Name, PlanJobOutcome.Skipped, 0, $"not started: {noMachine[first]}, so the plan did not start", j.After) { FileOrder = j.FileOrder })];
+        return JobRunner.AggregatePlan(jobs, cancelled: false) with
+        {
+            Runnable = [.. ordered.Where(j => !blocked.Contains(j.Name)).OrderBy(j => j.FileOrder).Select(j => j.Name)],
+        };
     }
 
     /// <summary>A plan refused before any job ran (the plan file, --only, bad arguments or config): the status line, Next lines and one JSON object.</summary>
@@ -306,36 +441,61 @@ public static partial class Cli
     private static async Task<int> PlanFileDryRun(
         ParsedArgs p, FleetConfig config, ISshClient ssh, IPayloadBuilder payloads, JobLog log, string home, PlanFile plan, PlanSelection selection,
         IReadOnlyList<PlanJob> ordered, IReadOnlyList<PlanJobSpec> specs, Func<PlanJob, double?> expected, TextWriter stdout, TextWriter stderr, CancellationToken ct,
-        TimeProvider? clock)
+        TimeProvider? clock, PlanRunResult? narrowedOut = null, int? planTimeout = null)
     {
         var time = clock ?? TimeProvider.System;
 
         // No waker, no BaseStore file, no output: as lanq run --dry-run.
         var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, time), log, Path.Combine(home, "tmp"), _ => { }, clock: time);
         PlanDryResult dry;
-        try
+        if (narrowedOut is not null)
         {
-            dry = await runner.PlanFileDryAsync(specs, ct).ConfigureAwait(false);
+            // --on / --size / --min-size leave a job no machine: the plan would end before the snapshot, so nothing is looked at.
+            dry = new PlanDryResult(narrowedOut.Status, narrowedOut.ExitCode, narrowedOut.Message, [.. ordered.Zip(narrowedOut.Jobs).Select(x => new PlanJobDry(
+                x.First.Name,
+                x.First.After.Count > 0 ? "after" : "now",
+                x.Second.Status == PlanJobOutcome.Skipped ? PlanJobDry.Pending : x.Second.Status,
+                x.Second.Message)
+            {
+                Retryable = x.Second.Status == PlanJobOutcome.Skipped ? null : false,
+                ShardCount = x.First.Args.Shards?.Count,
+            })])
+            {
+                Decided = narrowedOut.Decided,
+                Retryable = false,
+            };
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        else
         {
-            dry = new PlanDryResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C); nothing was sent", []);
-        }
-        catch (Exception ex)
-        {
-            dry = new PlanDryResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), []) { InfraKind = InfraKind.Unexpected };
+            try
+            {
+                dry = await runner.PlanFileDryAsync(specs, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                dry = new PlanDryResult(JobRunner.Cancelled, 130, "cancelled (Ctrl+C); nothing was sent", []);
+            }
+            catch (Exception ex)
+            {
+                dry = new PlanDryResult(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}"), []) { InfraKind = InfraKind.Unexpected };
+            }
         }
 
         var history = ordered.Any(j => expected(j) is not null);
-        await (p.Json ? stderr : stdout).WriteAsync(PlanFileDryText(plan, selection, ordered, dry, expected, history, runner.ScanSkipped.Count)).ConfigureAwait(false);
+        await (p.Json ? stderr : stdout).WriteAsync(PlanFileDryText(plan, selection, ordered, dry, expected, history, runner.ScanSkipped.Count, planTimeout)).ConfigureAwait(false);
         var decided = dry.Decided is { } d ? ordered.FirstOrDefault(j => j.Name == d)?.Args : null;
-        var next = NextSteps.ForPlanFileDry(p, dry.Status, JobRunner.SafeLine(dry.Message), dry.Retryable, dry.RejectKind, dry.InfraKind, decided);
+        var next = NextSteps.ForPlanFileDry(p, dry.Status, JobRunner.SafeLine(dry.Message), dry.Retryable, dry.RejectKind, dry.InfraKind, decided, narrowedOut);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {dry.Status}: {JobRunner.SafeLine(dry.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanFileDryJsonOf(plan, ordered, dry, expected, p.LogTail) with { NextSteps = next, ScanSkipped = ScanSkippedJson(runner.ScanSkipped) }, LanqJson.Default.PlanFileDryJson))
-                .ConfigureAwait(false);
+            var json = PlanFileDryJsonOf(plan, ordered, dry, expected, p.LogTail) with
+            {
+                NextSteps = next,
+                ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
+                PlanTimeoutMinutes = planTimeout,
+            };
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.PlanFileDryJson)).ConfigureAwait(false);
         }
 
         return dry.ExitCode;
@@ -343,8 +503,10 @@ public static partial class Cli
 
     /// <summary>The plan's dry run for people: the header, the plan and snapshot lines, then per job its lanq run line and what it would do.</summary>
     /// <param name="scanSkipped">How many files the secret scan did not read in full (scanSkipped), noted on the Snapshot line.</param>
+    /// <param name="planTimeout">--plan-timeout or plan_timeout: in minutes, shown on its own line; null for none.</param>
     internal static string PlanFileDryText(
-        PlanFile plan, PlanSelection selection, IReadOnlyList<PlanJob> ordered, PlanDryResult dry, Func<PlanJob, double?> expected, bool history, int scanSkipped = 0)
+        PlanFile plan, PlanSelection selection, IReadOnlyList<PlanJob> ordered, PlanDryResult dry, Func<PlanJob, double?> expected, bool history, int scanSkipped = 0,
+        int? planTimeout = null)
     {
         var sb = new StringBuilder();
         void Line(string text) => sb.Append(JobRunner.SafeLine(text)).Append('\n');
@@ -353,6 +515,11 @@ public static partial class Cli
         Line(string.Create(
             CultureInfo.InvariantCulture,
             $"Plan:     {label} (version {plan.Version}): {ordered.Count} job(s); order: {string.Join(", ", ordered.Select(j => j.Name))}{(history ? " (longest first from history)" : "")}"));
+        if (planTimeout is { } limit)
+        {
+            Line(string.Create(CultureInfo.InvariantCulture, $"Timeout:  plan_timeout {limit} min for the whole plan, from after the snapshot (jobs and baselines)"));
+        }
+
         foreach (var w in plan.Warnings)
         {
             Line("Warning:  " + w);
@@ -396,6 +563,33 @@ public static partial class Cli
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// What history expects the plan's longest chain of after: jobs to take, in seconds: each job's expected time (none counts 0) plus the
+    /// longest chain before it. Null when history knows none of the jobs.
+    /// </summary>
+    internal static double? CriticalPathSeconds(IReadOnlyList<PlanJob> ordered, PlanSelection selection, Func<PlanJob, double?> expected)
+    {
+        if (!ordered.Any(j => expected(j) is not null))
+        {
+            return null;
+        }
+
+        var byName = ordered.ToDictionary(j => j.Name, StringComparer.Ordinal);
+        var memo = new Dictionary<string, double>(StringComparer.Ordinal);
+        double Of(PlanJob j)
+        {
+            if (memo.TryGetValue(j.Name, out var known))
+            {
+                return known;
+            }
+
+            var before = selection.After.GetValueOrDefault(j.Name, []).Where(byName.ContainsKey).Select(n => Of(byName[n])).DefaultIfEmpty(0).Max();
+            return memo[j.Name] = (expected(j) ?? 0) + before;
+        }
+
+        return ordered.Max(Of);
     }
 
     /// <summary>The <see cref="PlanFileDryJson"/> of a plan's dry run (sanitised); logTail is empty with --log-tail and absent without it.</summary>

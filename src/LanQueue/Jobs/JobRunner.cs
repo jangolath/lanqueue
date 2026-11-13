@@ -113,6 +113,9 @@ public sealed record JobRequest(
     /// <summary>lanq run --plan: the id every job of one plan run shares (jobs.jsonl planRun), or null.</summary>
     public string? PlanRun { get; init; }
 
+    /// <summary>lanq run --plan (0.10.0): the plan file's full local path (jobs.jsonl planFile, which lanq stats groups plan jobs by), or null.</summary>
+    public string? PlanFile { get; init; }
+
     /// <summary>
     /// lanq run --plan: the wait gate every job of one plan shares (<see cref="Jobs.PlanProgress"/>): --wait then counts only while no job of the
     /// plan holds a slot, so a job waits behind its siblings even with --wait 0. Null for a plain run (--wait counts from the start).
@@ -121,6 +124,12 @@ public sealed record JobRequest(
 
     /// <summary>lanq run --plan: called once the job holds its first slot or begins waiting for one (the next job's start waits for it).</summary>
     public Action? Placed { get; init; }
+
+    /// <summary>
+    /// lanq run --plan --plan-timeout (lanq.yml plan_timeout:, 0.10.0): the whole plan's limit every job and baseline of it shares, or null. Once
+    /// it has <see cref="PlanDeadline.Expired"/>, a job stopped by the plan's cancellation ends TimedOut (and is recorded so in jobs.jsonl).
+    /// </summary>
+    public PlanDeadline? PlanTimeout { get; init; }
 
     /// <summary>
     /// lanq run --env (lanq.yml env:): the job's own variables, in the order given (parsed and deny-checked by <see cref="JobEnv.Parse"/>;
@@ -1170,7 +1179,15 @@ public sealed partial class JobRunner(
             JobResult result;
             try
             {
-                result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
+                try
+                {
+                    result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (req.PlanTimeout is { Expired: true } planTimeout)
+                {
+                    // --plan-timeout: stopped as --fail-fast stops a job (the cleanup below still runs), but it ends, and is recorded, TimedOut.
+                    result = new JobResult(jobId, JobStatus.TimedOut, ProcessSshClient.TimedOutExitCode, machine.Name, planTimeout.RunningMessage);
+                }
             }
             finally
             {
@@ -1202,6 +1219,7 @@ public sealed partial class JobRunner(
                 RunSeconds = result.RunSeconds,
                 PlanJob = req.PlanJob,
                 PlanRun = req.PlanRun,
+                PlanFile = req.PlanJob is null ? null : req.PlanFile,
                 Exclusive = req.Exclusive ? true : null,
                 EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
                 BaselineOf = req.BaselineOf,

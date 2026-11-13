@@ -55,7 +55,8 @@ refused too: put values several jobs share under `defaults:`, or write them out.
 | Key | Required | Notes |
 | --- | --- | --- |
 | `version` | yes | The number `1`. A newer version is refused with "update lanq". |
-| `defaults` | no | Values every job gets unless it sets its own: `dir`, `needs`, `mem`, `size` or `min_size`, `on`, `timeout`, `env`, `exclusive`, `baseline`, `baseline_ref`. |
+| `plan_timeout` | no | Minutes, 1 to 10080: the whole plan's limit (0.10.0); `--plan-timeout` on the command line replaces it. See [Plan timeout](#plan-timeout-plan_timeout). |
+| `defaults` | no | Values every job gets unless it sets its own: `dir`, `needs`, `mem`, `size` or `min_size`, `on`, `timeout`, `env`, `exclusive`, `baseline`, `baseline_ref`, `fetch_max`, `fetch_max_files` (the fetch limits apply only to jobs with `fetch:`). |
 | `jobs` | yes | A mapping of job names to jobs, 1 to 32. |
 
 Job names start with a letter or digit and hold letters, digits, `_` and `-` (at most 32 characters); they must
@@ -80,6 +81,8 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `shard_retries` | `--shard-retries` | 0 to 3; only re-runs a shard whose machine stopped answering. |
 | `fail_fast` | `--fail-fast` | `true`: the first failing shard of this job cancels its other shards. Needs `shards`. |
 | `fetch` | `--fetch` | A pattern or a list of patterns, as `--fetch`. |
+| `fetch_max` | `--fetch-max` | With `fetch:`. May only lower the 200 MB default (0.10.0); see [Fetch limits and folder](#fetch-limits-and-folder). |
+| `fetch_max_files` | `--fetch-max-files` | With `fetch:`. May only lower the 500-file default (0.10.0). |
 | `env` | `--env NAME=VALUE` | A mapping of `NAME: value`, one `--env` per entry (0.9.0). Only names in your `policy.allowed_env`; see [Environment variables: env](#environment-variables-env). |
 | `exclusive` | `--exclusive` | `true`: the job takes every slot of its machine (0.9.0); see [Exclusive jobs](#exclusive-jobs). |
 | `baseline` | `--baseline` | `true`: if the job fails, rerun it at the base commit and report whether the failure is new (0.9.0); see [Baseline](#baseline-is-the-failure-new). |
@@ -243,6 +246,104 @@ Every job gets its own throw-away folder, maybe on another machine, from the sam
 it does not pass build output, test results or files from one job to the next. A job that needs a build builds it
 itself (`dotnet test` builds first). Use `fetch:` to bring files back to your PC.
 
+### Plan timeout: plan_timeout
+
+A job's `timeout:` limits that job. `plan_timeout: M` (or `lanq run --plan --plan-timeout M`, which replaces the file's
+value) limits the whole plan, in minutes from 1 to 10080 (0.10.0):
+
+```yaml
+version: 1
+plan_timeout: 60
+jobs:
+  ...
+```
+
+The clock starts after the command-line checks and the snapshot. It covers waiting for slots, the jobs and the baseline
+reruns. When it runs out, lanq prints `[lanq] plan_timeout: 60 min reached; stopping 2 started job(s)` and then:
+
+- **Running jobs** are stopped and cleaned up, as `--fail-fast` stops them. Each one ends `TimedOut` (124) with "plan_timeout
+  60 min reached; cancelled and cleaned up". `jobs.jsonl` records it as `TimedOut`.
+- **Jobs waiting for a slot** end `TimedOut` with "plan_timeout reached while waiting for a slot". Nothing was claimed,
+  so nothing needs cleaning up.
+- **Jobs not started yet** (behind `after:` or the stagger) are `Skipped`: "not started: plan_timeout reached".
+- **Baseline reruns not finished** are `inconclusive` ("plan_timeout reached").
+
+The plan is then `TimedOut` (124) unless a `Failed` or `Rejected` job decides it. This holds even when nothing was
+running when the time ran out, for example between `after:` waves or while every job was waiting. Each job's own
+`timeout:` still applies. `--wait` cannot outlast the plan's limit. Ctrl+C before the limit still ends the plan
+`Cancelled` (130). If the limit comes while the last job is only cleaning up, it stops nothing: lanq adds
+`[lanq] plan_timeout: nothing was stopped; every job had already ended` and the plan keeps its own status, without
+`planTimedOut`. After `--fail-fast` the limit still bounds the baseline reruns that follow. If it comes while
+`--fail-fast` is still stopping the jobs, those jobs stay `Cancelled`, lanq prints `[lanq] plan_timeout: 60 min reached
+while the jobs were already being stopped (--fail-fast or an error); no baseline rerun will start`, and every baseline
+is `inconclusive` ("plan_timeout reached before it started").
+
+`planTimedOut` is `true` whenever the limit came due before the plan finished its work: when it stopped a job or a
+baseline, and in every case where it came during a `--fail-fast` hold (with or without baselines to cut short). The
+one exception is a limit that came while the last job was only cleaning up: nothing was left to do, so the plan is
+not flagged and lanq adds the "nothing was stopped" line (never after a hold). The flag is information: `Failed` and
+`Rejected` still decide the status and exit code.
+
+`--json` adds `planTimeoutMinutes` (whenever a limit is set) and `planTimedOut: true` (when it was reached). The dry
+run shows the limit on a `Timeout:` line. It warns when history's expected critical path (the longest `after:` chain
+of expected work) is longer than the limit.
+
+**Refused:** `--plan-timeout` without `--plan` (exit 2; a single run's limit is `--timeout`). A value outside 1 to
+10080 in either place is refused with the same words.
+
+**Agents:** a plan that timed out gets a `fix_code` step. Find where the plan was slow from the logs. Raising
+`plan_timeout` in lanq.yml or passing a larger `--plan-timeout` is the developer's decision, never a way to make a
+plan pass.
+
+### Narrowing a plan from the command line
+
+`--on`, `--size` and `--min-size` work with `--plan` (0.10.0). They **narrow** every selected job and never widen one:
+
+- A job's effective `on` is its own `on:` intersected with `--on`, or `--on` alone when the job has none.
+- A job's effective size is the size classes both its `size:`/`min_size:` and the command line allow.
+
+```sh
+lanq run --plan --on big-01 --json --no-wake      # every job only on big-01
+lanq run --plan --min-size medium --dry-run       # each job's narrowed run line
+```
+
+The dry run prints each job's narrowed `lanq run` line. Without these options the plan behaves exactly as before.
+
+**Refused:**
+
+- An `--on` name that is not in your `machines.yml` is refused before any network (exit 2).
+- A job the narrowing leaves with no machine ends the whole plan before the snapshot, with nothing sent:
+  `NoCapacity` (75, `retryable: false`), for example "--on big-01 leaves job 'unit-windows' no machine (its on:
+  [micro-01])". The other jobs are `Skipped`. `nextSteps` are `ask_developer`, then `fix_command`: the same command
+  with `--only` set to the jobs that can still run. A job that starts after a narrowed-out job (directly or not) is
+  left out too, so nothing runs without its prerequisite. That `--only` replaces any `--only` you gave, and the
+  narrowing is kept. Because it leaves jobs out, the step is not `safeToRunUnattended` (its `--dry-run` is).
+
+**Agents:** an agent may narrow a plan. It never edits lanq.yml (its `on:`, `size:` or `min_size:`) to widen a job so
+that a narrowed plan passes. It asks the developer before running the `fix_command` rerun, and then reports that
+the left-out jobs did not run.
+
+### Fetch limits and folder
+
+A job with `fetch:` brings files back to your PC: at most 500 files and 200 MB by default, under `.lanq/artifacts` at
+the repository top. Since 0.10.0:
+
+- `fetch_max` and `fetch_max_files` (on a job, or in `defaults:` for the jobs that fetch) are `--fetch-max` and
+  `--fetch-max-files`. They may only **lower** the defaults. A larger value is refused (exit 2): "lanq.yml may lower
+  fetch limits (at most 200M / 500 files); a larger limit is the developer's choice: lanq run --plan --fetch-max 1G".
+- There is no `fetch_dir` key. A repository never picks where files land on your disk, and the key is refused with a
+  hint to `--fetch-dir`.
+- On the command line, `lanq run --plan --fetch-dir DIR`, `--fetch-max SIZE` and `--fetch-max-files N` apply to every
+  selected job that fetches. They replace the file's values, up to the 2 GB and 5,000-file ceiling. They are refused
+  (exit 2) when no selected job fetches.
+
+There is no plan-wide total. At worst a plan writes the number of fetching jobs times the per-job limit: 32 jobs at
+the defaults is 6.4 GB, and at `--fetch-max 2G` it is 64 GB.
+
+**Agents:** an agent never raises `--fetch-max` or `--fetch-max-files`, and never adds `fetch_max` to lanq.yml, to get
+a plan's files through. A `fetchSkipped` entry over a limit is reported to the developer. Fetch problems never change
+a job's exit code.
+
 ## A mixed pool
 
 A pool of three small machines (`micro-01` .. `micro-03`, 4 to 8 GB) and two bigger ones (`big-01`, 32 GB, and
@@ -341,6 +442,9 @@ A job that runs zero tests usually exits 0 and shows `Completed`. Make it fail i
 | --- | --- |
 | `--plan` | Run `lanq.yml` at the repository top. |
 | `--plan-file PATH` | Read this file instead (implies `--plan`). |
+| `--on m[,m]`, `--size C[,C]`, `--min-size C` | Narrow every job, never widen one (0.10.0); see [Narrowing](#narrowing-a-plan-from-the-command-line). |
+| `--plan-timeout M` | The whole plan's limit in minutes (0.10.0); replaces `plan_timeout:`. See [Plan timeout](#plan-timeout-plan_timeout). |
+| `--fetch-dir DIR`, `--fetch-max SIZE`, `--fetch-max-files N` | For every job that fetches (0.10.0), up to 2 GB and 5,000 files; see [Fetch limits and folder](#fetch-limits-and-folder). |
 | `--only a,b` | Run only these jobs. An unknown name is refused (exit 2) with the list of jobs. An `after:` job that is not selected is dropped from the order, with a note: `[lanq] --only: serial starts without waiting for integration (not selected)`. |
 | `--dry-run` | Say what the plan would do now, and do none of it. |
 | `--fail-fast` | The first job that does not complete cancels the running jobs (cleaned up, `Cancelled`) and skips the rest. |
@@ -350,9 +454,8 @@ A job that runs zero tests usually exits 0 and shows `Completed`. Make it fail i
 | `--config FILE` | As for every command. |
 
 The options a job sets in `lanq.yml` are refused with `--plan` (exit 2): a command after `--`, `--needs`, `--dir`,
-`--mem`, `--timeout`, `--size`, `--min-size`, `--on`, `--shards`, `--shard-retries`, `--target-minutes`, the
-`--fetch` options, `--env`, `--exclusive`, `--baseline` and `--baseline-ref`. `--only` and `--plan-file` are refused
-without a plan.
+`--mem`, `--timeout`, `--shards`, `--shard-retries`, `--target-minutes`, `--fetch`, `--env`, `--exclusive`,
+`--baseline` and `--baseline-ref`. `--only`, `--plan-file` and `--plan-timeout` are refused without a plan.
 
 ### --dry-run
 
@@ -385,22 +488,32 @@ Each job ends with a `lanq run` status (`Completed`, `Failed`, `Rejected`, `NoCa
 `WindowClosed`, `Cancelled`) or `Skipped` (never started: an `after:` job did not complete, `--fail-fast`, or Ctrl+C).
 
 - The plan is `Completed` (exit 0) only when every selected job completed.
-- Otherwise the worst job decides, earliest in launch order on a tie: `Failed` (that job's own exit code), then
+- Otherwise the worst job decides, earliest in lanq.yml on a tie: `Failed` (that job's own exit code), then
   `Rejected` (2), `TimedOut` and `WindowClosed` (124), `InfraError` (70), `NoCapacity` (75), `Cancelled` (130).
 - Before anything is sent, every job (and every shard of a fixed `shards: N`) is checked as its own `lanq run` line.
   One refusal refuses the whole plan (`Rejected`, 2, naming the job). A job no machine can ever take as configured
   ends the plan with `NoCapacity` (75, `retryable: false`) before the snapshot.
+- `--on`, `--size` or `--min-size` that leave a job no machine end the plan before the snapshot: `NoCapacity` (75,
+  `retryable: false`); see [Narrowing](#narrowing-a-plan-from-the-command-line).
+- When `plan_timeout` is reached, the plan is `TimedOut` (124) unless a `Failed` or `Rejected` job decides it; see
+  [Plan timeout](#plan-timeout-plan_timeout).
 - Ctrl+C cancels and cleans up every started job: `Cancelled`, 130.
 
 A suggested re-run (`nextSteps`, or the `Next:` line) is the same command with `--only` set to the jobs that did not
-complete; it never changes anything else.
+complete (after a narrowing, the jobs that can still run). It replaces any `--only` you gave and never changes
+anything else.
 
 ## Environment
 
 Every job gets `LANQ_JOB` (its job id) and `LANQ_PLAN_JOB` (its name in `lanq.yml`); a sharded job also gets
 `LANQ_SHARD` and `LANQ_SHARDS`. A job with `env:` gets those variables too, set after the machine's `env:` and before
-the `LANQ_*` ones. Your `jobs.jsonl` records `planJob` and `planRun` (shared by the jobs of one plan run), and the
-names (never the values) of a job's `env:` as `envNames`.
+the `LANQ_*` ones. Your `jobs.jsonl` records `planJob`, `planRun` (shared by the jobs of one plan run), `planFile`
+(the plan file's full path on your PC, 0.10.0), and the names (never the values) of a job's `env:` as `envNames`.
+
+`lanq stats` adds a "Plan jobs" table (`planJobs` in `--json`), one row per plan file and job name, one run per plan
+run: completed when all its shards were recorded and each one's last attempt completed, failed when any failed, other otherwise. A run's wall time
+runs from its first start to its last end. The plan file is the full path, so clones of one repository in different
+folders are separate rows. Records written before 0.10.0 have no `planFile` and group under none.
 
 ## lanq.yml and machines.yml
 
@@ -408,11 +521,12 @@ names (never the values) of a job's `env:` as `envNames`.
 | --- | --- | --- |
 | Where | the repository, committed | your per-user config folder, never committed |
 | Who writes it | the team (reviewed like code) | each developer |
-| Holds | jobs: commands, needs, sizes, timeouts, order, the job's own `env`, `exclusive`, `baseline` | machines, hosts, keys, each machine's `env`, `path_prepend`, hours, the allowlists (`allowed_commands`, `allowed_directories`, `allowed_env`) |
+| Holds | jobs: commands, needs, sizes, timeouts, order, the job's own `env`, `exclusive`, `baseline`, lower fetch limits; the plan's `plan_timeout` | machines, hosts, keys, each machine's `env`, `path_prepend`, hours, the allowlists (`allowed_commands`, `allowed_directories`, `allowed_env`) |
 
 `lanq.yml` comes with the repository, so lanq treats it as untrusted input: it can only say what a `lanq run` line can
 say, and every job still has to pass your allowlist. A plan never adds machines, keys or commands, and its `env:` can
-set only the names your `policy.allowed_env` lists. If a plan job is refused for an `env:` name, add the name to
+set only the names your `policy.allowed_env` lists. It may lower the fetch limits but never raise them, and it never
+picks the folder fetched files go to. If a plan job is refused for an `env:` name, add the name to
 `allowed_env` yourself only if jobs may set it; a coding agent must never do that for you.
 
 Machine names are per person: `big-01` in your `machines.yml` may not exist in a colleague's. In a shared `lanq.yml`

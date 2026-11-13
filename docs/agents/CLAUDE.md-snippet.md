@@ -74,8 +74,16 @@
   `lanq run --plan --dry-run --json` (each job's `lanq run` line and what it would do). stdout is one object:
   `status`, `exitCode`, `order`, `jobs[]` (`name`, `status`, `exitCode`, `message`, `logPath` or `shards[]`), `nextSteps`.
   Report each job whose `status` is not `Completed` by `name`, with its `message`; a `Skipped` job never started
-  because a job before it did not complete. A suggested re-run only adds `--only`.
+  because a job before it did not complete. A suggested re-run only sets `--only` (replacing yours).
 - `lanq.yml` is the team's file; do not edit it (or the machines file) to get around a refusal or a `NoCapacity`.
+- Since 0.10.0 `--on`, `--size` and `--min-size` work with `--plan` and narrow every job, never widen one. A job the
+  narrowing leaves no machine ends the plan before anything is sent (`NoCapacity` 75, `retryable: false`):
+  `ask_developer`, then a `fix_command` rerun with `--only` set to the jobs that can still run. It leaves jobs out,
+  so it is not `safeToRunUnattended`: run it only when the developer agrees, and report the jobs it left out. Never edit `lanq.yml` to widen a job.
+- `plan_timeout:` (or `--plan-timeout M`) limits the whole plan: on expiry it is `TimedOut` (124, `planTimedOut:
+  true`) unless a `Failed` or `Rejected` job decides it. Report where it was slow; never raise the limit yourself.
+- `lanq.yml` may only lower fetch limits (`fetch_max`, `fetch_max_files`) and has no `fetch_dir`. Never raise
+  `--fetch-max` / `--fetch-max-files` or add `fetch_max` to `lanq.yml` to get files through; report `fetchSkipped`.
 
 ## Job variables, exclusive jobs and baselines
 

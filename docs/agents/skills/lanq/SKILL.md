@@ -126,6 +126,22 @@ or `shards`, `logTail` with `--log-tail`) and `nextSteps`. Report each job whose
 with its `message` (`Skipped`: it never started, because a job it runs after did not complete). Never edit `lanq.yml`
 or the machines file to get a job through.
 
+Since 0.10.0:
+
+- `--on`, `--size` and `--min-size` with `--plan` narrow every job (its own `on:` and size intersected with yours),
+  never widen one: `lanq run --plan --on big-01 --json --no-wake`. An unknown `--on` name is `Rejected` (2). A job the
+  narrowing leaves no machine ends the plan before anything is sent: `NoCapacity` 75, `retryable: false`, then
+  `ask_developer` and a `fix_command` rerun whose `--only` lists the jobs that can still run (it replaces your
+  `--only`, and leaves out jobs that start after a narrowed-out one). It is not `safeToRunUnattended`: ask the
+  developer before running it, then report the jobs it left out. Never edit `lanq.yml` to widen a job.
+- `plan_timeout:` in `lanq.yml` (or `--plan-timeout M`) limits the whole plan. When it is reached the plan is
+  `TimedOut` (124, `planTimedOut: true`) unless a `Failed` or `Rejected` job decides it; running jobs were stopped and
+  cleaned up. Report where it was slow; never raise the limit yourself.
+- `lanq.yml` `fetch_max` / `fetch_max_files` may only lower the 200 MB / 500-file limits; `fetch_dir` is not a key.
+  `--fetch-dir`, `--fetch-max` and `--fetch-max-files` with `--plan` are the developer's: never raise a fetch limit
+  (on the command line or in `lanq.yml`) to get files through; report `fetchSkipped`.
+- `lanq stats --json` lists `planJobs` per plan file (full path) and job: runs, passes, failures, median wall time.
+
 ## Shard long work across the pool
 
 Use `--shards` for a long suite that splits cleanly (Jest, Vitest, Playwright, nextest, or a helper script the

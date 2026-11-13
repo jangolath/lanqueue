@@ -88,7 +88,10 @@ Recipes for .NET, Node, Python, Go and Rust:
 `machines.yml`), and `--on big-01` only to named machines; every other rule still applies. A repository's `lanq.yml`
 lists its jobs (build, unit tests, integration tests, a serial tail with `after:`), each one `lanq run` line, and
 `lanq run --plan` runs them side by side on one snapshot with one result (`--only`, `--dry-run`, `--json`):
-[docs/PLANS.md](https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md).
+[docs/PLANS.md](https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md). Since 0.10.0 `--on`, `--size` and
+`--min-size` narrow every job of a plan (never widen one), `--plan-timeout M` or `plan_timeout:` limits the whole
+plan, and `lanq.yml` may only lower the fetch limits (`fetch_max`, `fetch_max_files`); only your own `--fetch-max`,
+`--fetch-max-files` and `--fetch-dir` raise them or pick the folder.
 
 ## Per-job options
 

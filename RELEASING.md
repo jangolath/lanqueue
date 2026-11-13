@@ -40,7 +40,10 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    `LANQ_HOME` (restored afterwards with `LANQ_CONFIG` and the git identity variables), and refuses unless each smoke
    machine's `ssh`, `work_root` and `max_jobs` equal the real config's (so its slot locks are the ones real jobs use).
    Every smoke job has `--timeout 5`, and every lanq call is stopped after 15 minutes. It ends with `lanq unlock` on each
-   smoke machine and a check, by a job that must see its own slot, that no slot of a smoke job is left.
+   smoke machine and a check, by a job that must see its own slot, that no slot of a smoke job is left. Scenario 8 (from
+   0.10.0) checks that `--plan-timeout 1` ends a plan `TimedOut` (124) with its job cleaned up, that `--plan --on` puts
+   every job on the machine named, and that a narrowing which leaves a job no machine is `NoCapacity` (75) with a rerun
+   `--only`; an older binary gets N/A there.
 
    It prints a PASS/FAIL/SKIP/N/A table and **exits 0 only when every scenario that applies passed**. N/A means the
    smoke config has no machine of that kind (a Windows-only pool has no Linux scenarios; no machine with `max_jobs` of

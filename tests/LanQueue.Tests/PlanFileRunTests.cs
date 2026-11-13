@@ -852,8 +852,6 @@ public sealed partial class PlanFileRunTests : IDisposable
     [InlineData("--needs", "node")]
     [InlineData("--dir", "src")]
     [InlineData("--timeout", "10")]
-    [InlineData("--on", "big-01")]
-    [InlineData("--min-size", "heavy")]
     [InlineData("--shards", "2")]
     [InlineData("--fetch", "x")]
     public void RunOnlyOptionsAreRefusedWithPlan(string option, string value)

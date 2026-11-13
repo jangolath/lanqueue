@@ -33,6 +33,12 @@
   machines; every other rule still applies). When the repository has a `lanq.yml`, run its jobs with
   `lanq run --plan --json --no-wake` (`--only a,b` for some, `--dry-run` to preview); stdout is one object with `jobs[]`.
   Report each job whose `status` is not `Completed` by `name`, with its `message` (a `Skipped` job never started).
+  You may narrow a plan with `--on`/`--size`/`--min-size` (0.10.0: they never widen a job). A narrowing that leaves a
+  job no machine is `NoCapacity` 75 (`retryable: false`): ask the developer. The `fix_command` rerun (`--only` the
+  jobs that can still run) leaves jobs out and is not `safeToRunUnattended`: run it only when the developer agrees,
+  and report the jobs it left out. A plan that hit `plan_timeout` is `TimedOut`
+  (`planTimedOut: true`): report it; never raise `--plan-timeout`, `plan_timeout:`, `--fetch-max` or
+  `--fetch-max-files`, and never widen a job's `on:`/`size:` in `lanq.yml`, to make a plan pass.
 - You may add `--exclusive` (the job takes a whole machine; it waits for an idle one), `--baseline` (after a `Failed`
   run, lanq reruns it at the base commit: `baseline.verdict` is `new`, `preexisting`, `inconclusive` or `skipped`;
   status and exit code never change) and `--env NAME=VALUE`, only for names already in the developer's

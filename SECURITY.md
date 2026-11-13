@@ -71,6 +71,14 @@ A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_
 revision syntax, so the file cannot pick an arbitrary old commit to send; `--baseline-ref` on your own command line can
 name any commit.
 
+Since 0.10.0 a repository's `lanq.yml` can only lower what a plan writes to your disk: `fetch_max` and
+`fetch_max_files` above the 200 MB / 500-file defaults are refused, and there is no `fetch_dir` key, so the file never
+picks where fetched files land. Only your own command line (`lanq run --plan --fetch-dir`, `--fetch-max`,
+`--fetch-max-files`) chooses the folder or raises a limit, up to 2 GB / 5,000 files per job. There is no plan-wide
+total: a plan of 32 fetching jobs can write 32 times the per-job limit (6.4 GB at the defaults). `--on`, `--size` and
+`--min-size` with `--plan` only narrow the jobs, and `plan_timeout:` only limits how long the plan runs; neither adds
+input lanq parses beyond a `lanq run` line.
+
 `lanq makeready` runs the embedded lanq-makeready scripts, which are byte-identical to a GitHub release whose SHA-256
 values a test pins; they are updated only through `scripts/sync-makeready.sh`, which checks the release's
 `SHA256SUMS` and its build-provenance attestation first. The script is sent on ssh stdin and runs from memory, so

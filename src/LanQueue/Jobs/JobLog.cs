@@ -53,6 +53,13 @@ public sealed record JobRecord(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? PlanRun { get; init; }
 
+    /// <summary>
+    /// lanq run --plan only (0.10.0): the plan file's full local path on this computer. lanq stats groups plan jobs by it and the job's name, so
+    /// clones of one repository in different folders count separately. Absent on older lines (their plan jobs group under null).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PlanFile { get; init; }
+
     /// <summary>lanq run --env only (0.9.0): the names of the job's own variables, in the order given. Never their values.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? EnvNames { get; init; }

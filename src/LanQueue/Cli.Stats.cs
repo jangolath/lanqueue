@@ -15,6 +15,12 @@ public static partial class Cli
     /// <summary>The most commands lanq stats prints as text (newest first); --json lists up to <see cref="MaxStatsCommands"/>.</summary>
     internal const int StatsTextCommands = 20;
 
+    /// <summary>The most plan jobs lanq stats --json lists (0.10.0); the rest are counted in planJobsMore.</summary>
+    internal const int MaxStatsPlanJobs = MaxStatsCommands;
+
+    /// <summary>The most plan jobs lanq stats prints as text (newest first).</summary>
+    internal const int StatsTextPlanJobs = StatsTextCommands;
+
     /// <summary>The longest command lanq stats prints as text; longer ones are cut and end in "...".</summary>
     private const int StatsTextCommandChars = 120;
 
@@ -114,6 +120,10 @@ public static partial class Cli
                     c.P90Seconds, c.LastRunUtc.UtcDateTime, c.LastShards, TimingJson(Timing(c))))])
             {
                 CommandsMore = report.Commands.Count > MaxStatsCommands ? report.Commands.Count - MaxStatsCommands : null,
+                PlanJobs = [.. report.PlanJobs.Take(MaxStatsPlanJobs).Select(j => new StatsPlanJobJson(
+                    j.PlanFile is null ? null : JobRunner.SafeLine(j.PlanFile), JobRunner.SafeLine(j.Job), j.Runs, j.Completed, j.Failed, j.Other, j.MedianSeconds, j.P90Seconds,
+                    j.LastRunUtc.UtcDateTime, j.LastShards))],
+                PlanJobsMore = report.PlanJobs.Count > MaxStatsPlanJobs ? report.PlanJobs.Count - MaxStatsPlanJobs : null,
                 NextSteps = NextSteps.ForStats("Ok", message),
             };
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.StatsJson)).ConfigureAwait(false);
@@ -172,6 +182,32 @@ public static partial class Cli
             {
                 await stdout.WriteLineAsync(string.Create(
                     CultureInfo.InvariantCulture, $"  and {report.Commands.Count - StatsTextCommands} more (lanq stats --json lists up to {MaxStatsCommands})")).ConfigureAwait(false);
+            }
+
+            if (report.PlanJobs.Count > 0)
+            {
+                // 0.10.0: one row per lanq.yml (full path) and job; one run per plan run. A clone in another folder is another plan file.
+                await stdout.WriteLineAsync().ConfigureAwait(false);
+                await stdout.WriteLineAsync("Plan jobs (newest first; one run per plan run; median and p90 of completed runs, first start to last end):").ConfigureAwait(false);
+                foreach (var line in Table(
+                    [
+                        ["job", "runs", "pass", "fail", "other", "median", "p90", "last run", "shards", "plan file"],
+                        .. report.PlanJobs.Take(StatsTextPlanJobs).Select(j => new[]
+                        {
+                            JobRunner.SafeLine(j.Job), Num(j.Runs), Num(j.Completed), Num(j.Failed), Num(j.Other), Seconds(j.MedianSeconds), Seconds(j.P90Seconds),
+                            Local(j.LastRunUtc, zone), Num(j.LastShards), j.PlanFile is null ? "(recorded before 0.10.0)" : JobRunner.SafeLine(j.PlanFile),
+                        }),
+                    ],
+                    leftFrom: 7))
+                {
+                    await stdout.WriteLineAsync("  " + line).ConfigureAwait(false);
+                }
+
+                if (report.PlanJobs.Count > StatsTextPlanJobs)
+                {
+                    await stdout.WriteLineAsync(string.Create(
+                        CultureInfo.InvariantCulture, $"  and {report.PlanJobs.Count - StatsTextPlanJobs} more (lanq stats --json lists up to {MaxStatsPlanJobs})")).ConfigureAwait(false);
+                }
             }
 
             await stdout.WriteLineAsync().ConfigureAwait(false);

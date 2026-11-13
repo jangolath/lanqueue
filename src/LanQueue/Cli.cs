@@ -116,6 +116,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     public bool FailFast { get; init; }
 
     /// <summary>
+    /// lanq run --plan --plan-timeout M (lanq.yml plan_timeout: M; the command line wins): the whole plan's limit in minutes, 1 to 10080, from
+    /// after the snapshot to the last baseline (0.10.0). Null without it.
+    /// </summary>
+    public int? PlanTimeoutMinutes { get; init; }
+
+    /// <summary>
     /// lanq run --env NAME=VALUE (repeatable): the job's own variables, in the order given (<see cref="Policy.JobEnv.Parse"/>: split at the first
     /// '=', a valid name not on the hard deny table, a non-empty value of at most 4,096 characters without control characters, no name twice,
     /// at most 16,384 characters in all). policy.allowed_env and the secret scan are checked when the job is (JobRunner's precheck); a machine
@@ -135,12 +141,20 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --baseline-ref REF (lanq.yml baseline_ref:): the branch, tag or commit to compare with; null means the default branch.</summary>
     public string? BaselineRef { get; init; }
 
-    /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
+    /// <summary>
+    /// The run options that come from lanq.yml with --plan, and so are refused with it. Not among them (0.10.0): --on, --size and --min-size,
+    /// which narrow every job (see <see cref="Plan.PlanNarrowing"/>), and --fetch-dir, --fetch-max and --fetch-max-files, the developer's own
+    /// choice for every fetching job (lanq.yml may only lower the limits and never names the folder; see <see cref="Plan.PlanFetch"/>).
+    /// </summary>
     internal static readonly string[] PlanFileOptions =
     [
-        "--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
-        "--fetch-max-files", "--env", "--exclusive", "--baseline", "--baseline-ref",
+        "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--env", "--exclusive", "--baseline",
+        "--baseline-ref",
     ];
+
+    /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
+    internal const string PlanTakes =
+        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -156,7 +170,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive", "--baseline", "--baseline-ref",
+            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -208,6 +222,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         int? fetchMaxFiles = null;
         int? logTail = null;
         int? targetMinutes = null;
+        int? planTimeout = null;
         List<string>? on = null;
         SizeRule? size = null;
         var plan = false;
@@ -316,6 +331,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--min-size" when i + 1 < own.Length:
                     size = SizeRule.AtLeastText(own[++i]);
+                    break;
+                case "--plan-timeout" when i + 1 < own.Length:
+                    planTimeout = ParsePlanTimeout(own[++i]);
                     break;
                 case "--plan":
                     plan = true;
@@ -440,7 +458,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException("--log-tail needs --json (it adds logTail to the JSON object); without --json lanq prints the log's path before the status line.");
         }
 
-        if (fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
+        // With --plan these apply to the plan's fetching jobs (fetch: in lanq.yml); the plan refuses them when none of its jobs fetches.
+        if (!plan && fetch.Count == 0 && (fetchDir is not null || fetchMax is not null || fetchMaxFiles is not null))
         {
             throw new ArgumentException("--fetch-dir, --fetch-max and --fetch-max-files need at least one --fetch pattern.");
         }
@@ -490,6 +509,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             PlanFile = planFile,
             Only = only,
             FailFast = shards.FailFast,
+            PlanTimeoutMinutes = planTimeout,
             LogTail = logTail,
             Env = jobEnv,
             Raw = [.. args],
@@ -539,6 +559,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 throw new ArgumentException("--only goes with --plan (it picks jobs of lanq.yml): lanq run --plan --only build,unit");
             }
 
+            if (seen.Contains("--plan-timeout"))
+            {
+                throw new ArgumentException("--plan-timeout goes with --plan (it limits the whole plan); a single run's limit is --timeout: lanq run --plan --plan-timeout 60");
+            }
+
             return;
         }
 
@@ -549,9 +574,15 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
         if (seen.FirstOrDefault(o => PlanFileOptions.Contains(o)) is { } option)
         {
-            throw new ArgumentException($"with --plan each job's {option} comes from lanq.yml; leave {option} out (lanq run --plan takes --plan-file, --only, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config).");
+            throw new ArgumentException($"with --plan each job's {option} comes from lanq.yml; leave {option} out ({PlanTakes}).");
         }
     }
+
+    /// <summary>--plan-timeout (and lanq.yml plan_timeout:): whole minutes from 1 to 10080 (one week), as --timeout.</summary>
+    internal static int ParsePlanTimeout(string text) =>
+        int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var minutes) && minutes is >= 1 and <= 10080
+            ? minutes
+            : throw new ArgumentException("--plan-timeout must be a whole number of minutes from 1 to 10080 (one week).");
 
     /// <summary>--fetch-max: a size in bytes with an optional K, M or G suffix (powers of 1024, an optional trailing B), from 1 KB to 2 GB.</summary>
     internal static long ParseSize(string text)
@@ -594,6 +625,8 @@ public static partial class Cli
           lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
+          lanq run --plan ... [--on big-01,build-01] [--size light,medium | --min-size heavy] [--plan-timeout M]
+          lanq run --plan ... [--fetch-dir DIR] [--fetch-max 1G] [--fetch-max-files 2000]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
@@ -646,8 +679,10 @@ public static partial class Cli
         failed, median, p90, and timing: the work and per-shard overhead --target-minutes would use) and the size of logs/. --target-minutes M
         adds the shards M needs on a typical machine (no probe, before any free-slot cap). Unreadable lines are skipped with a warning. --json
         prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
-        newestUtc, logs, machines, commands, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad arguments, 70
-        the job log could not be read, 130 Ctrl+C.
+        newestUtc, logs, machines, commands, planJobs, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad
+        arguments, 70 the job log could not be read, 130 Ctrl+C. Plan jobs (a "Plan jobs" table; planJobs, at most 500, then planJobsMore) are
+        grouped by plan file (its full path) and job name, one run per plan run (completed when all its shards' last attempts completed, failed
+        when any failed, else other; wall time from the first start to the last end); clones in different folders are separate rows.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
         such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
@@ -706,6 +741,18 @@ public static partial class Cli
         after the first job that does not complete; --wait counts only while no job of the plan holds a slot. Lines are prefixed [job machine];
         a summary table, then the status line. Exit 0 only when every job completed, else the first failed job's own code, then 2, 124, 70, 75,
         130. --json prints one object (status, exitCode, plan, durationSeconds, message, order, jobs, warnings, nextSteps).
+        run --plan --on / --size / --min-size narrow every job, never widen one: a job's own on: is intersected with --on (--on alone when it
+        has none), its size classes with the command line's; the dry run prints each job's narrowed line. An unknown --on name is refused (2)
+        before any network; a job left with no machine ends the plan before the snapshot (75, retryable: false; the suggested rerun's --only
+        lists the jobs that can still run, never one after a narrowed-out job, replaces any --only given and is not safe unattended).
+        run --plan --plan-timeout M (lanq.yml plan_timeout: M; the command line wins; 1 to 10080 minutes, plan only) limits the whole plan, from
+        after the snapshot to the last baseline: when it is reached the running jobs are stopped and cleaned up and end TimedOut, jobs waiting
+        for a slot end TimedOut, jobs not started are Skipped, unfinished baselines are inconclusive, and the plan is TimedOut (124) unless a
+        Failed or Rejected job decides it; --json adds planTimeoutMinutes and planTimedOut. A job's own --timeout still applies.
+        run --plan --fetch-dir DIR, --fetch-max SIZE and --fetch-max-files N apply to every job with fetch: (refused when no selected job
+        fetches) and replace lanq.yml's values, up to 2G and 5000 files. lanq.yml fetch_max and fetch_max_files may only lower the limits (at
+        most 200M and 500 files; larger is refused, exit 2) and there is no fetch_dir key: a repository never picks where files land on your
+        disk. No plan-wide total: at worst the fetching jobs times the per-job limit (32 jobs at the defaults: 6.4 GB).
         Exit codes (run): job's own code; 2 rejected by policy or bad arguments; 70 infrastructure error; 75 no eligible machine (at once, without waiting or waking, when no machine can ever take the job as configured; --json then says retryable: false); 124 job timed out or its machine's allowed hours ended; 130 Ctrl+C (the job is cleaned up where it had started).
         """;
 

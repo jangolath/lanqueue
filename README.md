@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.9.2/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.10.0/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.9.2 --repo jangolath/lanqueue
+gh release download v0.10.0 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.9.2    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.10.0    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -226,12 +226,12 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | `lanq run ... --env NAME=VALUE ... -- CMD...` | Sets a variable for this job only; the name must be in `policy.allowed_env`. See [Job variables](#job-variables---env). |
 | `lanq run ... --exclusive -- CMD...` | Takes every slot of the machine, so nothing else runs there meanwhile. See [Exclusive jobs](#exclusive-jobs---exclusive). |
 | `lanq run ... --baseline [--baseline-ref REF] -- CMD...` | After a failure, runs the same command at the base commit and says whether the failure is new. See [Is this failure new?](#is-this-failure-new---baseline) |
-| `lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--dry-run] [--json]` | Runs the jobs of the repository's `lanq.yml` side by side on one snapshot, ordered by `after:`, with one result; see [docs/PLANS.md](docs/PLANS.md). |
+| `lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--dry-run] [--json]` | Runs the jobs of the repository's `lanq.yml` side by side on one snapshot, ordered by `after:`, with one result; see [docs/PLANS.md](docs/PLANS.md). Since 0.10.0 also `--on`/`--size`/`--min-size` (narrow every job, never widen), `--plan-timeout M` (the whole plan's limit) and `--fetch-dir`/`--fetch-max`/`--fetch-max-files` (for every fetching job). |
 | `lanq run ... --json --log-tail N -- CMD...` | Adds the last N lines (1 to 200) of the job's log to the JSON object as `logTail`; `logPath` is always there. |
 | `lanq run ... --dry-run [--json] -- CMD...` | Says what `lanq run` would do now (the checks, the snapshot scan, the machine, every excluded machine and why, `--shards` N and placement) and does none of it. |
 | `lanq run --shards N\|auto [--shard-retries R] [--fail-fast] ... -- CMD {shard}/{shards}` | Splits one command into N jobs that run at once across free slots; see [Sharding](#sharding-long-work-across-the-pool). |
 | `lanq run --shards auto --target-minutes M ... -- CMD {shard}/{shards}` | Picks N from earlier runs of the same command so each shard takes about M minutes (1 to 1440), never more than the free slots; see [docs/SHARDING.md](docs/SHARDING.md#choosing-n-from-history---target-minutes). |
-| `lanq stats [--json] [--target-minutes M]` | Summarises your local job log: totals, per machine (median and p90 of completed jobs, speed factor) and per command (runs, results, the work and per-shard overhead), and the size of the job logs. `--target-minutes M` adds the shards M would need. |
+| `lanq stats [--json] [--target-minutes M]` | Summarises your local job log: totals, per machine (median and p90 of completed jobs, speed factor), per command (runs, results, the work and per-shard overhead) and, since 0.10.0, per plan job (per plan file and job name; one run per plan run), and the size of the job logs. `--target-minutes M` adds the shards M would need. |
 | `lanq doctor [--remote [--force]] [--json]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. `--json` prints one object with every check and its fix. |
 | `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--key-env VAR] [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. `--key-env VAR` scans with the key file whose path is in `VAR`. |
 | `lanq makeready --ssh user@host --os windows\|linux --setup [--key-env VAR]` | Prints the PC's full one-time setup (build user, your public key, work folder, firewall, password logins off, the fingerprint check) and connects to nothing. |
@@ -539,9 +539,10 @@ on stdout). `lanq run --dry-run --json` prints one object with `status` `WouldRu
 would end with, the machine, every machine as judged for the job and, with `--shards`, N and the placement.
 `lanq run --plan --json` prints one object for the whole plan with a `jobs` array (one entry per job, by name), and
 `lanq run --plan --dry-run --json` one with each job's `lanq run` line and what it would do
-([docs/JSON.md](docs/JSON.md#lanq-run---plan---json)).
+([docs/JSON.md](docs/JSON.md#lanq-run---plan---json)); with a plan limit both add `planTimeoutMinutes`, and a plan
+that reached it adds `planTimedOut: true`.
 `lanq doctor --json` prints one object with every check (see [lanq doctor](#lanq-doctor)), and `lanq stats --json` one
-object with the totals, `machines`, `commands` (each with its `timing`) and `logs`.
+object with the totals, `machines`, `commands` (each with its `timing`), `planJobs` and `logs`.
 
 **`nextSteps`.** Every `--json` object (each `lanq health` row, the run, dry-run, init, wake, doctor, stats,
 `makeready --all` and `--add` objects and every error object) carries `nextSteps`, at least one entry:
@@ -616,8 +617,9 @@ lanq keeps its state on your computer, in `<state>` (`$LANQ_HOME`, else `%LOCALA
   command itself ran, without the wait, upload, prepare, fetch or cleanup), and since 0.8.0 `planJob` and `planRun`
   for the jobs of a `lanq run --plan` (the job's name in `lanq.yml`, and an id shared by one plan run), and since 0.9.0
   `envNames` (the names of the job's `--env` variables, never their values), `exclusive` and, on a `--baseline` rerun,
-  `baselineOf` (the failed job's id) and `commit` (the base commit's short id). A field that does not apply is left
-  out. Baseline reruns ran another commit, so `lanq stats`, `--target-minutes` and a plan's order leave them out.
+  `baselineOf` (the failed job's id) and `commit` (the base commit's short id), and since 0.10.0 `planFile` on a plan
+  job (the plan file's full path; `lanq stats` groups plan jobs by it, so clones in different folders count
+  separately). A field that does not apply is left out. Baseline reruns ran another commit, so `lanq stats`, `--target-minutes` and a plan's order leave them out.
   At 4 MiB the file moves to `jobs.1.jsonl` (replacing the one before), so there are at most two files; lanq reads
   both, and lanq 0.6 reads only `jobs.jsonl`. `jobs.jsonl.lock` makes two lanq processes take turns writing. A job
   that cannot be recorded (the file is locked for long) gets a warning; its result does not change. A line lanq cannot
@@ -871,12 +873,19 @@ hours, slots, wake) still applies:
   at once (`retryable: false`).
 - A plan file, `lanq.yml`, sets these per job, so `lanq run --plan` sends builds and unit tests to the small machines
   and the integration suite to the big ones in one command: [docs/PLANS.md](docs/PLANS.md).
+- Since 0.10.0 `--on`, `--size` and `--min-size` also work with `--plan`. They narrow every job: a job's own `on:` is
+  intersected with `--on`, and its size classes with yours. They never widen a job. A job they leave with no machine
+  ends the plan before anything is sent (`NoCapacity`, 75, `retryable: false`). The suggested rerun's `--only` then
+  lists the jobs that can still run (never one whose `after:` prerequisite was narrowed out), replacing any `--only`
+  you gave; it leaves jobs out, so it is not safe for an agent to run unattended. A coding agent may narrow a plan,
+  asks you before such a rerun, and never edits `lanq.yml` to widen a job.
 
 ```bash
 lanq run --needs dotnet --size light,medium -- dotnet test tests/Unit -m:1
 lanq run --needs dotnet --min-size heavy --shards 2 -- sh scripts/lanq/test-shard.sh tests/Integration
 lanq health --needs dotnet --min-size heavy        # which machines could take it, and why not the others
 lanq run --plan --dry-run                          # what lanq.yml would do now
+lanq run --plan --on big-01 --dry-run              # the same, every job narrowed to big-01
 ```
 
 `lanq health --json` shows each machine's effective `size` and where it came from (`sizeSource`: `probe` or `config`);
@@ -1311,6 +1320,10 @@ Each default below is enforced in code and covered by a unit test.
   profile and `GIT_*`/`SSH_*` variables; see [Job variables](#job-variables---env)), and each `NAME=VALUE` goes
   through the secret scan. Values reach the job as data, quoted like the machine's `env:`. They are not secret-safe:
   other users of the worker can see them in its process list.
+- **A plan file can only narrow what lands on your disk.** `lanq.yml` `fetch_max` and `fetch_max_files` may only
+  lower the 200 MB / 500-file fetch limits (a larger value is refused), and there is no `fetch_dir` key: only your
+  own `--fetch-dir`, `--fetch-max` and `--fetch-max-files` pick the folder or raise a limit (up to 2 GB / 5,000
+  files). `--on`, `--size` and `--min-size` with `--plan` only narrow the plan's jobs (0.10.0).
 - **No permission-skipping agent flags.** Any argument containing `dangerously`, `skip-permissions`,
   `bypassPermissions`, `--yolo`, `bypass-approvals`, `danger-full-access`, `approval_policy=never` or
   `--ask-for-approval never` is rejected, even for an allowlisted command.
@@ -1398,6 +1411,10 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 - No persistent queue: `--wait` polls every 15 seconds.
 - Plan files (`lanq run --plan`) pass nothing between jobs: each job runs in its own throw-away folder, maybe on
   another machine, and `after:` only orders jobs (a test job builds what it needs itself).
+- A plan's fetches have no plan-wide total: at worst a plan writes the number of fetching jobs times the per-job limit
+  (32 jobs at the 200 MB default: 6.4 GB). `lanq.yml` may only lower that limit; only your own `--fetch-max` raises it.
+- `lanq stats` knows a plan by its file's full path, so clones of one repository in different folders are separate
+  rows.
 - `--exclusive` has no reservation: it waits until a machine happens to be idle, and other jobs keep taking free slots
   meanwhile, so on a busy pool it can wait out `--wait`. Its check for slots above its own `max_jobs` is one look at
   claim time, so everyone who shares a worker should use the same `max_jobs` for it.

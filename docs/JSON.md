@@ -63,7 +63,7 @@ error and do not guess the result.
 | `run --dry-run` | `NoCapacity` | 75 | No machine could take the job now (`retryable` as for a run). |
 | `run --dry-run` | `Rejected`, `InfraError`, `Cancelled` | 2, 70, 130 | As for a run; `InfraError` here is a failed snapshot or an unexpected error. |
 | `run --plan` | `Completed` | 0 | Every selected job of `lanq.yml` completed. |
-| `run --plan` | any `run` status | as above | The worst job decides, earliest in launch order on a tie: `Failed` (that job's own code), `Rejected`, `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Cancelled`. A bad `lanq.yml` or a refused job is `Rejected` (2) before anything is sent; see [lanq run --plan](#lanq-run---plan---json). A job's own `status` can also be `Skipped`. |
+| `run --plan` | any `run` status | as above | The worst job decides, earliest in lanq.yml on a tie: `Failed` (that job's own code), `Rejected`, `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Cancelled`. A bad `lanq.yml` or a refused job is `Rejected` (2) before anything is sent; see [lanq run --plan](#lanq-run---plan---json). A job's own `status` can also be `Skipped`. When `plan_timeout` is reached the plan is `TimedOut` (124) unless a `Failed` or `Rejected` job decides it (0.10.0). |
 | `run --plan --dry-run` | `WouldRun`, `NoCapacity`, `Rejected`, `InfraError`, `Cancelled` | 0, 75, 2, 70, 130 | As for a dry run, for the whole plan. |
 | `health` | (an array) | 0 | Every machine was probed. Machines that are down or held are in the array; that is not an error. |
 | `health --needs`/`--mem` | (an array) | 0 or 75 | 0 when at least one machine could take such a job now, 75 when none could. |
@@ -455,24 +455,26 @@ bad `lanq.yml`, a refusal, Ctrl+C and an unexpected error included):
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `status` | string | `Completed` only when every selected job completed. Otherwise the worst job decides, earliest in `order` on a tie: `Failed`, then `Rejected`, `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Cancelled`. `Cancelled` on Ctrl+C. |
+| `status` | string | `Completed` only when every selected job completed. Otherwise the worst job decides, earliest in `lanq.yml` on a tie: `Failed`, then `Rejected`, `TimedOut`, `WindowClosed`, `InfraError`, `NoCapacity`, `Cancelled`. `Cancelled` on Ctrl+C. With `planTimedOut`, `TimedOut` unless a `Failed` or `Rejected` job decides it, also when no job was running (0.10.0). |
 | `exitCode` | number | 0, else the deciding job's code: its own exit code for `Failed`, else 2, 124, 70 or 75; 130 on Ctrl+C. |
 | `plan` | string or null | The plan file's full path; `null` when it was not found. |
 | `durationSeconds` | number | Wall-clock seconds for the whole plan. |
 | `message` | string | `N of M job(s) completed; <job>: <status>: <its message>`, or the refusal or error. A refused job is named (`job 'unit': ...`); an error in `lanq.yml` starts with the file name, then the job and the line. |
 | `order` | array of string | The launch order (job names). May be empty when the plan was refused before it was ordered. |
 | `jobs` | array | One entry per selected job, in `order` (below). Empty when the plan was refused or ended before any job ran (bad arguments, config, `lanq.yml`, a refused command line, a job that can never run, the snapshot). |
-| `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, from the job that decided it, as for [one run](#nocapacity-retryable-and-excluded). |
+| `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, from the job that decided it, as for [one run](#nocapacity-retryable-and-excluded). After `--on`/`--size`/`--min-size` left a job no machine: `retryable: false` and `excluded: []` (no machine was looked at). |
 | `warnings` | array of string | The plan file's warnings (two jobs with the same command and folder; `shards:` without `{shard}` or `{shards}`), also printed on stderr. |
-| `nextSteps` | array | For the whole plan. A suggested re-run is the same command with `--only` set to the jobs that did not complete. See [nextSteps](#nextsteps). |
+| `nextSteps` | array | For the whole plan. A suggested re-run is the same command with `--only` set to the jobs that did not complete (after a narrowing: the jobs that can still run); it replaces any `--only` given. See [nextSteps](#nextsteps). |
 | `scanSkipped` | array | Conditional (0.9.2): for the plan's one snapshot, as for [a run](#scanskipped). |
+| `planTimeoutMinutes` | number | Conditional (0.10.0): the plan's limit (`--plan-timeout`, else `plan_timeout:`). Absent without one. |
+| `planTimedOut` | boolean | Conditional (0.10.0): `true` whenever the limit came due before the plan finished its work: it stopped a job or baseline, or it came while `--fail-fast` (or an error) was stopping the jobs, with or without baselines to cut short, even if Ctrl+C came after. Absent when no limit was reached, and when it came only while the last job was cleaning up (nothing left to do; stderr then says `plan_timeout: nothing was stopped`). Information only: `Failed` and `Rejected` still decide `status` and `exitCode`. |
 
 Each entry in `jobs`:
 
 | Key | Type | Notes |
 | --- | --- | --- |
 | `name` | string | The job's name in `lanq.yml`. |
-| `status` | string | A `lanq run` status, or `Skipped`: never started, because a job in its `after:` did not complete, `--fail-fast` stopped the plan, or Ctrl+C. A running job that `--fail-fast` stopped is `Cancelled`. |
+| `status` | string | A `lanq run` status, or `Skipped`: never started, because a job in its `after:` did not complete, `--fail-fast` stopped the plan, `plan_timeout` was reached, or Ctrl+C. A running job that `--fail-fast` stopped is `Cancelled`; one that `plan_timeout` stopped, or one still waiting for a slot then, is `TimedOut` (124). |
 | `exitCode` | number or null | The job's `lanq run` exit code (for a sharded job, its overall one). `null` only for `Skipped`. |
 | `after` | array of string | The jobs it started after, within the selection (`--only` drops the others). |
 | `machine`, `jobId`, `logPath` | string or null | A single job's, as in [lanq run](#lanq-run---json). `null` for a sharded job (each shard has its own) and for a job that never started. |
@@ -488,8 +490,15 @@ Each entry in `jobs`:
 | `env`, `exclusive` | | Conditional (0.9.0): a job with `env:` (the merged names, never values) or `exclusive: true` in `lanq.yml`, as for [a run](#lanq-run---json). |
 | `baseline` | object | Conditional (0.9.0): a single job with `baseline: true` that ended `Failed` ([baseline](#baseline)). A sharded job has it on each failed shard. The reruns start after the whole plan has ended. |
 
-Jobs of a plan run are recorded in `jobs.jsonl` with `planJob` (the job's name) and `planRun` (one id shared by the
-plan run), and get `LANQ_PLAN_JOB=<name>` in their environment.
+Jobs of a plan run are recorded in `jobs.jsonl` with `planJob` (the job's name), `planRun` (one id shared by the
+plan run) and, since 0.10.0, `planFile` (the plan file's full local path), and get `LANQ_PLAN_JOB=<name>` in their
+environment. A job `plan_timeout` stopped is recorded `TimedOut`, never `Cancelled`.
+
+The messages lanq uses for `plan_timeout` (0.10.0) are fixed: a running job `plan_timeout 60 min reached; cancelled and
+cleaned up`, a job waiting for a slot `plan_timeout reached while waiting for a slot`, a job not started `not started:
+plan_timeout reached`, and a baseline `...: inconclusive: plan_timeout reached ...`. A narrowing that leaves a job no
+machine reads `--on big-01 leaves job 'unit-windows' no machine (its on: [micro-01])` (or `--size light leaves job
+'x' no machine (its min_size: heavy)`).
 
 In text mode stderr starts with `[lanq] plan lanq.yml: N job(s); order: ...`; job lines are prefixed `[job machine]`
 (`[job i/N machine]` for shards); a summary table follows, then the `[lanq] Next: ...` lines, a
@@ -535,17 +544,18 @@ slot is claimed, nothing is woken, and `jobs.jsonl` is read, never written. stdo
 | `order` | array of string | The launch order. |
 | `jobs` | array | Every selected job, in `order` (below). Empty when the plan was refused before any machine was looked at. |
 | `warnings` | array of string | As for a run. |
-| `retryable` | boolean or null | `NoCapacity` only: `false` when some job can never run as configured. |
+| `retryable` | boolean or null | `NoCapacity` only: `false` when some job can never run as configured, or `--on`/`--size`/`--min-size` leave a job no machine. |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty. |
-| `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. |
+| `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. After a narrowing that leaves a job no machine: `ask_developer`, then `fix_command` (the same dry run with `--only` replaced by the jobs that can still run). |
 | `scanSkipped` | array | Conditional (0.9.2): as for [a run](#scanskipped). The text plan's `Snapshot:` line notes the count. |
+| `planTimeoutMinutes` | number | Conditional (0.10.0): the limit the plan would run under. The text plan has a `Timeout:` line, and `warnings` gains "history's expected critical path is about N min, over plan_timeout M min: the plan would likely time out" when history says so. |
 
 Each entry in `jobs`:
 
 | Key | Type | Notes |
 | --- | --- | --- |
 | `name`, `after` | | As for a run. |
-| `runArgv` | array of string | The job's equivalent `lanq run` command line (`"lanq", "run", ...`), exactly as it expands and is checked. |
+| `runArgv` | array of string | The job's equivalent `lanq run` command line (`"lanq", "run", ...`), exactly as it expands and is checked: with `--on`/`--size`/`--min-size` narrowing (0.10.0), the narrowed line; with `--fetch-dir`/`--fetch-max`/`--fetch-max-files`, a fetching job's line carries them. |
 | `runCommand` | string or null | The same as one line for bash and PowerShell; `null` when an argument cannot be written safely for both. |
 | `start` | string | `now` (first wave), `waits_for_plan` (first wave, but every slot it could use is taken by this plan's own jobs) or `after` (it has `after:` jobs). |
 | `status` | string | `WouldRun`, `WouldWait` (behind this plan's own jobs), `Pending` (starts after other jobs; not probed) or `NoCapacity`. |
@@ -836,10 +846,12 @@ shows local time.
    "timing":{"runsUsed":10,"workMinutes":10.7,"overheadSeconds":30,"suggestedShards":null}},
   {"command":"dotnet test","dir":null,"runs":40,"jobs":40,"completed":36,"failed":4,"other":0,"medianSeconds":95.2,"p90Seconds":130.5,
    "lastRunUtc":"2026-10-30T18:12:44Z","lastShards":null,"timing":null}],
+ "planJobs":[{"planFile":"/home/me/src/app/lanq.yml","job":"integration","runs":12,"completed":10,"failed":2,"other":0,
+   "medianSeconds":1210.4,"p90Seconds":1388.0,"lastRunUtc":"2026-11-08T21:40:05Z","lastShards":2}],
  "nextSteps":[{"action":"none","reason":"lanq stats only reads the local job log; nothing to do","safeToRunUnattended":false}]}
 ```
 
-Every key is always there except `commandsMore`.
+Every key is always there except `commandsMore` and `planJobsMore`.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -873,7 +885,18 @@ Every key is always there except `commandsMore`.
 | `commands[].timing.overheadSeconds` | number | Per shard: wall-clock minus the command's own run time, one decimal. |
 | `commands[].timing.suggestedShards` | number or null | With `lanq stats --target-minutes M`: the shards M needs on a machine of speed factor 1, before any free-slot cap. `null` without `--target-minutes`, or when the per-shard overhead leaves less than a tenth of M for the work. |
 | `commandsMore` | number | Conditional: only when there are more than 500 commands; how many more. |
+| `planJobs` | array | 0.10.0, always there (empty without plan runs): one entry per plan file and job name, newest first (by its newest run's start); at most 500. Baseline reruns are left out. |
+| `planJobs[].planFile` | string or null | The plan file's full path on this computer, as recorded in `jobs.jsonl`. Clones of one repository in different folders are separate entries; on Windows paths are compared ignoring case (the newest run's spelling is shown). `null` for records written before 0.10.0. |
+| `planJobs[].job` | string | The job's name in `lanq.yml`. |
+| `planJobs[].runs` | number | Plan runs (`planRun`): every shard and retried attempt of one plan run is one run. |
+| `planJobs[].completed`, `.failed`, `.other` | number | Runs in which all N shards were recorded and each one's last attempt completed (a run missing a shard, cancelled by `--fail-fast` or Ctrl+C, is other); in which one failed (its own exit code); the rest (timed out, infrastructure error, ...). |
+| `planJobs[].medianSeconds`, `.p90Seconds` | number or null | Of the completed runs' wall time, from the first start to the last end (nearest rank, one decimal); `null` when none completed. |
+| `planJobs[].lastRunUtc` | string | When its newest run started. |
+| `planJobs[].lastShards` | number | The newest run's shard count (1 for a single job). |
+| `planJobsMore` | number | Conditional: only when there are more than 500 plan jobs; how many more. |
 | `nextSteps` | array | `Ok`: `none`. stats never suggests a command. `Rejected`: `fix_command`; `InfraError`: `ask_developer`; `Cancelled`: `none`. |
+
+In text mode a "Plan jobs" table follows the commands (the newest 20) when the log has plan runs.
 
 On `Rejected`, `InfraError` and `Cancelled` the object has the same keys, with zeros, `null` and empty lists. Exit 70
 means the job log exists but could not be read (permissions, or another program holds it locked); without `--json`
@@ -974,7 +997,7 @@ What lanq suggests, by result:
 | run `TimedOut` | `fix_code` + `retry` with double the `--timeout` |
 | run `WindowClosed` | `wait` |
 | `--shards` | by the overall status as above; `Failed` lists each failing shard and its log; lost connections: `retry` with `--shard-retries 1` |
-| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log and, with `baseline: true`, its verdict; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); `env:` values too long for every Windows machine left: `ask_developer` ("...; ask the developer: they can shorten or drop that job's env: values in lanq.yml, or change machines.yml"); an `env:` name on the deny table: `ask_developer` ("this variable can never be set by a job; the developer drops it from that job's env: in lanq.yml (...)"); an `env:` clash on every machine: `ask_developer` ("ask the developer: they can drop NAME from that job's env: in lanq.yml, or remove it from the env of build-01 in machines.yml") + `run_health`; a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `WindowClosed`: `wait` with `--only` |
+| `--plan` | `Completed`, `Cancelled`: `none`; `Failed`: `fix_code` naming each failed job (and failing shard) with its log and, with `baseline: true`, its verdict; a bad `lanq.yml`: `fix_code` (`fix lanq.yml: ...`); `env:` values too long for every Windows machine left: `ask_developer` ("...; ask the developer: they can shorten or drop that job's env: values in lanq.yml, or change machines.yml"); an `env:` name on the deny table: `ask_developer` ("this variable can never be set by a job; the developer drops it from that job's env: in lanq.yml (...)"); an `env:` clash on every machine: `ask_developer` ("ask the developer: they can drop NAME from that job's env: in lanq.yml, or remove it from the env of build-01 in machines.yml") + `run_health`; a job not allowlisted: `ask_developer`; bad arguments: `fix_command`; `NoCapacity` retryable: `wait` (the same plan with `--only` set to the jobs that did not complete, and `--wait 120`) + `run_health` for the deciding job; `NoCapacity` permanent: `ask_developer` + `run_health`; `NoCapacity` because `--on`/`--size`/`--min-size` left a job no machine (0.10.0): `ask_developer` ("...; never edit lanq.yml to widen a job") + `fix_command` (the same plan with `--only` replaced by the jobs that can still run, never one that starts after a narrowed-out job; the reason names the jobs left out; `safeToRunUnattended` is `false`, except for a `--dry-run`); a lost connection: `retry` with `--only`; `TimedOut`: `fix_code` (raise `timeout:` for that job in `lanq.yml`); `TimedOut` with `planTimedOut` (0.10.0): `fix_code` ("plan_timeout N min was reached before the plan ended (...); ... if the plan is only slow, raise plan_timeout in lanq.yml or pass --plan-timeout (the developer decides)"), never a command; `WindowClosed`: `wait` with `--only` |
 | `--plan --dry-run` | `WouldRun`: `proceed`; otherwise as for the plan, without `--only` edits |
 | dry run `WouldRun` | `proceed` |
 | dry run `NoCapacity`, retryable | `wait` (the same dry run, later) + `run_health` |

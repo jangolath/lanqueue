@@ -17,7 +17,8 @@
   3. A throwaway repository (fixed author, committer and dates, so its repo id is stable) runs the scenarios: normal
      runs on each OS, refusals (not allowlisted, an env name not allowed, a secret in --env, a secret in a -diff file),
      env values byte-exact, exclusive, baseline new and preexisting, --shards 2, a plan (run and dry run), the 0.10
-     items (when this binary has them), and no leftover slots. Every job runs with --timeout 5; every lanq call is
+     items when this binary has them (--plan-timeout 1 gives TimedOut 124, --on narrows every plan job, and a narrowing
+     that leaves a job no machine is NoCapacity 75 with a rerun --only), and no leftover slots. Every job runs with --timeout 5; every lanq call is
      stopped after 15 minutes.
   4. Prints a PASS/FAIL/SKIP/N/A table. N/A: the smoke config has no machine of that kind (it never fails). SKIP: the
      scenario could run but did not (a machine down); it fails the smoke unless -AllowSkip. A configured machine that is
@@ -744,12 +745,52 @@ switch ($Mode) {
         'Completed; dry run WouldRun'
     }
 
-    # 8. 0.10.0 items, when this binary has them (probed: a dry-run binary's version is 0.0.0-dryrun.N).
+    # 8. 0.10.0 items, when this binary has them (probed: a dry-run binary's version is 0.0.0-dryrun.N). Each writes an untracked
+    #    lanq.yml (the root commit stays fixed) and removes it again.
     $probe = Lanq @('run', '--plan', '--dry-run', '--json', '--no-wake', '--plan-timeout', '1')
     if ($probe.Stdout -match 'plan-timeout' -and $probe.Code -eq 2) {
         Add-Result '8 plan timeout, --on narrowing' 'N/A' 'this binary has no --plan-timeout (before 0.10.0)'
     } else {
-        Add-Result '8 plan timeout, --on narrowing' 'FAIL' 'this binary has --plan-timeout, but the scenario is not written yet'
+        $cmd8 = $(if ($main) { ((Check $mainOs) | ForEach-Object { "`"$_`"" }) -join ', ' } else { '' })
+
+        # 8a. --plan-timeout 1: the job still running after a minute is stopped and cleaned up; the plan is TimedOut 124.
+        OnMachine '8a plan timeout' $main 'machine' {
+            [void](Write-SmokeFile 'repo/lanq.yml' ("version: 1`ndefaults:`n  needs: [$mainOs]`n  timeout: 5`njobs:`n  slow:`n    command: [$cmd8, run, `"150`", `"0`", slow]`n"))
+            try {
+                $j = Assert-LanqResult (Lanq @('run', '--plan', '--plan-timeout', '1', '--on', $main, '--json', '--no-wake', '--wait', '300')) 124 'TimedOut'
+                if ($j.planTimedOut -ne $true -or $j.planTimeoutMinutes -ne 1) { throw "planTimedOut $($j.planTimedOut), planTimeoutMinutes $($j.planTimeoutMinutes)" }
+                $slow = @($j.jobs)[0]
+                if ($slow.status -ne 'TimedOut' -or $slow.exitCode -ne 124) { throw "job slow ended $($slow.status) $($slow.exitCode)" }
+                if (-not $slow.message.StartsWith('plan_timeout 1 min reached', [StringComparison]::Ordinal)) { throw "job slow: $($slow.message)" }
+            } finally { Remove-SmokeFile 'repo/lanq.yml' }
+            'TimedOut 124, the job cleaned up'
+        }
+
+        # 8b. --on narrows every job to the machine named, never widening one.
+        OnMachine '8b --on narrowing' $main 'machine' {
+            [void](Write-SmokeFile 'repo/lanq.yml' ("version: 1`ndefaults:`n  needs: [$mainOs]`n  timeout: 5`njobs:`n  one:`n    command: [$cmd8, run, `"1`", `"0`", one]`n" +
+                "  two:`n    command: [$cmd8, run, `"1`", `"0`", two]`n"))
+            try {
+                $j = Assert-LanqResult (Lanq @('run', '--plan', '--on', $main, '--json', '--no-wake', '--wait', '300')) 0 'Completed'
+                $elsewhere = @($j.jobs | Where-Object { $_.machine -ne $main })
+                if ($elsewhere.Count -gt 0) { throw "jobs not on the narrowed machine: $(($elsewhere | ForEach-Object { $_.name }) -join ', ')" }
+            } finally { Remove-SmokeFile 'repo/lanq.yml' }
+            'every job on the named machine'
+        }
+
+        # 8c. A narrowing that leaves a job no machine fails closed before the snapshot, and the rerun's --only lists the others.
+        OnMachine '8c narrowing fails closed' $main 'machine' {
+            [void](Write-SmokeFile 'repo/lanq.yml' ("version: 1`ndefaults:`n  needs: [$mainOs]`n  timeout: 5`njobs:`n  big:`n    command: [$cmd8, run, `"1`", `"0`", big]`n    min_size: heavy`n" +
+                "  small:`n    command: [$cmd8, run, `"1`", `"0`", small]`n"))
+            try {
+                $j = Assert-LanqResult (Lanq @('run', '--plan', '--size', 'light', '--json', '--no-wake')) 75 'NoCapacity'
+                if ($j.retryable -ne $false) { throw "retryable $($j.retryable)" }
+                if (@($j.jobs | Where-Object { $_.jobId }).Count -gt 0) { throw 'a job ran' }
+                $rerun = @($j.nextSteps | Where-Object { $_.action -eq 'fix_command' })[0]
+                if (-not $rerun -or (@($rerun.argv) -join ' ') -notmatch '--only small') { throw "no rerun with --only small: $(@($j.nextSteps | ForEach-Object { $_.action }) -join ', ')" }
+            } finally { Remove-SmokeFile 'repo/lanq.yml' }
+            'NoCapacity 75, rerun --only small'
+        }
     }
 
     # 9. Leftover slots: lanq unlock on each smoke machine (removes only slots past their deadline), then a read-only list.
