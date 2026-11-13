@@ -108,8 +108,8 @@ public sealed class PlanProgress(string holders = "this plan's other jobs")
 /// </summary>
 /// <remarks>
 /// One state, changed atomically, decides why the plan stopped, so records and the plan's status agree: Open, Expired (the limit came first),
-/// Held (--fail-fast or an error stopped the jobs first: the limit waits until the baselines start, see <see cref="Release"/>) or Closed (the
-/// plan ended first: the limit can no longer be reached).
+/// Held (--fail-fast or an error stopped the jobs first), HeldDue (held, and the limit came meanwhile: <see cref="Release"/> applies it,
+/// synchronously, before any baseline starts) or Closed (the plan ended first: the limit can no longer be reached).
 /// </remarks>
 public sealed class PlanDeadline(int minutes)
 {
@@ -117,8 +117,8 @@ public sealed class PlanDeadline(int minutes)
     private const int ExpiredState = 1;
     private const int Closed = 2;
     private const int Held = 3;
+    private const int HeldDue = 4;
 
-    private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _state;
     private int _running;
 
@@ -128,27 +128,43 @@ public sealed class PlanDeadline(int minutes)
     /// <summary>True once the limit was reached first (set before anything is cancelled); never after --fail-fast stopped the jobs or the plan ended.</summary>
     public bool Expired => Volatile.Read(ref _state) == ExpiredState;
 
-    /// <summary>Whether the plan is held (for the timer: wait for <see cref="Released"/>, then try again).</summary>
-    internal bool IsHeld => Volatile.Read(ref _state) == Held;
-
-    /// <summary>Completes when a hold is released.</summary>
-    internal Task Released => _released.Task;
-
     /// <summary>The limit is reached: true when it came first (the caller then says so and cancels the plan), false when the plan was already stopped or ended.</summary>
     internal bool TryExpire() => Interlocked.CompareExchange(ref _state, ExpiredState, Open) == Open;
 
     /// <summary>--fail-fast (or an error) stops the plan's jobs: true when it came first, so the jobs it stops are not TimedOut; false when the limit did.</summary>
     internal bool Hold() => Interlocked.CompareExchange(ref _state, Held, Open) == Open;
 
-    /// <summary>The jobs have all ended after a hold: the limit applies again (to the baselines); one already due is reached at once.</summary>
-    internal void Release()
+    /// <summary>The limit came while the plan was held: true when it was held (the limit is now due, for <see cref="Release"/> to apply).</summary>
+    internal bool MarkDue() => Interlocked.CompareExchange(ref _state, HeldDue, Held) == Held;
+
+    /// <summary>
+    /// The jobs have all ended after a hold, and the baselines may start: the limit applies again. True when it already came during the hold:
+    /// the deadline is now expired, and the caller cancels the plan BEFORE any baseline starts.
+    /// </summary>
+    internal bool Release()
     {
+        if (Interlocked.CompareExchange(ref _state, ExpiredState, HeldDue) == HeldDue)
+        {
+            return true;
+        }
+
         Interlocked.CompareExchange(ref _state, Open, Held);
-        _released.TrySetResult();
+        return false;
     }
 
     /// <summary>The plan ended: the limit can no longer be reached. False when it already was.</summary>
-    internal bool Close() => Interlocked.CompareExchange(ref _state, Closed, Open) == Open || Interlocked.CompareExchange(ref _state, Closed, Held) == Held;
+    internal bool Close()
+    {
+        foreach (var from in new[] { Open, Held, HeldDue })
+        {
+            if (Interlocked.CompareExchange(ref _state, Closed, from) == from)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>How many jobs of the plan are started and not ended (for the line printed on expiry).</summary>
     public int Running
@@ -165,6 +181,10 @@ public sealed class PlanDeadline(int minutes)
 
     /// <summary>A job that had not started (behind after: or the stagger).</summary>
     public const string NotStartedMessage = "not started: plan_timeout reached";
+
+    /// <summary>The line lanq prints when the limit comes while --fail-fast (or an error) is already stopping the jobs.</summary>
+    public string HeldLine => string.Create(
+        CultureInfo.InvariantCulture, $"[lanq] plan_timeout: {minutes} min reached while the jobs were already being stopped (--fail-fast or an error); no baseline rerun will start");
 
     /// <summary>The line lanq prints when the limit is reached (started jobs: some may still be waiting for a slot).</summary>
     public string ReachedLine => string.Create(CultureInfo.InvariantCulture, $"[lanq] plan_timeout: {minutes} min reached; stopping {Running} started job(s)");
@@ -331,7 +351,17 @@ public sealed partial class JobRunner
                 var result = await DispatchPlan(ordered, failFast, prepared, planRun, ct, plan.Token, deadline, closeAtEnd: bases.Count == 0).ConfigureAwait(false);
                 if (bases.Count > 0)
                 {
-                    deadline?.Release(); // after --fail-fast, the limit applies again to the baselines
+                    // After --fail-fast the limit applies again to the baselines. One that came during the hold is applied here, before any
+                    // baseline starts (unless Ctrl+C came: then the plan is the user's, not the limit's).
+                    if (ct.IsCancellationRequested)
+                    {
+                        deadline?.Close();
+                    }
+                    else if (deadline?.Release() == true)
+                    {
+                        await plan.CancelAsync().ConfigureAwait(false);
+                    }
+
                     result = await WithPlanBaselinesAsync(ordered, result, bases, planRun, prepared.Payload, plan.Token, deadline).ConfigureAwait(false);
                 }
 
@@ -367,32 +397,21 @@ public sealed partial class JobRunner
             return;
         }
 
-        while (true)
+        if (stop.IsCancellationRequested || user.IsCancellationRequested)
         {
-            if (stop.IsCancellationRequested || user.IsCancellationRequested)
+            return;
+        }
+
+        if (!deadline.TryExpire())
+        {
+            // --fail-fast (or an error) is stopping the jobs: the limit is now due, and Release applies it before any baseline starts. Ended
+            // (Closed): nothing to do.
+            if (deadline.MarkDue())
             {
-                return;
+                output(deadline.HeldLine);
             }
 
-            if (deadline.TryExpire())
-            {
-                break;
-            }
-
-            if (!deadline.IsHeld)
-            {
-                return; // the plan ended first
-            }
-
-            try
-            {
-                // --fail-fast stopped the jobs first: the limit is reached as soon as the baselines start, if any do.
-                await deadline.Released.WaitAsync(stop).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
+            return;
         }
 
         output(deadline.ReachedLine);

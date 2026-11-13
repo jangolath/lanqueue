@@ -17,10 +17,11 @@ public sealed partial class PlanFileRunTests
     /// length may be asked for (the plan timer's), so the stub can never fire anything else.
     /// </summary>
     private async Task<(int Code, string Stdout, string Stderr)> RunTimed(
-        PoolSsh ssh, IPayloadBuilder payloads, TaskCompletionSource fire, string[] args, int minutes = 1, string fleet = Fleet, CancellationToken ct = default)
+        PoolSsh ssh, IPayloadBuilder payloads, TaskCompletionSource fire, string[] args, int minutes = 1, string fleet = Fleet, CancellationToken ct = default,
+        LockedWriter? stderr = null)
     {
         var o = new StringWriter();
-        var e = new StringWriter();
+        var e = stderr ?? new LockedWriter();
         var timers = 0;
         var code = await Cli.RunPlanFile(
             ParsedArgs.Parse(["run", .. args]), ConfigLoader.Parse(fleet), ssh, payloads, new HealthProbe(ssh, TimeProvider.System), Log, Home, Repo, o, e, ct,
@@ -36,6 +37,73 @@ public sealed partial class PlanFileRunTests
             });
         Assert.Equal(1, timers); // only the plan timer waited this long
         return (code, o.ToString(), e.ToString());
+    }
+
+    /// <summary>A StringWriter a test may read while lanq still writes to it (each write and each read under one lock).</summary>
+    internal sealed class LockedWriter : StringWriter
+    {
+        private readonly Lock _gate = new();
+
+        public string Text
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return base.ToString();
+                }
+            }
+        }
+
+        public override void Write(char value)
+        {
+            lock (_gate)
+            {
+                base.Write(value);
+            }
+        }
+
+        public override void Write(string? value)
+        {
+            lock (_gate)
+            {
+                base.Write(value);
+            }
+        }
+
+        public override void Write(char[] buffer, int index, int count)
+        {
+            lock (_gate)
+            {
+                base.Write(buffer, index, count);
+            }
+        }
+
+        public override void Write(ReadOnlySpan<char> buffer)
+        {
+            lock (_gate)
+            {
+                base.Write(buffer);
+            }
+        }
+
+        public override void WriteLine(string? value)
+        {
+            lock (_gate)
+            {
+                base.WriteLine(value);
+            }
+        }
+
+        public override void WriteLine(ReadOnlySpan<char> buffer)
+        {
+            lock (_gate)
+            {
+                base.WriteLine(buffer);
+            }
+        }
+
+        public override string ToString() => Text;
     }
 
     /// <summary>Every job blocks on its machine until it is cancelled (Ctrl+C, --fail-fast or --plan-timeout).</summary>
@@ -437,11 +505,12 @@ public sealed partial class PlanFileRunTests
             },
         };
         var fire = new TaskCompletionSource();
+        var err = new LockedWriter();
 
-        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--plan-timeout", "1", "--json"]);
+        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--plan-timeout", "1", "--json"], stderr: err);
         Assert.True(inCleanup.Wait(TimeSpan.FromSeconds(30)));
         fire.SetResult();
-        await Task.Delay(200);
+        await Until(() => err.Text.Contains("min reached; stopping 1 started job(s)", StringComparison.Ordinal)); // the limit came first
         release.Set();
         var (code, stdout, stderr) = await run;
 
@@ -475,28 +544,34 @@ public sealed partial class PlanFileRunTests
         // Cleanups that start after lint is recorded: lint's own cleanup runs before its record is written, so it never counts here; only
         // a job --fail-fast stopped does.
         var stoppedCleanups = 0;
+        using var release = new ManualResetEventSlim();
         var ssh = new PoolSsh
         {
             OnExecute = async (e, c) => JobOf(e) == "lint" ? await failLint.Task.ContinueWith(_ => e.Exit(3), TaskScheduler.Default) : await Hang(e, c),
             OnCleanup = _ =>
             {
+                // A stopped job's cleanup (lint's own runs before its record is written) holds until the test lets it go.
                 if (Log.ReadAll().Any(r => r.PlanJob == "lint"))
                 {
                     Interlocked.Increment(ref stoppedCleanups);
+                    release.Wait(TimeSpan.FromSeconds(30));
                 }
 
                 return new SshResult(0, "");
             },
         };
         var fire = new TaskCompletionSource();
+        var err = new LockedWriter();
 
-        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"]);
+        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"], stderr: err);
         await Until(() => ssh.Executes.Count == 3);
         failLint.SetResult();
 
-        // A stopped job's cleanup shows --fail-fast has stopped the others (it holds the deadline before it cancels anything). Then the limit comes.
+        // --fail-fast is stopping the others (it holds the deadline before it cancels anything); then the limit comes, during the hold.
         await Until(() => Volatile.Read(ref stoppedCleanups) >= 1);
         fire.SetResult();
+        await Until(() => err.Text.Contains("reached while the jobs were already being stopped", StringComparison.Ordinal));
+        release.Set();
         var (code, stdout, stderr) = await run;
 
         Assert.Equal(3, code);
@@ -508,7 +583,7 @@ public sealed partial class PlanFileRunTests
         Assert.Equal("Cancelled", jobs["unit"].GetProperty("status").GetString());
         Assert.StartsWith("cancelled by --fail-fast", jobs["unit"].GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.DoesNotContain(Log.ReadAll(), r => r.Status == "TimedOut");
-        Assert.DoesNotContain("min reached", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("stopping", stderr, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -563,13 +638,14 @@ public sealed partial class PlanFileRunTests
     {
         var (ssh, payloads, failBuild, inHold, release) = HeldByFailFast();
         var fire = new TaskCompletionSource();
+        var err = new LockedWriter();
 
-        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"]);
+        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"], stderr: err);
         await Until(() => ssh.Executes.Count == 2);
         failBuild.SetResult();
         Assert.True(inHold.Wait(TimeSpan.FromSeconds(30)));
         fire.SetResult(); // due while held: nothing is stopped as TimedOut
-        await Task.Delay(200);
+        await Until(() => err.Text.Contains("reached while the jobs were already being stopped", StringComparison.Ordinal));
         release.Set();
         var (code, stdout, stderr) = await run;
 
@@ -582,8 +658,9 @@ public sealed partial class PlanFileRunTests
         Assert.StartsWith("cancelled by --fail-fast", jobs["unit"].GetProperty("message").GetString(), StringComparison.Ordinal);
         var baseline = jobs["build"].GetProperty("baseline");
         Assert.Equal("inconclusive", baseline.GetProperty("verdict").GetString());
-        Assert.Contains("plan_timeout reached", baseline.GetProperty("message").GetString(), StringComparison.Ordinal);
-        Assert.Contains("[lanq] plan_timeout: 1 min reached", stderr, StringComparison.Ordinal);
+        Assert.EndsWith("inconclusive: plan_timeout reached before it started", baseline.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(ssh.Executes, e => payloads.IsBase(ssh, e)); // applied at release, before any baseline started
+        Assert.Contains("[lanq] plan_timeout: 1 min reached while the jobs were already being stopped", stderr, StringComparison.Ordinal);
         Assert.DoesNotContain(Log.ReadAll(), r => r.PlanJob == "unit"); // a job --fail-fast cancelled is not recorded
     }
 
@@ -594,13 +671,14 @@ public sealed partial class PlanFileRunTests
         var (ssh, payloads, failBuild, inHold, release) = HeldByFailFast();
         var fire = new TaskCompletionSource();
         using var cts = new CancellationTokenSource();
+        var err = new LockedWriter();
 
-        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"], ct: cts.Token);
+        var run = RunTimed(ssh, payloads, fire, ["--plan", "--fail-fast", "--plan-timeout", "1", "--json"], ct: cts.Token, stderr: err);
         await Until(() => ssh.Executes.Count == 2);
         failBuild.SetResult();
         Assert.True(inHold.Wait(TimeSpan.FromSeconds(30)));
-        fire.SetResult(); // the timer now waits for the hold to end
-        await Task.Delay(200);
+        fire.SetResult(); // the limit is now due, held
+        await Until(() => err.Text.Contains("reached while the jobs were already being stopped", StringComparison.Ordinal));
         await cts.CancelAsync();
         release.Set();
         var (code, stdout, stderr) = await run;
@@ -609,7 +687,8 @@ public sealed partial class PlanFileRunTests
         var json = Json(stdout);
         Assert.Equal("Cancelled", json.GetProperty("status").GetString());
         Assert.False(json.TryGetProperty("planTimedOut", out _));
-        Assert.DoesNotContain("min reached", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("stopping", stderr, StringComparison.Ordinal);
         Assert.DoesNotContain(ssh.Executes, e => payloads.IsBase(ssh, e)); // nothing reran after Ctrl+C
+        Assert.Contains("cancelled (Ctrl+C)", JobsOf(json)["build"].GetProperty("baseline").GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 }
