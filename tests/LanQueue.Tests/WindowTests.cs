@@ -501,7 +501,7 @@ public sealed class WindowTests : IDisposable
         Assert.Equal(75, r.CliExitCode);
         Assert.Contains("window closing", r.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(calls, c => c.Contains("Set-Content -LiteralPath $pf", StringComparison.Ordinal)); // Execute never ran
-        Assert.Contains(calls, c => c.Contains("locks/slot-1", StringComparison.Ordinal)); // the slot was cleaned up
+        Assert.Contains(calls, c => c.Contains("foreach($n in @(1))", StringComparison.Ordinal)); // the slot was cleaned up
     }
 
     private sealed class SteppingClock(DateTimeOffset start) : TimeProvider
