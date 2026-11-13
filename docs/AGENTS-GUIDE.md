@@ -168,6 +168,11 @@ it is: the agent never changes a worker's permissions or ACLs, and never suggest
   raises `--fetch-max` or `--fetch-max-files` and never picks a `--fetch-dir` the developer did not name. With no
   plan-wide total, a plan can write up to the fetching jobs times the per-job limit (6.4 GB for 32 jobs at the
   defaults).
+- `scripts/docker-linux-worker/setup.ps1` sets up a Linux worker in a Docker container on the developer's PC
+  ([docs/WORKERS.md](WORKERS.md#a-linux-worker-in-docker-on-your-own-pc)). It makes a key and edits `~/.ssh/config`,
+  so the developer runs it. Its `-Register` step edits `machines.yml` and refuses in an agent's environment unless
+  `-OwnerApproved`, which an agent passes only when the developer has said so in that session. A job on that worker
+  is a heavy job on the developer's own PC.
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.
 - `lanq makeready`, `lanq wake` and `lanq unlock` act on a PC that may belong to someone else. They stay with you.
   The one exception is lanq's release smoke (`scripts/smoke-workers.ps1`), which runs `lanq unlock` on its smoke

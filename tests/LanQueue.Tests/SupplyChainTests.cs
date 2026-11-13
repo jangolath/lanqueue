@@ -286,6 +286,16 @@ public sealed partial class SupplyChainTests
         Assert.Matches(@"^ubuntu:18\.04@sha256:[0-9a-f]{64}$", Scalar(Map(Map(jobs, "smoke"), "env"), "OLD_DISTRO"));
     }
 
+    /// <summary>Dependabot has no docker ecosystem here, so the Docker worker's base image moves only by a deliberate digest bump.</summary>
+    [Fact]
+    public void DockerWorkerBaseImageIsPinnedByDigest()
+    {
+        var dockerfile = File.ReadAllLines(Path.Combine(Root, "scripts", "docker-linux-worker", "Dockerfile"));
+        var froms = dockerfile.Where(l => l.TrimStart().StartsWith("FROM ", StringComparison.OrdinalIgnoreCase)).ToList();
+        Assert.Single(froms);
+        Assert.Matches(@"^FROM mcr\.microsoft\.com/dotnet/sdk:10\.0-noble@sha256:[0-9a-f]{64}$", froms[0].Trim());
+    }
+
     [Fact]
     public void CiPublishesAndSmokesANativeBinaryOnEveryPullRequest()
     {

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A Linux worker in Docker on your own PC.** `scripts/docker-linux-worker/` holds a `Dockerfile`, an entrypoint, an
+  sshd drop-in and `setup.ps1`. The image is the .NET 10 SDK on Ubuntu 24.04, pinned by digest (runtime 10.0.15), plus
+  sshd and git, with key-only login as `lanq`. `setup.ps1`:
+  - makes the key, the host key and a private ssh config entry with an `Include` at the top of `~/.ssh/config`;
+  - runs the container on `127.0.0.1` only, with `restrict` on the key, 8 GB, 4 CPUs (with a matching cpuset) and
+    `--restart unless-stopped`;
+  - checks the result with `ssh -G` and one login.
+
+  A separate `-Register` step, run by the owner, adds the machine (`size: medium`, `max_jobs: 1`) to `machines.yml`
+  and `machines.smoke.yml`. It keeps the change only when `lanq doctor --remote` passes for the machine. See
+  docs/WORKERS.md, "A Linux worker in Docker on your own PC", for what it proves and what it does not.
+- A test checks that the Docker worker's base image is pinned by digest.
+
 ## 0.10.0 (2026-11-13)
 
 ### Added
