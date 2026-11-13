@@ -464,17 +464,62 @@ public sealed class BaselineReviewTests : IDisposable
 
         foreach (var name in new[] { "main", "release", "v1.0", "origin/main", "refs/heads/main" })
         {
-            Assert.True(await BaseRef.IsBranchOrTagAsync(repo.Dir, name, ct), name);
+            Assert.NotNull((await BaseRef.BranchOrTagAsync(repo.Dir, name, ct)).FullRef);
         }
 
         foreach (var name in new[] { c1, c1[..7], "HEAD", "HEAD~1", "main~1", "main^", "v1.0^{}", "main@{1}", "-main", "no-such", "main..release", ":/two" })
         {
-            Assert.False(await BaseRef.IsBranchOrTagAsync(repo.Dir, name, ct), name);
+            var refused = await BaseRef.BranchOrTagAsync(repo.Dir, name, ct);
+            Assert.Null(refused.FullRef);
+            Assert.Equal(BaseRef.PlanRefMessage, refused.Error);
         }
 
         // The command line still takes a commit.
         var bySha = await BaseRef.ResolveAsync(repo.Dir, c1, ct);
         Assert.Equal(c1, bySha.Base!.Sha);
+    }
+
+    /// <summary>
+    /// The check returns the exact full ref, and that is what is resolved: a tag whose name is 40 hex digits (here the id of another commit)
+    /// is the tag, a name that is both a branch and a tag is refused with the two full refs, and a full ref is taken as written.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task TheCheckedFullRefIsWhatIsResolved()
+    {
+        var repo = new TempRepo();
+        _owned.Add(repo);
+        var c1 = repo.Git("rev-parse", "HEAD").Trim();
+        var c2 = repo.Commit("b.txt", "b", "two");
+        repo.Git("tag", c2, c1); // a tag named like c2's id, pointing at c1
+        repo.Git("branch", "rel", c1);
+        repo.Git("tag", "rel", c1);
+        var ct = CancellationToken.None;
+
+        Assert.Equal("refs/tags/" + c2, (await BaseRef.BranchOrTagAsync(repo.Dir, c2, ct)).FullRef);
+        var both = await BaseRef.BranchOrTagAsync(repo.Dir, "rel", ct);
+        Assert.Null(both.FullRef);
+        Assert.Equal("baseline_ref rel is both a branch and a tag; write refs/heads/rel or refs/tags/rel", both.Error);
+        Assert.Equal("refs/heads/rel", (await BaseRef.BranchOrTagAsync(repo.Dir, "refs/heads/rel", ct)).FullRef);
+        Assert.Equal("refs/tags/rel", (await BaseRef.BranchOrTagAsync(repo.Dir, "refs/tags/rel", ct)).FullRef);
+        Assert.Null((await BaseRef.BranchOrTagAsync(repo.Dir, "refs/heads/nope", ct)).FullRef);
+        Assert.Null((await BaseRef.BranchOrTagAsync(repo.Dir, "refs/lanq/x", ct)).FullRef);
+
+        // Through a plan: the 40-hex tag resolves to the tag's commit (c1), never to the object c2; it is shown as written.
+        var (runner, ssh, payloads, _) = Pool();
+        payloads.Resolution = null; // the real resolution
+        ssh.OnExecute = (e, _) => Task.FromResult(e.Exit(payloads.IsBase(ssh, e) ? 0 : 2));
+        var r = await runner.RunPlanAsync([new PlanJobSpec("x", Npm() with { RepoDir = repo.Dir, BaselineRef = c2 }, null, [])], false, ct);
+        var b = Assert.Single(r.Jobs).Baseline!;
+        Assert.Equal(c1, b.Sha);
+        Assert.Equal(c2, b.Ref);
+        Assert.Contains($"({c2})", b.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("refs/tags/", b.Message, StringComparison.Ordinal);
+
+        // The ambiguous name refuses the plan before anything is sent, with that message.
+        var refused = await runner.RunPlanAsync([new PlanJobSpec("x", Npm() with { RepoDir = repo.Dir, BaselineRef = "rel" }, null, []) { Where = "lanq.yml: job 'x' (line 3)" }], false, ct);
+        Assert.Equal("Rejected", refused.Status);
+        Assert.Equal("lanq.yml: job 'x' (line 3): baseline_ref rel is both a branch and a tag; write refs/heads/rel or refs/tags/rel", refused.Message);
+        Assert.Equal(RejectKind.PlanFile, refused.RejectKind);
     }
 
     /// <summary>lanq.yml's baseline_ref naming a commit refuses the plan before anything is sent; a branch name runs.</summary>

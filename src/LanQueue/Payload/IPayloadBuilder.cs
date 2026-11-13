@@ -69,6 +69,6 @@ public interface IPayloadBuilder
     /// </summary>
     Task<bool> IsAncestorAsync(string repoDir, string ancestor, string descendant, CancellationToken ct) => Task.FromResult(false);
 
-    /// <summary>Whether <paramref name="name"/> names a branch or tag (<see cref="BaseRef.IsBranchOrTagAsync"/>): lanq.yml's baseline_ref must.</summary>
-    Task<bool> IsBranchOrTagAsync(string repoDir, string name, CancellationToken ct) => BaseRef.IsBranchOrTagAsync(repoDir, name, ct);
+    /// <summary>The exact branch or tag <paramref name="name"/> names, as a full ref (<see cref="BaseRef.BranchOrTagAsync"/>): lanq.yml's baseline_ref must name one.</summary>
+    Task<NamedRef> BranchOrTagAsync(string repoDir, string name, CancellationToken ct) => BaseRef.BranchOrTagAsync(repoDir, name, ct);
 }

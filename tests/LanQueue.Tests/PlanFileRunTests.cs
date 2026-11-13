@@ -379,7 +379,13 @@ public sealed partial class PlanFileRunTests : IDisposable
         var stderrLines = new LineSignal(Waiting);
         var run = Run(ssh, new RunnerTests.FakePayloads(""), ["--plan", "--json", "--wait", "0"], fleet: Solo, stderr: stderrLines);
         await firstRuns.Task;
-        await stderrLines.Seen;
+        if (!await stderrLines.WaitAsync(TimeSpan.FromSeconds(30)))
+        {
+            release.SetResult(); // let the run end, so the failure below is the only one
+            await run;
+            Assert.Fail("the waiting line was never written; stderr so far:\n" + stderrLines);
+        }
+
         release.SetResult();
         var (code, stdout, stderr) = await run;
 
@@ -390,25 +396,78 @@ public sealed partial class PlanFileRunTests : IDisposable
         Assert.Equal("Completed", Json(stdout).GetProperty("status").GetString());
     }
 
-    /// <summary>A StringWriter whose <see cref="Seen"/> completes once a line containing <paramref name="text"/> is written (from any thread).</summary>
+    /// <summary>
+    /// A StringWriter that notices once <paramref name="text"/> has been written, by any write path (a line, a string, chars, spans; sync or
+    /// async) from any thread: after each write it looks at everything written so far.
+    /// </summary>
     private sealed class LineSignal(string text) : StringWriter
     {
         private readonly TaskCompletionSource _seen = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly Lock _gate = new();
 
-        public Task Seen => _seen.Task;
-
-        public override void WriteLine(string? value)
+        /// <summary>True once the text was written; false when <paramref name="timeout"/> passed first.</summary>
+        public async Task<bool> WaitAsync(TimeSpan timeout)
         {
-            lock (_gate)
+            try
             {
-                base.WriteLine(value);
+                await _seen.Task.WaitAsync(timeout);
+                return true;
             }
+            catch (TimeoutException)
+            {
+                return false;
+            }
+        }
 
-            if (value?.Contains(text, StringComparison.Ordinal) == true)
-            {
-                _seen.TrySetResult();
-            }
+        public override void Write(char value) => Locked(() => base.Write(value));
+
+        public override void Write(char[] buffer, int index, int count) => Locked(() => base.Write(buffer, index, count));
+
+        public override void Write(ReadOnlySpan<char> buffer)
+        {
+            var copy = buffer.ToString();
+            Locked(() => base.Write(copy));
+        }
+
+        public override void Write(string? value) => Locked(() => base.Write(value));
+
+        public override void WriteLine(ReadOnlySpan<char> buffer)
+        {
+            var copy = buffer.ToString();
+            Locked(() => base.WriteLine(copy));
+        }
+
+        public override void WriteLine(string? value) => Locked(() => base.WriteLine(value));
+
+        public override Task WriteAsync(char value)
+        {
+            Write(value);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteAsync(string? value)
+        {
+            Write(value);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteAsync(char[] buffer, int index, int count)
+        {
+            Write(buffer, index, count);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            Write(buffer.Span);
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteLineAsync(char value)
+        {
+            Write(value);
+            WriteLine();
+            return Task.CompletedTask;
         }
 
         public override Task WriteLineAsync(string? value)
@@ -417,11 +476,39 @@ public sealed partial class PlanFileRunTests : IDisposable
             return Task.CompletedTask;
         }
 
+        public override Task WriteLineAsync(char[] buffer, int index, int count)
+        {
+            Write(buffer, index, count);
+            WriteLine();
+            return Task.CompletedTask;
+        }
+
+        public override Task WriteLineAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            WriteLine(buffer.Span);
+            return Task.CompletedTask;
+        }
+
         public override string ToString()
         {
             lock (_gate)
             {
                 return base.ToString();
+            }
+        }
+
+        private void Locked(Action write)
+        {
+            bool seen;
+            lock (_gate)
+            {
+                write();
+                seen = GetStringBuilder().ToString().Contains(text, StringComparison.Ordinal);
+            }
+
+            if (seen)
+            {
+                _seen.TrySetResult();
             }
         }
     }

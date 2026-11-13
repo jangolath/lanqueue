@@ -13,6 +13,9 @@ public sealed record BaseCommit(string Ref, string? Sha, string Label, string? P
     public string Short => Sha is { Length: >= 7 } s ? s[..7] : "?";
 }
 
+/// <summary>The full ref a lanq.yml baseline_ref names (<see cref="BaseRef.BranchOrTagAsync"/>), or why it is refused.</summary>
+public sealed record NamedRef(string? FullRef, string? Error);
+
 /// <summary>A resolved base (<see cref="Base"/>) or why --baseline / --baseline-ref was refused (<see cref="Error"/>, Rejected 2).</summary>
 public sealed record BaseResolution(BaseCommit? Base, string? Error);
 
@@ -52,26 +55,49 @@ public static class BaseRef
     /// <summary>Why a lanq.yml baseline_ref was refused (after "lanq.yml: job 'x' (line N): ").</summary>
     public const string PlanRefMessage = "baseline_ref must name a branch or tag (a commit can be given on the command line with --baseline-ref)";
 
-    /// <summary>The namespaces a lanq.yml baseline_ref may resolve in.</summary>
-    private static readonly string[] NamedRefs = ["refs/heads/", "refs/remotes/", "refs/tags/"];
+    /// <summary>The namespaces a lanq.yml baseline_ref may resolve in, in the order a short name is looked up.</summary>
+    private static readonly string[] NamedRefs = ["refs/heads/", "refs/tags/", "refs/remotes/"];
 
     /// <summary>
-    /// Whether <paramref name="name"/> is a branch or tag name: it passes <see cref="CheckRefText"/>, has no revision syntax (~ ^ : @{ and the
-    /// like), is not HEAD or another pseudo-ref, and git resolves it to a full ref under refs/heads/, refs/remotes/ or refs/tags/. A commit id
-    /// (full or abbreviated), HEAD, HEAD~n
-    /// or anything else is not.
+    /// The exact branch or tag a lanq.yml baseline_ref names, as a full ref (refs/heads/..., refs/tags/..., refs/remotes/...), or why it is
+    /// refused. The name must pass <see cref="CheckRefText"/>, have no revision syntax (~ ^ : @{ and the like) and not be HEAD or another
+    /// pseudo-ref. A full ref under one of those namespaces must exist as it is written; a short name must exist under exactly one of them (a
+    /// name that is a branch and a tag is refused, with the two full refs to choose from). Existence is checked with
+    /// <c>git show-ref --verify</c> on each full ref, so a commit id, abbreviated or not, is never read as an object id: a tag whose name is
+    /// 40 hex digits is that tag. The caller resolves the returned full ref, never the text as written.
     /// </summary>
-    public static async Task<bool> IsBranchOrTagAsync(string repoDir, string name, CancellationToken ct)
+    public static async Task<NamedRef> BranchOrTagAsync(string repoDir, string name, CancellationToken ct)
     {
+        var refused = new NamedRef(null, PlanRefMessage);
+
         // HEAD and the other pseudo-refs (FETCH_HEAD, ORIG_HEAD, ...) follow whatever is checked out or fetched: not a branch or tag name.
         if (name == "HEAD" || name.EndsWith("_HEAD", StringComparison.Ordinal) || CheckRefText(name) is not null || name.IndexOfAny(['~', '^', ':', '@', '{', '}', '\\', '*', '?', '[', ' ']) >= 0)
         {
-            return false;
+            return refused;
         }
 
-        var (code, output, _) = await GitPayloadBuilder.GitRun(repoDir, null, ct, "rev-parse", "--symbolic-full-name", name).ConfigureAwait(false);
-        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return code == 0 && lines.Length == 1 && NamedRefs.Any(p => lines[0].StartsWith(p, StringComparison.Ordinal) && lines[0].Length > p.Length);
+        string[] candidates = name.StartsWith("refs/", StringComparison.Ordinal)
+            ? NamedRefs.Any(p => name.StartsWith(p, StringComparison.Ordinal) && name.Length > p.Length) ? [name] : []
+            : [.. NamedRefs.Select(p => p + name)];
+        var found = new List<string>();
+        foreach (var full in candidates)
+        {
+            // The full ref starts with "refs/", so git never reads it as an option.
+            if ((await GitPayloadBuilder.GitRun(repoDir, null, ct, "show-ref", "--verify", "-q", full).ConfigureAwait(false)).Code == 0)
+            {
+                found.Add(full);
+            }
+        }
+
+        var heads = found.Contains("refs/heads/" + name);
+        var tags = found.Contains("refs/tags/" + name);
+        return found.Count switch
+        {
+            1 => new NamedRef(found[0], null),
+            0 => refused,
+            _ when heads && tags => new NamedRef(null, $"baseline_ref {name} is both a branch and a tag; write refs/heads/{name} or refs/tags/{name}"),
+            _ => new NamedRef(null, $"baseline_ref {name} names more than one ref ({string.Join(", ", found)}); write one of them"),
+        };
     }
 
     /// <param name="repoDir">Any folder inside the repository.</param>

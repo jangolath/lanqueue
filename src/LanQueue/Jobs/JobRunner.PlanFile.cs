@@ -237,22 +237,31 @@ public sealed partial class JobRunner
         var byRef = new Dictionary<string, BaseCommit>(StringComparer.Ordinal);
         foreach (var spec in ordered.Where(j => j.Request.Baseline))
         {
-            var key = spec.Request.BaselineRef ?? "";
-
             // A baseline_ref from lanq.yml (a file of the repository, not the developer's own command line) must name a branch or tag: a commit
-            // id or HEAD~n could pick any old commit and send its tree to a worker. --baseline-ref on the command line takes any commit.
-            if (spec.Request.BaselineRef is { } named && !await payloads.IsBranchOrTagAsync(spec.Request.RepoDir, named, ct).ConfigureAwait(false))
+            // id or HEAD~n could pick any old commit and send its tree to a worker. --baseline-ref on the command line takes any commit. The
+            // exact full ref the check found is what is resolved, so the check and the resolution see the same object.
+            var request = spec.Request;
+            string? fullRef = null;
+            if (request.BaselineRef is { } named)
             {
-                return (bases, new PlanRunResult(nameof(JobStatus.Rejected), 2, $"{spec.Where ?? $"job '{spec.Name}'"}: {BaseRef.PlanRefMessage}", [])
+                var checkedRef = await payloads.BranchOrTagAsync(request.RepoDir, named, ct).ConfigureAwait(false);
+                if (checkedRef.FullRef is null)
                 {
-                    Decided = spec.Name,
-                    RejectKind = Jobs.RejectKind.PlanFile,
-                });
+                    return (bases, new PlanRunResult(nameof(JobStatus.Rejected), 2, $"{spec.Where ?? $"job '{spec.Name}'"}: {checkedRef.Error ?? BaseRef.PlanRefMessage}", [])
+                    {
+                        Decided = spec.Name,
+                        RejectKind = Jobs.RejectKind.PlanFile,
+                    });
+                }
+
+                fullRef = checkedRef.FullRef;
+                request = request with { BaselineRef = fullRef };
             }
 
+            var key = fullRef ?? "";
             if (!byRef.TryGetValue(key, out var b))
             {
-                var (resolved, refused) = await ResolveBaseAsync("plan", spec.Request, ct).ConfigureAwait(false);
+                var (resolved, refused) = await ResolveBaseAsync("plan", request, ct).ConfigureAwait(false);
                 if (refused is not null)
                 {
                     return (bases, new PlanRunResult(refused.Status.ToString(), refused.CliExitCode, $"job '{spec.Name}': {refused.Message}", [])
@@ -262,7 +271,10 @@ public sealed partial class JobRunner
                     });
                 }
 
-                b = resolved!;
+                // Shown as written in lanq.yml (main), though resolved as its full ref (refs/heads/main).
+                b = fullRef is null || spec.Request.BaselineRef is not { } written
+                    ? resolved!
+                    : resolved! with { Ref = written, Label = resolved.Label.Replace(fullRef, written, StringComparison.Ordinal) };
                 byRef[key] = b;
             }
 

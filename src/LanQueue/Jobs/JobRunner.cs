@@ -708,8 +708,9 @@ public sealed partial class JobRunner(
     /// <param name="onSlot">Called with the machine's name once the job holds a slot there (a plan job reports where it ran when cancelled).</param>
     /// <param name="prefer">
     /// A machine tried first whenever it can take the job (a baseline rerun prefers the machine the job failed on); null for none. While it can
-    /// take the job but has no free slot (busy, or its slot was taken first), no other machine is tried for <see cref="PreferRounds"/> looks:
-    /// a rerun elsewhere could pass or fail because of the machine, not the commit.
+    /// take the job but has no free slot (busy, or its slot was taken first), no other machine is tried for up to <see cref="PreferRounds"/>
+    /// looks, and never past what is left of --wait: a rerun elsewhere could pass or fail because of the machine, not the commit. lanq run's
+    /// --wait defaults to 0, so without --wait the rerun does not wait for that machine at all and takes any machine that can take it now.
     /// </param>
     private async Task<JobResult> Dispatch(string jobId, JobRequest req, PreparedPayload prepared, CancellationToken ct, Action<string>? onSlot = null, string? prefer = null)
     {
@@ -772,7 +773,8 @@ public sealed partial class JobRunner(
 
             if (holdForPreferred)
             {
-                // The preferred machine can take the job but has no free slot now: wait for it (at most PreferRounds looks), not for --wait.
+                // The preferred machine can take the job but has no free slot now: wait for it, at most PreferRounds looks and never past what
+                // is left of --wait (waitLeft; with --wait 0, the default, this hold is off and another machine is taken at once).
                 preferLooks++;
                 say(req.Progress is { AnyHolding: true } busy
                     ? $"[lanq] waiting for a slot on {prefer}, where the job failed ({busy.Holders} hold some)"
