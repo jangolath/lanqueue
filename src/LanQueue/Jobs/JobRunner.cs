@@ -878,8 +878,36 @@ public sealed partial class JobRunner(
     private async Task<(MachineHealth[] Probes, List<Assessment> Assessed)> ProbeForJobAsync(IReadOnlyList<Machine> machines, JobNeeds needs, CancellationToken ct)
     {
         var probes = await Task.WhenAll(machines.Select(m => ProbeSharedAsync(m, ct))).ConfigureAwait(false);
+        probes = [.. probes.Select(CountStuckStale)];
         return (probes, Scheduler.Assess(machines.Zip(probes), needs));
     }
+
+    /// <summary>The stale slots each machine's latest probe reported (before <see cref="CountStuckStale"/>), by machine name.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _staleSeen = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Machines where a claim came back FULL although the probe said some slots were stale (so free): their reclaim failed (a dead
+    /// reclaimer's .reclaim lock, or file permissions). For the rest of this run their stale slots count as used.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _staleStuck = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Records <paramref name="h"/>'s stale slots and, on a machine whose stale slots this run found it could not reclaim, counts them as
+    /// used (<see cref="MachineHealth.SlotsStuck"/>), so the job waits as for a busy machine instead of claiming there again and again.
+    /// </summary>
+    private MachineHealth CountStuckStale(MachineHealth h)
+    {
+        _staleSeen[h.Name] = h.SlotsStale;
+        return h.SlotsStale > 0 && _staleStuck.ContainsKey(h.Name) ? h with { SlotsStuck = h.SlotsStale, SlotsStale = 0 } : h;
+    }
+
+    /// <summary>
+    /// The line lanq prints once per run for a machine whose stale slots could not be reclaimed:
+    /// "[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file permissions); counting it as busy for this run; lanq unlock build-01 clears it".
+    /// </summary>
+    internal static string StuckStaleLine(string machine, int stale) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"[lanq] {SafeLine(machine)}: {stale} stale slot{(stale == 1 ? "" : "s")} could not be reclaimed (a .reclaim lock or file permissions); counting {(stale == 1 ? "it" : "them")} as busy for this run; lanq unlock {SafeLine(machine)} clears {(stale == 1 ? "it" : "them")}");
 
     /// <summary>How recent an in-flight probe of a machine must be for another job of this runner to share it (<see cref="ProbeSharedAsync"/>).</summary>
     internal static readonly TimeSpan ProbeShareWindow = TimeSpan.FromSeconds(3);
@@ -1040,6 +1068,11 @@ public sealed partial class JobRunner(
             if (!acquire.Ok || !IsCleanFull(acquire.Output))
             {
                 await ReleaseClaimAsync(machine, jobId).ConfigureAwait(false);
+            }
+            else if (_staleSeen.TryGetValue(machine.Name, out var stale) && stale > 0 && _staleStuck.TryAdd(machine.Name, true))
+            {
+                // FULL although the probe called some slots stale: the claim could not reclaim them. Count them as used from now on.
+                emit(StuckStaleLine(machine.Name, stale));
             }
 
             return null;

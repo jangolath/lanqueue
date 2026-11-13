@@ -164,9 +164,13 @@ public static class Scheduler
             : (Exclusion.None, null);
     }
 
-    /// <summary>", 1 stale: reclaimed by the next claim" when the probe saw stale slots; empty otherwise (the text stays as before).</summary>
+    /// <summary>
+    /// ", 1 stale: reclaimed by the next claim" when the probe saw stale slots, ", 1 stale, not reclaimable" for stale slots a claim of this run
+    /// could not reclaim (<see cref="MachineHealth.SlotsStuck"/>); empty otherwise (the text stays as before).
+    /// </summary>
     internal static string StaleNote(MachineHealth h) =>
-        h.SlotsStale > 0 ? string.Create(CultureInfo.InvariantCulture, $", {h.SlotsStale} stale: reclaimed by the next claim") : "";
+        (h.SlotsStale > 0 ? string.Create(CultureInfo.InvariantCulture, $", {h.SlotsStale} stale: reclaimed by the next claim") : "")
+        + (h.SlotsStuck > 0 ? string.Create(CultureInfo.InvariantCulture, $", {h.SlotsStuck} stale, not reclaimable") : "");
 
     /// <summary>
     /// How many copies of a job a machine can take now: max_jobs minus the slots in use (stale ones, <see cref="MachineHealth.SlotsStale"/>,

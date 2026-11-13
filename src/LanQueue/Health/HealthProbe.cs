@@ -44,6 +44,12 @@ public sealed record MachineHealth(
     /// </summary>
     public int SlotsStale { get; init; }
 
+    /// <summary>
+    /// Stale slots a claim of this run could not reclaim (a dead reclaimer's .reclaim lock, or file permissions): counted as used for the rest
+    /// of the run, and named in the busy reason. Set by the runner, never by the probe; 0 otherwise.
+    /// </summary>
+    public int SlotsStuck { get; init; }
+
     /// <summary>The slots really in use: <see cref="SlotsUsed"/> minus <see cref="SlotsStale"/>. What scheduling judges by.</summary>
     public int SlotsLive => Math.Max(0, SlotsUsed - SlotsStale);
 

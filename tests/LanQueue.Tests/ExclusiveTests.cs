@@ -970,4 +970,61 @@ public sealed class ExclusiveTests : IDisposable
         var a = Assert.Single(Scheduler.Assess([(m, h)], new JobNeeds(["node"], null, false) { Exclusive = true }));
         Assert.Equal((Exclusion.Busy, "busy (slots 1/3; --exclusive needs all 3 free)"), (a.Reason, a.Why));
     }
+
+    // ---- a stale slot the claim cannot reclaim; an unreadable higher slot ----
+
+    /// <summary>
+    /// The probe calls one of build-01's two slots stale, but the claim cannot reclaim it (a dead reclaimer's lock, permissions) and answers
+    /// FULL: lanq says so once, counts it as used for the rest of the run, and does not claim there again while it waits.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task AStaleSlotThatCannotBeReclaimedCountsAsBusyForTheRun()
+    {
+        foreach (var exclusive in new[] { false, true })
+        {
+            var ssh = new FakeSsh
+            {
+                Handler = (_, cmd) => cmd.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=FULL")
+                    : new SshResult(0, $"load=0.1\ndisk_free_gb=50\nslots_used={(exclusive ? 1 : 2)}\nslots_stale=1\ntool=ok"),
+            };
+            var lines = new List<string>();
+            var runner = new JobRunner(
+                T.Config(), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), Log, Path.Combine(_root, "tmp"),
+                l => { lock (lines) { lines.Add(l); } }, (_, ct) => Task.Delay(20, ct));
+
+            var r = await runner.RunAsync(
+                new JobRequest(["dotnet"], ["dotnet", "test"], ".", Repo, TimeSpan.FromSeconds(1)) { On = ["build-01"], Exclusive = exclusive, NoWake = true }, CancellationToken.None);
+
+            Assert.Equal(JobStatus.NoCapacity, r.Status);
+            Assert.True(r.Retryable);
+            Assert.Single(ssh.Calls, c => c.Command.Contains("SLOT=", StringComparison.Ordinal)); // one claim, then judged busy
+            Assert.True(ssh.Calls.Count(c => c.Command.Contains("disk_free_gb", StringComparison.Ordinal)) > 1, "it stopped looking");
+            Assert.Equal(
+                ["[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file permissions); counting it as busy for this run; lanq unlock build-01 clears it"],
+                lines.Where(l => l.Contains("could not be reclaimed", StringComparison.Ordinal)));
+            var why = Assert.Single(r.Excluded!).Why;
+            Assert.Equal(exclusive ? "busy (slots 1/2, 1 stale, not reclaimable; --exclusive needs all 2 free)" : "busy (slots 2/2, 1 stale, not reclaimable)", why);
+        }
+    }
+
+    [Fact]
+    public void TheStuckStaleLineCountsSlots() =>
+        Assert.Equal(
+            "[lanq] big-01: 3 stale slots could not be reclaimed (a .reclaim lock or file permissions); counting them as busy for this run; lanq unlock big-01 clears them",
+            JobRunner.StuckStaleLine("big-01", 3));
+
+    /// <summary>A higher slot another process holds open exclusively (being written, or locked) cannot be read: it counts as live, as in sh.</summary>
+    [WindowsFact]
+    public void AnUnreadableSlotAboveMaxJobsMakesTheExclusiveClaimBackOut()
+    {
+        WriteSlot(5, Lines("other-dev", Stale)); // stale by its content, but nobody can read that now
+        using (new FileStream(Slot(5), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var output = ClaimAll("windows", "ex-job", 3);
+            Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
+            Assert.Equal(["slot-5"], LockFiles());
+        }
+
+        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll("windows", "ex-job", 3))); // readable again, and stale: no longer blocks
+    }
 }
