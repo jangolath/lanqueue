@@ -417,6 +417,39 @@ public sealed class SmokeScriptTests : IDisposable
         Assert.Null(LanQueue.Policy.JobPolicy.AllowedBy(config.Policy, ["sh", "smoke/other.sh"])); // scenario 2a's refusal
     }
 
+    /// <summary>
+    /// Scenario 8 (0.10.0): the binary is probed first (before 0.10.0 it is N/A), then --plan-timeout 1 must give TimedOut 124, --on must put
+    /// every job on the machine named, and a narrowing that leaves a job no machine must fail closed (NoCapacity 75, a rerun with --only). Each
+    /// plan job keeps the smoke's 5-minute limit, and the script still parses.
+    /// </summary>
+    [PowerShellFact]
+    public void SmokeScriptRunsTheZeroTenScenarios()
+    {
+        var text = System.IO.File.ReadAllText(Script);
+        Assert.Contains("'this binary has no --plan-timeout (before 0.10.0)'", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("the scenario is not written yet", text, StringComparison.Ordinal);
+        Assert.Contains("(Lanq @('run', '--plan', '--plan-timeout', '1', '--on', $main, '--json', '--no-wake', '--wait', '300')) 124 'TimedOut'", text, StringComparison.Ordinal);
+        Assert.Contains("$j.planTimedOut -ne $true", text, StringComparison.Ordinal);
+        Assert.Contains("(Lanq @('run', '--plan', '--on', $main, '--json', '--no-wake', '--wait', '300')) 0 'Completed'", text, StringComparison.Ordinal);
+        Assert.Contains("(Lanq @('run', '--plan', '--size', 'light', '--json', '--no-wake')) 75 'NoCapacity'", text, StringComparison.Ordinal);
+        foreach (var name in new[] { "'8a plan timeout'", "'8b --on narrowing'", "'8c narrowing fails closed'" })
+        {
+            var at = text.IndexOf(name, StringComparison.Ordinal);
+            Assert.True(at > 0, name);
+            var body = text[at..text.IndexOf("Remove-SmokeFile 'repo/lanq.yml'", at, StringComparison.Ordinal)];
+            Assert.Contains("timeout: 5", body, StringComparison.Ordinal);
+        }
+
+        const string Parse = """
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$null, [ref]$errors)
+            'ERRORS ' + @($errors).Count
+            """;
+        var (code, output) = Shells.Exec(Shells.PowerShell!, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", File("parse.ps1", Parse), Script]);
+        Assert.True(code == 0, output);
+        Assert.Contains("ERRORS 0", output, StringComparison.Ordinal);
+    }
+
     /// <summary>LANQ_HOME is a fresh folder under the smoke folder before lanq is first run, and every variable it sets is restored at the end.</summary>
     [Fact]
     public void SmokeScriptSetsLanqHome()

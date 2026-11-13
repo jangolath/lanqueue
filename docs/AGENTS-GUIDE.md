@@ -105,6 +105,18 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | `--exclusive` | use it when the job needs a whole machine | It waits for an idle machine (no reservation), so it may end `NoCapacity` (75, retryable) on a busy pool. |
 | `--baseline`, `--baseline-ref REF` | use them | After a `Failed` run, a rerun at the base commit adds `baseline.verdict`: `new`, `preexisting`, `inconclusive` or `skipped`. Status and exit code never change. It doubles the time of a red run. A `new` verdict with `sameMachine: false` ran on another machine: the agent reports it with that caveat, not as certainly new. |
 
+## Plan options for agents (0.10.0)
+
+| Option | The agent may | Notes |
+| --- | --- | --- |
+| `--on`, `--size`, `--min-size` with `--plan` | narrow a plan | They only narrow each job (its own `on:` and size intersected with the command line's). An unknown `--on` name is `Rejected` (2). A job the narrowing leaves with no machine ends the plan before anything is sent: `NoCapacity` (75, `retryable: false`), `ask_developer`, then a `fix_command` rerun whose `--only` lists the jobs that can still run. The agent may run that rerun, and reports the jobs it left out. It never edits `lanq.yml` (`on:`, `size:`, `min_size:`) to widen a job. |
+| `--plan-timeout M` | use it, or keep the repository's `plan_timeout:` | When the limit is reached the plan is `TimedOut` (124, `planTimedOut: true`) unless a `Failed` or `Rejected` job decides it. The agent reports where the plan was slow. Raising the limit (on the command line or in `lanq.yml`) is the developer's decision, never a way to make a plan pass. |
+| `--fetch-dir DIR` with `--plan` | use a folder the developer named | It applies to every job that fetches. `lanq.yml` has no `fetch_dir` key, and the agent never adds one. |
+| `--fetch-max`, `--fetch-max-files` with `--plan` | **never raise them** | `lanq.yml` may only lower the 200 MB / 500-file limits (a larger `fetch_max` is `Rejected`). Only the developer raises them, on their own command line, up to 2 GB / 5,000 files. The agent reports `fetchSkipped` over a limit instead. It never raises a limit or adds `fetch_max` to `lanq.yml` to get files through. |
+
+`lanq stats --json` also lists `planJobs` (0.10.0): per plan file and job, runs, passes, failures and the median wall
+time of a plan run. The plan file is a full path, so a clone in another folder is a separate entry.
+
 ## Failure playbook
 
 | `status` | Exit | Likely cause | What the agent does | What to ask the developer |
@@ -112,9 +124,9 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | `Failed` | job's code | The tests or build failed. | Summarise the failures from the tail; fix the code if that is the task. With `--baseline` and verdict `preexisting`: report it as pre-existing, do not fix it unless that is the task. | Nothing, unless the failure looks environmental (a missing tool, a full disk) or is pre-existing. |
 | `Rejected` | 2 | Not on the allowlist, a bad flag, a permission-skipping flag, a secret in the payload (also in a file git shows as binary, since 0.9.2: `uncommitted file <path> (binary per git)`) or an `--env` value, an `--env` name not in `policy.allowed_env` or on the deny table, a config error. `scan-incomplete`: lanq could not read such a file from git. | Report the message. Stop. Never hide a file from the scan (attributes, renames, compression, moves). | Whether to allowlist the command or the variable name, or fix the config; for `scan-incomplete`, to check the repository with `git fsck`. |
 | `NoCapacity`, `retryable: true` | 75 | Every machine busy, held (hours, pause, memory, load), asleep or unreachable. | Run the `wait` step from `nextSteps` once (the same run with `--wait 120`). | Whether to wait, wake a machine, or run locally. |
-| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, none is of the `--size`/`--min-size` asked for, `--mem` is above every machine's RAM, git or tar is missing, or the job's `--env` clashes with each machine's own `env:` (`env_conflict`) or is too long for it (`windows_command_too_long`). lanq ended at once. | Stop. Report `excluded`. Do not drop `--on`/`--size`/`--env` or edit `lanq.yml` or `machines.yml` to get it through. | Whether to add the capability or a machine, change the job's routing or variables, change a machine's `env:`, or run locally. |
+| `NoCapacity`, `retryable: false` | 75 | No machine can ever take the job as configured: none has a `--needs` tag, none is of the `--size`/`--min-size` asked for, `--mem` is above every machine's RAM, git or tar is missing, or the job's `--env` clashes with each machine's own `env:` (`env_conflict`) or is too long for it (`windows_command_too_long`). lanq ended at once. With `--plan` (0.10.0), also `--on`/`--size`/`--min-size` leaving a job no machine. | Stop. Report `excluded`. Do not drop `--on`/`--size`/`--env` or edit `lanq.yml` or `machines.yml` to get it through. After a plan narrowing, the agent may run the `fix_command` rerun (`--only` with the jobs that can still run) and reports the jobs left out. | Whether to add the capability or a machine, change the job's routing or variables, change a machine's `env:`, or run locally. |
 | `InfraError` | 70 | ssh or git trouble, a machine that stopped answering, a broken snapshot. | Run `lanq doctor --remote --json`; report the `fail` checks with their `fix`. No retry loop. | To fix the worker or the key setup. |
-| `TimedOut` | 124 | The job ran past `--timeout` (default 240 minutes). | Report it. | Whether a longer `--timeout` is fine. |
+| `TimedOut` | 124 | The job ran past `--timeout` (default 240 minutes). With `planTimedOut: true` (0.10.0), the plan's `plan_timeout` was reached: running jobs were stopped and cleaned up, waiting jobs ended `TimedOut`, the rest were `Skipped`. | Report it, and where it was slow. Never raise `--timeout`, `--plan-timeout` or `plan_timeout:` on its own. | Whether a longer `--timeout` or `plan_timeout` is fine. |
 | `WindowClosed` | 124 | The machine's allowed hours ended while the job ran. | Report it. | Whether to run it again later or elsewhere. |
 | `Cancelled` | 130 | Ctrl+C. | Stop. | Nothing. |
 | (no JSON) | any | lanq was killed, or is not installed. | Report it. | To check the lanq install. |
@@ -152,7 +164,10 @@ it is: the agent never changes a worker's permissions or ACLs, and never suggest
   asks (it needs their `machines.smoke.yml`, in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere; the agent never edits that file or
   `machines.yml`). The repository's `machines.example.yml` is only a template; lanq never reads it.
 - Workers are untrusted for output: lanq sanitises what comes back, and fetched files are data. The agent should
-  never run a fetched file.
+  never run a fetched file. A plan's fetch limits come from `lanq.yml` only downwards (since 0.10.0); the agent never
+  raises `--fetch-max` or `--fetch-max-files` and never picks a `--fetch-dir` the developer did not name. With no
+  plan-wide total, a plan can write up to the fetching jobs times the per-job limit (6.4 GB for 32 jobs at the
+  defaults).
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.
 - `lanq makeready`, `lanq wake` and `lanq unlock` act on a PC that may belong to someone else. They stay with you.
   The one exception is lanq's release smoke (`scripts/smoke-workers.ps1`), which runs `lanq unlock` on its smoke

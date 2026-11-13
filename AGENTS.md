@@ -14,8 +14,9 @@ and returns the job's exit code. The developer sets up the pool and owns its con
    A long suite that splits cleanly: add `--shards auto` (see [docs/SHARDING.md](docs/SHARDING.md)). Once the
    command has history (`lanq stats --json` shows a `timing` for it): `--shards auto --target-minutes 10`, previewed
    with `--dry-run`.
-4. The repository has a `lanq.yml`: `lanq run --plan --json --no-wake` runs its jobs (`--only a,b` for some of them),
-   previewed with `--plan --dry-run --json`. See [docs/PLANS.md](docs/PLANS.md).
+4. The repository has a `lanq.yml`: `lanq run --plan --json --no-wake` runs its jobs (`--only a,b` for some of them,
+   `--on`/`--size`/`--min-size` to narrow every job), previewed with `--plan --dry-run --json`. See
+   [docs/PLANS.md](docs/PLANS.md) and [Plans](#plans-narrowing-plan_timeout-fetch-limits).
 5. Act on `status`, the exit code and `nextSteps` (below). Report the result in a line or two.
 6. Unsure whether a failure is yours? Add `--baseline`: after a `Failed` run lanq reruns the same command at the base
    commit and reports `baseline.verdict` (see [Job options](#job-options---env---exclusive---baseline)).
@@ -26,7 +27,8 @@ You may run: `lanq health --json` (also with `--needs`, `--mem`, `--on`, `--size
 (with `--needs`, `--dir`, `--wait`, `--timeout`, `--mem`, `--on`, `--size`, `--min-size`, `--no-wake`, `--fetch`,
 `--log-tail`, `--dry-run`, `--shards`, `--shard-retries 1`, `--fail-fast`, `--target-minutes`, `--exclusive`,
 `--baseline`, `--baseline-ref`, and `--env NAME=VALUE` only for names already in `policy.allowed_env`), `lanq run --plan --json
---no-wake` (with `--only`, `--dry-run`, `--fail-fast`, `--log-tail`), `lanq doctor --json`, `lanq doctor --remote
+--no-wake` (with `--only`, `--dry-run`, `--fail-fast`, `--log-tail`, `--on`, `--size`, `--min-size`, `--plan-timeout`,
+and `--fetch-dir` only for a folder the developer named; never `--fetch-max` or `--fetch-max-files`), `lanq doctor --json`, `lanq doctor --remote
 --json`, `lanq stats --json`, `lanq --version`.
 
 Ask the developer first: `lanq wake`, `lanq health --wake`, `lanq run` without `--no-wake`, `lanq makeready`
@@ -63,7 +65,7 @@ Open more of the file at `logPath` only if the tail does not show the failure. N
 | `Rejected` | 2 | Report the message and stop. Do not look for a way around it. An `--env` name "not in policy.allowed_env": tell the developer; never add it yourself. |
 | `NoCapacity` | 75 | `retryable: false`: stop and tell the developer (`excluded` says why; `env_conflict` and `windows_command_too_long` mean your `--env` clashes with a machine's config or is too long for it: report it, do not edit anything). `true`: run the `wait` step once, then tell the developer. |
 | `InfraError` | 70 | Do not retry in a loop. Run `lanq doctor --remote --json` and report the `fail` checks with their `fix`. |
-| `TimedOut` | 124 | Report it. Ask before raising `--timeout`. |
+| `TimedOut` | 124 | Report it. Ask before raising `--timeout`. A plan with `planTimedOut: true` reached its `plan_timeout`: report where it was slow; ask before raising `--plan-timeout` or `plan_timeout:`. |
 | `WindowClosed` | 124 | The machine's allowed hours ended. Report it; do not retry until the developer says so. |
 | `Cancelled` | 130 | Someone pressed Ctrl+C. Stop. |
 
@@ -93,6 +95,24 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
   on your own command line ("drop it or ask the developer") means the variable cannot be set; drop it only if the job
   does not need it, otherwise ask.
 
+## Plans: narrowing, plan_timeout, fetch limits
+
+Since 0.10.0:
+
+- `--on`, `--size` and `--min-size` with `--plan` narrow every job, never widen one. An unknown `--on` name is
+  `Rejected` (2). If the narrowing leaves a job no machine, the plan ends before anything is sent: `NoCapacity` (75,
+  `retryable: false`), an `ask_developer` step, then a `fix_command` rerun whose `--only` lists the jobs that can still
+  run (it replaces any `--only` you gave). You may run that rerun once; report the jobs it leaves out. Never edit
+  `lanq.yml` to widen a job.
+- `plan_timeout:` in `lanq.yml`, or `--plan-timeout M`, limits the whole plan. When it is reached, running jobs are
+  stopped and cleaned up (`TimedOut`), and the plan is `TimedOut` (124, `planTimedOut: true`) unless a `Failed` or
+  `Rejected` job decides it. Report it; raising the limit is the developer's decision.
+- `lanq.yml` `fetch_max` / `fetch_max_files` may only lower the 200 MB / 500-file limits, and there is no `fetch_dir`
+  key. Only the developer raises the limits (`--fetch-max`, `--fetch-max-files`, up to 2 GB / 5,000 files). Never
+  raise them, and never add `fetch_max` to `lanq.yml`, to get files through: report `fetchSkipped` instead.
+- `lanq stats --json` lists `planJobs`, per plan file (its full path) and job; a clone in another folder is a
+  separate entry.
+
 ## Hard rules
 
 - Do not edit `machines.yml`, the allowlists (`policy.allowed_commands`, `policy.allowed_directories`,
@@ -109,7 +129,8 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
   `lanqWithheld` lists what lanq left out of the report (lanq's own key; a worker cannot send it). A folder lanq or
   lanq-makeready calls open ("other local users can write there", by mode bits or POSIX ACLs) is reported, never
   proposed anyway; never change a worker's permissions or ACLs.
-- Never edit `lanq.yml` or the scripts it runs (such as `scripts/lanq/*` shard scripts) to turn a red run green.
+- Never edit `lanq.yml` or the scripts it runs (such as `scripts/lanq/*` shard scripts) to turn a red run green. Never
+  widen a job's machines or sizes, raise `plan_timeout`, or raise a fetch limit to make a plan pass.
 - A `preexisting` baseline verdict means the failure was there before your change. Report it as such; fix it only if
   that is your task. A `new` verdict with `sameMachine: false` ran on another machine: report the caveat (it may be
   machine-specific) and do not treat it as certainly caused by your change.

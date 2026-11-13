@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.10.0 (unreleased)
+
+### Added
+
+- **Whole-plan timeout.** `lanq run --plan --plan-timeout M`, or a top-level `plan_timeout: M` in `lanq.yml` (1 to
+  10080 minutes; the command line replaces the file's value; `plan_timeout:` is judged by `--plan-timeout`'s own
+  parser). The clock starts after the command-line checks and the snapshot. It covers waiting for slots, the jobs and
+  the baseline reruns. When the time runs out lanq prints `[lanq] plan_timeout: 60 min reached; stopping N running
+  job(s)`, and then:
+  - running jobs are stopped and cleaned up, and end `TimedOut` (124);
+  - jobs waiting for a slot end `TimedOut`;
+  - jobs not started yet are `Skipped` ("not started: plan_timeout reached");
+  - unfinished baselines are `inconclusive`;
+  - `jobs.jsonl` records the stopped jobs as `TimedOut`, never `Cancelled`.
+
+  The plan is `TimedOut` (124) unless a `Failed` or `Rejected` job decides it, also when nothing was running (between
+  `after:` waves, or with every job waiting). A job's own `timeout:` still applies, and Ctrl+C before the limit still
+  ends the plan `Cancelled` (130). `--json` adds the conditional `planTimeoutMinutes` and `planTimedOut: true`. The dry
+  run shows the limit on a `Timeout:` line and warns when history's expected critical path is longer.
+  `--plan-timeout` without `--plan` is refused (exit 2). The `fix_code` step says where to look and that raising
+  the limit is the developer's decision. It never suggests a command.
+- **Narrowing a plan from the command line.** `--on`, `--size` and `--min-size` now work with `--plan`, where they
+  were refused before. They narrow every selected job and never widen one:
+  - a job's own `on:` is intersected with `--on`, or `--on` applies alone when the job has none;
+  - its size classes are intersected with the command line's.
+
+  The dry run prints each job's narrowed `lanq run` line. An unknown `--on` name is refused before any network (exit
+  2). A job the narrowing leaves with no machine ends the plan before the snapshot, with nothing sent: `NoCapacity`
+  (75, `retryable: false`), for example "--on big-01 leaves job 'unit-windows' no machine (its on: [micro-01])". Its
+  `nextSteps` are `ask_developer`, then `fix_command`: the same command with `--only` set to the jobs that can still
+  run. That `--only` replaces any `--only` given, and the narrowing is kept. Without these options a plan behaves
+  exactly as before.
+- **Plan fetch limits and folder.** `lanq.yml` gains `fetch_max` and `fetch_max_files`, on a job or in `defaults:`
+  (where they apply to the jobs that fetch). They are `--fetch-max` and `--fetch-max-files`, and **may only lower** the
+  200 MB / 500-file defaults: a larger value is refused (exit 2) with "lanq.yml may lower fetch limits (at most 200M /
+  500 files); a larger limit is the developer's choice: lanq run --plan --fetch-max 1G". `fetch_dir` is not a
+  `lanq.yml` key: it is refused with a hint to `--fetch-dir`. With `--plan`, the developer's `--fetch-dir`,
+  `--fetch-max` and `--fetch-max-files` (refused with `--plan` before) apply to every selected job that fetches. They
+  replace the file's values, up to the 2 GB / 5,000-file ceiling, and are refused when no selected job fetches. There
+  is no plan-wide total: at worst a plan writes the fetching jobs times the per-job limit (6.4 GB for 32 jobs at the
+  defaults).
+- **`lanq stats` by plan job.** Plan jobs in `jobs.jsonl` now carry `planFile`, the plan file's full local path (`v`
+  stays 2). `lanq stats` groups plan jobs by plan file and job name, with one run per plan run:
+  - completed when every shard's last attempt completed;
+  - failed when any failed;
+  - other otherwise.
+
+  The wall time runs from the first start to the last end. `--json` always carries `planJobs` (`planFile`, `job`,
+  `runs`, `completed`, `failed`, `other`, `medianSeconds`, `p90Seconds`, `lastRunUtc`, `lastShards`). It is capped at
+  500 like `commands`, with the conditional `planJobsMore`. The text adds a "Plan jobs" table. Records written before
+  0.10.0 group under `planFile: null`. Clones of one repository in different folders count separately. Baseline
+  reruns are left out.
+
+### For coding agents
+
+- An agent may narrow a plan with `--on`/`--size`/`--min-size`, and may run the suggested `fix_command` rerun once,
+  reporting the jobs it left out. It never edits `lanq.yml` (`on:`, `size:`, `min_size:`) to widen a job.
+- A plan with `planTimedOut: true` is reported with where it was slow. Raising `--plan-timeout` or `plan_timeout:` is
+  the developer's decision, never a way to make a plan pass.
+- An agent never raises `--fetch-max` or `--fetch-max-files`, never adds `fetch_max` to `lanq.yml` and never picks a
+  `--fetch-dir` the developer did not name to get files through. It reports `fetchSkipped` instead.
+
+### Project
+
+- `scripts/smoke-workers.ps1` scenario 8 now runs on a 0.10 binary (an older one is N/A):
+  - `--plan-timeout 1` must end a plan `TimedOut` (124), with its job cleaned up;
+  - `--plan --on` must put every job on the machine named;
+  - a narrowing that leaves a job no machine must be `NoCapacity` (75, `retryable: false`) with a rerun `--only`.
+
 ## 0.9.2 (2026-11-13)
 
 ### Security
