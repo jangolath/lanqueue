@@ -201,7 +201,7 @@ added; judge an unknown one by `permanent`.
 | `memory_pressure` | no | Linux memory pressure above `policy.max_mem_pressure`. |
 | `load` | no | Load above `policy.load_threshold`. |
 | `mem_below_request` | no | Available memory now is below `--mem`. |
-| `busy` | no | Every live slot is taken. For an `--exclusive` job, any live slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). Stale slots do not count; when there are some, the reason says so: "busy (slots 3/4, 1 stale: reclaimed by the next claim)". |
+| `busy` | no | Every live slot is taken. For an `--exclusive` job, any live slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). Stale slots do not count; when there are some, the reason says so: "busy (slots 3/4, 1 stale: reclaimed by the next claim)". Stale slots a claim of this run could not reclaim count as busy for the rest of the run: "busy (slots 2/2, 1 stale, not reclaimable)". |
 | `avoided` | no | `--shards` only: an earlier attempt of the shard lost the connection there, and it may still be running. |
 | `held` | no | Any other hold. |
 
@@ -258,7 +258,7 @@ Every key of `baseline` except `sameMachine` is always there, `null` where it do
 
 The rerun waits up to 2 looks for a slot on the machine the job failed on, while that machine could take it but is
 busy, then takes any eligible machine. Each look waits about 15 seconds and never past what is left of the rerun's own
-`--wait`; with `--wait 0` it does not wait for that machine at all and takes any machine that can run it now (none:
+`--wait`; with `--wait 0` (the default) it does not wait for that machine at all and takes any machine that can run it now (none:
 `NoCapacity`, inconclusive). A held machine, or one that can never take the job, is not waited for.
 
 Some `inconclusive` messages (on every path: single, shards, plans):

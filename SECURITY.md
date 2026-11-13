@@ -32,10 +32,12 @@ command line or the repository, so they are not trusted the same way. A job can 
 `policy.allowed_env` (empty by default), and never a name on a hard deny table that wins over that list: the
 machine-level names above plus `PATH`, the runtime startup and module-path variables of Node, .NET, Java, Python, Perl
 and Ruby, the Go toolchain and module settings and `CC`/`CXX`/`CGO_*`, Rust (`RUSTFMT`, `RUSTUP_TOOLCHAIN`, `RUSTC`,
-`RUSTC_WRAPPER`, `CARGO_TARGET_*`), build tools (`JAVA_OPTS`, `GRADLE_USER_HOME`, `MAKEFILES`, `DOTNET_HOST_PATH`,
+`RUSTDOC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_TARGET_*`, `CARGO_BUILD_*`), build tools (`JAVA_OPTS`,
+`GRADLE_USER_HOME`, `GRADLE_OPTS`, `MAVEN_OPTS`, `MAKEFILES`, `MAKEFLAGS`, `DOTNET_HOST_PATH`,
 `NUGET_PLUGIN_PATHS`, `COMPLUS_*`, `DOTNET_MSBUILD_SDK_RESOLVER_*`), TLS trust and proxies
 (`NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`,
-`CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), OpenSSL and glibc module paths, profile and temp folders (`HOME`, `USERPROFILE`, `APPDATA`, `TEMP`, `XDG_CONFIG_HOME`, ...), `IFS`,
+`CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), package indexes (`PIP_*`, `UV_INDEX_URL`,
+`UV_EXTRA_INDEX_URL`, `UV_INDEX`), OpenSSL and glibc module paths, profile and temp folders (`HOME`, `USERPROFILE`, `APPDATA`, `TEMP`, `XDG_CONFIG_HOME`, ...), `IFS`,
 `CDPATH`, and every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_`, `MSBUILD`, `CORECLR_`, `COR_` or `LANQ_`.
 Each `NAME=VALUE` is secret-scanned, values are capped (4,096 characters each, 16,384 in all) and quoted as data like
 machine values. The table guards against the obvious ways a variable can make an allowlisted command run other code;
@@ -74,6 +76,11 @@ SHA-256 with the hash lanq computed from its own copy, and runs exactly the byte
 A changed or unreadable helper is never run (the script falls back to taskkill and Stop-Process), and the load sits in
 `try`/`catch`, so cleanup still removes the job's folder and frees its slot. A job can still leave programs running or
 change that account's other files, which is one more reason to give the build account nothing but its work folder.
+
+To fit the Windows command-line limit, the `--exclusive` slot claim's fixed PowerShell functions travel compressed
+(deflate, then base64) and are dot-sourced from memory, as the helper install above already ships its text compressed.
+Some endpoint-protection tools flag that pattern. The inflated text is lanq's constant claim code, nothing taken from
+the job or the repository, and AMSI scans it as such when it runs.
 
 Wake-on-LAN is opt-in per machine (`wake:` in the config). The magic packet is a plain, unauthenticated UDP broadcast
 that only works inside the LAN: anyone on the LAN who knows a machine's MAC address can send the same packet, so

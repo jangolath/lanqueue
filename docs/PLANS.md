@@ -164,6 +164,12 @@ README's [Is this failure new?](../README.md#is-this-failure-new---baseline).
 lanq.yml: job 'unit' (line 12): baseline_ref must name a branch or tag (a commit can be given on the command line with --baseline-ref)
 ```
 
+A short name must exist under exactly one of those: a name that is both a branch and a tag is refused with
+`baseline_ref NAME is both a branch and a tag; write refs/heads/NAME or refs/tags/NAME`, and one that matches more
+than one ref with `baseline_ref NAME names more than one ref (refs/heads/NAME, refs/remotes/NAME); write one of them`.
+A full `refs/heads/NAME` or `refs/tags/NAME` is accepted. The baseline's `ref` and its label show the name as you
+wrote it.
+
 The plan file comes with the repository. If it could name any commit, it could make lanq send that commit's tree to
 a worker, which on an archive worker means any old version of the files. You can still compare with a commit by
 running one job by hand with `--baseline-ref <sha>`.

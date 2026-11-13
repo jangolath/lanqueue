@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.8.1/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.9.0/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.8.1 --repo jangolath/lanqueue
+gh release download v0.9.0 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.8.1    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.9.0    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -903,17 +903,20 @@ What is refused, and why:
     `DOTNET_ROOT*`, `DOTNET_HOST_PATH`, `CORECLR_*`, `COR_*`, `COMPLUS_*`), Java (`JAVA_TOOL_OPTIONS`, `JAVA_OPTS`,
     `CLASSPATH`, ...), Python (`PYTHONSTARTUP`, `PYTHONPATH`, ...), Perl and Ruby;
   - toolchains and build tools: Go (`GOFLAGS`, `GOROOT`, `GOPROXY`, ..., `CC`, `CXX`, `CGO_*`), Rust (`RUSTFMT`,
-    `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTC_WRAPPER`, `CARGO_TARGET_*`), `NUGET_PLUGIN_PATHS`,
+    `RUSTUP_TOOLCHAIN`, `RUSTC`, `RUSTDOC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_TARGET_*`,
+    `CARGO_BUILD_*`), Gradle and Maven (`GRADLE_OPTS`, `MAVEN_OPTS`), `MAKEFLAGS`, `NUGET_PLUGIN_PATHS`,
     `DOTNET_MSBUILD_SDK_RESOLVER_*`, `MSBUILD*`, `GRADLE_USER_HOME`, `MAKEFILES`;
   - TLS trust and proxies: `NODE_TLS_REJECT_UNAUTHORIZED`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
     `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`;
+  - package indexes: every name starting `PIP_`, and `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`;
   - OpenSSL and glibc module paths;
   - profile and temp folders: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `TMPDIR`,
     `XDG_CONFIG_HOME`, ...;
   - every name starting `GIT_`, `SSH_`, `NPM_CONFIG_`, `YARN_` or `LANQ_`.
 
   `NODE_ENV`, `GOOS` and `GOARCH` stay allowed. An `allowed_env` entry the table fully covers (`GIT_*`, `HOME`) stops
-  the config from loading; a prefix that only partly overlaps (`NODE_*`) loads, and `lanq doctor` notes it with an
+  the config from loading (so do `PIP_*` and `CARGO_BUILD_*`); a prefix that only partly overlaps (`NODE_*`,
+  `UV_*`, `CARGO_*`) loads, and `lanq doctor` notes it with an
   `OK` line: `policy.allowed_env NODE_*: names on lanq's deny list (NODE_OPTIONS, NODE_PATH,
   NODE_TLS_REJECT_UNAUTHORIZED, ...) stay refused` (fix: nothing to change if that is intended; list exact names to
   make it plain). The table is a guard against the obvious routes, not a sandbox. On the command line a deny-table
@@ -951,7 +954,9 @@ lanq run --needs dotnet --exclusive --on big-01 --wait 3600 -- dotnet test tests
 lanq claims `slot-1` to `slot-<max_jobs>` on the machine, all or nothing, so no other lanq job, yours or anyone
 else's, starts there while it runs. A claim that finds any slot taken removes the slots it just created and tries
 again later. It also backs out when a live `slot-N` above its own `max_jobs` exists: another developer whose
-`machines.yml` gives the same `work_root` a higher `max_jobs` is running a job there.
+`machines.yml` gives the same `work_root` a higher `max_jobs` is running a job there. That check is one look when the
+claim is made: such a developer can still start a job in a higher slot afterwards, beside the exclusive job. Everyone
+who shares a worker should use the same `max_jobs` for it.
 
 - **It waits for an idle machine.** A machine with any live slot in use is `busy` for this job ("busy (slots 1/4;
   --exclusive needs all 4 free)"), and waiting can help. Stale slots (below) do not count. Nothing is reserved for it:
@@ -972,6 +977,17 @@ exclusive job or any other: the next claim that passes them reclaims them. `lanq
 stale: reclaimed by the next claim)`, `health --json` adds `slotsStale` (only when above 0) while `freeSlots` counts
 live slots only, and a busy reason reads `busy (slots 3/4, 1 stale: reclaimed by the next claim)` (for an exclusive
 job, `busy (slots 2/4, 1 stale: reclaimed by the next claim; --exclusive needs all 4 free)`).
+
+When a claim cannot reclaim a stale slot (a `.reclaim` lock a dead claim left, or file permissions), lanq says so once
+per machine per run and counts it as busy for the rest of that run:
+
+```text
+[lanq] build-01: 1 stale slot could not be reclaimed (a .reclaim lock or file permissions); counting it as busy for this run; lanq unlock build-01 clears it
+```
+
+The busy reason then reads `busy (slots 2/2, 1 stale, not reclaimable)` (for an exclusive job, `busy (slots 1/2, 1
+stale, not reclaimable; --exclusive needs all 2 free)`); both stale notes can appear together. `lanq health` does not
+change. A slot file above `max_jobs` that cannot be read counts as live, on Windows as on Linux.
 
 ## Is this failure new? (--baseline)
 
@@ -1017,7 +1033,7 @@ further back it reads `(merge-base with origin/main)`.
   past what is left of its own `--wait`, printing `[lanq] waiting for a slot on build-01, where the job failed, before
   taking another machine (look 1 of 2)`. While other reruns of the same run hold slots the line is `[lanq] waiting
   for a slot on build-01, where the job failed (the other baseline reruns hold some)` instead. After that it takes
-  any machine that can run it. With `--wait 0` it does not wait for that machine at all: it takes any machine that can
+  any machine that can run it. With `--wait 0`, the default, it does not wait for that machine at all: it takes any machine that can
   run it now, and with none free it ends `NoCapacity`, which makes the verdict `inconclusive`. A machine that is held
   or can never take the job is not waited for.
 - **Rerun lines** are prefixed `[baseline]` (`[baseline 2/4]` for a shard, `[baseline unit 2/4]` in a plan). On
@@ -1362,7 +1378,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
 - Plan files (`lanq run --plan`) pass nothing between jobs: each job runs in its own throw-away folder, maybe on
   another machine, and `after:` only orders jobs (a test job builds what it needs itself).
 - `--exclusive` has no reservation: it waits until a machine happens to be idle, and other jobs keep taking free slots
-  meanwhile, so on a busy pool it can wait out `--wait`.
+  meanwhile, so on a busy pool it can wait out `--wait`. Its check for slots above its own `max_jobs` is one look at
+  claim time, so everyone who shares a worker should use the same `max_jobs` for it.
 - `--baseline` compares jobs, not tests: it says whether the same command failed at the base commit, not whether the
   same tests failed. With `--shards`, the base may split its tests differently.
 - Wake-on-LAN is best effort and was exercised only against fakes and a loopback UDP socket, not real hardware. `lanq`
