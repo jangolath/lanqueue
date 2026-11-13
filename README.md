@@ -1297,8 +1297,9 @@ Each default below is enforced in code and covered by a unit test.
   never echoes the value. If a scan pattern times out the job is refused (fail closed). Since 0.9.2 the content of
   uncommitted files git shows as binary is scanned too (a `.gitattributes` `-diff` or `binary` entry hides a file
   from the diff, not from lanq; also UTF-16 text and real binaries): blobs are read by object id without filters or
-  textconv, text up to 32 MB per file, the printable strings of a binary (8-bit and UTF-16LE) up to 8 MB per file and
-  64 MB in all; in a modified file only new lines or strings count. A file over a cap is not refused: it is named on
+  textconv, text up to 32 MB per file and 256 MB in all, the printable strings of a binary (8-bit, UTF-16 and UTF-32)
+  up to 8 MB per file and 64 MB in all; in a modified file only new lines or strings count. Compressed or encrypted
+  content (a zip, a `.gz`) is not unpacked, so a secret inside it is not seen. A file over a cap is not refused: it is named on
   stderr and in `scanSkipped` ([JSON.md](docs/JSON.md#scanskipped)); an object git cannot produce refuses the job.
   Never rename, compress, move or re-attribute a file to get past the scan. This is a safety net, not a
   guarantee: apart from `.npmrc`, `.pypirc` and `.yarnrc.yml` it does not read the content of committed files, it does not look at files that were committed and later

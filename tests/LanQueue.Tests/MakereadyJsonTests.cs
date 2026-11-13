@@ -123,7 +123,11 @@ public sealed class MakereadyJsonTests : IDisposable
         }
     }
 
-    /// <summary>Fact A2.3: the JSON paths printed the worker's strings as sent. Every string, env keys included, is now sanitised on all three.</summary>
+    /// <summary>
+    /// Fact A2.3: the JSON paths printed the worker's strings as sent. Every string is now sanitised on all three. The dirty env key cannot
+    /// pass the filter (only DOTNET_ROOT does), so it must be withheld, never echoed; <see cref="EnvKeysAreSanitisedByTheWrapper"/> checks
+    /// the key sanitising itself.
+    /// </summary>
     [Fact]
     public async Task EveryJsonStringIsSanitised()
     {
@@ -140,6 +144,7 @@ public sealed class MakereadyJsonTests : IDisposable
             Assert.Equal("lanq-makeready/v1", report.GetProperty("schema").GetString());
             var strings = Strings(report).ToList();
             dirty.AddRange(strings.Where(s => s.IndexOfAny(BadChars) >= 0).Select(s => path + ": " + s));
+            Assert.Contains("suggestedMachine.env", Withheld(report).Select(w => w.Key));
             Assert.True(strings.Contains("lanq-makeready?[31m???") || dirty.Count > 0, path);
         }
 
@@ -305,5 +310,25 @@ public sealed class MakereadyJsonTests : IDisposable
             Assert.False(doc.RootElement.TryGetProperty("nextSteps", out _)); // the report has no lanq nextSteps (summary.nextSteps is the script's)
             Assert.False(doc.RootElement.TryGetProperty("status", out _));
         }
+    }
+
+    /// <summary>The wrapper sanitises env keys and values wherever it keeps them (here with SuggestedDotnetDir bypassed by an exact report).</summary>
+    [Fact]
+    public void EnvKeysAreSanitisedByTheWrapper()
+    {
+        var report = MakereadyReport.Parse(MakereadyTests.Report());
+        var kept = Cli.ReportForJson(report with
+        {
+            SuggestedMachine = report.SuggestedMachine! with { PathPrepend = ["/opt/dotnet"], Env = new() { ["DOTNET_ROOT"] = "/opt/dotnet" } },
+        });
+        Assert.Equal("/opt/dotnet", kept.SuggestedMachine!.Env!["DOTNET_ROOT"]);
+
+        // A key that is not exactly DOTNET_ROOT, dirty or not, never reaches the output: the whole env is withheld.
+        var dirty = Cli.ReportForJson(report with
+        {
+            SuggestedMachine = report.SuggestedMachine! with { PathPrepend = ["/opt/dotnet"], Env = new() { ["DOTNET_ROOT\u001b"] = "/opt/dotnet" } },
+        });
+        Assert.Null(dirty.SuggestedMachine!.Env);
+        Assert.Contains(dirty.LanqWithheld!, w => w.Key == "suggestedMachine.env");
     }
 }

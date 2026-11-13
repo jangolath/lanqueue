@@ -9,12 +9,15 @@
   UTF-16 text, files with a NUL byte and files over `core.bigFileThreshold`. The paths come from
   `git diff --cached --numstat`, their object ids from `git diff --cached --raw --no-renames`, and the blobs are read
   locally with `git cat-file --batch` (never with filters or textconv, so no attribute driver runs). Text (UTF-16 with
-  a byte order mark, or text with no NUL byte) is scanned up to 32 MB per file; a real binary has its printable
-  strings (8-bit and UTF-16LE runs of 4 or more characters) scanned, up to 8 MB per file and 64 MB per snapshot. In a
+  a byte order mark, or text with no NUL byte in its first 8000 bytes) is scanned up to 32 MB per file and 256 MB per
+  snapshot, plus its printable strings when it holds a NUL or a byte order mark; a real binary has its printable
+  strings (8-bit, UTF-16 and UTF-32 runs of 4 or more characters) scanned, up to 8 MB per file and 64 MB per snapshot.
+  The caps are decided from git's sizes and a file's first 8000 bytes, so a file over a cap is never read whole. In a
   modified file only lines or strings the old version did not have count. Texts are scanned in line-cut chunks of
-  about 1 MB with a 64-line overlap; a pattern timeout still refuses the run. A binary path git does not list, or an
-  object it cannot produce, refuses the run (`scan-incomplete`). Symlinks, submodules, deleted files and mode-only
-  changes read nothing.
+  about 1 MB; each starts with the previous chunk's last 64 non-blank lines (blank lines between them included). A
+  pattern timeout still refuses the run. A binary path git does not list, or an object it cannot produce, refuses the
+  run (`scan-incomplete`, with a hint to check the repository with `git fsck`). Symlinks, submodules, deleted files and
+  mode-only changes read nothing. Compressed or encrypted content is not unpacked.
 - `lanq makeready --json`, each `--all --json` row and `--add --json` now print the worker's report through one
   output-only wrapper: every string is sanitised (control, bidi and zero-width characters become `?`, keys of
   `suggestedMachine.env` included), as JSON.md always promised; before, the JSON paths printed them as the worker
@@ -29,7 +32,7 @@
   the file." An agent must not rename, compress, move or re-attribute the file to get past the scan.
 - A file over a cap is not refused. It is named on stderr (`[lanq] secret scan: N file(s) not read in full: ...`, at
   most 5) and listed in the new conditional `scanSkipped` key (`path`, `bytes`, `reason`: `binary_over_file_cap`,
-  `binary_over_total_cap` or `masked_text_over_cap`) of `lanq run --json`, at the top level of `--shards` and
+  `binary_over_total_cap`, `masked_text_over_cap` or `masked_text_over_total_cap`) of `lanq run --json`, at the top level of `--shards` and
   `--plan`, and in both dry runs, whose snapshot line also notes the count. Report it; do not try to "fix" it.
 - In `lanq makeready` JSON, `suggestedMachine.path_prepend` and `env` may now be absent where 0.9.1 printed them (a
   list, a redacted home folder, a mismatched or extra variable, or characters lanq refuses). Both keys were always

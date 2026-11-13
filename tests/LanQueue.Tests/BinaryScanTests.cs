@@ -336,7 +336,7 @@ public sealed class BinaryScanTests : IDisposable
         var r = await runner.RunAsync(new JobRequest(["node"], ["npx", "jest"], ".", _repo, TimeSpan.Zero), CancellationToken.None);
         Assert.Equal((JobStatus.Rejected, RejectKind.Secret), (r.Status, r.RejectKind));
         Assert.Contains("scan-incomplete", r.Message, StringComparison.Ordinal);
-        Assert.Contains("hides a file from diffs, not from lanq", r.Message, StringComparison.Ordinal);
+        Assert.Contains("git fsck", r.Message, StringComparison.Ordinal);
         Assert.Empty(ssh.Uploads);
     }
 
@@ -393,6 +393,110 @@ public sealed class BinaryScanTests : IDisposable
         var found = BlobScan.ScanLines(lines, "uncommitted file x.dat (binary per git)", [("slow", slow)]);
 
         Assert.Equal([new SecretFinding(SecretScanner.TimeoutRule, "uncommitted file x.dat (binary per git)")], found);
+    }
+
+    /// <summary>A UTF-16 byte order mark on a file that is not UTF-16 (ASCII after it, and a NUL): the strings are scanned too.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task BomFollowedByAsciiIsStillScanned()
+    {
+        Write("fake.bin", [0xFF, 0xFE, .. Encoding.ASCII.GetBytes("key = " + AwsKey + "\ntoken = " + GitHubToken + "\n"), 0]);
+
+        var p = await Snapshot();
+
+        Assert.True(Has(p, "aws-access-key", "fake.bin"), string.Join("; ", p.BinaryFindings));
+        Assert.True(Has(p, "github-token", "fake.bin"));
+        Assert.Empty(p.ScanSkipped);
+    }
+
+    /// <summary>A masked file whose first 8000 bytes have no NUL is text; UTF-16LE further on is still found through its strings.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task Utf16AfterANulFreeStartIsScanned()
+    {
+        Write("notes.dat", [.. Encoding.ASCII.GetBytes(new string('x', 9000) + "\n"), .. Encoding.Unicode.GetBytes("aws_key " + AwsKey + "\n")]);
+
+        var p = await Snapshot();
+
+        Assert.True(Has(p, "aws-access-key", "notes.dat"), string.Join("; ", p.BinaryFindings));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task Utf32InABinaryIsFound()
+    {
+        var data = Binary(4096);
+        Encoding.UTF32.GetBytes("aws_key " + AwsKey).CopyTo(data, 1003); // little-endian, an odd offset
+        Write("tool.bin", data);
+
+        var p = await Snapshot();
+
+        Assert.True(Has(p, "aws-access-key", "tool.bin"), string.Join("; ", p.BinaryFindings));
+    }
+
+    /// <summary>quoted-credential's \s* spans blank lines: 100 of them between the key at a chunk's end and the value must not split the match.</summary>
+    [Fact]
+    public void OverlapSpansBlankLines()
+    {
+        var lines = new List<string>();
+        long length = 0;
+        var filler = new string('f', 1000);
+        while (length + filler.Length + 1 + 11 + 100 <= BlobScan.ChunkChars)
+        {
+            lines.Add(filler);
+            length += filler.Length + 1;
+        }
+
+        lines.Add("password =");
+        lines.AddRange(Enumerable.Repeat("", 100));
+        lines.Add("\"" + new string('v', 700) + "\"");
+        Assert.True(length + 11 + 100 + 703 > BlobScan.ChunkChars); // the value line starts a new chunk
+
+        Assert.Contains(BlobScan.ScanLines(lines, "uncommitted file x.dat (binary per git)"), f => f.Rule == "quoted-credential");
+    }
+
+    /// <summary>Over-cap decisions come from the sizes and a look at the first bytes: a binary over a cap is never read whole.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task OverCapBlobsAreNotReadWhole()
+    {
+        var caps = new BlobScan.Caps(BinaryFile: 64 * 1024, BinaryTotal: 100 * 1024, Text: 64 * 1024, TextTotal: 100 * 1024);
+        var targets = new List<GitPayloadBuilder.BlobTarget>();
+        void Add(string name, byte[] data)
+        {
+            Write(name, data);
+            targets.Add(new GitPayloadBuilder.BlobTarget(name, Git("hash-object", "-w", name).Trim(), null));
+        }
+
+        Add("a1.bin", Binary(60 * 1024, 1)); // scanned: 60 KB of binaries so far
+        Add("a2.bin", Binary(60 * 1024, 2)); // past the 100 KB total: looked at, listed
+        Add("a3.bin", Binary(200 * 1024, 3)); // over the file cap: looked at, listed
+        Add("t1.dat", Encoding.ASCII.GetBytes(new string('t', 60 * 1024))); // text: its own totals, scanned
+        Add("t2.dat", Encoding.ASCII.GetBytes(new string('u', 60 * 1024))); // past the 100 KB text total: listed
+        Add("t3.dat", Encoding.ASCII.GetBytes(new string('w', 200 * 1024))); // over the text cap: listed
+
+        var r = await GitPayloadBuilder.ScanBlobsAsync(_repo, targets, CancellationToken.None, caps);
+
+        Assert.Equal(
+            [
+                new ScanSkip("a2.bin", 60 * 1024, BlobScan.BinaryOverTotalCap),
+                new ScanSkip("a3.bin", 200 * 1024, BlobScan.BinaryOverFileCap),
+                new ScanSkip("t2.dat", 60 * 1024, BlobScan.MaskedTextOverTotalCap),
+                new ScanSkip("t3.dat", 200 * 1024, BlobScan.MaskedTextOverCap),
+            ],
+            r.Skipped);
+        Assert.Equal((60 * 1024 * 2) + (5 * BlobScan.ClassifyBytes), r.BytesRead); // two whole files, five first parts (t1 might have been over the binary total)
+    }
+
+    /// <summary>A file lanq could not read from git: refused with a git fsck hint, not the "take the secret out" one.</summary>
+    [Fact]
+    public void ScanIncompleteHasItsOwnHint()
+    {
+        var r = JobRunner.SecretRefusal("j1", [new SecretFinding(BlobScan.IncompleteRule, BlobScan.Where("x.bin"))]);
+
+        Assert.Equal((JobStatus.Rejected, 2, RejectKind.Secret), (r.Status, r.CliExitCode, r.RejectKind));
+        Assert.Contains("git fsck", r.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("take the secret out", r.Message, StringComparison.Ordinal);
+
+        var both = JobRunner.SecretRefusal("j1", [new SecretFinding(BlobScan.IncompleteRule, BlobScan.Where("x.bin")), new SecretFinding("aws-access-key", BlobScan.Where("y.bin"))]);
+        Assert.Contains("git fsck", both.Message, StringComparison.Ordinal);
+        Assert.Contains("take the secret out", both.Message, StringComparison.Ordinal);
     }
 
     [Fact]

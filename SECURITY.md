@@ -54,8 +54,10 @@ samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, all
 references pass, and the value is never printed). Since 0.9.2 the uncommitted changes include files git shows as
 binary (hidden by a `.gitattributes` `-diff` or `binary` entry, UTF-16 text, or real binaries): lanq reads their
 blobs locally by object id (`git cat-file`, never with filters or textconv, so no attribute driver runs) and scans
-text up to 32 MB per file and a binary's printable strings up to 8 MB per file and 64 MB per snapshot, only the
-content a modified file did not have before. A file over a cap is listed in `scanSkipped` and on stderr, not refused;
+text up to 32 MB per file and 256 MB per snapshot, and a binary's printable strings (8-bit, UTF-16 and UTF-32 runs) up
+to 8 MB per file and 64 MB per snapshot, only the content a modified file did not have before. It does not unpack
+compressed or encrypted content (an archive, a `.gz`, an encrypted file), and a string shorter than 4 characters or in
+another encoding is not seen. A file over a cap is listed in `scanSkipped` and on stderr, not refused;
 a binary path or object git cannot produce refuses the job (fail closed). It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).

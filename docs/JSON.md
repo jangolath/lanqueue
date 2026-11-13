@@ -152,15 +152,15 @@ A refused command line:
 
 Since 0.9.2 the secret scan also reads the content of uncommitted files git shows as binary (a `.gitattributes` entry
 such as `-diff` or `binary`, UTF-16 text, a NUL byte, or `core.bigFileThreshold`), which the diff never shows. Text is
-read up to 32 MB per file; a real binary has its printable strings read, up to 8 MB per file and 64 MB in all. A file
-over a cap is not refused: it is listed here, and on stderr as
+read up to 32 MB per file and 256 MB in all; a real binary has its printable strings read, up to 8 MB per file and
+64 MB in all. A file over a cap is not refused: it is listed here, and on stderr as
 `[lanq] secret scan: N file(s) not read in full: <path> (<size> MB), ...` (at most 5 named). Each entry:
 
 | Key | Type | Notes |
 | --- | --- | --- |
 | `path` | string | The file's path in the repository (sanitised). |
 | `bytes` | number | Its size. |
-| `reason` | string | `binary_over_file_cap` (a binary over 8 MB), `binary_over_total_cap` (past 64 MB of binaries in the snapshot) or `masked_text_over_cap` (text over 32 MB). Values may be added. |
+| `reason` | string | `binary_over_file_cap` (a binary over 8 MB), `binary_over_total_cap` (past 64 MB of binaries in the snapshot), `masked_text_over_cap` (text over 32 MB) or `masked_text_over_total_cap` (past 256 MB of such text in the snapshot). Values may be added. |
 
 The key is on a run, at the top level of a `--shards` run and a plan run (one snapshot for every shard and job), and
 on both dry runs; it is left out when nothing was skipped. A file listed here was not checked for secrets; report it,

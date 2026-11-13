@@ -35,13 +35,19 @@ internal static class BlobScan
     /// <summary>Largest masked (attribute-hidden) or UTF-16 text file scanned.</summary>
     internal const long TextCap = 32L * 1024 * 1024;
 
+    /// <summary>The most masked or UTF-16 text bytes scanned in one snapshot; files past it are listed, not read.</summary>
+    internal const long TextTotalCap = 256L * 1024 * 1024;
+
     /// <summary>How many leading bytes decide text or binary: the same 8000 git looks at.</summary>
     internal const int ClassifyBytes = 8000;
 
     /// <summary>A chunk is cut at a line end once it reaches about this many characters.</summary>
     internal const int ChunkChars = 1024 * 1024;
 
-    /// <summary>Each chunk starts with up to this many whole lines of the previous one.</summary>
+    /// <summary>
+    /// Each chunk starts with the previous chunk's last lines holding up to this many non-blank lines (blank and whitespace-only lines
+    /// between them come along without counting), at most about <see cref="ChunkChars"/> characters.
+    /// </summary>
     internal const int OverlapLines = 64;
 
     internal const string BinaryOverFileCap = "binary_over_file_cap";
@@ -49,6 +55,8 @@ internal static class BlobScan
     internal const string BinaryOverTotalCap = "binary_over_total_cap";
 
     internal const string MaskedTextOverCap = "masked_text_over_cap";
+
+    internal const string MaskedTextOverTotalCap = "masked_text_over_total_cap";
 
     /// <summary>The finding when a file git shows as binary could not be looked up or read (fails closed: the run is refused).</summary>
     internal const string IncompleteRule = "scan-incomplete (refusing: a file git shows as binary could not be read)";
@@ -76,16 +84,25 @@ internal static class BlobScan
         return data[..Math.Min(data.Length, ClassifyBytes)].IndexOf((byte)0) < 0 ? Kind.MaskedText : Kind.Binary;
     }
 
-    /// <summary>The cap that applies to a file of <paramref name="kind"/>.</summary>
-    internal static long CapFor(Kind kind) => kind == Kind.Binary ? BinaryFileCap : TextCap;
+    /// <summary>The caps of one snapshot's scan: per file and in total, for real binaries and for masked or UTF-16 text.</summary>
+    internal sealed record Caps(long BinaryFile, long BinaryTotal, long Text, long TextTotal)
+    {
+        public static readonly Caps Default = new(BinaryFileCap, BinaryTotalCap, TextCap, TextTotalCap);
+    }
 
-    /// <summary>The lines scanned for <paramref name="data"/> of <paramref name="kind"/>: text lines (a trailing CR dropped) or strings runs.</summary>
+    /// <summary>
+    /// The lines scanned for <paramref name="data"/> of <paramref name="kind"/>: text lines (a trailing CR dropped) or strings runs. Text
+    /// with a byte order mark or any NUL byte also gets the strings runs, so a mark on a file that is not UTF-16, or UTF-16 or UTF-32 text
+    /// after a NUL-free start, cannot hide what the decoding missed.
+    /// </summary>
     internal static List<string> Lines(byte[] data, Kind kind) => kind switch
     {
-        Kind.Utf16Text => SplitLines(data[1] == 0xFE
+        Kind.Utf16Text => [.. SplitLines(data[1] == 0xFE
             ? Encoding.Unicode.GetString(data, 2, data.Length - 2)
-            : Encoding.BigEndianUnicode.GetString(data, 2, data.Length - 2)),
-        Kind.MaskedText => SplitLines(Encoding.UTF8.GetString(data)),
+            : Encoding.BigEndianUnicode.GetString(data, 2, data.Length - 2)), .. Strings(data)],
+        Kind.MaskedText => Array.IndexOf(data, (byte)0) < 0
+            ? SplitLines(Encoding.UTF8.GetString(data))
+            : [.. SplitLines(Encoding.UTF8.GetString(data)), .. Strings(data)],
         _ => Strings(data),
     };
 
@@ -107,7 +124,8 @@ internal static class BlobScan
 
     /// <summary>
     /// The strings projection of a binary: 8-bit runs of 4 or more printable ASCII characters or tabs, then UTF-16LE runs (4 or more such
-    /// characters, each followed by a zero byte, at either byte alignment, like <c>strings -el</c>).
+    /// characters, each followed by a zero byte, at either byte alignment, like <c>strings -el</c>; this also finds UTF-16BE), then UTF-32LE
+    /// runs (each followed by three zero bytes, at any of the four alignments; this also finds UTF-32BE).
     /// </summary>
     internal static List<string> Strings(ReadOnlySpan<byte> data)
     {
@@ -153,13 +171,30 @@ internal static class BlobScan
             Flush();
         }
 
+        for (var align = 0; align < 4; align++)
+        {
+            for (var i = align; i + 3 < data.Length; i += 4)
+            {
+                if (Printable(data[i]) && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 0)
+                {
+                    sb.Append((char)data[i]);
+                }
+                else
+                {
+                    Flush();
+                }
+            }
+
+            Flush();
+        }
+
         return runs;
     }
 
     /// <summary>
     /// Scans <paramref name="lines"/> with every secret rule in line-cut chunks of about <see cref="ChunkChars"/> characters. Each chunk
-    /// after the first starts with the last <see cref="OverlapLines"/> whole lines of the previous one (at most about one more chunk of
-    /// them), so a match that spans lines is still seen; a line is never cut, and a line over the chunk size is a chunk of its own (with
+    /// after the first starts with the previous one's last whole lines holding <see cref="OverlapLines"/> non-blank lines (blank lines
+    /// between them do not count; at most about one more chunk of them), so a match that spans lines is still seen; a line is never cut, and a line over the chunk size is a chunk of its own (with
     /// that overlap). Each rule keeps its 2 s timeout per chunk, and a timeout fails closed (<see cref="SecretScanner.TimeoutRule"/>).
     /// One finding per rule.
     /// </summary>
@@ -187,13 +222,19 @@ internal static class BlobScan
             {
                 Scan(start, i);
 
-                // The next chunk starts with the last whole lines of this one: at least one, at most OverlapLines, about ChunkChars at most.
+                // The next chunk starts with the last whole lines of this one: at least one, up to OverlapLines non-blank ones (blank lines,
+                // which a pattern's whitespace can span, do not count), about ChunkChars characters at most.
                 var o = i;
                 long overlap = 0;
-                while (o > start && i - o < OverlapLines && (o == i || overlap + lines[o - 1].Length + 1 <= ChunkChars))
+                var counted = 0;
+                while (o > start && counted < OverlapLines && (o == i || overlap + lines[o - 1].Length + 1 <= ChunkChars))
                 {
                     o--;
                     overlap += lines[o].Length + 1;
+                    if (!string.IsNullOrWhiteSpace(lines[o]))
+                    {
+                        counted++;
+                    }
                 }
 
                 (start, fresh, length) = (o, i, overlap);

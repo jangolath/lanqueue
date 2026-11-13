@@ -1734,6 +1734,9 @@ public sealed partial class JobRunner(
         }
     }
 
+    /// <summary>The Rejected (Secret) result for <paramref name="findings"/>, with its hints (tests).</summary>
+    internal static JobResult SecretRefusal(string jobId, IReadOnlyList<SecretFinding> findings) => Rejected(jobId, findings);
+
     private static JobResult Rejected(string jobId, IReadOnlyList<SecretFinding> findings)
     {
         const int Shown = 10;
@@ -1742,9 +1745,14 @@ public sealed partial class JobRunner(
         var hint = findings.Any(f => f.Rule == SecretScanner.CommittedFileRule)
             ? " Committed files named like secrets are refused because the bundle or archive would carry them; rename samples to *.example or keep them under a fixtures/ or testdata/ folder."
             : "";
-        if (findings.Any(f => f.Where.EndsWith(BlobScan.WhereSuffix, StringComparison.Ordinal)))
+        if (findings.Any(f => f.Rule != BlobScan.IncompleteRule && f.Where.EndsWith(BlobScan.WhereSuffix, StringComparison.Ordinal)))
         {
             hint += " A file git shows as binary is read anyway: a .gitattributes entry (-diff or binary) hides a file from diffs, not from lanq; take the secret out of the file.";
+        }
+
+        if (findings.Any(f => f.Rule == BlobScan.IncompleteRule))
+        {
+            hint += " lanq could not read a file git shows as binary from git, so it could not be checked; check the repository with git fsck.";
         }
 
         return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.") { RejectKind = Jobs.RejectKind.Secret };

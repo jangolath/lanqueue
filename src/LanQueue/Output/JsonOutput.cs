@@ -180,7 +180,7 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
 /// </summary>
 /// <param name="Path">The file's path in the repository (sanitised).</param>
 /// <param name="Bytes">Its size.</param>
-/// <param name="Reason">binary_over_file_cap (a binary over 8 MB), binary_over_total_cap (past 64 MB of binaries in the snapshot) or masked_text_over_cap (text over 32 MB). Values may be added.</param>
+/// <param name="Reason">binary_over_file_cap (a binary over 8 MB), binary_over_total_cap (past 64 MB of binaries in the snapshot), masked_text_over_cap (text over 32 MB) or masked_text_over_total_cap (past 256 MB of such text in the snapshot). Values may be added.</param>
 internal sealed record ScanSkipJson(string Path, long Bytes, string Reason);
 
 /// <summary>
