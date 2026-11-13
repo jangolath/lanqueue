@@ -166,63 +166,98 @@ function Test-NotRealConfig([string]$SmokeConfig, [string[]]$RealConfigs) {
 }
 
 # ---- the identity check --------------------------------------------------------------------------------------------
+# Privacy: nothing here ever puts config content (line text, values, hosts, users, paths) into a message. Errors name the
+# file, the line number, the key and the machine name only.
 
-function ConvertFrom-YamlScalar([string]$Text) {
+# The plain value of a key the smoke reads: unquoted (an inline " #" comment dropped), "double" (no escapes) or 'single'
+# ('' is a quote). A flow, block, anchor, alias or tag value, or an empty one, throws: the smoke reads only plain scalars.
+function ConvertFrom-YamlScalar([string]$Text, [string]$Where) {
     $v = $Text.Trim()
     if ($v.StartsWith('"')) {
         $end = $v.IndexOf('"', 1)
-        if ($end -lt 0 -or $v.Substring(1, $end - 1).Contains('\')) { throw "a quoted value lanq's smoke cannot read: $v" }
+        if ($end -lt 0 -or $v.Substring(1, $end - 1).Contains('\')) { throw "$Where`: a double-quoted value the smoke cannot read (no escapes, closed on the line)" }
+        $after = $v.Substring($end + 1).Trim()
+        if ($after -and -not $after.StartsWith('#')) { throw "$Where`: text after a quoted value" }
         return $v.Substring(1, $end - 1)
     }
     if ($v.StartsWith("'")) {
-        $end = $v.IndexOf("'", 1)
-        if ($end -lt 0) { throw "a quoted value lanq's smoke cannot read: $v" }
-        return $v.Substring(1, $end - 1)
+        $m = [regex]::Match($v, "^'((?:[^']|'')*)'\s*(#.*)?$")
+        if (-not $m.Success) { throw "$Where`: a single-quoted value the smoke cannot read" }
+        return $m.Groups[1].Value.Replace("''", "'")
     }
-    $hash = $v.IndexOf(' #')
-    if ($hash -ge 0) { $v = $v.Substring(0, $hash) }
-    return $v.Trim()
+    $hash = [regex]::Match($v, '\s#')
+    if ($hash.Success) { $v = $v.Substring(0, $hash.Index) }
+    $v = $v.Trim()
+    if (-not $v) { throw "$Where`: no plain value on the line" }
+    if ($v[0] -in @('[', '{', '|', '>', '&', '*', '!', '%', '@', '`')) { throw "$Where`: a flow, block, anchor, alias or tag value; write a plain value" }
+    return $v
 }
 
-# name -> @{ ssh; work_root; max_jobs; os } from the flat machines: list ("  - name: x" then "    key: value" lines). os
-# defaults to windows and max_jobs to 1, as in lanq. Anything it is not sure about (flow style, a duplicate name, a
-# machine without ssh or work_root) throws: the caller refuses.
+# name -> @{ name; ssh; work_root; max_jobs; os } from the machines: block list. An entry starts only at the indent of the
+# first "- " item directly under the top-level machines: key, and must start with "- name:". Of each entry, only name, os,
+# ssh, work_root and max_jobs at the entry's own key indent are read; deeper lines (path_prepend: items, env: maps, any
+# nested name:) and other keys (capabilities: [a, b], key_env, ...) are skipped. os defaults to windows and max_jobs to 1,
+# as in lanq. Anything it is not sure about (machines: in flow style, an entry that is not "- name:", odd indentation, a
+# tab in the indentation, a value it cannot read for one of its keys, a duplicate name, a machine without ssh or work_root)
+# throws: the caller refuses.
 function Read-MachineIdentities([string]$Path) {
+    $file = [System.IO.Path]::GetFileName($Path)
+    $wanted = @('name', 'os', 'ssh', 'work_root', 'max_jobs')
     $machines = [ordered]@{}
     $current = $null
     $inMachines = $false
-    foreach ($raw in [System.IO.File]::ReadAllLines($Path)) {
-        $line = $raw.TrimEnd()
-        if ($line -match '^\s*(#|$)') { continue }
-        if ($line -match '^[A-Za-z_]') {
-            $inMachines = $line -match '^machines:\s*$'
-            if ($line -match '^machines:\s*\S') { throw 'machines: in flow style; the smoke reads only a block list' }
+    $itemIndent = -1
+    $keyIndent = -1
+    $lines = [System.IO.File]::ReadAllLines($Path)
+    for ($n = 0; $n -lt $lines.Length; $n++) {
+        $where = "$file line $($n + 1)"
+        $line = $lines[$n].TrimEnd()
+        $body = $line.TrimStart(' ')
+        if (-not $body -or $body.StartsWith('#')) { continue }
+        if ($body.StartsWith("`t") -or $line.Substring(0, $line.Length - $body.Length).Contains("`t")) { throw "$where`: a tab in the indentation" }
+        $indent = $line.Length - $body.Length
+        if ($indent -eq 0 -and -not $body.StartsWith('-')) {
+            # A top-level key: machines: starts the list, anything else ends it.
+            $inMachines = $body -match '^machines\s*:'
+            if ($inMachines -and $body -notmatch '^machines\s*:\s*(#.*)?$') { throw "$where`: machines: in flow style; the smoke reads only a block list" }
             $current = $null
             continue
         }
         if (-not $inMachines) { continue }
-        if ($line -match '^\s*-\s*\{' -or $line -match '^\s*-\s*$') { throw 'a machine in flow style or an empty list item; the smoke reads only "- name: x" entries' }
-        if ($line -match '^\s*-\s+name:\s*(.+)$') {
-            $name = ConvertFrom-YamlScalar $Matches[1]
-            if ($machines.Contains($name)) { throw "machine '$name' is listed twice" }
+        if ($itemIndent -lt 0) {
+            if (-not $body.StartsWith('-')) { throw "$where`: expected a ""- name:"" entry under machines:" }
+            $itemIndent = $indent
+        }
+        if ($indent -lt $itemIndent) { throw "$where`: indentation the smoke cannot read under machines:" }
+        if ($indent -eq $itemIndent) {
+            if ($body -notmatch '^-(\s+|$)') { throw "$where`: an entry under machines: that is not a list item" }
+            $rest = $body.Substring(1).TrimStart(' ')
+            if ($rest -notmatch '^name\s*:(\s|$)') { throw "$where`: a machine entry that does not start with name:" }
+            $keyIndent = $indent + ($body.Length - $rest.Length)
+            $name = ConvertFrom-YamlScalar ($rest -replace '^name\s*:', '') "$where (key name)"
+            if ($machines.Contains($name)) { throw "$where`: machine '$name' is listed twice" }
             $current = @{ name = $name; ssh = $null; work_root = $null; max_jobs = '1'; os = 'windows' }
             $machines[$name] = $current
             continue
         }
-        if ($line -match '^\s*-\s') { throw "a machine entry that does not start with name: ($line)" }
-        if ($null -ne $current -and $line -match '^\s+(ssh|work_root|max_jobs|os):\s*(.*)$') {
-            $current[$Matches[1]] = ConvertFrom-YamlScalar $Matches[2]
-        }
+        if ($indent -lt $keyIndent) { throw "$where`: indentation the smoke cannot read in machine '$($current.name)'" }
+        if ($indent -gt $keyIndent -or $body.StartsWith('-')) { continue } # nested content, or an item of a list at the key indent
+        $m = [regex]::Match($body, '^([A-Za-z_][A-Za-z0-9_-]*)\s*:(\s|$)')
+        if (-not $m.Success) { throw "$where`: a line the smoke cannot read in machine '$($current.name)'" }
+        $key = $m.Groups[1].Value
+        if ($key -eq 'name') { throw "$where`: a second name: in machine '$($current.name)'" }
+        if ($wanted -contains $key) { $current[$key] = ConvertFrom-YamlScalar $body.Substring($m.Length) "$where (key $key)" }
     }
-    foreach ($m in $machines.Values) {
-        if (-not $m.ssh -or -not $m.work_root) { throw "machine '$($m.name)' has no ssh or work_root line the smoke can read" }
-        if ($m.os -notin @('windows', 'linux')) { throw "machine '$($m.name)' has os '$($m.os)'; the smoke knows windows and linux" }
+    foreach ($mc in $machines.Values) {
+        if (-not $mc.ssh -or -not $mc.work_root) { throw "$file`: machine '$($mc.name)' has no ssh or work_root line the smoke can read" }
+        if ($mc.os -notin @('windows', 'linux')) { throw "$file`: machine '$($mc.name)' has an os the smoke does not know (windows and linux)" }
+        if ($mc.max_jobs -notmatch '^[1-9][0-9]{0,2}$') { throw "$file`: machine '$($mc.name)' has a max_jobs the smoke cannot read" }
     }
     return $machines
 }
 
 # The differences that make the smoke machines unsafe to use: each must be in the real config with the same ssh, work_root
-# and max_jobs (so their slot locks are shared with real jobs). An empty list means they match.
+# and max_jobs (so their slot locks are shared with real jobs). An empty list means they match. Names only, never values.
 function Compare-MachineIdentities($Smoke, $Real) {
     $problems = New-Object System.Collections.Generic.List[string]
     if ($Smoke.Count -eq 0) { $problems.Add('the smoke config lists no machines') }
@@ -232,12 +267,38 @@ function Compare-MachineIdentities($Smoke, $Real) {
         $r = $Real[$name]
         foreach ($key in 'ssh', 'work_root', 'max_jobs') {
             if (-not [string]::Equals([string]$s[$key], [string]$r[$key], [StringComparison]::Ordinal)) {
-                $problems.Add("smoke machine '$name': $key is '$($s[$key])', the real config has '$($r[$key])'")
+                $problems.Add("smoke machine '$name': its $key differs from the real config's")
             }
         }
     }
     return , $problems.ToArray()
 }
+
+# $Text with every ssh target (and its host part) and work_root of the machines replaced by a placeholder naming the
+# machine, so no message or table note shows them (a worker or ssh error may quote them).
+function Hide-ConfigValues([string]$Text) {
+    if (-not $Text -or -not $script:HiddenValues) { return $Text }
+    foreach ($h in $script:HiddenValues) {
+        $Text = [regex]::Replace($Text, [regex]::Escape($h.Value), $h.Placeholder, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+    return $Text
+}
+
+# The values Hide-ConfigValues hides, longest first, from every machine of the given configs.
+function Set-HiddenValues($Configs) {
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($cfg in $Configs) {
+        foreach ($mc in $cfg.Values) {
+            foreach ($pair in @(@($mc.ssh, "<ssh of $($mc.name)>"), @(($mc.ssh -replace '^[^@]*@', ''), "<host of $($mc.name)>"), @($mc.work_root, "<work_root of $($mc.name)>"),
+                    @(($mc.work_root -replace '\\', '/'), "<work_root of $($mc.name)>"), @(($mc.work_root -replace '/', '\'), "<work_root of $($mc.name)>"))) {
+                if ($pair[0] -and $pair[0].Length -ge 3) { $list.Add([pscustomobject]@{ Value = [string]$pair[0]; Placeholder = $pair[1] }) }
+            }
+        }
+    }
+    $script:HiddenValues = @($list | Sort-Object { $_.Value.Length } -Descending)
+}
+
+$script:HiddenValues = @()
 
 # ---- the run -------------------------------------------------------------------------------------------------------
 
@@ -374,6 +435,7 @@ $script:Results = New-Object System.Collections.Generic.List[object]
 $script:JobIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
 
 function Add-Result([string]$Scenario, [string]$Outcome, [string]$Note) {
+    $Note = Hide-ConfigValues $Note
     $script:Results.Add([pscustomobject]@{ Scenario = $Scenario; Result = $Outcome; Note = $Note })
     Write-Host ('{0,-4} {1}: {2}' -f $Outcome, $Scenario, $Note)
 }
@@ -446,6 +508,7 @@ try {
 } catch {
     Write-Host "smoke-workers: refused, a config it cannot read safely: $($_.Exception.Message)"; exit 2
 }
+Set-HiddenValues @($smokeMachines, $realMachines)
 $problems = Compare-MachineIdentities $smokeMachines $realMachines
 if ($problems.Count -gt 0) {
     Write-Host 'smoke-workers: refused, the smoke machines must equal the real ones (ssh, work_root, max_jobs):'
@@ -707,7 +770,7 @@ switch ($Mode) {
     }
 } catch {
     if ($exitCode -eq 0) { $exitCode = 70 }
-    Write-Host "smoke-workers: $($_.Exception.Message)"
+    Write-Host "smoke-workers: $(Hide-ConfigValues $_.Exception.Message)"
 } finally {
     foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
     foreach ($r in $realHashes.Keys) {

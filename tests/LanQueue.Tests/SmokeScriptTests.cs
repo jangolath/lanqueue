@@ -163,9 +163,9 @@ public sealed class SmokeScriptTests : IDisposable
 
         Assert.Equal("MATCH", Compare(Real.Replace("max_jobs: 2", "max_jobs: 2   # same", StringComparison.Ordinal)));
         Assert.Equal("MATCH", Compare(Real[..Real.IndexOf("  - name: win-01", StringComparison.Ordinal)])); // a subset is fine
-        Assert.Contains("work_root is '/srv/other'", Compare(Real.Replace("/srv/lanq", "/srv/other", StringComparison.Ordinal)), StringComparison.Ordinal);
-        Assert.Contains("max_jobs is '4'", Compare(Real.Replace("max_jobs: 2", "max_jobs: 4", StringComparison.Ordinal)), StringComparison.Ordinal);
-        Assert.Contains("ssh is", Compare(Real.Replace("build@10.20.30.11", "other@10.20.30.11", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("its work_root differs from the real config's", Compare(Real.Replace("/srv/lanq", "/srv/other", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("its max_jobs differs", Compare(Real.Replace("max_jobs: 2", "max_jobs: 4", StringComparison.Ordinal)), StringComparison.Ordinal);
+        Assert.Contains("its ssh differs", Compare(Real.Replace("build@10.20.30.11", "other@10.20.30.11", StringComparison.Ordinal)), StringComparison.Ordinal);
         Assert.Contains("is not in the real config", Compare(Real.Replace("build-01", "build-09", StringComparison.Ordinal)), StringComparison.Ordinal);
         Assert.StartsWith("REFUSED", Compare("machines:\n  - {name: build-01, ssh: x, work_root: y}\n"), StringComparison.Ordinal);
         Assert.StartsWith("REFUSED", Compare("machines: [x]\n"), StringComparison.Ordinal);
@@ -184,6 +184,98 @@ public sealed class SmokeScriptTests : IDisposable
         var (exit, said) = RunScript(real, "-Run", "123", "-Branch", "v0.9.2", "-Config", smokeFile);
         Assert.Equal(2, exit);
         Assert.Contains("must equal the real ones", said, StringComparison.Ordinal);
+    }
+
+    /// <summary>A config shaped like a real one (flow lists, nested lists and maps, comments, key_env, quoting) parses; nested keys never count.</summary>
+    private const string RealShaped = """
+        # machines.yml
+        policy:
+          allowed_commands:
+            - "dotnet test"
+          allowed_env: [CONFIGURATION]
+        machines:
+          - name: build-01            # the big one
+            os: windows
+            ssh: "build@10.20.30.11"   # quoted
+            key_env: LANQ_KEY_BUILD01
+            work_root: 'D:/lq'
+            capabilities: [dotnet, windows, node]
+            max_jobs: 2
+            path_prepend:
+              - D:/build/dotnet
+              - D:/tools/bin
+            env:
+              DOTNET_ROOT: D:/build/dotnet
+              name: not-a-machine
+            wake:
+              mac: "aa:bb:cc:dd:ee:ff"
+            notes:
+              - name: also-not-a-machine
+                ssh: nobody@10.20.30.99
+          - name: micro-01
+            ssh: build@10.20.30.21
+            work_root: C:/lq
+            capabilities:
+            - dotnet
+            - windows
+        """;
+
+    [PowerShellFact]
+    public void SmokeParsesARealShapedConfig()
+    {
+        var file = File("machines.yml", RealShaped);
+        var (code, output) = WithFunctions(
+            $"$m = Read-MachineIdentities '{file}'; $m.Keys -join ','; foreach ($k in $m.Keys) {{ '{{0}}|{{1}}|{{2}}|{{3}}|{{4}}' -f $m[$k].name, $m[$k].os, $m[$k].ssh, $m[$k].work_root, $m[$k].max_jobs }}");
+        Assert.True(code == 0, output);
+        Assert.Equal(
+            ["build-01,micro-01", "build-01|windows|build@10.20.30.11|D:/lq|2", "micro-01|windows|build@10.20.30.21|C:/lq|1"],
+            Lines(output));
+
+        // Entries at column 0 under machines: are read too.
+        var flat = File("flat.yml", "machines:\n- name: m1\n  ssh: a@10.20.30.31\n  work_root: /srv/lq\n  os: linux\n");
+        (code, output) = WithFunctions($"(Read-MachineIdentities '{flat}')['m1'].os");
+        Assert.Equal((0, "linux"), (code, output.Trim()));
+    }
+
+    /// <summary>Every refusal names the file, the line number, the key and the machine name only: never line text, values, hosts, users or paths.</summary>
+    [PowerShellFact]
+    public void SmokeRefusalsNeverEchoConfigContent()
+    {
+        const string Secretish = "zz-private-host-77";
+        string[] bad =
+        [
+            $"machines:\n  - name: m1\n    ssh: [{Secretish}@10.20.30.77]\n    work_root: /srv/{Secretish}\n",
+            $"machines:\n  - ssh: {Secretish}@10.20.30.77\n    name: m1\n",
+            $"machines: [{Secretish}]\n",
+            $"machines:\n  - name: m1\n    ssh: \"{Secretish}\\x\"\n    work_root: /x\n",
+            $"machines:\n  - name: m1\n    ssh: a@b\n   work_root: /srv/{Secretish}\n",
+            $"machines:\n  - name: m1\n    work_root: /srv/{Secretish}\n",
+            $"machines:\n  - {{name: m1, ssh: {Secretish}}}\n",
+        ];
+        for (var k = 0; k < bad.Length; k++)
+        {
+            var file = File($"bad{k}.yml", bad[k]);
+            var (code, output) = WithFunctions($"try {{ [void](Read-MachineIdentities '{file}'); 'PARSED' }} catch {{ 'REFUSED: ' + $_.Exception.Message }}");
+            Assert.Equal(0, code);
+            Assert.StartsWith("REFUSED: bad" + k + ".yml", output.Trim(), StringComparison.Ordinal);
+            Assert.DoesNotContain(Secretish, output, StringComparison.Ordinal);
+            Assert.DoesNotContain("10.20.30.77", output, StringComparison.Ordinal);
+        }
+
+        // Differences are named by key, never shown.
+        var real = File("machines.yml", Real);
+        var smoke = File("machines.smoke.yml", Real.Replace("/srv/lanq", "/srv/" + Secretish, StringComparison.Ordinal));
+        var (exit, said) = RunScript(real, "-Run", "123", "-Branch", "v0.9.2", "-Config", smoke);
+        Assert.Equal(2, exit);
+        Assert.Contains("its work_root differs", said, StringComparison.Ordinal);
+        Assert.DoesNotContain(Secretish, said, StringComparison.Ordinal);
+        Assert.DoesNotContain("/srv/lanq", said, StringComparison.Ordinal);
+
+        // Notes and messages hide every ssh target, host and work_root of the machines.
+        var (c2, o2) = WithFunctions(
+            $"Set-HiddenValues @((Read-MachineIdentities '{real}')); Hide-ConfigValues 'ssh: connect to host 10.20.30.11 port 22 as build@10.20.30.11 in /srv/lanq/jobs/x'");
+        Assert.Equal(0, c2);
+        Assert.Equal("ssh: connect to host <host of build-01> port 22 as <ssh of build-01> in <work_root of build-01>/jobs/x", o2.Trim());
     }
 
     /// <summary>The run must be a successful release workflow_dispatch run on the branch, at its head; the binary must carry +headSha.</summary>
