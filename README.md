@@ -920,7 +920,8 @@ Two cases rule out a machine rather than the job, both permanent:
   with `NoCapacity` (75, `retryable: false`) and says which variable and machines: drop the `--env`, or remove the
   variable from the machine's `env:`.
 - `windows_command_too_long`: on a Windows machine the values make the job's command longer than the 8,000-character
-  limit. The job goes to another machine; if none is left, it is `Rejected` (2) with the length.
+  limit. The job goes to another machine; if none is left, it is `Rejected` (2) with the length (and, when other
+  machines were ruled out by `env_conflict`, each of them and its variable).
 
 `--dry-run` shows the `--env` flags as given (after the secret scan) and every machine they rule out.
 
