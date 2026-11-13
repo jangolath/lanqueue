@@ -317,8 +317,10 @@ or when the shards together list fewer tests than the whole suite.
     size: [light, medium]
 ```
 
-`check-test-split.sh` is in [SHARDING.md](SHARDING.md#net); lanq's own [`lanq.yml`](../lanq.yml) runs it with the same
-N as its Linux shards, plus a Windows job so Windows-only tests are not dropped.
+`check-test-split.sh` and its PowerShell twin `check-test-split.ps1` are in [SHARDING.md](SHARDING.md#net); lanq's own
+[`lanq.yml`](../lanq.yml) runs the PowerShell one with the same N as its Windows shards. A plan file has no conditions,
+so a job for an OS your pool lacks can never run and fails the plan: keep such jobs commented out, as that file does
+with its Linux job.
 
 Make the later jobs depend on it (`after: [guard]`) when they are expensive, or let it run alongside when they are not.
 

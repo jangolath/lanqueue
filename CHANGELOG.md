@@ -59,8 +59,10 @@
 
 ### Project
 
-- lanq's repository has its own `lanq.yml`: a `guard` job, four Linux shards and two Windows shards of the test suite,
-  running the scripts in `scripts/lanq/` (the same files as the SHARDING.md recipe). It names no machines.
+- lanq's repository has its own `lanq.yml`: a PowerShell `guard` job and two Windows shards of the test suite,
+  running the scripts in `scripts/lanq/` (the same files as the SHARDING.md recipe), plus a commented Linux job for
+  pools with Linux workers (a plan has no conditions, so a job no machine can take would fail it). It names no
+  machines. CI runs the split guard on Linux (sh) and Windows (PowerShell).
 - `scripts/smoke-workers.ps1` (Windows PowerShell 5.1 and PowerShell 7) smokes a release candidate on real workers,
   as RELEASING.md's new step 1b: it runs the release dry run's `native-win-x64` binary (checked by the run's `headSha`
   against the release branch), with the owner's separate `machines.smoke.yml` and a temporary `LANQ_HOME`. It refuses

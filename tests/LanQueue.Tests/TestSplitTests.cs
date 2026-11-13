@@ -13,12 +13,13 @@ namespace LanQueue.Tests;
 /// </summary>
 public sealed partial class TestSplitTests : IDisposable
 {
-    /// <summary>The exact policy.allowed_commands lines the owner adds for lanq.yml (README "Developing lanq").</summary>
+    /// <summary>The exact policy.allowed_commands lines the owner adds for lanq.yml (README "Developing lanq"): Windows, then the optional Linux job.</summary>
     internal static readonly string[] AllowLines =
     [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1",
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/check-test-split.ps1",
         "sh scripts/lanq/dotnet-test-shard.sh",
         "sh scripts/lanq/check-test-split.sh",
-        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1",
     ];
 
     private static readonly (string Name, long Cksum)[] Golden =
@@ -253,41 +254,61 @@ public sealed partial class TestSplitTests : IDisposable
         Assert.Equal(was, [.. now.Take(10), .. now.Skip(11).Take(before.Count - 10)]);
     }
 
+    private static readonly string PolicyYaml = $$"""
+        policy:
+          allowed_commands: [{{string.Join(", ", AllowLines.Select(l => "\"" + l + "\""))}}]
+          allowed_directories: ["."]
+        machines:
+          - name: build-01
+            os: windows
+            ssh: user@10.20.30.11
+            work_root: C:/lq
+            capabilities: [dotnet, windows]
+            max_jobs: 2
+        """;
+
+    /// <summary>The plan runs on Windows only (a Windows-only pool can run all of it): the guard with the same N as the shards.</summary>
     [Fact]
     public void RepoLanqYmlLoadsAndExpands()
     {
         var plan = PlanFileLoader.Load(Path.Combine(T.RepoRoot, "lanq.yml"));
-        Assert.Equal(["guard", "unit-linux", "unit-windows"], plan.Jobs.Select(j => j.Name));
-        var config = ConfigLoader.Parse($$"""
-            policy:
-              allowed_commands: [{{string.Join(", ", AllowLines.Select(l => "\"" + l + "\""))}}]
-              allowed_directories: ["."]
-            machines:
-              - name: build-01
-                os: linux
-                ssh: user@10.20.30.11
-                work_root: /srv/lanq
-                capabilities: [dotnet, linux]
-                max_jobs: 1
-            """);
+        Assert.Equal(["guard", "unit-windows"], plan.Jobs.Select(j => j.Name));
+        var config = ConfigLoader.Parse(PolicyYaml);
 
         var guard = plan.Jobs[0].Args;
-        var linux = plan.Jobs[1].Args;
-        var windows = plan.Jobs[2].Args;
-        Assert.Equal(["sh", "scripts/lanq/check-test-split.sh", "tests/LanQueue.Tests/LanQueue.Tests.csproj", "4"], guard.Argv);
-        Assert.Equal(4, linux.Shards!.Count);
-        Assert.Equal(guard.Argv[^1], $"{linux.Shards.Count}"); // the guard checks the N the shards use
+        var windows = plan.Jobs[1].Args;
+        Assert.Equal(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/lanq/check-test-split.ps1", "-Project", "tests/LanQueue.Tests/LanQueue.Tests.csproj", "-Shards", "2"],
+            guard.Argv);
         Assert.Equal(2, windows.Shards!.Count);
-        Assert.Equal(["dotnet", "linux"], guard.Needs);
-        Assert.Equal(["dotnet", "linux"], linux.Needs);
-        Assert.Equal(["dotnet", "windows"], windows.Needs); // Windows-only tests run too
-        Assert.Equal(AllowLines[0], JobPolicy.AllowedBy(config.Policy, linux.Argv));
+        Assert.Equal(guard.Argv[^1], $"{windows.Shards.Count}"); // the guard checks the N the shards use
+        Assert.Null(guard.Shards);
+        Assert.All(plan.Jobs, j => Assert.Equal(["dotnet", "windows"], j.Args.Needs));
+        Assert.Equal(AllowLines[0], JobPolicy.AllowedBy(config.Policy, windows.Argv));
         Assert.Equal(AllowLines[1], JobPolicy.AllowedBy(config.Policy, guard.Argv));
-        Assert.Equal(AllowLines[2], JobPolicy.AllowedBy(config.Policy, windows.Argv));
         Assert.All(plan.Jobs, j => Assert.True(j.Args.Baseline));
         Assert.All(plan.Jobs, j => Assert.Equal(30, j.Args.TimeoutMinutes));
-        Assert.All(plan.Jobs.Skip(1), j => Assert.Equal(["tests/LanQueue.Tests/TestResults/*.trx"], j.Args.Fetch));
-        Assert.True(JobPolicy.ValidateForWindows(windows.Argv).Ok);
+        Assert.Equal(["tests/LanQueue.Tests/TestResults/*.trx"], windows.Fetch);
+        Assert.All(plan.Jobs, j => Assert.True(JobPolicy.ValidateForWindows(j.Args.Argv).Ok));
+    }
+
+    /// <summary>The commented Linux block, uncommented, loads too, with its guard's N matching its shards and the two sh allowlist lines.</summary>
+    [Fact]
+    public void RepoLanqYmlLinuxExampleLoads()
+    {
+        var text = File.ReadAllText(Path.Combine(T.RepoRoot, "lanq.yml")).Replace("\r\n", "\n", StringComparison.Ordinal);
+        var uncommented = string.Join('\n', text.Split('\n').Select(l => l.StartsWith("  #   ", StringComparison.Ordinal) || l.StartsWith("  # unit-linux:", StringComparison.Ordinal) || l.StartsWith("  # guard-linux:", StringComparison.Ordinal) ? "  " + l[4..] : l));
+        var plan = PlanFileLoader.Parse(uncommented);
+        Assert.Equal(["guard", "unit-windows", "unit-linux", "guard-linux"], plan.Jobs.Select(j => j.Name));
+        var config = ConfigLoader.Parse(PolicyYaml);
+        var linux = plan.Jobs[2].Args;
+        var guard = plan.Jobs[3].Args;
+        Assert.Equal(4, linux.Shards!.Count);
+        Assert.Equal(guard.Argv[^1], $"{linux.Shards.Count}");
+        Assert.Equal(["dotnet", "linux"], linux.Needs);
+        Assert.Equal(["dotnet", "linux"], guard.Needs);
+        Assert.Equal(AllowLines[2], JobPolicy.AllowedBy(config.Policy, linux.Argv));
+        Assert.Equal(AllowLines[3], JobPolicy.AllowedBy(config.Policy, guard.Argv));
     }
 
     [Fact]

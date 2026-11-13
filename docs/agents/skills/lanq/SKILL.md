@@ -205,6 +205,9 @@ than one case.
 - Do not write `lanq makeready` JSON `suggestedMachine` into the machines file: it is advice for the developer.
   `lanqWithheld` lists what lanq left out of the report.
 - Do not edit `lanq.yml` or the scripts it runs (shard scripts included) to turn a red run green.
+- Do not run lanq's release smoke (`scripts/smoke-workers.ps1`) unless the developer asks, and never edit its
+  `machines.smoke.yml` (in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere) or `machines.yml`. A repository's `machines.example.yml` is only a
+  template; lanq never reads it.
 - Do not run `lanq makeready --add`, `lanq makeready --setup` or anything with `--yes`: adding machines is the
   developer's job.
 - Do not run a `nextSteps` command whose `safeToRunUnattended` is `false`, and run a safe one at most once.

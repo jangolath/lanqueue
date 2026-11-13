@@ -126,8 +126,8 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
 
 ### In lanq's own repository
 
-You may run its test plan with `lanq run --plan --json --no-wake` (the `guard` job, four Linux shards and two Windows
-shards; it needs the developer's `machines.yml` to allow the three script commands listed in `lanq.yml`). Report a
-red `guard` as a broken split, not as a test failure. Run `scripts/smoke-workers.ps1` (the release-candidate smoke on
-real workers) only when the developer asks: it needs their `machines.smoke.yml`. Never edit `machines.yml` or
-`machines.smoke.yml`.
+You may run its test plan with `lanq run --plan --json --no-wake` (a `guard` job and two Windows shards; it needs the
+developer's `machines.yml` to allow the script commands listed in `lanq.yml`). Report a red `guard` as a broken split,
+not as a test failure. Run `scripts/smoke-workers.ps1` (the release-candidate smoke on real workers) only when the
+developer asks: it needs their `machines.smoke.yml`, which lives in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere. Never edit `machines.yml` or
+`machines.smoke.yml`; the repository's `machines.example.yml` is only a template that lanq never reads.

@@ -533,8 +533,8 @@ above the count) exits 2 before anything runs, no test classes at all exits 1, a
 (which a Windows console could re-encode, splitting differently from sh) exits 2, and a shard's run passes
 `RunConfiguration.TreatNoTestsAsError=true`, so a filter that matches nothing fails instead of passing.
 
-These are the files lanq's own repository runs (its [`lanq.yml`](../lanq.yml) has a `guard` job with the same N as its
-Linux shards, and a Windows job, since some tests run only on Windows). They were checked against an xUnit project on
+These are the files lanq's own repository runs (its [`lanq.yml`](../lanq.yml) has a PowerShell `guard` job with the
+same N as its two Windows shards, and a commented Linux job to uncomment on a pool with Linux workers). They were checked against an xUnit project on
 VSTest: `dotnet test --list-tests` prints one fully qualified test name per line, indented four spaces (parameters in
 parentheses are dropped), and it honours `--filter`. With Microsoft Testing Platform projects, check `--list-tests`
 output on your project before relying on the `sed`. If one class dominates, split by namespace buckets you choose

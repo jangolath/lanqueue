@@ -27,7 +27,7 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    ```powershell
    gh workflow run release.yml --ref <release branch>
    gh run list --workflow release.yml --branch <release branch> --limit 1   # wait for it; note its id
-   pwsh scripts/smoke-workers.ps1 -Run <run id> -Config <folder of machines.yml>\machines.smoke.yml   # or powershell -File
+   pwsh scripts/smoke-workers.ps1 -Run <run id> -Branch <release branch> -Config "$env:APPDATA\lanq\machines.smoke.yml"   # or powershell -File
    ```
 
    The script downloads the run's `native-win-x64` artifact and checks the run's `headSha` against the branch head on
@@ -39,8 +39,9 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    note. Every smoke job has `--timeout 5`, and the script ends with `lanq unlock` on each smoke machine and a check
    that no slot of a smoke job is left.
 
-   The smoke config is yours and lives outside every repository: `machines.smoke.yml` next to `machines.yml`, with
-   the same machines (copy their entries unchanged) and this policy:
+   The smoke config is yours and lives outside every repository: `machines.smoke.yml` in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere. (The repository's
+   `machines.example.yml` is only a template; lanq never reads it.) It holds the same machines as `machines.yml`
+   (copy their entries unchanged) and this policy:
 
    ```yaml
    # machines.smoke.yml: only for scripts/smoke-workers.ps1 (RELEASING.md step 1b). The machines below must be copies of

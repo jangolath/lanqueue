@@ -168,9 +168,11 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 [docs/WORKERS.md](docs/WORKERS.md).
 
 1. Write a starter config with `lanq init`: it goes to the per-user file lanq reads without flags
-   (`~/.config/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`), never into the current folder. Or copy
-   `machines.example.yml` there, and edit it. A config in the current directory is never picked up implicitly; for
-   another file pass `--config FILE` or set `LANQ_CONFIG` (`lanq init` then writes that file).
+   (`~/.config/lanq/machines.yml`, or `$XDG_CONFIG_HOME/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`),
+   never into the current folder, and prints the path. Or copy `machines.example.yml` there, and edit it: the
+   repository's `machines.example.yml` is only a template, and lanq never reads it. A config in the current directory is
+   never picked up implicitly; for another file pass `--config FILE` or set `LANQ_CONFIG` (`lanq init` then writes that
+   file).
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
    (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
 3. Check your setup and the fleet (`lanq doctor --remote` also checks each worker's tools; see [Commands](#commands)):
@@ -1434,27 +1436,30 @@ based on each project's public README at the time of writing; check the project 
 
 ## Developing lanq
 
-lanq's repository runs its own test suite through lanq: [`lanq.yml`](lanq.yml) has a `guard` job
-(`scripts/lanq/check-test-split.sh`, which fails unless every test lands in exactly one shard), the suite in four
-Linux shards and two Windows shards (some tests run only on Windows), each rerun at the base on failure
-(`baseline: true`), with fixed shard counts so history compares like with like. The shard scripts are the
-[SHARDING.md](docs/SHARDING.md#net) recipe. `lanq run --plan --json --no-wake` is the release gate's "full suite on
-the pool". Your `machines.yml` must allow exactly these commands, and tag workers `linux` or `windows`:
+lanq's repository runs its own test suite through lanq on Windows workers: [`lanq.yml`](lanq.yml) has a `guard` job
+(`scripts/lanq/check-test-split.ps1`, which fails unless every test lands in exactly one shard) and the suite in two
+Windows shards, each rerun at the base on failure (`baseline: true`), with a fixed shard count so history compares
+like with like. The shard scripts are the [SHARDING.md](docs/SHARDING.md#net) recipe. `lanq run --plan --json
+--no-wake` is the release gate's "full suite on the pool". Your `machines.yml` must allow exactly these commands, and
+tag the workers `windows`:
 
 ```yaml
 policy:
   allowed_commands:
-    - "sh scripts/lanq/dotnet-test-shard.sh"
-    - "sh scripts/lanq/check-test-split.sh"
     - "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1"
+    - "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/check-test-split.ps1"
 ```
 
-Never a bare `sh` or `powershell`. An agent may run the plan; it never edits `lanq.yml` or the scripts to turn a red
-run green, and never edits `machines.yml`.
+A Linux job (four shards and its own guard, on workers tagged `linux`) is in `lanq.yml` as a commented block: a plan
+file has no conditions, so a job for an OS the pool lacks could never run and would fail the plan. With Linux workers,
+uncomment it and also allow `"sh scripts/lanq/dotnet-test-shard.sh"` and `"sh scripts/lanq/check-test-split.sh"`. CI
+runs both guards (Linux and Windows) on every pull request. Never a bare `sh` or `powershell`. An agent may run the
+plan; it never edits `lanq.yml` or the scripts to turn a red run green, and never edits `machines.yml`.
 
 Before a release, `scripts/smoke-workers.ps1` runs the release candidate's binary on real workers with a separate
-`machines.smoke.yml` (see [RELEASING.md](RELEASING.md), step 1b). It refuses the real `machines.yml`, uses a
-temporary `LANQ_HOME`, and needs the smoke machines to equal the real ones. Agents run it only when asked.
+smoke config, `machines.smoke.yml`, in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere (see [RELEASING.md](RELEASING.md), step 1b). It refuses the real
+`machines.yml`, uses a temporary `LANQ_HOME`, and needs the smoke machines to equal the real ones. Agents run it only
+when asked, and never edit either file.
 
 ## Contributing and licence
 
