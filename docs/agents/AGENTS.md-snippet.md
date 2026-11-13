@@ -45,6 +45,10 @@
   `--setup` or any `--yes`: adding machines is the developer's job. Never pass permission-skipping flags.
   Never shard a command that is not idempotent or writes shared state (deploy, migrate, publish, push).
   Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder.
+- The secret scan reads files git shows as binary too (0.9.2). Never add a `.gitattributes` entry, rename, compress,
+  move or re-encode a file, or move a secret into a `-diff` file, to get past it. Report `scanSkipped` (files not read
+  in full) and a `scan-incomplete` refusal; do not try to fix them. `lanq makeready` JSON `suggestedMachine` is advice
+  for the developer: never write it into the machines file. Never edit `lanq.yml` or its scripts to turn a red run green.
 - Keep `--no-wake` unless the developer has said waking machines is fine. Do not run `lanq wake`, `lanq health --wake`,
   `lanq makeready`, `lanq unlock` or `lanq init` unless the developer asks. Never run lanq-makeready-fix: it is the PC
   owner's, local and interactive only.

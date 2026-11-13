@@ -12,7 +12,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -23,6 +23,15 @@ jobs:
       - run: dotnet format --verify-no-changes
       - run: dotnet build -c Release
       - run: dotnet test -c Release --no-build
+      # lanq.yml's shard split (scripts/lanq): every test in exactly one shard, through the scripts' own filters, with the
+      # same N as lanq.yml (4 Linux shards, 2 Windows shards).
+      - name: Test split guard (sh)
+        if: runner.os == 'Linux'
+        run: sh scripts/lanq/check-test-split.sh tests/LanQueue.Tests/LanQueue.Tests.csproj 4
+      - name: Test split guard (PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/check-test-split.ps1 -Project tests/LanQueue.Tests/LanQueue.Tests.csproj -Shards 2
   aot-linux:
     # A cheap NativeAOT check on every PR: trimming/AOT breakage (a reflection-only API, a lost embedded resource) fails here, not at
     # release time. It links against the runner's own glibc; the release builds link against glibc 2.27 (see release.yml).

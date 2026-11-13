@@ -13,7 +13,7 @@ namespace LanQueue;
 public static partial class Cli
 {
     /// <summary>The lanq-makeready release embedded in this build (see scripts/sync-makeready.sh).</summary>
-    internal const string MakereadyVersion = "0.4.0";
+    internal const string MakereadyVersion = "0.4.1";
 
     internal static readonly TimeSpan MakereadyTimeout = TimeSpan.FromSeconds(120);
 
@@ -300,7 +300,7 @@ public static partial class Cli
 
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(report, MakereadyJson.Default.MakereadyReport)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ReportForJson(report), MakereadyJson.Default.MakereadyReportJson)).ConfigureAwait(false);
         }
         else
         {
@@ -478,7 +478,7 @@ public static partial class Cli
             ? JobRunner.SafeLine(string.IsNullOrWhiteSpace(detail) ? title ?? "?" : $"{title}: {detail}")
             : ready ? null : "no transfer mode works (worker_git and worker_archive are FAIL)";
         var verdictText = !ready ? "FAIL" : warnings > 0 ? "WARN" : "OK";
-        return new MakereadyRowJson(m.Name, os, verdictText, warnings, failures, scan.Code, problem, report);
+        return new MakereadyRowJson(m.Name, os, verdictText, warnings, failures, scan.Code, problem, ReportForJson(report));
     }
 
     /// <summary>The human report. Every string from the worker is sanitised by the caller, line by line; nothing from it is executed.</summary>
@@ -685,6 +685,64 @@ public static partial class Cli
         }
 
         return lines;
+    }
+
+    internal const string WithheldPathPrependReason =
+        "not one usable folder with DOTNET_ROOT set to it (a redacted home folder, a list, or characters lanq refuses in path_prepend)";
+
+    internal const string WithheldEnvReason = "kept only as DOTNET_ROOT set to the one usable path_prepend folder";
+
+    /// <summary>
+    /// The report for every <c>lanq makeready</c> JSON path (one machine, each <c>--all</c> row, <c>--add</c>; 0.9.2): every string passed
+    /// through <see cref="JobRunner.SafeLine"/> (env keys included), and suggestedMachine.path_prepend and env kept only when
+    /// <see cref="SuggestedDotnetDir"/> accepts them, as the text and <c>--add</c> do. What was dropped is listed in lanqWithheld (absent
+    /// when nothing was). The schema stays lanq-makeready/v1 and the report still has no nextSteps of lanq's.
+    /// </summary>
+    internal static MakereadyReportJson ReportForJson(MakereadyReport r)
+    {
+        static string? S(string? v) => v is null ? null : JobRunner.SafeLine(v);
+        static List<string>? L(List<string>? v) => v?.Select(x => JobRunner.SafeLine(x ?? "")).ToList();
+        List<MakereadyWithheld> withheld = [];
+        MakereadySuggestion? suggestion = null;
+        if (r.SuggestedMachine is { } s)
+        {
+            var usable = SuggestedDotnetDir(s) is not null;
+            if (!usable && s.PathPrepend is not null)
+            {
+                withheld.Add(new MakereadyWithheld("suggestedMachine.path_prepend", WithheldPathPrependReason));
+            }
+
+            if (!usable && s.Env is not null)
+            {
+                withheld.Add(new MakereadyWithheld("suggestedMachine.env", WithheldEnvReason));
+            }
+
+            suggestion = new MakereadySuggestion(
+                S(s.Name), S(s.Os), S(s.Ssh), S(s.WorkRoot), L(s.Capabilities), s.MaxJobs, s.MinFreeMemGb, S(s.Transfer), S(s.AllowedHours),
+                s.Wake is { } w ? new MakereadyWake(S(w.Mac)) : null,
+                usable ? L(s.PathPrepend) : null,
+                usable ? s.Env!.ToDictionary(e => JobRunner.SafeLine(e.Key), e => JobRunner.SafeLine(e.Value ?? ""), StringComparer.Ordinal) : null);
+        }
+
+        return new MakereadyReportJson(
+            S(r.Schema),
+            r.Tool is { } t ? new MakereadyTool(S(t.Name), S(t.Version)) : null,
+            S(r.GeneratedAt),
+            r.Host is { } h ? new Makeready.MakereadyHost(S(h.Hostname), S(h.User), S(h.Os), S(h.Arch)) : null,
+            r.Verdicts is { } v ? new MakereadyVerdicts(S(v.WorkerGit), S(v.WorkerArchive), S(v.Dotnet10), S(v.Docker), S(v.Overnight)) : null,
+            r.Summary is { } sum
+                ? sum with
+                {
+                    Verdict = S(sum.Verdict),
+                    Text = S(sum.Text),
+                    NextSteps = sum.NextSteps?.Select(st => st with { Id = S(st.Id), Title = S(st.Title), Status = S(st.Status), Detail = S(st.Detail), Action = S(st.Action) }).ToList(),
+                }
+                : null,
+            r.SuitedFor is { } f ? f with { Tier = S(f.Tier), Text = S(f.Text) } : null,
+            r.Checks?.Select(c => c with { Id = S(c.Id), Title = S(c.Title), Status = S(c.Status), Detail = S(c.Detail), Advice = S(c.Advice) }).ToList(),
+            L(r.Capabilities),
+            suggestion,
+            withheld.Count > 0 ? withheld : null);
     }
 
     internal const string RedactedDotnetComment =

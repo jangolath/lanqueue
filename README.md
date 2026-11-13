@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.9.1/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.9.2/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.9.1 --repo jangolath/lanqueue
+gh release download v0.9.2 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.9.1    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.9.2    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -168,9 +168,11 @@ GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist an
 [docs/WORKERS.md](docs/WORKERS.md).
 
 1. Write a starter config with `lanq init`: it goes to the per-user file lanq reads without flags
-   (`~/.config/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`), never into the current folder. Or copy
-   `machines.example.yml` there, and edit it. A config in the current directory is never picked up implicitly; for
-   another file pass `--config FILE` or set `LANQ_CONFIG` (`lanq init` then writes that file).
+   (`~/.config/lanq/machines.yml`, or `$XDG_CONFIG_HOME/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`),
+   never into the current folder, and prints the path. Or copy `machines.example.yml` there, and edit it: the
+   repository's `machines.example.yml` is only a template, and lanq never reads it. A config in the current directory is
+   never picked up implicitly; for another file pass `--config FILE` or set `LANQ_CONFIG` (`lanq init` then writes that
+   file).
 2. Make sure key-based login works and the host key is already in `known_hosts`. With a key loaded in ssh-agent
    (recommended, see [Keeping your keys safe](#keeping-your-keys-safe)): `ssh user@build-01.lan true`.
 3. Check your setup and the fleet (`lanq doctor --remote` also checks each worker's tools; see [Commands](#commands)):
@@ -303,7 +305,7 @@ The check names and every field are in [docs/JSON.md](docs/JSON.md#lanq-doctor--
 
 Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
 .NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
-(v0.4.0, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner: lanq-makeready's fix
+(v0.4.1, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner: lanq-makeready's fix
 script is never built in or sent), sent on ssh **stdin** and run from memory with
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
@@ -328,8 +330,9 @@ Linux: `ssh.start`, `power.sleep`), one more line names those fixes: *May be fix
 power.sleep, longpaths.on): its owner can run lanq-makeready-fix.ps1 -WhatIf there to see what it can do, local and
 interactive only (see lanq-makeready's README). lanq never runs it.* (`sh lanq-makeready-fix.sh --dry-run` on Linux.)
 "May": the fix script has its own preconditions and can still decline. (Since 0.9.1; not in `--json`.) It ends with: *lanq never changes a worker. Fixes are for the PC's
-owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead, every field as the script sent it (0.2.0's
-`summary`, `suitedFor`, `min_free_mem_gb` and `wake` included); when there is no report it prints exactly
+owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead (0.2.0's
+`summary`, `suitedFor`, `min_free_mem_gb` and `wake` included), every string sanitised and `suggestedMachine.path_prepend`/`env`
+kept only as the one usable folder with `DOTNET_ROOT` set to it, anything left out named in `lanqWithheld` (0.9.2; also in `--all` and `--add --json`); when there is no report it prints exactly
 one `{"status":...,"exitCode":...,"message":...}` object (`Rejected` 2, `InfraError` 70, `Held` 75, `Cancelled` 130). The report is
 treated as untrusted input: at most 1 MB, parsed without reflection, checked against the schema, every string
 sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-ready (git or archive transfer works),
@@ -342,7 +345,7 @@ prints one table:
 
 ```text
 $ lanq makeready --all
-lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.4.0)
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.4.1)
 
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending
@@ -1293,7 +1296,14 @@ Each default below is enforced in code and covered by a unit test.
   are refused) (lines may end in CR,
   LF or CRLF); the refusal names the file and key, never the value. Obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
   anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
-  never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
+  never echoes the value. If a scan pattern times out the job is refused (fail closed). Since 0.9.2 the content of
+  uncommitted files git shows as binary is scanned too (a `.gitattributes` `-diff` or `binary` entry hides a file
+  from the diff, not from lanq; also UTF-16 text and real binaries): blobs are read by object id without filters or
+  textconv, text up to 32 MB per file and 256 MB in all, the printable strings of a binary (8-bit, UTF-16 and UTF-32)
+  up to 8 MB per file and 64 MB in all; in a modified file only new lines or strings count. Compressed or encrypted
+  content (a zip, a `.gz`) is not unpacked, so a secret inside it is not seen. A file over a cap is not refused: it is named on
+  stderr and in `scanSkipped` ([JSON.md](docs/JSON.md#scanskipped)); an object git cannot produce refuses the job.
+  Never rename, compress, move or re-attribute a file to get past the scan. This is a safety net, not a
   guarantee: apart from `.npmrc`, `.pypirc` and `.yarnrc.yml` it does not read the content of committed files, it does not look at files that were committed and later
   deleted (they are still in the history a bundle carries), and it cannot recognise every secret format.
 - **Job variables are opt-in by name.** `--env` (and `lanq.yml` `env:`) can set only names you list in
@@ -1423,6 +1433,33 @@ a headless command that routes one job at a time to a machine by capability and 
 of it. It does not run or supervise agents interactively, has no UI, and installs nothing on the remote machines.
 They can complement each other; choose by whether you want a cockpit or a dispatcher. (Feature descriptions are
 based on each project's public README at the time of writing; check the project for current details.)
+
+## Developing lanq
+
+lanq's repository runs its own test suite through lanq on Windows workers: [`lanq.yml`](lanq.yml) has a `guard` job
+(`scripts/lanq/check-test-split.ps1`, which fails unless every test lands in exactly one shard) and the suite in two
+Windows shards, each rerun at the base on failure (`baseline: true`), with a fixed shard count so history compares
+like with like. The shard scripts are the [SHARDING.md](docs/SHARDING.md#net) recipe. `lanq run --plan --json
+--no-wake` is the release gate's "full suite on the pool". Your `machines.yml` must allow exactly these commands, and
+tag the workers `windows`:
+
+```yaml
+policy:
+  allowed_commands:
+    - "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1"
+    - "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/check-test-split.ps1"
+```
+
+A Linux job (four shards and its own guard, on workers tagged `linux`) is in `lanq.yml` as a commented block: a plan
+file has no conditions, so a job for an OS the pool lacks could never run and would fail the plan. With Linux workers,
+uncomment it and also allow `"sh scripts/lanq/dotnet-test-shard.sh"` and `"sh scripts/lanq/check-test-split.sh"`. CI
+runs both guards (Linux and Windows) on every pull request. Never a bare `sh` or `powershell`. An agent may run the
+plan; it never edits `lanq.yml` or the scripts to turn a red run green, and never edits `machines.yml`.
+
+Before a release, `scripts/smoke-workers.ps1` runs the release candidate's binary on real workers with a separate
+smoke config, `machines.smoke.yml`, in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere (see [RELEASING.md](RELEASING.md), step 1b). It refuses the real
+`machines.yml`, uses a temporary `LANQ_HOME`, and needs the smoke machines to equal the real ones. Agents run it only
+when asked, and never edit either file.
 
 ## Contributing and licence
 

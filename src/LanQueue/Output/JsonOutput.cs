@@ -168,7 +168,20 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>--baseline only (0.9.0), on a single run's object and on each shard of --shards: the rerun at the base commit after the job (shard) ended Failed. Absent when not asked for or not run.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public BaselineJson? Baseline { get; init; }
+
+    /// <summary>On a single run's object only (the top level of --shards carries it) (0.9.2): uncommitted files git shows as binary that the secret scan did not read in full (over a cap). Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
 }
+
+/// <summary>
+/// One file in scanSkipped (0.9.2): an uncommitted file git shows as binary whose content the secret scan did not read in full. Reported,
+/// never refused.
+/// </summary>
+/// <param name="Path">The file's path in the repository (sanitised).</param>
+/// <param name="Bytes">Its size.</param>
+/// <param name="Reason">binary_over_file_cap (a binary over 8 MB), binary_over_total_cap (past 64 MB of binaries in the snapshot), masked_text_over_cap (text over 32 MB) or masked_text_over_total_cap (past 256 MB of such text in the snapshot). Values may be added.</param>
+internal sealed record ScanSkipJson(string Path, long Bytes, string Reason);
 
 /// <summary>
 /// lanq run --baseline (0.9.0): the rerun of a failed job (shard, plan job) at the base commit. Every member is always written (null where it
@@ -221,6 +234,10 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Exclusive { get; init; }
+
+    /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the one snapshot every shard runs. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
 }
 
 /// <summary>
@@ -315,6 +332,10 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>--baseline only (0.9.0): the base a failure would be rerun at (ref, sha, message; verdict skipped when the snapshot is the base, else null). Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public BaselineJson? Baseline { get; init; }
+
+    /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the snapshot the dry run took. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
 }
 
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
@@ -349,6 +370,10 @@ internal sealed record PlanFileRunJson(
 
     /// <summary>What to do next for the whole plan (see <see cref="NextStepJson"/>); a re-run adds --only with the jobs that did not complete.</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+
+    /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the plan's one snapshot. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
 }
 
 /// <summary>
@@ -440,6 +465,10 @@ internal sealed record PlanFileDryJson(string Status, int ExitCode)
 
     /// <summary>What to do next: WouldRun proceeds with the same command without --dry-run.</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+
+    /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the snapshot the dry run took. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
 }
 
 /// <summary>One job of <c>lanq run --plan --dry-run --json</c> (every member always written, null where it does not apply).</summary>
@@ -619,9 +648,9 @@ internal sealed partial class LanqJson : JsonSerializerContext;
 /// <param name="Failures">Blockers of a not-ready machine: the summary's blockers, else its FAIL checks (0 when ready or without a report).</param>
 /// <param name="ExitCode">What <c>lanq makeready &lt;machine&gt;</c> would exit with: 0, 1, 70 or 75.</param>
 /// <param name="Problem">The first FAIL check, else the first WARN (title: detail), or why there is no report; absent when there is nothing.</param>
-/// <param name="Report">The validated lanq-makeready/v1 report, exactly as <c>lanq makeready &lt;machine&gt; --json</c> prints it; absent without one.</param>
+/// <param name="Report">The validated lanq-makeready/v1 report, exactly as <c>lanq makeready &lt;machine&gt; --json</c> prints it (sanitised and filtered, 0.9.2); absent without one.</param>
 internal sealed record MakereadyRowJson(
-    string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReport? Report)
+    string Machine, string Os, string Verdict, int Warnings, int Failures, int ExitCode, string? Problem, Makeready.MakereadyReportJson? Report)
 {
     /// <summary>What to do about this machine (see <see cref="NextStepJson"/>).</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
@@ -654,7 +683,7 @@ internal sealed record InitJson(string Status, int ExitCode, string? Path, strin
 /// <param name="Entry">The lines written (Added) or that would have been written, exactly; null before there was an entry.</param>
 /// <param name="AfterLine">The 1-based line of machines.yml the entry follows; null without an entry.</param>
 /// <param name="Health">One read-only probe of the added machine (as a lanq health --json row); null unless Added.</param>
-/// <param name="Report">The validated lanq-makeready/v1 report; null when there was none.</param>
+/// <param name="Report">The validated lanq-makeready/v1 report, as <c>lanq makeready --json</c> prints it (sanitised and filtered, 0.9.2); null when there was none.</param>
 internal sealed record MakereadyAddJson(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string Status,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int ExitCode,
@@ -663,7 +692,7 @@ internal sealed record MakereadyAddJson(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] IReadOnlyList<string>? Entry,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? AfterLine,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] HealthJson? Health,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] Makeready.MakereadyReport? Report,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] Makeready.MakereadyReportJson? Report,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string Message)
 {
     /// <summary>What to do next (see <see cref="NextStepJson"/>): Added suggests lanq doctor --remote; never --add or --yes.</summary>

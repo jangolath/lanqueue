@@ -1,5 +1,7 @@
-# Example registry. Copy to a private location (for example ~/.config/lanq/machines.yml) and edit.
-# Pass it with --config or LANQ_CONFIG; lanq never reads a config from the current directory implicitly.
+# Example registry: a template only; lanq never reads this file. Copy it to the per-user file lanq reads without flags
+# (%APPDATA%\lanq\machines.yml on Windows, ~/.config/lanq/machines.yml or $XDG_CONFIG_HOME/lanq/machines.yml elsewhere;
+# lanq init writes a starter there and prints the path) and edit it, or pass another file with --config or LANQ_CONFIG.
+# lanq never reads a config from the current directory implicitly.
 # Never commit real hosts or key paths.
 #
 # Hosts must already be in known_hosts (StrictHostKeyChecking=yes), and key-based login must work.

@@ -45,7 +45,7 @@ public static partial class Cli
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             if (p.Json)
             {
-                var json = new MakereadyAddJson(status, code, state.Path, p.Name is { } n ? JobRunner.SafeLine(n) : null, state.Entry, state.AfterLine, state.Health, state.Report, message)
+                var json = new MakereadyAddJson(status, code, state.Path, p.Name is { } n ? JobRunner.SafeLine(n) : null, state.Entry, state.AfterLine, state.Health, state.Report is { } report ? ReportForJson(report) : null, message)
                 {
                     NextSteps = steps,
                 };

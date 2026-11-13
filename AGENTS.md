@@ -30,7 +30,8 @@ You may run: `lanq health --json` (also with `--needs`, `--mem`, `--on`, `--size
 --json`, `lanq stats --json`, `lanq --version`.
 
 Ask the developer first: `lanq wake`, `lanq health --wake`, `lanq run` without `--no-wake`, `lanq makeready`
-(also `--all`), `lanq unlock`. They act on someone else's PC.
+(also `--all`), `lanq unlock`. They act on someone else's PC. (lanq's release smoke, `scripts/smoke-workers.ps1`, runs
+`lanq unlock` on its smoke machines; it too runs only when the developer asks.)
 
 For the developer only, never you: `lanq makeready --setup` and `--add`, any `--yes`, `lanq init`, editing
 `machines.yml` or `lanq.yml`, `ssh` to a worker yourself.
@@ -100,7 +101,15 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
   Never run `lanq makeready --add`, `--setup` or `--yes`, and never run lanq-makeready-fix (the PC owner's, local only).
 - Never pass permission-skipping flags (such as `--dangerously-skip-permissions`) to any command. lanq refuses them.
 - Never put secrets, tokens or key material in files, command lines or `--env` values lanq will ship. lanq refuses
-  the ones it recognises.
+  the ones it recognises. Since 0.9.2 that includes the content of files git shows as binary: never add a
+  `.gitattributes` entry, rename, compress, move or re-encode a file (or move a secret into a `-diff` file) to get past
+  the scan. A `scan-incomplete` refusal means lanq could not read a file from git: report it (the developer checks
+  with `git fsck`). Report `scanSkipped` (files over the scan's caps, not read in full); do not try to get them read.
+- `lanq makeready` JSON `suggestedMachine` is advice for the developer: never write it into `machines.yml`.
+  `lanqWithheld` lists what lanq left out of the report (lanq's own key; a worker cannot send it). A folder lanq or
+  lanq-makeready calls open ("other local users can write there", by mode bits or POSIX ACLs) is reported, never
+  proposed anyway; never change a worker's permissions or ACLs.
+- Never edit `lanq.yml` or the scripts it runs (such as `scripts/lanq/*` shard scripts) to turn a red run green.
 - A `preexisting` baseline verdict means the failure was there before your change. Report it as such; fix it only if
   that is your task. A `new` verdict with `sameMachine: false` ran on another machine: report the caveat (it may be
   machine-specific) and do not treat it as certainly caused by your change.
@@ -117,3 +126,11 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
 - [docs/JSON.md](docs/JSON.md): every `--json` field, status, reason code and the `nextSteps` contract.
 - [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md): setup, snippets for agent instruction files, failure playbook.
 - [docs/SHARDING.md](docs/SHARDING.md): splitting long suites across the pool.
+
+### In lanq's own repository
+
+You may run its test plan with `lanq run --plan --json --no-wake` (a `guard` job and two Windows shards; it needs the
+developer's `machines.yml` to allow the script commands listed in `lanq.yml`). Report a red `guard` as a broken split,
+not as a test failure. Run `scripts/smoke-workers.ps1` (the release-candidate smoke on real workers) only when the
+developer asks: it needs their `machines.smoke.yml`, which lives in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere. Never edit `machines.yml` or
+`machines.smoke.yml`; the repository's `machines.example.yml` is only a template that lanq never reads.

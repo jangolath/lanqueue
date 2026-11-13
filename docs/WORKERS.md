@@ -153,6 +153,16 @@ FAIL  build-02 (remote): dotnet: 'dotnet --version' failed in the job environmen
       fix: add `path_prepend: [D:/build/dotnet]` to build-02 in machines.yml (found .NET SDK 10.0.102 there), and `DOTNET_ROOT: D:/build/dotnet` under its env: so the SDK's tools find the runtimes next to it
 ```
 
+A folder other local users could plant code in is never proposed: doctor and `lanq makeready --add` skip it with a
+note ("not proposed for path_prepend: other local users can write there"). The folder, its `dotnet`, `sdk`, the newest
+SDK, `host`, `shared` and their version folders must be owned by root (Administrators on Windows) or the build account
+and writable by nobody else; every parent folder too, unless it is sticky. On Linux that is judged by the mode bits
+and, since 0.9.2 (as lanq-makeready 0.4.1 does), by POSIX ACLs: a named `user:` or `group:` entry, or a `default:` one,
+that lets another account write makes the folder open. lanq reads `getfacl -cpn` (at most 5 s); without `getfacl`, the
+`+` ACL marker in `ls -ld` makes a folder open, and so does any group write with BusyBox `ls` (it shows no marker). If
+`getfacl` is missing on a worker that uses ACLs, install the `acl` package there, or the folder stays "open". macOS is not
+checked for ACLs. An agent reports such a note; it never changes a worker's permissions or ACLs to get a folder proposed.
+
 Add those lines to the machine yourself (lanq never edits `machines.yml` or a worker's `PATH` by itself):
 
 ```yaml

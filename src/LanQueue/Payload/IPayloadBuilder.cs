@@ -20,7 +20,20 @@ public sealed record JobPayload(
     string? RepoId = null,
     string? Head = null,
     IReadOnlyList<string>? CommittedFiles = null,
-    IReadOnlyDictionary<string, string?>? CommittedConfigs = null);
+    IReadOnlyDictionary<string, string?>? CommittedConfigs = null)
+{
+    /// <summary>
+    /// Findings in the content of uncommitted files git shows as binary (0.9.2; see <see cref="Policy.BlobScan"/>), including the fail-closed
+    /// scan-incomplete finding; scanned with the rest of the payload.
+    /// </summary>
+    public IReadOnlyList<Policy.SecretFinding> BinaryFindings { get; init; } = [];
+
+    /// <summary>Uncommitted files git shows as binary that were over a cap and not read in full (0.9.2): reported in scanSkipped, never refused.</summary>
+    public IReadOnlyList<Policy.ScanSkip> ScanSkipped { get; init; } = [];
+
+    /// <summary>How many blobs the binary scan read (whole or a first part): 0 on a clean tree or when git shows nothing as binary.</summary>
+    public int BlobsRead { get; init; }
+}
 
 /// <summary>A built archive plus how many entries a tar.gz cannot carry (symlinks, submodules) were left out.</summary>
 public sealed record ArchiveBuild(string Path, int SkippedSymlinks, int SkippedSubmodules);

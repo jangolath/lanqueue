@@ -56,6 +56,22 @@ public static partial class SecretScanner
 
     public static IReadOnlyList<SecretFinding> ScanText(string text, string where) => ScanText(text, where, Rules);
 
+    /// <summary>
+    /// Whether <paramref name="line"/> starts a multi-line secret (a private key's BEGIN line), whose secret part is in the lines after it.
+    /// A timeout counts as yes (fail closed).
+    /// </summary>
+    internal static bool StartsASecretBlock(string line)
+    {
+        try
+        {
+            return Rules.First(r => r.Name == "private-key-block").Pattern.IsMatch(line);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return true;
+        }
+    }
+
     internal static IReadOnlyList<SecretFinding> ScanText(string text, string where, IEnumerable<(string Name, Regex Pattern)> rules)
     {
         var found = new List<SecretFinding>();

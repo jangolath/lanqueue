@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.9.2 (2026-11-13)
+
+### Security
+
+- The secret scan now reads the content of uncommitted files git shows as binary, which the diff it scanned before
+  only reported as "Binary files ... differ": files a `.gitattributes` entry (`-diff`, `binary`) hides from diffs,
+  UTF-16 text, files with a NUL byte and files over `core.bigFileThreshold`. The paths come from
+  `git diff --cached --numstat`, their object ids from `git diff --cached --raw --no-renames`, and the blobs are read
+  locally with `git cat-file --batch` (never with filters or textconv, so no attribute driver runs). Text (UTF-16 with
+  a byte order mark, or text with no NUL byte in its first 8000 bytes) is scanned up to 32 MB per file and 256 MB per
+  snapshot, plus its printable strings when it holds a NUL or a byte order mark; a real binary has its printable
+  strings (8-bit, UTF-16 and UTF-32 runs of 4 or more characters) scanned, up to 8 MB per file and 64 MB per snapshot.
+  The caps are decided from git's sizes and a file's first 8000 bytes, so a file over a cap is never read whole. In a
+  modified file only lines or strings the old version did not have count. Texts are scanned in line-cut chunks of
+  about 1 MB; each starts with the previous chunk's last 64 non-blank lines (blank lines between them included). A
+  pattern timeout still refuses the run. A binary path git does not list, or an object it cannot produce, refuses the
+  run (`scan-incomplete`, with a hint to check the repository with `git fsck`). Symlinks, submodules, deleted files and
+  mode-only changes read nothing. Compressed or encrypted content is not unpacked.
+- `lanq makeready --json`, each `--all --json` row and `--add --json` now print the worker's report through one
+  output-only wrapper: every string is sanitised (control, bidi and zero-width characters become `?`, keys of
+  `suggestedMachine.env` included), as JSON.md always promised; before, the JSON paths printed them as the worker
+  sent them. `suggestedMachine.path_prepend` and `env` are kept only when the text and `--add` would use them (exactly
+  one usable folder, `env` exactly `DOTNET_ROOT` set to it).
+- lanq's own Linux safe-folder rule (the toolchain search of `lanq doctor --remote` and `lanq makeready --add`, before
+  a folder is proposed for `path_prepend:`) now reads POSIX ACLs, exactly as lanq-makeready 0.4.1: `getfacl -cpn` (at
+  most 5 s); a named `user:ID`/`group:ID` entry whose effective rights include write, or a `default:` entry whose own
+  rights do, for an ID other than root, the build account or its private group, makes the folder open; so do
+  `getfacl` failing and output with no `user::` line. Without `getfacl`, `ls -ld` failing or showing the `+` ACL marker
+  (or a missing marker column) is open, and with BusyBox `ls` any group write is. Parent folders are checked unless they
+  are links or sticky. macOS is not checked. Before, a folder writable by another account through an ACL was proposed.
+
+### Behaviour changes
+
+- `lanq makeready` runs lanq-makeready 0.4.1 (embedded, SHA-256 pinned): its safe-folder check reads POSIX ACLs, so a
+  `path_prepend` suggestion may now be left out (and listed in `lanqWithheld`, or the text's comment) where 0.4.0
+  proposed it. A folder lanq or lanq-makeready calls open is reported, never proposed; install the `acl` package on a
+  Linux worker that uses ACLs, or the folder stays open.
+
+- A run 0.9.1 accepted may now be `Rejected` (2) for a secret in such a file. The finding names
+  `uncommitted file <path> (binary per git)`, never the value, and the message adds: "A file git shows as binary is
+  read anyway: a .gitattributes entry (-diff or binary) hides a file from diffs, not from lanq; take the secret out of
+  the file." An agent must not rename, compress, move or re-attribute the file to get past the scan.
+- A file over a cap is not refused. It is named on stderr (`[lanq] secret scan: N file(s) not read in full: ...`, at
+  most 5) and listed in the new conditional `scanSkipped` key (`path`, `bytes`, `reason`: `binary_over_file_cap`,
+  `binary_over_total_cap`, `masked_text_over_cap` or `masked_text_over_total_cap`) of `lanq run --json`, at the top level of `--shards` and
+  `--plan`, and in both dry runs, whose snapshot line also notes the count. Report it; do not try to "fix" it.
+- In `lanq makeready` JSON, `suggestedMachine.path_prepend` and `env` may now be absent where 0.9.1 printed them (a
+  list, a redacted home folder, a mismatched or extra variable, or characters lanq refuses). Both keys were always
+  optional. What was left out is listed in the new conditional report key `lanqWithheld` (`key`, `reason`), which is
+  lanq's own: a worker that sends one is ignored. The schema stays `lanq-makeready/v1` and the report still has no
+  `nextSteps`. `suggestedMachine` is advice for the developer; an agent never writes it into `machines.yml`.
+
+### Docs
+
+- The .NET shard recipe in docs/SHARDING.md split classes by their position in a sorted list, and `sort -u` /
+  `Sort-Object -Unique` sort by the machine's locale or culture: shards on machines with different locales could run
+  some classes twice and others never while the run stayed green. A class now goes to shard
+  `cksum(class) mod N + 1` (the POSIX `cksum` of its full name), identical in sh and PowerShell on every locale, and a
+  class keeps its shard when others are added. If you copied the old scripts, replace them. The recipe also gains a
+  guard script (`check-test-split.sh PROJECT N`) that fails unless every test lands in exactly one shard, and the
+  durations recipe's sorts are now ordinal (`LC_ALL=C`, `[StringComparer]::Ordinal`).
+- README (security model, `lanq makeready --json`, a new "Developing lanq" section with the allowlist lines),
+  SECURITY.md, docs/JSON.md (`scanSkipped`, `lanqWithheld`), PLANS.md, SHARDING.md, CONTRIBUTING.md and the AI guide
+  (AGENTS.md, docs/AGENTS-GUIDE.md, both snippets, the skill, llms.txt): an agent never adds a `.gitattributes`
+  entry, renames, compresses, moves or re-encodes a file (or moves a secret into a `-diff` file) to get past the scan;
+  it reports `scanSkipped` and `scan-incomplete` instead of fixing them; it never writes `suggestedMachine` into
+  `machines.yml`; it may run lanq's own plan but never edits `lanq.yml` or its scripts to turn a red run green; and it
+  runs the release smoke only when asked, never editing `machines.yml` or `machines.smoke.yml`.
+
+### Project
+
+- lanq's repository has its own `lanq.yml`: a PowerShell `guard` job and two Windows shards of the test suite,
+  running the scripts in `scripts/lanq/` (the same files as the SHARDING.md recipe), plus a commented Linux job for
+  pools with Linux workers (a plan has no conditions, so a job no machine can take would fail it). It names no
+  machines. CI runs the split guard on Linux (sh) and Windows (PowerShell).
+- `scripts/smoke-workers.ps1` (Windows PowerShell 5.1 and PowerShell 7) smokes a release candidate on real workers,
+  as RELEASING.md's new step 1b: it runs the release dry run's `native-win-x64` binary (checked by the run's `headSha`
+  against the release branch), with the owner's separate `machines.smoke.yml` and a temporary `LANQ_HOME`. It needs
+  `-Branch` (never the default branch), a successful `release` workflow_dispatch run at that branch's head, and a
+  binary whose `--version` carries `+<headSha>`. It refuses the real config (`LANQ_CONFIG` and the per-user file, by
+  resolved path or the same SHA-256) and checks it is unchanged, refuses unless the smoke machines' `ssh`, `work_root`
+  and `max_jobs` equal the real ones, and prints a PASS/FAIL/SKIP/N/A table: exit 0 only when every scenario that
+  applies passed (N/A: no machine of that kind in the smoke config; a skip fails unless `-AllowSkip`). Agents run it
+  only when asked.
+
 ## 0.9.1 (2026-11-13)
 
 ### Behaviour changes

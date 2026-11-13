@@ -180,7 +180,7 @@ than one case.
 - Same exit code as the command (for example `1`): the job ran and failed. Summarise the failures from `logTail`; open
   the file at `logPath` only if the tail does not show them. With `--baseline`, also report `baseline.verdict`.
 - `2`: refused by policy (command, directory, secret scan, bad flag, an `--env` name not allowed). Report the message
-  and stop.
+  and stop. A secret in a file git shows as binary is named `uncommitted file <path> (binary per git)`.
 - `70`: infrastructure error (ssh, git). Report it; do not retry in a loop. Run `lanq doctor --remote --json` once
   (local checks plus each worker's tools in the job environment; `lanq doctor --json` is local only, no network) and
   report the `checks` whose `level` is `fail`, with their `fix`.
@@ -198,12 +198,23 @@ than one case.
 - Do not edit the lanq machines file, the allowlists (`policy.allowed_env` included), `known_hosts` or any ssh or key
   setting. The developer owns them. Never edit them, or `lanq.yml`, to get an `--env` through.
 - Do not put secrets in `--env` values.
+- Do not try to get past the secret scan: it reads files git shows as binary too (0.9.2). Never add a `.gitattributes`
+  entry, rename, compress, move or re-encode a file, or move a secret into a `-diff` file. Report `scanSkipped` (files
+  over the scan's caps, not read in full) and a `scan-incomplete` refusal (lanq could not read a file from git); do
+  not try to fix them.
+- Do not write `lanq makeready` JSON `suggestedMachine` into the machines file: it is advice for the developer. Do not
+  change a worker's permissions or ACLs to get a folder proposed for `path_prepend`.
+  `lanqWithheld` lists what lanq left out of the report.
+- Do not edit `lanq.yml` or the scripts it runs (shard scripts included) to turn a red run green.
+- Do not run lanq's release smoke (`scripts/smoke-workers.ps1`) unless the developer asks, and never edit its
+  `machines.smoke.yml` (in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere) or `machines.yml`. A repository's `machines.example.yml` is only a
+  template; lanq never reads it.
 - Do not run `lanq makeready --add`, `lanq makeready --setup` or anything with `--yes`: adding machines is the
   developer's job.
 - Do not run a `nextSteps` command whose `safeToRunUnattended` is `false`, and run a safe one at most once.
 - Do not ssh to the machines yourself, and do not try to work around a refusal (never by editing `lanq.yml` or the
   machines file).
-- Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
+- Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC. (lanq's release smoke script runs `lanq unlock` itself, and only when the developer asks for the smoke.)
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
 - Never run lanq-makeready-fix (`lanq-makeready-fix.ps1` / `.sh`), even when `lanq makeready` says a check may be fixable
   at that PC: it is the PC owner's, local and interactive only. Pass that line on to the developer.

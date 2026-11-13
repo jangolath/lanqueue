@@ -51,7 +51,20 @@ line, the uncommitted changes (content and names), the names of committed files 
 `.git-credentials`, `.netrc`, `terraform.tfstate`, `*.pem` and similar, from the same list as uncommitted files, with
 samples under `fixtures/` or `testdata/`, or named `*.example` / `*.sample`, allowed), and the content of `.npmrc` /
 `.pypirc` / `.yarnrc.yml` files, committed or uncommitted (refused only for a literal token or password; `${NPM_TOKEN}`-style
-references pass, and the value is never printed). It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
+references pass, and the value is never printed). Since 0.9.2 the uncommitted changes include files git shows as
+binary (hidden by a `.gitattributes` `-diff` or `binary` entry, UTF-16 text, or real binaries): lanq reads their
+blobs locally by object id (`git cat-file`, never with filters or textconv, so no attribute driver runs) and scans
+text up to 32 MB per file and 256 MB per snapshot, and a binary's printable strings (8-bit, UTF-16 and UTF-32 runs) up
+to 8 MB per file and 64 MB per snapshot, only the content a modified file did not have before. It does not unpack
+compressed or encrypted content (an archive, a `.gz`, an encrypted file), and a string shorter than 4 characters or in
+another encoding is not seen. A file over a cap is listed in `scanSkipped` and on stderr, not refused;
+a binary path or object git cannot produce refuses the job (fail closed). Such files are read smallest first, so large
+files cannot use up the totals before a small one; a single file over a per-file cap (8 MB binary, 32 MB text) is
+listed, not refused, so a secret placed in a very large binary or text file is not seen. In a modified file only new
+lines count, except that an unchanged private-key BEGIN line is scanned again when any line of its block (up to its
+END line, indented or not) is new, so a key replaced in place is found (PEM, OpenSSH and PGP blocks, encrypted ones
+included); in ordinary text files the diff shows only changed lines, so a key whose body is replaced while its
+BEGIN line stays the same is not recognised there. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).
 A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_ref:`), never a commit id, `HEAD` or

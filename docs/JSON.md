@@ -26,11 +26,12 @@ single-machine `lanq makeready --json` report, which is the lanq-makeready scrip
 - **Null versus absent.** In lanq's own objects a key that is listed below is always there; when it has no value it is
   `null` (for example `machine` when no machine took the job). The exceptions are marked "conditional": they are left
   out entirely when they do not apply (`shard`, `attempts`, `retryable`, `excluded`, `logTail` and the `--fetch` keys
-  on a run, `env`, `exclusive` and `baseline` wherever they appear and `sameMachine` inside `baseline` (0.9.0), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
+  on a run, `env`, `exclusive` and `baseline` wherever they appear and `sameMachine` inside `baseline` (0.9.0), `scanSkipped` wherever it
+  appears (0.9.2), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
   `makeready --all`, `commandsMore` in `lanq stats`, and in a plan run `retryable` and `excluded` at the top and
   `logTail`, `retryable`, `excluded`, the `--fetch` keys and `shardTiming` on a job). In a dry run, `shardCountWhy` and
-  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail`, `env`
-  and `exclusive` is always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
+  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail`, `env`,
+  `exclusive` and `scanSkipped` is always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
   `startedSeconds`, `durationSeconds`, `message`, `logPath`, `shardCount` and `shards`, `null` where they do not apply
   (`exitCode` is `null` only for `Skipped`). Inside a makeready report, keys without a value are left out, never `null`.
 - **Key order is not part of the contract.** Look keys up by name.
@@ -132,6 +133,7 @@ The job's output streams to stderr. When the run is over, stdout gets one object
 | `env` | array of string | Conditional (0.9.0): only with `--env`. The variable names, in the order given. Never the values (but a suggested command in `nextSteps` repeats your command line, values included). |
 | `exclusive` | boolean | Conditional (0.9.0): `true` with `--exclusive` (the job takes every slot of its machine); left out otherwise. |
 | `baseline` | object | Conditional (0.9.0): only with `--baseline` (or `--baseline-ref`), and only when the job ended `Failed`. See [baseline](#baseline). |
+| `scanSkipped` | array | Conditional (0.9.2): only when the secret scan did not read some uncommitted file in full. See [scanSkipped](#scanskipped). |
 | `nextSteps` | array | Always there (at least one entry). See [nextSteps](#nextsteps). |
 
 The state folder is `$LANQ_HOME`, else `%LOCALAPPDATA%\lanq` on Windows, else `$XDG_STATE_HOME/lanq`, else
@@ -145,6 +147,24 @@ A refused command line:
 {"status":"Rejected","exitCode":2,"machine":null,"jobId":null,"durationSeconds":0,"message":"lanq run does not take --force.","logPath":null,
  "nextSteps":[{"action":"fix_command","reason":"fix the command line: lanq run does not take --force.","safeToRunUnattended":false}]}
 ```
+
+### scanSkipped
+
+Since 0.9.2 the secret scan also reads the content of uncommitted files git shows as binary (a `.gitattributes` entry
+such as `-diff` or `binary`, UTF-16 text, a NUL byte, or `core.bigFileThreshold`), which the diff never shows. Text is
+read up to 32 MB per file and 256 MB in all; a real binary has its printable strings read, up to 8 MB per file and
+64 MB in all. A file over a cap is not refused: it is listed here, and on stderr as
+`[lanq] secret scan: N file(s) not read in full: <path> (<size> MB), ...` (at most 5 named). Each entry:
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `path` | string | The file's path in the repository (sanitised). |
+| `bytes` | number | Its size. |
+| `reason` | string | `binary_over_file_cap` (a binary over 8 MB), `binary_over_total_cap` (past 64 MB of binaries in the snapshot), `masked_text_over_cap` (text over 32 MB) or `masked_text_over_total_cap` (past 256 MB of such text in the snapshot). Values may be added. |
+
+The key is on a run, at the top level of a `--shards` run and a plan run (one snapshot for every shard and job), and
+on both dry runs; it is left out when nothing was skipped. A file listed here was not checked for secrets; report it,
+do not try to get it read (or past the scan) by renaming, compressing, moving or re-attributing it.
 
 ### NoCapacity: retryable and excluded
 
@@ -311,6 +331,7 @@ One object for the whole run, with one entry per shard in index order:
 | `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, at the top level, as for [one run](#nocapacity-retryable-and-excluded). |
 | `shardTiming` | object | Conditional: only with `--shards auto --target-minutes M`, and only once N was picked: how N came from earlier runs ([shardTiming](#shardtiming)). Left out otherwise, also on a refused command line. |
 | `env`, `exclusive` | | Conditional (0.9.0): at the top level, as for [one run](#lanq-run---json); they apply to every shard. |
+| `scanSkipped` | array | Conditional (0.9.2): at the top level, as for [one run](#scanskipped). |
 | `nextSteps` | array | Always there, for the whole run. See [nextSteps](#nextsteps). |
 
 Conditional keys, only inside `shards` entries:
@@ -368,6 +389,7 @@ Every key is always there (`null` where it does not apply), except `logTail`, `e
 | `retryable` | boolean or null | `NoCapacity` only, as for [a run](#nocapacity-retryable-and-excluded). |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty (a dry run starts no job). |
 | `env`, `exclusive` | | Conditional (0.9.0): as for [a run](#lanq-run---json). The text plan shows the `--env` flags with their values (after the secret scan) on its `Options:` line. |
+| `scanSkipped` | array | Conditional (0.9.2): as for [a run](#scanskipped). The text plan's `Command:` line notes the count after the secret scan. |
 | `baseline` | object | Conditional (0.9.0): with `--baseline`, the base a failure would be rerun at: a [baseline](#baseline) object with `ref`, `sha` and `message` (`on failure, rerun at 1a2b3c4 (merge-base with origin/main)`; the text plan's `Baseline:` line also ends with `(a dry run runs nothing)`, this message does not), the rerun's keys `null`, and `verdict` `null`, or `skipped` when the snapshot is the base commit, or `inconclusive` when a shallow clone lacks it. |
 | `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. See [nextSteps](#nextsteps). |
 
@@ -443,6 +465,7 @@ bad `lanq.yml`, a refusal, Ctrl+C and an unexpected error included):
 | `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, from the job that decided it, as for [one run](#nocapacity-retryable-and-excluded). |
 | `warnings` | array of string | The plan file's warnings (two jobs with the same command and folder; `shards:` without `{shard}` or `{shards}`), also printed on stderr. |
 | `nextSteps` | array | For the whole plan. A suggested re-run is the same command with `--only` set to the jobs that did not complete. See [nextSteps](#nextsteps). |
+| `scanSkipped` | array | Conditional (0.9.2): for the plan's one snapshot, as for [a run](#scanskipped). |
 
 Each entry in `jobs`:
 
@@ -515,6 +538,7 @@ slot is claimed, nothing is woken, and `jobs.jsonl` is read, never written. stdo
 | `retryable` | boolean or null | `NoCapacity` only: `false` when some job can never run as configured. |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty. |
 | `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. |
+| `scanSkipped` | array | Conditional (0.9.2): as for [a run](#scanskipped). The text plan's `Snapshot:` line notes the count. |
 
 Each entry in `jobs`:
 
@@ -599,7 +623,10 @@ When there is no array to print, stdout gets an [error object](#error-object) in
 ### One machine
 
 `lanq makeready <machine> --json` and `lanq makeready --ssh user@host --os windows|linux --json` print the validated
-lanq-makeready report (schema `lanq-makeready/v1`), every field as the script sent it, indented over several lines.
+lanq-makeready report (schema `lanq-makeready/v1`), indented over several lines. Since 0.9.2 every string in it is
+sanitised (keys of `suggestedMachine.env` included), and `suggestedMachine.path_prepend` and `env` are filtered as the
+text and `--add` filter them; see [lanqWithheld](#lanqwithheld). The same report, filtered the same way, is in each
+`--all` row and in `--add --json`.
 Exit 0 when the machine is worker-ready, 1 when it is not. Its top-level keys:
 
 | Key | Type | Notes |
@@ -613,7 +640,19 @@ Exit 0 when the machine is worker-ready, 1 when it is not. Its top-level keys:
 | `suitedFor` | object | 0.2.0 and later: `tier` (`light`, `medium`, `heavy`), `containers`, `text`. |
 | `checks` | array | Each `id`, `title`, `status` (`OK`, `WARN`, `FAIL`, `SKIP`), `detail`, `advice`, `needsAdmin`. |
 | `capabilities` | array of string | Capabilities the script detected. |
-| `suggestedMachine` | object | A `machines.yml` entry: `name`, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`, `min_free_mem_gb`, `transfer`, `allowed_hours`, `wake` (`mac`), and (lanq-makeready 0.3.0+) `path_prepend` and `env` (`DOTNET_ROOT`) when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. |
+| `suggestedMachine` | object | A `machines.yml` entry: `name`, `os`, `ssh`, `work_root`, `capabilities`, `max_jobs`, `min_free_mem_gb`, `transfer`, `allowed_hours`, `wake` (`mac`), and (lanq-makeready 0.3.0+) `path_prepend` and `env` (`DOTNET_ROOT`) when the newest .NET SDK is in a folder that is not the `dotnet` on PATH. Since 0.9.2 `path_prepend` and `env` are there only as exactly one usable folder with `env` exactly `{"DOTNET_ROOT": <that folder>}`; otherwise both are left out and listed in `lanqWithheld`. Advice for the developer: an agent never writes it into `machines.yml`. |
+| `lanqWithheld` | array | Conditional (0.9.2): lanq's own key, never the script's (a worker that sends one is ignored). Each `key` lanq left out of the report and the `reason`. Absent when nothing was left out. |
+
+### lanqWithheld
+
+```json
+"lanqWithheld":[{"key":"suggestedMachine.path_prepend","reason":"not one usable folder with DOTNET_ROOT set to it (a redacted home folder, a list, or characters lanq refuses in path_prepend)"},
+ {"key":"suggestedMachine.env","reason":"kept only as DOTNET_ROOT set to the one usable path_prepend folder"}]
+```
+
+`key` is `suggestedMachine.path_prepend` or `suggestedMachine.env` (more may be added). Before 0.9.2 these values were
+printed as the worker sent them. Values may now be absent where 0.9.1 printed them; both keys were always optional.
+`lanq makeready --add` looks the SDK up itself when the report hides it.
 
 The report is the script's output, not lanq's: its `summary.nextSteps` and `advice` are for the PC's owner to read,
 and it has no lanq `nextSteps` (this is the one `--json` object without them). The report has no `status` key. When
@@ -643,7 +682,7 @@ there is no report, stdout gets an [error object](#error-object) with lanq's `ne
 | `machines[].failures` | number | Blockers; 0 when ready or without a report. |
 | `machines[].exitCode` | number | What `lanq makeready <machine>` would exit with: 0, 1, 70 or 75. |
 | `machines[].problem` | string | Conditional: the top problem, or why there is no report. Absent when there is nothing. |
-| `machines[].report` | object | Conditional: the report exactly as the single-machine `--json` prints it. Absent without one. |
+| `machines[].report` | object | Conditional: the report exactly as the single-machine `--json` prints it (sanitised and filtered, with its `lanqWithheld`). Absent without one. |
 | `machines[].nextSteps` | array | What to do about this machine: `none` when OK or WARN. |
 | `nextSteps` | array | For the whole check. See [nextSteps](#nextsteps). |
 
@@ -671,7 +710,7 @@ prints one object on every path. Every key is always there, `null` when it has n
 | `entry` | array of string or null | The lines written (`Added`) or that would have been written, exactly; `null` before there was an entry. |
 | `afterLine` | number or null | The 1-based line of `machines.yml` the entry follows; `null` without an entry. |
 | `health` | object or null | One read-only probe of the added machine, as a [`lanq health --json`](#lanq-health---json) row; `null` unless `Added`. |
-| `report` | object or null | The validated `lanq-makeready/v1` report, as `lanq makeready --json` prints it; `null` when there was none. |
+| `report` | object or null | The validated `lanq-makeready/v1` report, as `lanq makeready --json` prints it (sanitised and filtered, with its `lanqWithheld`); `null` when there was none. |
 | `message` | string | One line. |
 | `nextSteps` | array | `Added` suggests `lanq doctor --remote --json` (and asks the developer to delete `example-01` when `lanq init`'s placeholder is still there). A NOT READY PC asks the developer, with `lanq makeready --ssh ...` for the details. Never `--add` or `--yes`. |
 
@@ -901,7 +940,8 @@ Values may be added in a later version. **Treat an `action` you do not know as `
 
 What a suggestion can be, by construction:
 
-- Only `lanq run`, `lanq health`, `lanq doctor` or `lanq makeready`. Never `lanq unlock`, `lanq init`, `lanq wake`,
+- Only `lanq run`, `lanq health`, `lanq doctor` or `lanq makeready`. Never `lanq unlock` (lanq's release smoke script runs
+  it, only when the developer asks for the smoke), `lanq init`, `lanq wake`,
   `lanq health --wake`, `--force`, `--yes` or `--add`. `--setup` appears only as `lanq makeready --ssh X --os Y
   --setup`, after a worker refused the key or its host key is not in `known_hosts` yet.
 - `lanq makeready` (any form) is never safe unattended: it runs a script on someone else's PC, or prints setup for the

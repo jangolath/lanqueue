@@ -8,7 +8,7 @@ namespace LanQueue.Payload;
 /// Snapshots HEAD plus uncommitted and untracked (non-ignored) changes into a commit using a throwaway index,
 /// so the user's index, branches and working tree are never touched, then bundles or archives it on demand.
 /// </summary>
-public sealed class GitPayloadBuilder : IPayloadBuilder
+public sealed partial class GitPayloadBuilder : IPayloadBuilder
 {
     /// <summary>
     /// Every local git call is bounded (0.9.1): git reads no stdin (closed at once), never prompts (GIT_TERMINAL_PROMPT=0, GCM_INTERACTIVE=never)
@@ -63,6 +63,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
             var diff = tree == headTree
                 ? ""
                 : await Git(top, env, ct, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "HEAD").ConfigureAwait(false);
+            // Files git shows as binary (an attribute such as -diff or binary, a NUL byte, UTF-16, core.bigFileThreshold) never appear in
+            // the diff above: their blobs are read and scanned separately, under caps (0.9.2).
+            var blobs = tree == headTree ? BinaryScanResult.None : await ScanBinaryChangesAsync(top, env, ct).ConfigureAwait(false);
             var sha = tree == headTree
                 ? head
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
@@ -82,7 +85,12 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
                 built = await WriteArchiveAsync(top, tree, Path.Combine(outputDir, jobId + ".tar.gz"), ct).ConfigureAwait(false);
             }
 
-            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed, configs);
+            return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed, configs)
+            {
+                BinaryFindings = blobs.Findings,
+                ScanSkipped = blobs.Skipped,
+                BlobsRead = blobs.BlobsRead,
+            };
         }
         finally
         {
@@ -528,8 +536,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
     /// pipe deadlock), and the whole call, reads included, bounded by <paramref name="timeout"/>. On expiry the process tree is killed and
     /// <see cref="GitTimeoutException"/> is thrown; on <paramref name="ct"/> (Ctrl+C) it is killed too and the cancellation propagates.
     /// </summary>
+    /// <param name="input">Written to stdin before it is closed (cat-file --batch-check's object ids), or null: stdin is closed at once.</param>
     internal static async Task<(int Code, string Output, string Error)> RunAsync(
-        string exe, string dir, IReadOnlyDictionary<string, string>? env, TimeSpan timeout, CancellationToken ct, IReadOnlyList<string> args)
+        string exe, string dir, IReadOnlyDictionary<string, string>? env, TimeSpan timeout, CancellationToken ct, IReadOnlyList<string> args, string? input = null)
     {
         var psi = NonInteractive(new ProcessStartInfo(exe)
         {
@@ -555,13 +564,25 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         }
 
         using var p = Process.Start(psi) ?? throw new InvalidOperationException($"Could not start {exe}.");
-        p.StandardInput.Close();
+        if (input is null)
+        {
+            p.StandardInput.Close();
+        }
+
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
         var output = p.StandardOutput.ReadToEndAsync(cts.Token);
         var err = p.StandardError.ReadToEndAsync(cts.Token);
         try
         {
+            if (input is not null)
+            {
+                // Written while stdout and stderr are already being read, so a long input cannot deadlock on a full pipe.
+                // As bytes (UTF-8, no byte order mark): the writer's own encoding may start with one, which git would read as part of the first line.
+                await p.StandardInput.BaseStream.WriteAsync(new UTF8Encoding(false).GetBytes(input), cts.Token).ConfigureAwait(false);
+                p.StandardInput.Close();
+            }
+
             await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
             return (p.ExitCode, await output.ConfigureAwait(false), await err.ConfigureAwait(false));
         }
