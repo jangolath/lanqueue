@@ -250,6 +250,14 @@ public sealed partial class JobRunner(
     /// </summary>
     public string? StartedLogPath { get => _startedLogPath; private set => _startedLogPath = value; }
 
+    private volatile IReadOnlyList<ScanSkip> _scanSkipped = [];
+
+    /// <summary>
+    /// The snapshot's files git shows as binary that the secret scan did not read in full (over a cap; 0.9.2), for scanSkipped in the JSON;
+    /// empty when there were none or no snapshot was taken. A --baseline base commit has no overlay and never adds to it.
+    /// </summary>
+    public IReadOnlyList<ScanSkip> ScanSkipped { get => _scanSkipped; private set => _scanSkipped = value; }
+
     public async Task<JobResult> RunAsync(JobRequest req, CancellationToken ct)
     {
         var jobId = NewId();
@@ -576,6 +584,14 @@ public sealed partial class JobRunner(
             return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message) { InfraKind = Jobs.InfraKind.Snapshot });
         }
 
+        // Files git shows as binary that were over a cap and not read in full (0.9.2): said once, kept for the JSON (scanSkipped). One
+        // snapshot per lanq run (one job, every shard, a whole plan), so this is set once.
+        if (payload.ScanSkipped.Count > 0)
+        {
+            ScanSkipped = payload.ScanSkipped;
+            output(ScanSkippedLine(payload.ScanSkipped));
+        }
+
         if (ScanPayload(payloadId, payload) is { } refused)
         {
             TryDelete(payload.ArchivePath);
@@ -586,12 +602,25 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>
+    /// "[lanq] secret scan: 2 file(s) not read in full: assets/big.bin (52 MB), ..." (at most 5 named, sanitised): files git shows as binary
+    /// that were over a cap of the content scan.
+    /// </summary>
+    internal static string ScanSkippedLine(IReadOnlyList<ScanSkip> skipped)
+    {
+        const int Named = 5;
+        var named = string.Join(", ", skipped.Take(Named).Select(s => string.Create(CultureInfo.InvariantCulture, $"{SafeLine(s.Path)} ({s.Bytes / (1024.0 * 1024.0):0.#} MB)")));
+        var more = skipped.Count > Named ? string.Create(CultureInfo.InvariantCulture, $", and {skipped.Count - Named} more") : "";
+        return string.Create(CultureInfo.InvariantCulture, $"[lanq] secret scan: {skipped.Count} file(s) not read in full: {named}{more} (over the scan's caps; listed in scanSkipped)");
+    }
+
+    /// <summary>
     /// The secret scans of a payload: the uncommitted changes and their file names (none for a baseline's clean base commit), the committed file
     /// names and the package-manager configs. The Rejected (Secret) result, or null when it is clean.
     /// </summary>
     private static JobResult? ScanPayload(string payloadId, JobPayload payload)
     {
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
+            .Concat(payload.BinaryFindings)
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
             .Concat((payload.CommittedConfigs ?? new Dictionary<string, string?>()).SelectMany(c => SecretScanner.ScanCommittedConfig(c.Key, c.Value)))
@@ -1713,6 +1742,11 @@ public sealed partial class JobRunner(
         var hint = findings.Any(f => f.Rule == SecretScanner.CommittedFileRule)
             ? " Committed files named like secrets are refused because the bundle or archive would carry them; rename samples to *.example or keep them under a fixtures/ or testdata/ folder."
             : "";
+        if (findings.Any(f => f.Where.EndsWith(BlobScan.WhereSuffix, StringComparison.Ordinal)))
+        {
+            hint += " A file git shows as binary is read anyway: a .gitattributes entry (-diff or binary) hides a file from diffs, not from lanq; take the secret out of the file.";
+        }
+
         return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.") { RejectKind = Jobs.RejectKind.Secret };
     }
 

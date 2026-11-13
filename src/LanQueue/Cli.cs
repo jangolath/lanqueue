@@ -926,6 +926,7 @@ public static partial class Cli
                         Env = EnvNames(p.Env),
                         Exclusive = Flag(p.Exclusive),
                         Baseline = BaselineJsonOf(result.Baseline),
+                        ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
                     },
                     result.LogPath,
                     p.LogTail),
@@ -964,6 +965,10 @@ public static partial class Cli
     {
         SameMachine = b.SameMachine,
     };
+
+    /// <summary>scanSkipped (0.9.2): the files the secret scan did not read in full, paths sanitised; null (the key left out) when there are none.</summary>
+    internal static List<ScanSkipJson>? ScanSkippedJson(IReadOnlyList<Policy.ScanSkip> skipped) =>
+        skipped.Count == 0 ? null : [.. skipped.Select(s => new ScanSkipJson(JobRunner.SafeLine(s.Path), s.Bytes, s.Reason))];
 
     /// <summary>An optional JSON flag such as exclusive: true when set, null (the key left out) when not.</summary>
     internal static bool? Flag(bool set) => set ? true : null;

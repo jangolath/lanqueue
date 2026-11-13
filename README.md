@@ -1293,7 +1293,13 @@ Each default below is enforced in code and covered by a unit test.
   are refused) (lines may end in CR,
   LF or CRLF); the refusal names the file and key, never the value. Obvious samples pass (names ending in `.example` or `.sample`, names containing `.example.`, and
   anything under a `fixtures/` or `testdata/` folder). A hit refuses the job before anything is sent, and the message
-  never echoes the value. If a scan pattern times out the job is refused (fail closed). This is a safety net, not a
+  never echoes the value. If a scan pattern times out the job is refused (fail closed). Since 0.9.2 the content of
+  uncommitted files git shows as binary is scanned too (a `.gitattributes` `-diff` or `binary` entry hides a file
+  from the diff, not from lanq; also UTF-16 text and real binaries): blobs are read by object id without filters or
+  textconv, text up to 32 MB per file, the printable strings of a binary (8-bit and UTF-16LE) up to 8 MB per file and
+  64 MB in all; in a modified file only new lines or strings count. A file over a cap is not refused: it is named on
+  stderr and in `scanSkipped` ([JSON.md](docs/JSON.md#scanskipped)); an object git cannot produce refuses the job.
+  Never rename, compress, move or re-attribute a file to get past the scan. This is a safety net, not a
   guarantee: apart from `.npmrc`, `.pypirc` and `.yarnrc.yml` it does not read the content of committed files, it does not look at files that were committed and later
   deleted (they are still in the history a bundle carries), and it cannot recognise every secret format.
 - **Job variables are opt-in by name.** `--env` (and `lanq.yml` `env:`) can set only names you list in

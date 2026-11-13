@@ -51,14 +51,17 @@ public static partial class Cli
             plan = new JobPlan(nameof(JobStatus.InfraError), 70, JobRunner.SafeLine($"unexpected error: {ex.GetType().Name}: {ex.Message}")) { InfraKind = InfraKind.Unexpected };
         }
 
-        await (p.Json ? stderr : stdout).WriteAsync(PlanText(p, plan)).ConfigureAwait(false);
+        await (p.Json ? stderr : stdout).WriteAsync(PlanText(p, plan, runner.ScanSkipped.Count)).ConfigureAwait(false);
         var next = NextSteps.ForPlan(p, plan);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {plan.Status}: {JobRunner.SafeLine(plan.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
             await stdout.WriteLineAsync(JsonSerializer.Serialize(
-                PlanJsonOf(plan, p.LogTail, p.Exclusive) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline) },
+                PlanJsonOf(plan, p.LogTail, p.Exclusive) with
+                {
+                    NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline), ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
+                },
                 LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
@@ -66,7 +69,8 @@ public static partial class Cli
     }
 
     /// <summary>The plan for people. A run refused or ended before any machine was looked at gets only the header (the status line says why).</summary>
-    internal static string PlanText(ParsedArgs p, JobPlan plan)
+    /// <param name="scanSkipped">How many files the secret scan did not read in full (scanSkipped), noted with the scan.</param>
+    internal static string PlanText(ParsedArgs p, JobPlan plan, int scanSkipped = 0)
     {
         var sb = new StringBuilder();
         void Line(string text) => sb.Append(text).Append('\n');
@@ -77,7 +81,7 @@ public static partial class Cli
         }
 
         var scan = plan.UncommittedFiles is { } files
-            ? string.Create(CultureInfo.InvariantCulture, $"command line and {files} uncommitted file(s) clean")
+            ? string.Create(CultureInfo.InvariantCulture, $"command line and {files} uncommitted file(s) clean{SkippedNote(scanSkipped)}")
             : "command line clean; no snapshot taken, lanq run would end before it";
         Line($"Command:  {JobRunner.SafeLine(string.Join(' ', p.Argv))}   (allowed by \"{JobRunner.SafeLine(plan.AllowedBy ?? "?")}\"; dir {JobRunner.SafeLine(p.Directory)}; secret scan: {scan})");
         Line("Needs:    " + (p.Needs.Count > 0 ? JobRunner.SafeLine(string.Join(", ", p.Needs)) : "(nothing)")
@@ -195,6 +199,11 @@ public static partial class Cli
     /// shows the slots that job would take, its max_jobs (it takes the machine whole: one copy, every slot).
     /// </summary>
     internal static int DryJobSlots(Scheduling.Assessment a, bool exclusive) => exclusive && a.JobSlots > 0 ? a.Machine.MaxJobs : a.JobSlots;
+
+    /// <summary>The note on the dry runs' snapshot line when files were over the secret scan's caps (0.9.2), else empty.</summary>
+    internal static string SkippedNote(int scanSkipped) => scanSkipped > 0
+        ? string.Create(CultureInfo.InvariantCulture, $"; {scanSkipped} file(s) git shows as binary not read in full (scanSkipped)")
+        : "";
 
     internal static PlanJson PlanJsonOf(JobPlan plan, int? logTail, bool exclusive = false) => new(plan.Status, plan.ExitCode)
     {

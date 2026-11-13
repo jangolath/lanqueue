@@ -138,7 +138,7 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), ScanSkipped = ScanSkippedJson(runner.ScanSkipped) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
         }
 
         return result.ExitCode;

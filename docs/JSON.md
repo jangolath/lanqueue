@@ -26,11 +26,12 @@ single-machine `lanq makeready --json` report, which is the lanq-makeready scrip
 - **Null versus absent.** In lanq's own objects a key that is listed below is always there; when it has no value it is
   `null` (for example `machine` when no machine took the job). The exceptions are marked "conditional": they are left
   out entirely when they do not apply (`shard`, `attempts`, `retryable`, `excluded`, `logTail` and the `--fetch` keys
-  on a run, `env`, `exclusive` and `baseline` wherever they appear and `sameMachine` inside `baseline` (0.9.0), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
+  on a run, `env`, `exclusive` and `baseline` wherever they appear and `sameMachine` inside `baseline` (0.9.0), `scanSkipped` wherever it
+  appears (0.9.2), `shardTiming` on a `--shards` run, `command` and `argv` in a next step, `problem` and `report` in
   `makeready --all`, `commandsMore` in `lanq stats`, and in a plan run `retryable` and `excluded` at the top and
   `logTail`, `retryable`, `excluded`, the `--fetch` keys and `shardTiming` on a job). In a dry run, `shardCountWhy` and
-  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail`, `env`
-  and `exclusive` is always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
+  `shardTiming` are always there and `null` when they do not apply; in a plan dry run every key except `logTail`, `env`,
+  `exclusive` and `scanSkipped` is always there. In a plan run every job always has `name`, `status`, `exitCode`, `after`, `machine`, `jobId`,
   `startedSeconds`, `durationSeconds`, `message`, `logPath`, `shardCount` and `shards`, `null` where they do not apply
   (`exitCode` is `null` only for `Skipped`). Inside a makeready report, keys without a value are left out, never `null`.
 - **Key order is not part of the contract.** Look keys up by name.
@@ -132,6 +133,7 @@ The job's output streams to stderr. When the run is over, stdout gets one object
 | `env` | array of string | Conditional (0.9.0): only with `--env`. The variable names, in the order given. Never the values (but a suggested command in `nextSteps` repeats your command line, values included). |
 | `exclusive` | boolean | Conditional (0.9.0): `true` with `--exclusive` (the job takes every slot of its machine); left out otherwise. |
 | `baseline` | object | Conditional (0.9.0): only with `--baseline` (or `--baseline-ref`), and only when the job ended `Failed`. See [baseline](#baseline). |
+| `scanSkipped` | array | Conditional (0.9.2): only when the secret scan did not read some uncommitted file in full. See [scanSkipped](#scanskipped). |
 | `nextSteps` | array | Always there (at least one entry). See [nextSteps](#nextsteps). |
 
 The state folder is `$LANQ_HOME`, else `%LOCALAPPDATA%\lanq` on Windows, else `$XDG_STATE_HOME/lanq`, else
@@ -145,6 +147,24 @@ A refused command line:
 {"status":"Rejected","exitCode":2,"machine":null,"jobId":null,"durationSeconds":0,"message":"lanq run does not take --force.","logPath":null,
  "nextSteps":[{"action":"fix_command","reason":"fix the command line: lanq run does not take --force.","safeToRunUnattended":false}]}
 ```
+
+### scanSkipped
+
+Since 0.9.2 the secret scan also reads the content of uncommitted files git shows as binary (a `.gitattributes` entry
+such as `-diff` or `binary`, UTF-16 text, a NUL byte, or `core.bigFileThreshold`), which the diff never shows. Text is
+read up to 32 MB per file; a real binary has its printable strings read, up to 8 MB per file and 64 MB in all. A file
+over a cap is not refused: it is listed here, and on stderr as
+`[lanq] secret scan: N file(s) not read in full: <path> (<size> MB), ...` (at most 5 named). Each entry:
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `path` | string | The file's path in the repository (sanitised). |
+| `bytes` | number | Its size. |
+| `reason` | string | `binary_over_file_cap` (a binary over 8 MB), `binary_over_total_cap` (past 64 MB of binaries in the snapshot) or `masked_text_over_cap` (text over 32 MB). Values may be added. |
+
+The key is on a run, at the top level of a `--shards` run and a plan run (one snapshot for every shard and job), and
+on both dry runs; it is left out when nothing was skipped. A file listed here was not checked for secrets; report it,
+do not try to get it read (or past the scan) by renaming, compressing, moving or re-attributing it.
 
 ### NoCapacity: retryable and excluded
 
@@ -311,6 +331,7 @@ One object for the whole run, with one entry per shard in index order:
 | `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, at the top level, as for [one run](#nocapacity-retryable-and-excluded). |
 | `shardTiming` | object | Conditional: only with `--shards auto --target-minutes M`, and only once N was picked: how N came from earlier runs ([shardTiming](#shardtiming)). Left out otherwise, also on a refused command line. |
 | `env`, `exclusive` | | Conditional (0.9.0): at the top level, as for [one run](#lanq-run---json); they apply to every shard. |
+| `scanSkipped` | array | Conditional (0.9.2): at the top level, as for [one run](#scanskipped). |
 | `nextSteps` | array | Always there, for the whole run. See [nextSteps](#nextsteps). |
 
 Conditional keys, only inside `shards` entries:
@@ -368,6 +389,7 @@ Every key is always there (`null` where it does not apply), except `logTail`, `e
 | `retryable` | boolean or null | `NoCapacity` only, as for [a run](#nocapacity-retryable-and-excluded). |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty (a dry run starts no job). |
 | `env`, `exclusive` | | Conditional (0.9.0): as for [a run](#lanq-run---json). The text plan shows the `--env` flags with their values (after the secret scan) on its `Options:` line. |
+| `scanSkipped` | array | Conditional (0.9.2): as for [a run](#scanskipped). The text plan's `Command:` line notes the count after the secret scan. |
 | `baseline` | object | Conditional (0.9.0): with `--baseline`, the base a failure would be rerun at: a [baseline](#baseline) object with `ref`, `sha` and `message` (`on failure, rerun at 1a2b3c4 (merge-base with origin/main)`; the text plan's `Baseline:` line also ends with `(a dry run runs nothing)`, this message does not), the rerun's keys `null`, and `verdict` `null`, or `skipped` when the snapshot is the base commit, or `inconclusive` when a shallow clone lacks it. |
 | `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. See [nextSteps](#nextsteps). |
 
@@ -443,6 +465,7 @@ bad `lanq.yml`, a refusal, Ctrl+C and an unexpected error included):
 | `retryable`, `excluded` | | Conditional: only when `status` is `NoCapacity`, from the job that decided it, as for [one run](#nocapacity-retryable-and-excluded). |
 | `warnings` | array of string | The plan file's warnings (two jobs with the same command and folder; `shards:` without `{shard}` or `{shards}`), also printed on stderr. |
 | `nextSteps` | array | For the whole plan. A suggested re-run is the same command with `--only` set to the jobs that did not complete. See [nextSteps](#nextsteps). |
+| `scanSkipped` | array | Conditional (0.9.2): for the plan's one snapshot, as for [a run](#scanskipped). |
 
 Each entry in `jobs`:
 
@@ -515,6 +538,7 @@ slot is claimed, nothing is woken, and `jobs.jsonl` is read, never written. stdo
 | `retryable` | boolean or null | `NoCapacity` only: `false` when some job can never run as configured. |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty. |
 | `nextSteps` | array | `WouldRun` proceeds with the same command without `--dry-run`. |
+| `scanSkipped` | array | Conditional (0.9.2): as for [a run](#scanskipped). The text plan's `Snapshot:` line notes the count. |
 
 Each entry in `jobs`:
 

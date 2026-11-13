@@ -130,7 +130,7 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            var json = PlanRunJsonOf(result, plan.Path, started.Elapsed, [.. ordered.Select(j => j.Name)], plan.Warnings, specs, p.LogTail) with { NextSteps = next };
+            var json = PlanRunJsonOf(result, plan.Path, started.Elapsed, [.. ordered.Select(j => j.Name)], plan.Warnings, specs, p.LogTail) with { NextSteps = next, ScanSkipped = ScanSkippedJson(runner.ScanSkipped) };
             await stdout.WriteLineAsync(JsonSerializer.Serialize(json, LanqJson.Default.PlanFileRunJson)).ConfigureAwait(false);
         }
 
@@ -327,14 +327,14 @@ public static partial class Cli
         }
 
         var history = ordered.Any(j => expected(j) is not null);
-        await (p.Json ? stderr : stdout).WriteAsync(PlanFileDryText(plan, selection, ordered, dry, expected, history)).ConfigureAwait(false);
+        await (p.Json ? stderr : stdout).WriteAsync(PlanFileDryText(plan, selection, ordered, dry, expected, history, runner.ScanSkipped.Count)).ConfigureAwait(false);
         var decided = dry.Decided is { } d ? ordered.FirstOrDefault(j => j.Name == d)?.Args : null;
         var next = NextSteps.ForPlanFileDry(p, dry.Status, JobRunner.SafeLine(dry.Message), dry.Retryable, dry.RejectKind, dry.InfraKind, decided);
         await NextSteps.WriteAsync(stderr, next, "[lanq] ").ConfigureAwait(false);
         await stderr.WriteLineAsync($"[lanq] {dry.Status}: {JobRunner.SafeLine(dry.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanFileDryJsonOf(plan, ordered, dry, expected, p.LogTail) with { NextSteps = next }, LanqJson.Default.PlanFileDryJson))
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanFileDryJsonOf(plan, ordered, dry, expected, p.LogTail) with { NextSteps = next, ScanSkipped = ScanSkippedJson(runner.ScanSkipped) }, LanqJson.Default.PlanFileDryJson))
                 .ConfigureAwait(false);
         }
 
@@ -342,7 +342,9 @@ public static partial class Cli
     }
 
     /// <summary>The plan's dry run for people: the header, the plan and snapshot lines, then per job its lanq run line and what it would do.</summary>
-    internal static string PlanFileDryText(PlanFile plan, PlanSelection selection, IReadOnlyList<PlanJob> ordered, PlanDryResult dry, Func<PlanJob, double?> expected, bool history)
+    /// <param name="scanSkipped">How many files the secret scan did not read in full (scanSkipped), noted on the Snapshot line.</param>
+    internal static string PlanFileDryText(
+        PlanFile plan, PlanSelection selection, IReadOnlyList<PlanJob> ordered, PlanDryResult dry, Func<PlanJob, double?> expected, bool history, int scanSkipped = 0)
     {
         var sb = new StringBuilder();
         void Line(string text) => sb.Append(JobRunner.SafeLine(text)).Append('\n');
@@ -363,7 +365,7 @@ public static partial class Cli
 
         if (dry.UncommittedFiles is { } files)
         {
-            Line(string.Create(CultureInfo.InvariantCulture, $"Snapshot: command lines and {files} uncommitted file(s) clean"));
+            Line(string.Create(CultureInfo.InvariantCulture, $"Snapshot: command lines and {files} uncommitted file(s) clean{SkippedNote(scanSkipped)}"));
         }
 
         if (dry.Jobs.Count == 0)

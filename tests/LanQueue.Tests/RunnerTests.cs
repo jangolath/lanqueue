@@ -32,8 +32,14 @@ public sealed class RunnerTests : IDisposable
                 File.WriteAllText(archive, "x");
             }
 
-            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) && !NoRepoId ? T.RepoId : null, Head: Head, CommittedFiles: Committed, CommittedConfigs: Configs));
+            return Task.FromResult(new JobPayload(Sha, files, diff, archive, RepoId: kinds.HasFlag(PayloadKinds.Bundle) && !NoRepoId ? T.RepoId : null, Head: Head, CommittedFiles: Committed, CommittedConfigs: Configs)
+            {
+                ScanSkipped = ScanSkips,
+            });
         }
+
+        /// <summary>The snapshot's files over the binary scan's caps (scanSkipped).</summary>
+        public IReadOnlyList<LanQueue.Policy.ScanSkip> ScanSkips { get; set; } = [];
 
         public string Sha { get; set; } = "abc";
 

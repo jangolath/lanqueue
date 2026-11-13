@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.2 (unreleased)
+
+### Security
+
+- The secret scan now reads the content of uncommitted files git shows as binary, which the diff it scanned before
+  only reported as "Binary files ... differ": files a `.gitattributes` entry (`-diff`, `binary`) hides from diffs,
+  UTF-16 text, files with a NUL byte and files over `core.bigFileThreshold`. The paths come from
+  `git diff --cached --numstat`, their object ids from `git diff --cached --raw --no-renames`, and the blobs are read
+  locally with `git cat-file --batch` (never with filters or textconv, so no attribute driver runs). Text (UTF-16 with
+  a byte order mark, or text with no NUL byte) is scanned up to 32 MB per file; a real binary has its printable
+  strings (8-bit and UTF-16LE runs of 4 or more characters) scanned, up to 8 MB per file and 64 MB per snapshot. In a
+  modified file only lines or strings the old version did not have count. Texts are scanned in line-cut chunks of
+  about 1 MB with a 64-line overlap; a pattern timeout still refuses the run. A binary path git does not list, or an
+  object it cannot produce, refuses the run (`scan-incomplete`). Symlinks, submodules, deleted files and mode-only
+  changes read nothing.
+
+### Behaviour changes
+
+- A run 0.9.1 accepted may now be `Rejected` (2) for a secret in such a file. The finding names
+  `uncommitted file <path> (binary per git)`, never the value, and the message adds: "A file git shows as binary is
+  read anyway: a .gitattributes entry (-diff or binary) hides a file from diffs, not from lanq; take the secret out of
+  the file." An agent must not rename, compress, move or re-attribute the file to get past the scan.
+- A file over a cap is not refused. It is named on stderr (`[lanq] secret scan: N file(s) not read in full: ...`, at
+  most 5) and listed in the new conditional `scanSkipped` key (`path`, `bytes`, `reason`: `binary_over_file_cap`,
+  `binary_over_total_cap` or `masked_text_over_cap`) of `lanq run --json`, at the top level of `--shards` and
+  `--plan`, and in both dry runs, whose snapshot line also notes the count. Report it; do not try to "fix" it.
+
 ## 0.9.1 (2026-11-13)
 
 ### Behaviour changes
