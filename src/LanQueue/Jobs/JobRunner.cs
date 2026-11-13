@@ -1748,7 +1748,7 @@ public sealed partial class JobRunner(
             lock (_gate)
             {
                 first = _task is null;
-                if (_task is null || ((_task.IsFaulted || _task.IsCanceled) && _started < MaxBuilds))
+                if (_task is null || ((_task.IsFaulted || _task.IsCanceled) && _started < MaxBuilds && !TimedOut(_task)))
                 {
                     _started++;
                     _task = Serialised(builds, () => builder.BuildArchiveAsync(jobId, repoDir, dir, sha, ct), ct);
@@ -1808,7 +1808,7 @@ public sealed partial class JobRunner(
             var key = baseSha ?? "";
             lock (_gate)
             {
-                if (!_built.TryGetValue(key, out var entry) || ((entry.Task.IsFaulted || entry.Task.IsCanceled) && entry.Started < MaxBuilds))
+                if (!_built.TryGetValue(key, out var entry) || ((entry.Task.IsFaulted || entry.Task.IsCanceled) && entry.Started < MaxBuilds && !TimedOut(entry.Task)))
                 {
                     entry = (Serialised(builds, () => builder.BuildBundleAsync(jobId, repoDir, dir, sha, baseSha, ct), ct), entry.Started + 1);
                     _built[key] = entry;
@@ -1844,6 +1844,9 @@ public sealed partial class JobRunner(
     private const int MaxBuilds = 2;
 
     /// <summary>Runs one build while holding <paramref name="gate"/>: bundle and archive builds of one payload never overlap.</summary>
+    /// <summary>A build whose git call timed out (<see cref="GitTimeoutException"/>) is final: another try would only wait as long again.</summary>
+    private static bool TimedOut(Task task) => task.Exception?.InnerExceptions.Any(e => e is GitTimeoutException) == true;
+
     private static async Task<T> Serialised<T>(SemaphoreSlim gate, Func<Task<T>> build, CancellationToken ct)
     {
         await gate.WaitAsync(ct).ConfigureAwait(false);

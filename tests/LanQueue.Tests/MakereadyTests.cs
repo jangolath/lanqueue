@@ -55,6 +55,17 @@ public class MakereadyTests
         return (code, o.ToString(), e.ToString(), ssh);
     }
 
+    /// <summary>Only the read-only scanner is built in (0.9.1): lanq-makeready-fix is the PC owner's, never embedded or sent.</summary>
+    [Fact]
+    public void OnlyTheTwoScannerScriptsAreEmbedded()
+    {
+        var names = typeof(Cli).Assembly.GetManifestResourceNames();
+        Assert.Equal(
+            ["lanq-makeready.ps1", "lanq-makeready.sh"],
+            names.Where(n => n.Contains("makeready", StringComparison.OrdinalIgnoreCase)).Order(StringComparer.Ordinal));
+        Assert.DoesNotContain(names, n => n.Contains("fix", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public void EmbeddedScriptsAreTheVerifiedReleaseBytes()
     {

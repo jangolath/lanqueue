@@ -143,8 +143,8 @@ A tool "not found" on a worker usually means a non-login ssh session does not se
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.
 - `lanq makeready`, `lanq wake` and `lanq unlock` act on a PC that may belong to someone else. They stay with you.
   `lanq makeready --setup` and `--add` (adding a machine, writing `machines.yml`) are yours alone; lanq never suggests
-  `--add` or `--yes`, and marks every `makeready` suggestion not safe unattended. When `lanq makeready` says a check is
-  fixable at that PC, it means lanq-makeready-fix, which only the PC's owner runs, at the PC (local and interactive; it
+  `--add` or `--yes`, and marks every `makeready` suggestion not safe unattended. When `lanq makeready` says a check may
+  be fixable at that PC, it means lanq-makeready-fix, which only the PC's owner runs, at the PC (local and interactive; it
   refuses to run over SSH). lanq never sends or runs it, and neither does an agent.
 - `--log-tail` puts the job's output in the JSON on stdout (sanitised). Ask for it only where that output may be read.
 
