@@ -51,6 +51,7 @@
   file to get one through.
 - Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
+- Never run lanq-makeready-fix, even when `lanq makeready` points to it: it is the PC owner's, local and interactive only.
 - Never pass permission-skipping flags (for example `--dangerously-skip-permissions`) to any command, including
   commands run through lanq. lanq rejects them anyway.
 - Never put secrets, tokens or key material in files, command lines or `--env` values that lanq will ship; it refuses

@@ -303,7 +303,8 @@ The check names and every field are in [docs/JSON.md](docs/JSON.md#lanq-doctor--
 
 Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
 .NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
-(v0.2.0, byte-identical to that release, whose SHA-256 a test pins), sent on ssh **stdin** and run from memory with
+(v0.4.0, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner: lanq-makeready's fix
+script is never built in or sent), sent on ssh **stdin** and run from memory with
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
 - `lanq makeready build-01` for a configured machine. It respects the machine's `PAUSE` file and `allowed_hours`
@@ -321,7 +322,11 @@ them, and a `Suited for:` line (light, medium or heavy, "+ container builds" whe
 lanq-makeready 0.1 has none of these: lanq then lists each `WARN`/`FAIL` check with its advice. Then, for a configured
 machine, the capabilities detected but not configured and configured but not detected, and a suggested `machines.yml`
 entry: `max_jobs` and `min_free_mem_gb` sized from the PC's RAM and CPUs, and, only when the script's Wake-on-LAN check
-passed, a commented `wake:` block to uncomment (the MAC is redacted in the report, so fill in `mac:`). It ends with: *lanq never changes a worker. Fixes are for the PC's
+passed, a commented `wake:` block to uncomment (the MAC is redacted in the report, so fill in `mac:`). When a `WARN`/`FAIL` check is one that lanq-makeready's
+fix script covers (Windows: `ssh.server` stopped or not automatic, `power.sleep`, `longpaths`, git `core.longpaths`,
+`ssh.keys` with too-open permissions; Linux: `ssh.server` stopped, `power.sleep`), one more line says so: *Fixable at
+that PC (power.sleep, longpaths): its owner can run lanq-makeready-fix there, local and interactive only (see
+lanq-makeready's README). lanq never runs it.* (Since 0.9.1; not in `--json`.) It ends with: *lanq never changes a worker. Fixes are for the PC's
 owner to run on that PC.* `--json` prints the validated report (schema `lanq-makeready/v1`) instead, every field as the script sent it (0.2.0's
 `summary`, `suitedFor`, `min_free_mem_gb` and `wake` included); when there is no report it prints exactly
 one `{"status":...,"exitCode":...,"message":...}` object (`Rejected` 2, `InfraError` 70, `Held` 75, `Cancelled` 130). The report is
@@ -336,7 +341,7 @@ prints one table:
 
 ```text
 $ lanq makeready --all
-lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.3.0)
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.4.0)
 
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending

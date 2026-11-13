@@ -20,7 +20,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param([string]$Json, [string]$Out, [switch]$Redact, [string]$Hours, [switch]$Quiet, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
-$ToolVersion = '0.3.0'
+$ToolVersion = '0.4.0'
 
 #region ADVICE
 # The ONE table of advice text. Nothing here is ever executed by this script.

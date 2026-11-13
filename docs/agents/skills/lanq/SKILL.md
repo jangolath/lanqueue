@@ -205,6 +205,8 @@ than one case.
   machines file).
 - Do not run `lanq unlock`, `lanq makeready` (also `--all`), `lanq wake` or `lanq health --wake` unless the developer asks: they act on someone's PC.
 - Do not run `lanq init`: it writes a machines file, which is the developer's to create.
+- Never run lanq-makeready-fix (`lanq-makeready-fix.ps1` / `.sh`), even when `lanq makeready` says a check is fixable
+  at that PC: it is the PC owner's, local and interactive only. Pass that line on to the developer.
 - Do not pass permission-skipping flags such as `--dangerously-skip-permissions`; lanq rejects them.
 - Do not paste whole logs into the conversation.
 - Do not edit or delete lanq's `jobs.jsonl` or its `logs/` folder.

@@ -18,6 +18,7 @@ JSON field is in [JSON.md](JSON.md).
 | Workers (OpenSSH, tools, `PAUSE` files) | sets up, or asks each PC's owner | never touches |
 | `lanq makeready --setup`, `lanq makeready --add` (and its `--yes`), `lanq init` | runs | never |
 | `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake` | runs | only when asked |
+| lanq-makeready-fix (`lanq-makeready-fix.ps1` / `.sh`, which `lanq makeready` may point to) | passes on to the PC's owner, who runs it at that PC (local and interactive only) | never |
 | `lanq health --json` (also `--needs`, `--on`, `--size`, `--min-size`), `lanq run --json` (also `--dry-run`, `--on`, `--size`, `--min-size`, `--exclusive`, `--baseline`, `--baseline-ref`), `lanq run --plan --json --no-wake` (also `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
 | `lanq run --env NAME=VALUE` | lists the names jobs may set in `policy.allowed_env` | runs, only with names already listed; never secrets |
 | `jobs.jsonl`, `jobs.1.jsonl` and `logs/` in lanq's state folder | owns (lanq writes them) | never touches (reads them through `lanq stats --json` and `logPath`) |
@@ -61,6 +62,7 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 - Never edit lanq's machines.yml, allowlists or SSH keys. Never pass permission-skipping flags.
 - Never run lanq makeready --setup, lanq makeready --add, any --yes, or lanq init.
 - Do not run lanq wake, lanq health --wake, lanq makeready, lanq unlock unless asked.
+- Never run lanq-makeready-fix: it is the PC owner's, local and interactive only. Report it to the developer.
 - Never shard a command that is not idempotent. Retry at most once.
 - Long suites: --shards auto --target-minutes 10 once lanq stats --json shows a "timing" for the command; preview
   with --dry-run.
@@ -141,7 +143,9 @@ A tool "not found" on a worker usually means a non-login ssh session does not se
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.
 - `lanq makeready`, `lanq wake` and `lanq unlock` act on a PC that may belong to someone else. They stay with you.
   `lanq makeready --setup` and `--add` (adding a machine, writing `machines.yml`) are yours alone; lanq never suggests
-  `--add` or `--yes`, and marks every `makeready` suggestion not safe unattended.
+  `--add` or `--yes`, and marks every `makeready` suggestion not safe unattended. When `lanq makeready` says a check is
+  fixable at that PC, it means lanq-makeready-fix, which only the PC's owner runs, at the PC (local and interactive; it
+  refuses to run over SSH). lanq never sends or runs it, and neither does an agent.
 - `--log-tail` puts the job's output in the JSON on stdout (sanitised). Ask for it only where that output may be read.
 
 ## bash and PowerShell

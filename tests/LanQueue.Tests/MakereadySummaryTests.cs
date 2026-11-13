@@ -210,4 +210,48 @@ public class MakereadySummaryTests
         using var doc = JsonDocument.Parse(V020);
         Assert.Equal("0.2.0", doc.RootElement.GetProperty("tool").GetProperty("version").GetString());
     }
+
+    private const string FixPointer = "its owner can run lanq-makeready-fix there, local and interactive only (see lanq-makeready's README). lanq never runs it.";
+
+    /// <summary>
+    /// 0.9.1: a WARN/FAIL check that lanq-makeready-fix covers gets one pointer line for the PC's owner, before the closing lines. On the 0.2.0
+    /// Windows fixture only git (core.longpaths) qualifies: OpenSSH not installed and no administrators_authorized_keys are not fixes it makes.
+    /// </summary>
+    [Fact]
+    public async Task AFixableCheckPointsTheOwnerAtTheFixScript()
+    {
+        var (_, o, _) = await Run(V020, "--ssh", "me@new-pc.lan", "--os", "windows");
+        var lines = Lines(o).ToList();
+        var at = lines.IndexOf("Fixable at that PC (git): " + FixPointer);
+        Assert.True(at >= 0, o);
+        Assert.True(at < lines.IndexOf("lanq never changes a worker. Fixes are for the PC's owner to run on that PC."));
+        Assert.Single(lines, l => l.Contains("lanq-makeready-fix", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("""{ "id": "power.sleep", "title": "Sleep/suspend", "status": "WARN", "detail": "may sleep: logind IdleAction=suspend", "advice": "", "needsAdmin": false },""", "power.sleep")]
+    [InlineData("""{ "id": "ssh.server", "title": "SSH server", "status": "FAIL", "detail": "sshd installed but not running", "advice": "", "needsAdmin": false },""", "ssh.server")]
+    [InlineData("""{ "id": "power.sleep", "title": "Sleep/suspend", "status": "OK", "detail": "will not sleep (masked)", "advice": "", "needsAdmin": false },""", null)]
+    [InlineData("""{ "id": "longpaths", "title": "Long paths", "status": "WARN", "detail": "LongPathsEnabled is off", "advice": "", "needsAdmin": false },""", null)] // a Windows-only fix
+    [InlineData("""{ "id": "git", "title": "git", "status": "WARN", "detail": "not found", "advice": "", "needsAdmin": false },""", null)]
+    public async Task OnLinuxOnlySshStartAndPowerSleepArePointedAt(string check, string? expected)
+    {
+        var (_, o, _) = await Run(MakereadyTests.Report(extraChecks: check), "build-01");
+        if (expected is null)
+        {
+            Assert.DoesNotContain("lanq-makeready-fix", o, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains($"Fixable at that PC ({expected}): " + FixPointer, Lines(o));
+        }
+    }
+
+    [Fact]
+    public async Task JsonNeverCarriesTheFixPointer()
+    {
+        var (_, o, _) = await Run(V020, "--ssh", "me@new-pc.lan", "--os", "windows", "--json");
+        Assert.DoesNotContain("lanq-makeready-fix", o, StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(o);
+    }
 }
