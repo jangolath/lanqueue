@@ -589,6 +589,16 @@ internal sealed record StatsJson(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? CommandsMore { get; init; }
 
+    /// <summary>
+    /// Plan jobs (0.10.0), always written (empty without any): one per lanq.yml (full local path) and job name, newest first; at most
+    /// <see cref="Cli.MaxStatsPlanJobs"/> (see <see cref="PlanJobsMore"/>). Clones of a repository in different folders are separate entries.
+    /// </summary>
+    public IReadOnlyList<StatsPlanJobJson> PlanJobs { get; init; } = [];
+
+    /// <summary>How many more plan jobs there were beyond <see cref="PlanJobs"/>; left out when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? PlanJobsMore { get; init; }
+
     /// <summary>What to do next (see <see cref="NextStepJson"/>): stats never suggests a command.</summary>
     public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
 }
@@ -614,6 +624,16 @@ internal sealed record StatsMachineJson(
 internal sealed record StatsCommandJson(
     string Command, string? Dir, int Runs, int Jobs, int Completed, int Failed, int Other, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
     int? LastShards, StatsTimingJson? Timing);
+
+/// <summary>
+/// One plan job of <c>lanq stats --json</c> (0.10.0): every run of one job of one lanq.yml. A run is one plan run (every shard and retried attempt
+/// in it): completed when every shard's last attempt completed, failed when any failed, other otherwise. Median and p90 are the wall seconds of
+/// completed runs, from the first start to the last end (nearest rank), null when none.
+/// </summary>
+/// <param name="PlanFile">The plan file's full local path, or null for records written before 0.10.0.</param>
+/// <param name="LastShards">The newest run's shard count (1 for a single job).</param>
+internal sealed record StatsPlanJobJson(
+    string? PlanFile, string Job, int Runs, int Completed, int Failed, int Other, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc, int LastShards);
 
 /// <summary>
 /// The timing block of a <c>lanq stats --json</c> command: the estimate --shards auto --target-minutes uses (machines without their own speed
@@ -648,6 +668,7 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(StatsJson))]
 [JsonSerializable(typeof(StatsMachineJson))]
 [JsonSerializable(typeof(StatsCommandJson))]
+[JsonSerializable(typeof(StatsPlanJobJson))]
 [JsonSerializable(typeof(StatsTimingJson))]
 [JsonSerializable(typeof(StatsLogsJson))]
 [JsonSerializable(typeof(NextStepJson))]

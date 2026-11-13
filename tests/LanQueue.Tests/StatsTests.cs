@@ -70,8 +70,8 @@ public sealed class StatsTests : IDisposable
         var r = doc.RootElement.Clone();
         Assert.Equal((status, exitCode), (r.GetProperty("status").GetString(), r.GetProperty("exitCode").GetInt32()));
         Assert.Equal(
-            ["status", "exitCode", "message", "files", "jobs", "wallMinutes", "skippedLines", "oldestUtc", "newestUtc", "logs", "machines", "commands", "nextSteps"],
-            r.EnumerateObject().Select(p => p.Name).Where(n => n != "commandsMore"));
+            ["status", "exitCode", "message", "files", "jobs", "wallMinutes", "skippedLines", "oldestUtc", "newestUtc", "logs", "machines", "commands", "planJobs", "nextSteps"],
+            r.EnumerateObject().Select(p => p.Name).Where(n => n is not "commandsMore" and not "planJobsMore"));
         Assert.Equal(["files", "megabytes", "keepDays"], r.GetProperty("logs").EnumerateObject().Select(p => p.Name));
         Assert.NotEqual(0, r.GetProperty("nextSteps").GetArrayLength());
         Assert.All(r.GetProperty("nextSteps").EnumerateArray(), s => Assert.False(s.TryGetProperty("argv", out _)));

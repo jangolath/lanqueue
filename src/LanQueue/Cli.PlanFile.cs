@@ -99,7 +99,8 @@ public static partial class Cli
 
         var expected = PlanGraph.ExpectedFromHistory(log, time.GetUtcNow(), ct);
         var ordered = PlanGraph.Order(selection, expected);
-        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun), j.Args.Shards, selection.After[j.Name])
+        var planFile = Path.GetFullPath(plan.Path);
+        var specs = ordered.Select(j => new PlanJobSpec(j.Name, PlanJobRequest(j, p, repoDir, fetch: !p.DryRun) with { PlanFile = planFile }, j.Args.Shards, selection.After[j.Name])
         {
             FileOrder = j.Index,
             Where = string.Create(CultureInfo.InvariantCulture, $"{Path.GetFileName(plan.Path)}: job '{j.Name}' (line {j.Line})"),

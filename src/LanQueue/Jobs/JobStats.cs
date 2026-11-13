@@ -21,11 +21,28 @@ public sealed record CommandStats(
     string Command, string? Dir, bool Keyed, int Runs, int Jobs, int Completed, int Failed, int Other, double? MedianSeconds, double? P90Seconds,
     DateTimeOffset LastRunUtc, int? LastShards);
 
+/// <summary>
+/// One plan job in <see cref="JobStatsReport"/> (0.10.0): every record of the same lanq.yml (its full local path) and job name. Each plan run
+/// (planRun) is one run, however many shards and attempts it had.
+/// </summary>
+/// <param name="PlanFile">The plan file's full path as recorded; null for lines written before 0.10.0.</param>
+/// <param name="Completed">Runs in which every shard's last attempt completed.</param>
+/// <param name="Failed">Runs in which some shard's last attempt failed (its own exit code).</param>
+/// <param name="Other">The other runs (timed out, infrastructure error, ...).</param>
+/// <param name="MedianSeconds">Median wall time of the completed runs (first start to last end; nearest rank, one decimal), or null.</param>
+/// <param name="LastShards">The newest run's shard count (1 for a single job).</param>
+public sealed record PlanJobStats(
+    string? PlanFile, string Job, int Runs, int Completed, int Failed, int Other, double? MedianSeconds, double? P90Seconds, DateTimeOffset LastRunUtc, int LastShards);
+
 /// <summary>What <see cref="JobStats.Of"/> found in the job log.</summary>
 /// <param name="Machines">Ordinal by name.</param>
 /// <param name="Commands">Newest first (by the start of their newest job), then ordinal by command and dir.</param>
 public sealed record JobStatsReport(
-    int Jobs, double WallMinutes, DateTimeOffset? OldestUtc, DateTimeOffset? NewestUtc, IReadOnlyList<MachineStats> Machines, IReadOnlyList<CommandStats> Commands);
+    int Jobs, double WallMinutes, DateTimeOffset? OldestUtc, DateTimeOffset? NewestUtc, IReadOnlyList<MachineStats> Machines, IReadOnlyList<CommandStats> Commands)
+{
+    /// <summary>Plan jobs (0.10.0), newest first (by their newest run's start), then ordinal by plan file and job.</summary>
+    public IReadOnlyList<PlanJobStats> PlanJobs { get; init; } = [];
+}
 
 /// <summary>
 /// lanq stats, without any I/O: totals, per machine and per command, from the records of jobs.jsonl (oldest first). Only Completed jobs feed the
@@ -73,8 +90,44 @@ public static class JobStats
             records.Count == 0 ? null : records.Min(r => r.StartedUtc),
             records.Count == 0 ? null : records.Max(r => r.StartedUtc),
             machines,
-            commands);
+            commands)
+        {
+            PlanJobs = PlanJobsOf(records),
+        };
     }
+
+    /// <summary>
+    /// The plan jobs of <paramref name="records"/> (those with planJob), grouped by (planFile, planJob). Each plan run is one run: Completed when
+    /// every shard's last attempt completed, Failed when any failed, Other otherwise; its wall time runs from the first start to the last end.
+    /// Baseline reruns are not in the history these records come from.
+    /// </summary>
+    public static List<PlanJobStats> PlanJobsOf(IReadOnlyList<JobRecord> records) =>
+        [.. records
+            .Select((r, i) => (r, i))
+            .Where(x => x.r.PlanJob is not null && x.r.BaselineOf is null)
+            .GroupBy(x => (x.r.PlanFile, Job: x.r.PlanJob!))
+            .Select(g =>
+            {
+                var runs = g.GroupBy(x => x.r.PlanRun ?? x.r.Id, StringComparer.Ordinal).Select(run =>
+                {
+                    // Each shard's (or the single job's) last attempt: the latest start, and of equal starts the one written last.
+                    var last = run.GroupBy(x => x.r.Shard ?? 0).Select(s => s.MaxBy(x => (x.r.StartedUtc, x.i)).r).ToList();
+                    var outcome = last.All(r => r.Status == nameof(JobStatus.Completed)) ? nameof(JobStatus.Completed)
+                        : last.Any(r => r.Status == nameof(JobStatus.Failed)) ? nameof(JobStatus.Failed)
+                        : "Other";
+                    var start = run.Min(x => x.r.StartedUtc);
+                    var end = run.Max(x => x.r.StartedUtc.AddSeconds(x.r.WallSeconds));
+                    return (Outcome: outcome, Start: start, Seconds: (end - start).TotalSeconds, Shards: run.Max(x => x.r.Shards ?? 1));
+                }).ToList();
+                var times = runs.Where(r => r.Outcome == nameof(JobStatus.Completed)).Select(r => r.Seconds).ToList();
+                var newest = runs.MaxBy(r => r.Start);
+                return new PlanJobStats(
+                    g.Key.PlanFile, g.Key.Job, runs.Count, runs.Count(r => r.Outcome == nameof(JobStatus.Completed)), runs.Count(r => r.Outcome == nameof(JobStatus.Failed)),
+                    runs.Count(r => r.Outcome == "Other"), Percentile(times, 50), Percentile(times, 90), newest.Start, newest.Shards);
+            })
+            .OrderByDescending(p => p.LastRunUtc)
+            .ThenBy(p => p.PlanFile, StringComparer.Ordinal)
+            .ThenBy(p => p.Job, StringComparer.Ordinal)];
 
     /// <summary>
     /// The nearest-rank <paramref name="percent"/> percentile of <paramref name="values"/>: sorted[ceil(percent/100 * n) - 1] (so the median of

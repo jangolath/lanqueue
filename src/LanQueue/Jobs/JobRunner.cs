@@ -113,6 +113,9 @@ public sealed record JobRequest(
     /// <summary>lanq run --plan: the id every job of one plan run shares (jobs.jsonl planRun), or null.</summary>
     public string? PlanRun { get; init; }
 
+    /// <summary>lanq run --plan (0.10.0): the plan file's full local path (jobs.jsonl planFile, which lanq stats groups plan jobs by), or null.</summary>
+    public string? PlanFile { get; init; }
+
     /// <summary>
     /// lanq run --plan: the wait gate every job of one plan shares (<see cref="Jobs.PlanProgress"/>): --wait then counts only while no job of the
     /// plan holds a slot, so a job waits behind its siblings even with --wait 0. Null for a plain run (--wait counts from the start).
@@ -1216,6 +1219,7 @@ public sealed partial class JobRunner(
                 RunSeconds = result.RunSeconds,
                 PlanJob = req.PlanJob,
                 PlanRun = req.PlanRun,
+                PlanFile = req.PlanJob is null ? null : req.PlanFile,
                 Exclusive = req.Exclusive ? true : null,
                 EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
                 BaselineOf = req.BaselineOf,

@@ -679,8 +679,10 @@ public static partial class Cli
         failed, median, p90, and timing: the work and per-shard overhead --target-minutes would use) and the size of logs/. --target-minutes M
         adds the shards M needs on a typical machine (no probe, before any free-slot cap). Unreadable lines are skipped with a warning. --json
         prints one object (status Ok, Rejected, InfraError or Cancelled, exitCode, message, files, jobs, wallMinutes, skippedLines, oldestUtc,
-        newestUtc, logs, machines, commands, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad arguments, 70
-        the job log could not be read, 130 Ctrl+C.
+        newestUtc, logs, machines, commands, planJobs, nextSteps; times in UTC; at most 500 commands). Exit 0 (no job log is 0 jobs), 2 bad
+        arguments, 70 the job log could not be read, 130 Ctrl+C. Plan jobs (a "Plan jobs" table; planJobs, at most 500, then planJobsMore) are
+        grouped by plan file (its full path) and job name, one run per plan run (completed when every shard's last attempt completed, failed
+        when any failed, else other; wall time from the first start to the last end); clones in different folders are separate rows.
         health probes every machine and prints one line each (DOWN and HOLD machines are reported, not an error). Exit 0 every machine was
         probed, 2 bad arguments or config, 70 unexpected error (--json), 130 Ctrl+C. With --needs and/or --mem each machine is also judged for
         such a job by the rules lanq run uses ("-> eligible (2 slots)" or "-> not eligible: why"; --json rows add eligible, why, reason, permanent
