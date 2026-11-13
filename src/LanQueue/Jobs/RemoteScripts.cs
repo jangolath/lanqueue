@@ -307,6 +307,78 @@ public static partial class RemoteScripts
     }
 
     /// <summary>
+    /// lanq run --exclusive: claims EVERY slot file, slot-1 to slot-max_jobs in ascending order, each exactly as <see cref="AcquireSlot"/>
+    /// claims one (the same atomic create, the same content: job id and deadline, and the same stale reclaim under the slot's lock file).
+    /// Prints <c>SLOTS=1,2,...,n</c> when it holds them all. At the first slot it cannot create it removes the slots this attempt created
+    /// (each only if its first line is still this job id) and prints <c>SLOT=FULL</c>: all or nothing. The ascending order means two
+    /// exclusive claims never deadlock; at worst both back off and one wins on a later look. Each slot file is an ordinary slot, so the
+    /// probe, <see cref="Unlock"/> and a later stale reclaim (slot by slot) treat them as they treat any other.
+    /// </summary>
+    public static string AcquireAll(Machine m, string jobId, TimeSpan jobTimeout)
+    {
+        var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
+        var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
+        // The sh loop keeps its own names (sf, n, got): stop_job's kill_recorded uses f and g as globals.
+        return m.Os == MachineOs.Windows
+            ? $$"""
+                $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
+                [void][IO.Directory]::CreateDirectory("$root/locks")
+                $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
+                {{WindowsSlotFunctions}}
+                $jid={{ShellQuote.PowerShell(jobId)}};$got=@()
+                for($i=1;$i -le {{max}};$i++){
+                  $f="$root/locks/slot-$i"
+                  try {
+                    $c=$IOFile::ReadAllText($f);$l=$c -split "`n"
+                    if ($l.Count -ge 2 -and $l[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$l[1].Trim()+{{grace}}) -and (Take $f)) {
+                      try{if($IOFile::ReadAllText($f) -ceq $c){StopJob $l[0].Trim();$t="$f.stale.$PID";$IOFile::Move($f,$t);$IOFile::Delete($t)} }catch{}finally{Drop $f}
+                    }
+                  } catch { }
+                  $ok=$false
+                  try {
+                    $fs=$IOFile::Open($f,'CreateNew','Write','None')
+                    $b=[Text.Encoding]::UTF8.GetBytes($jid+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close();$ok=$true
+                  }catch [IO.IOException]{}
+                  if($ok){$got+=$i;continue}
+                  foreach($n in $got){$g="$root/locks/slot-$n";try{if(($IOFile::ReadAllText($g) -split "`n")[0].Trim() -ceq $jid){$IOFile::Delete($g)} }catch{} }
+                  'SLOT=FULL';exit 0
+                }
+                'SLOTS='+($got -join ',')
+                """
+            : $$"""
+                R={{ShellQuote.Posix(m.WorkRoot)}}
+                mkdir -p "$R/locks"
+                now=$(date +%s); D=$((now + {{lease}}))
+                {{LinuxSlotFunctions}}
+                J={{ShellQuote.Posix(jobId)}}; got=
+                i=1
+                while [ "$i" -le {{max}} ]; do
+                  sf="$R/locks/slot-$i"
+                  if [ -f "$sf" ]; then
+                    c=$(cat "$sf" 2>/dev/null)
+                    if d=$(deadline_of "$c") && [ "$now" -gt $((d + {{grace}})) ] && take "$sf"; then
+                      if [ "$(cat "$sf" 2>/dev/null)" = "$c" ]; then
+                        stop_job "$(printf '%s\n' "$c" | sed -n 1p)"
+                        mv "$sf" "$sf.stale.$$" 2>/dev/null && rm -f "$sf.stale.$$"
+                      fi
+                      drop "$sf"
+                    fi
+                  fi
+                  if ( set -C; printf '%s\n%s\n' "$J" "$D" > "$sf" ) 2>/dev/null; then got="$got${got:+,}$i"; i=$((i+1)); continue; fi
+                  n=1
+                  while [ "$n" -lt "$i" ]; do
+                    sf="$R/locks/slot-$n"
+                    if [ "$(sed -n 1p "$sf" 2>/dev/null)" = "$J" ]; then rm -f "$sf"; fi
+                    n=$((n+1))
+                  done
+                  echo "SLOT=FULL"; exit 0
+                done
+                echo "SLOTS=$got"
+                """;
+    }
+
+    /// <summary>
     /// The tool command lanq doctor --remote runs for each capability it knows (Linux sh, Windows PowerShell). Version probes only: Go is
     /// pinned to its local toolchain so the probe can never download one.
     /// </summary>
@@ -905,6 +977,8 @@ public static partial class RemoteScripts
     /// <summary>
     /// Best-effort teardown: worktree, ref, bundle, slot. Never fails the job. In git mode without a repository id (nothing was fetched
     /// into a cache) only the cache steps are left out: the job's process, folder, bundle and slot are still removed.
+    /// <paramref name="slot"/> is what <see cref="JobRunner.ParseSlot"/> returned: one slot ("2"), removed as always, or an exclusive job's
+    /// list ("1,2,3,4", from <see cref="AcquireAll"/>), each of which is removed only while its first line is still this job's id.
     /// </summary>
     public static string Cleanup(Machine m, string jobId, string slot, string? repoId = null) =>
         m.Transfer == TransferMode.Archive ? CleanupArchive(m, jobId, slot) : CleanupGit(m, jobId, slot, repoId is null ? null : SafeRepoId(repoId));
@@ -923,14 +997,14 @@ public static partial class RemoteScripts
               if (Test-Path -LiteralPath $jd) { Write-Output "cleanup incomplete: $jd could not be removed"; $rc = 1 }
             }
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.tar.gz", "$root/incoming/$id.list"
-            Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
+            {{WindowsSlotRemoval(slot)}}
             exit $rc
             """
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
             rm -rf "$R/jobs/$ID"
-            rm -f "$R/incoming/$ID.tar.gz" "$R/incoming/$ID.list" "$R/locks/slot-{{SafeSlot(slot)}}"
+            {{LinuxSlotRemoval(slot, "rm -f \"$R/incoming/$ID.tar.gz\" \"$R/incoming/$ID.list\"")}}
             exit 0
             """;
 
@@ -944,7 +1018,7 @@ public static partial class RemoteScripts
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
             {{(repoId is null ? "" : WindowsCacheCleanupAfter)}}
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
-            Remove-Item -Force -ErrorAction SilentlyContinue "$root/locks/slot-{{SafeSlot(slot)}}"
+            {{WindowsSlotRemoval(slot)}}
             exit 0
             """
         : $$"""
@@ -953,7 +1027,7 @@ public static partial class RemoteScripts
             {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
             {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}
-            rm -f "$R/incoming/$ID.bundle" "$R/locks/slot-{{SafeSlot(slot)}}"
+            {{LinuxSlotRemoval(slot, "rm -f \"$R/incoming/$ID.bundle\"")}}
             exit 0
             """;
 
@@ -989,4 +1063,31 @@ public static partial class RemoteScripts
         int.TryParse(slot, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0
             ? n.ToString(CultureInfo.InvariantCulture)
             : throw new ArgumentException("Invalid slot id.", nameof(slot));
+
+    /// <summary>The slot ids of "2" or "1,2,3,4", each a positive whole number (anything else throws, so no text reaches a script).</summary>
+    private static List<string> SafeSlots(string slot) => [.. slot.Split(',').Select(SafeSlot)];
+
+    /// <summary>
+    /// Cleanup's slot step on Windows (needs $root and $id): one slot is removed as it always was; an exclusive job's slots each only while
+    /// the file's first line is still this job's id (a slot reclaimed and claimed by another job in the meantime is left to that job).
+    /// </summary>
+    private static string WindowsSlotRemoval(string slot)
+    {
+        var slots = SafeSlots(slot);
+        return slots.Count == 1
+            ? $"Remove-Item -Force -ErrorAction SilentlyContinue \"$root/locks/slot-{slots[0]}\""
+            : "foreach($n in @(" + string.Join(',', slots) + ")){$g=\"$root/locks/slot-$n\";try{if(([IO.File]::ReadAllText($g) -split \"`n\")[0].Trim() -ceq $id){[IO.File]::Delete($g)}}catch{}}";
+    }
+
+    /// <summary>
+    /// Cleanup's last rm on Linux (needs $R and $ID): <paramref name="rm"/> with the one slot appended, as it always was; for an exclusive
+    /// job's slots, <paramref name="rm"/> and then each slot only while its first line is still this job's id.
+    /// </summary>
+    private static string LinuxSlotRemoval(string slot, string rm)
+    {
+        var slots = SafeSlots(slot);
+        return slots.Count == 1
+            ? $"{rm} \"$R/locks/slot-{slots[0]}\""
+            : rm + "\nfor n in " + string.Join(' ', slots) + "; do if [ \"$(sed -n 1p \"$R/locks/slot-$n\" 2>/dev/null)\" = \"$ID\" ]; then rm -f \"$R/locks/slot-$n\"; fi; done";
+    }
 }

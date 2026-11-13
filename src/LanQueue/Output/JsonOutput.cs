@@ -153,6 +153,10 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>--env only, on a single run's object (the top level of --shards carries it for every shard) (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>
@@ -180,6 +184,10 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>
@@ -266,6 +274,10 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>--env only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
@@ -349,6 +361,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>
@@ -419,6 +435,10 @@ internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> Aft
     /// <summary>env: in lanq.yml only (0.9.0): the names of the job's own variables, in the order given; never their values. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? Env { get; init; }
+
+    /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>

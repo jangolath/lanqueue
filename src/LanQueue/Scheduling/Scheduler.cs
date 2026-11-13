@@ -52,7 +52,7 @@ public static class Scheduler
             why,
             Eligibility.IsPermanent(reason),
             Math.Max(0, m.MaxJobs - h.SlotsUsed),
-            reason == Exclusion.None ? Math.Max(0, FreeFor(m, h, needs.MemGb, 0, 0)) : 0);
+            reason == Exclusion.None ? Math.Max(0, FreeFor(m, h, needs.MemGb, 0, 0, needs.Exclusive)) : 0);
     }
 
     private static (Exclusion Reason, string? Why) Judge(Machine m, MachineHealth h, JobNeeds needs, IReadOnlySet<string>? avoid)
@@ -146,6 +146,12 @@ public static class Scheduler
             return (Exclusion.Avoided, "avoided: an earlier attempt of the waiting shard(s) lost the connection there and may still be running");
         }
 
+        if (needs.Exclusive && h.SlotsUsed > 0)
+        {
+            // --exclusive takes every slot: any slot in use rules the machine out for now (busy, retryable; no reservation).
+            return (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}; --exclusive needs all {m.MaxJobs} free)"));
+        }
+
         return h.SlotsUsed >= m.MaxJobs
             ? (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs})"))
             : (Exclusion.None, null);
@@ -155,11 +161,14 @@ public static class Scheduler
     /// How many copies of a job a machine can take now: max_jobs minus the slots in use (or this run's own shards there, if more), and with --mem
     /// no more than its free memory covers: floor((free memory - --mem for each of this run's shards placed there but not running yet) / --mem).
     /// A placed shard still uploading or preparing uses no memory yet, so the probe cannot see what it will need. A machine that does not
-    /// report memory is already excluded under --mem.
+    /// report memory is already excluded under --mem. An <paramref name="exclusive"/> job takes every slot of its machine: 1 when no slot
+    /// is in use and none of this run's shards is there, else 0 (--mem still applies).
     /// </summary>
-    public static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours, int oursNotRunning)
+    public static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours, int oursNotRunning, bool exclusive = false)
     {
-        var slots = machine.MaxJobs - Math.Max(h.SlotsUsed, ours);
+        var slots = exclusive
+            ? (h.SlotsUsed == 0 && ours == 0 && machine.MaxJobs > 0 ? 1 : 0)
+            : machine.MaxJobs - Math.Max(h.SlotsUsed, ours);
         return memGb is { } need && h.MemFreeGb is { } free ? Math.Min(slots, Math.Max(0, (int)Math.Floor((free - (oursNotRunning * need)) / need))) : slots;
     }
 
@@ -193,11 +202,11 @@ public static class Scheduler
 
     /// <summary>
     /// --shards auto: the free slots (<see cref="FreeFor"/>) of every machine that can take the job now, in rank order, and N = their sum, at
-    /// least 1 and at most <paramref name="max"/>.
+    /// least 1 and at most <paramref name="max"/>. For an <paramref name="exclusive"/> job each idle machine counts once.
     /// </summary>
-    public static (int Count, int Total, List<(Machine Machine, int Free)> Free) AutoCount(IReadOnlyList<Assessment> assessed, double? memGb, int max)
+    public static (int Count, int Total, List<(Machine Machine, int Free)> Free) AutoCount(IReadOnlyList<Assessment> assessed, double? memGb, int max, bool exclusive = false)
     {
-        List<(Machine Machine, int Free)> free = [.. Rank(assessed).Select(a => (a.Machine, FreeFor(a.Machine, a.Health, memGb, 0, 0))).Where(f => f.Item2 > 0)];
+        List<(Machine Machine, int Free)> free = [.. Rank(assessed).Select(a => (a.Machine, FreeFor(a.Machine, a.Health, memGb, 0, 0, exclusive))).Where(f => f.Item2 > 0)];
         var total = free.Sum(f => f.Free);
         return (Math.Clamp(total, 1, max), total, free);
     }

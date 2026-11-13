@@ -56,6 +56,10 @@ public sealed record JobRecord(
     /// <summary>lanq run --env only (0.9.0): the names of the job's own variables, in the order given. Never their values.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? EnvNames { get; init; }
+
+    /// <summary>lanq run --exclusive only (0.9.0): true when the job held every slot of its machine. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Exclusive { get; init; }
 }
 
 /// <summary>What <see cref="JobLog.Read"/> found: the records (oldest file first), how many lines could not be read, and the files read.</summary>

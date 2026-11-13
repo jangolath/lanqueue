@@ -165,11 +165,12 @@ public sealed partial class JobRunner
             return (job, null);
         }
 
-        List<(Assessment Machine, int Free)> free = [.. Scheduler.Rank(assessed).Select(a => (a, FreeLeft(a, taken, req.MinMemGb))).Where(f => f.Item2 > 0)];
+        List<(Assessment Machine, int Free)> free = [.. Scheduler.Rank(assessed).Select(a => (a, FreeLeft(a, taken, req.MinMemGb, req.Exclusive))).Where(f => f.Item2 > 0)];
         void Take(Assessment a)
         {
+            // An exclusive job (or shard) takes every slot of its machine: no later job of the plan is placed there.
             var (slots, mem) = taken.GetValueOrDefault(a.Machine.Name);
-            taken[a.Machine.Name] = (slots + 1, mem + (req.MinMemGb ?? 0));
+            taken[a.Machine.Name] = (req.Exclusive ? Math.Max(slots + 1, a.Machine.MaxJobs) : slots + 1, mem + (req.MinMemGb ?? 0));
         }
 
         if (options is null)
@@ -241,11 +242,14 @@ public sealed partial class JobRunner
         }
         : job with { Status = nameof(JobStatus.NoCapacity), Message = NoCapacity("dry", assessed, "").Message, Retryable = true };
 
-    /// <summary>The copies of a job a machine could still take after the slots (and --mem) the plan's earlier first-wave jobs took there.</summary>
-    private static int FreeLeft(Assessment a, Dictionary<string, (int Slots, double Mem)> taken, double? memGb)
+    /// <summary>
+    /// The copies of a job a machine could still take after the slots (and --mem) the plan's earlier first-wave jobs took there; an
+    /// <paramref name="exclusive"/> job only where every slot is still free (then 1).
+    /// </summary>
+    private static int FreeLeft(Assessment a, Dictionary<string, (int Slots, double Mem)> taken, double? memGb, bool exclusive)
     {
         var (slots, mem) = taken.GetValueOrDefault(a.Machine.Name);
         var h = a.Health with { SlotsUsed = a.Health.SlotsUsed + slots, MemFreeGb = a.Health.MemFreeGb - mem };
-        return Scheduler.FreeFor(a.Machine, h, memGb, 0, 0);
+        return Scheduler.FreeFor(a.Machine, h, memGb, 0, 0, exclusive);
     }
 }

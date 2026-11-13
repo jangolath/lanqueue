@@ -122,11 +122,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// </summary>
     public IReadOnlyList<Policy.JobEnvVar> Env { get; init; } = [];
 
+    /// <summary>lanq run --exclusive (lanq.yml exclusive: true): the job takes every slot of its machine (no other lanq job runs there meanwhile).</summary>
+    public bool Exclusive { get; init; }
+
     /// <summary>The run options that come from lanq.yml with --plan, and so are refused with it.</summary>
     internal static readonly string[] PlanFileOptions =
     [
         "--needs", "--dir", "--mem", "--timeout", "--size", "--min-size", "--on", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--fetch-dir", "--fetch-max",
-        "--fetch-max-files", "--env",
+        "--fetch-max-files", "--env", "--exclusive",
     ];
 
     /// <summary>
@@ -143,7 +146,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env",
+            "--env", "--exclusive",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -177,6 +180,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var waitForSsh = false;
         var wakeSleepers = false;
         var noWake = false;
+        var exclusive = false;
         var dryRun = false;
         var force = false;
         string? sshTarget = null;
@@ -329,6 +333,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--no-wake":
                     noWake = true;
                     break;
+                case "--exclusive":
+                    exclusive = true;
+                    break;
                 case "--dry-run":
                     dryRun = true;
                     break;
@@ -432,6 +439,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitForSsh = waitForSsh,
             WakeSleepers = wakeSleepers,
             NoWake = noWake,
+            Exclusive = exclusive,
             DryRun = dryRun,
             Force = force,
             SshTarget = sshTarget,
@@ -552,6 +560,7 @@ public static partial class Cli
           lanq run ... --dry-run [--json] -- dotnet test
           lanq run ... [--on big-01,build-01] [--size light,medium | --min-size heavy] -- dotnet test
           lanq run ... [--env NAME=VALUE ...] -- dotnet test
+          lanq run ... --exclusive [--shards N|auto] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq stats [--json] [--target-minutes M]
@@ -580,6 +589,10 @@ public static partial class Cli
         NODE_OPTIONS, DOTNET_STARTUP_HOOKS, GIT_*, HOME, TEMP, LANQ_*), the value non-empty, free of control characters and secrets, and no
         candidate machine's env: may set the same name. Settings only, never secrets: the value is in the job's environment on the worker. The
         JSON and jobs.jsonl carry the names only. Refused with exit 2 otherwise.
+        --exclusive (lanq.yml exclusive: true) takes every slot of the machine, so no other lanq job runs there while it does. It waits, like a
+        busy machine, until every slot is free (busy, retryable; no reservation, so a machine that is never idle never takes it: use --on with
+        an idle machine). With --shards each shard takes a whole machine: auto counts the idle machines, and a fixed N above the machines
+        that can take the job is refused (exit 2). --mem and every other rule still apply.
         --fetch (repeatable) brings files back from the job's working folder after the job, whether it passed or failed, into
         DIR/<job id>/ (default .lanq/artifacts in the repository): patterns relative to --dir with *, ? and **; regular files only,
         at most 500 files and 200 MB unless --fetch-max-files / --fetch-max (up to 2G). Fetch problems are reported, never change the exit code.
@@ -871,6 +884,7 @@ public static partial class Cli
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
                         NextSteps = next,
                         Env = EnvNames(p.Env),
+                        Exclusive = Flag(p.Exclusive),
                     },
                     result.LogPath,
                     p.LogTail),
@@ -885,6 +899,9 @@ public static partial class Cli
     /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
     internal static IReadOnlyList<string>? EnvNames(IReadOnlyList<Policy.JobEnvVar> env) => env.Count > 0 ? [.. env.Select(e => e.Name)] : null;
 
+    /// <summary>An optional JSON flag such as exclusive: true when set, null (the key left out) when not.</summary>
+    internal static bool? Flag(bool set) => set ? true : null;
+
     /// <summary>The job lanq run (or its dry run) asks for, from its command line: one job, or the template of every shard.</summary>
     internal static JobRequest RequestOf(ParsedArgs p, string repoDir, FetchRequest? fetch) =>
         new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
@@ -893,6 +910,7 @@ public static partial class Cli
             On = p.On,
             Size = p.Size,
             Env = p.Env,
+            Exclusive = p.Exclusive,
         };
 
     /// <summary>

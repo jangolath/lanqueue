@@ -225,7 +225,7 @@ public sealed partial class JobRunner
     /// </summary>
     private (int Count, string FreeWhy, ShardTimingResult? Timing) PickShardCount(JobRequest template, IReadOnlyList<Assessment> assessed, int? targetMinutes)
     {
-        var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards);
+        var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards, template.Exclusive);
         var why = AutoShardWhy(total, free);
         if (targetMinutes is not { } minutes)
         {
@@ -233,7 +233,7 @@ public sealed partial class JobRunner
         }
 
         var history = JobHistory.For(log, template.CommandKey ?? JobHistory.Key(template.Argv), JobHistory.Dir(template.Directory), clock.GetUtcNow());
-        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template.MinMemGb, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
+        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
         return (timing.Picked, why, timing);
     }
 
@@ -244,10 +244,11 @@ public sealed partial class JobRunner
     /// <summary>
     /// The machines shards can go to now, in rank order, each with its free slots for this job (<see cref="Scheduler.FreeFor"/>, counting
     /// this run's own shards there: <paramref name="ours"/> placed, <paramref name="oursNotRunning"/> placed but not running yet); only those above 0.
+    /// An exclusive template's shards take a whole machine each, so a machine offers at most one.
     /// </summary>
-    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, double? memGb, Func<string, int> ours, Func<string, int> oursNotRunning) =>
+    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, JobRequest template, Func<string, int> ours, Func<string, int> oursNotRunning) =>
         [.. Scheduler.Rank(assessed)
-            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, memGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name))))
+            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, template.MinMemGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name), template.Exclusive)))
             .Where(x => x.Item2 > 0)];
 
     /// <summary>Why --shards auto picked its N: "free slots: build-01 2, micro-02 1" (and the cap), or that no machine can take the job right now.</summary>
@@ -500,7 +501,7 @@ public sealed partial class JobRunner
                     // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
                     var free = Placeable(
-                        assessed, template.MinMemGb, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
+                        assessed, template, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
                     var first = firstRound == -1;
                     if (first)

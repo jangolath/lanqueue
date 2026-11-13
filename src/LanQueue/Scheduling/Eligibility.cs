@@ -8,6 +8,12 @@ public sealed record JobNeeds(IReadOnlyCollection<string> Capabilities, double? 
 {
     /// <summary>--size / --min-size: the size classes the job may run on, or null (any size).</summary>
     public SizeRule? Size { get; init; }
+
+    /// <summary>
+    /// lanq run --exclusive: the job takes every slot of its machine (max_jobs), so only a machine with no slot in use can take it; one
+    /// with any slot in use is <see cref="Exclusion.Busy"/> (retryable: it waits like any busy machine, with no reservation).
+    /// </summary>
+    public bool Exclusive { get; init; }
 }
 
 /// <summary>

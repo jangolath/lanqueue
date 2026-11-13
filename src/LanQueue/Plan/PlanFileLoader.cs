@@ -46,11 +46,11 @@ public static partial class PlanFileLoader
     internal static readonly string[] TopKeys = ["version", "defaults", "jobs"];
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
-    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env"];
+    internal static readonly string[] DefaultKeys = ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
-        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "env"];
+        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "env", "exclusive"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -431,6 +431,11 @@ public static partial class PlanFileLoader
         if (values.TryGetValue("fail_fast", out var failFast) && Flag(failFast, "fail_fast", Error))
         {
             args.Add("--fail-fast");
+        }
+
+        if (values.TryGetValue("exclusive", out var exclusive) && Flag(exclusive, "exclusive", Error))
+        {
+            args.Add("--exclusive");
         }
 
         // --timeout's own parser throws a FormatException for a word; say what the CLI says for a number out of range instead.

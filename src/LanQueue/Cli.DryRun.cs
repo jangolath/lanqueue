@@ -57,7 +57,7 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {plan.Status}: {JobRunner.SafeLine(plan.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next, Env = EnvNames(p.Env) }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(PlanJsonOf(plan, p.LogTail) with { NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive) }, LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
 
         return plan.ExitCode;
@@ -146,7 +146,7 @@ public static partial class Cli
         return sb.ToString();
     }
 
-    /// <summary>--timeout (when not the default), --fetch, --env and --log-tail as lanq run would use them; null when none was given.</summary>
+    /// <summary>--timeout (when not the default), --fetch, --env, --exclusive and --log-tail as lanq run would use them; null when none was given.</summary>
     private static string? OptionsText(ParsedArgs p)
     {
         var parts = new List<string>();
@@ -167,6 +167,11 @@ public static partial class Cli
         {
             // The values as typed: the run line holds them anyway, and this text is only printed once the secret scan passed.
             parts.Add("--env " + JobRunner.SafeLine(string.Join(' ', p.Env.Select(e => e.Name + "=" + e.Value))));
+        }
+
+        if (p.Exclusive)
+        {
+            parts.Add("--exclusive (needs every slot of the machine; it waits while any is in use)");
         }
 
         if (p.LogTail is { } tail)

@@ -112,7 +112,7 @@ public sealed partial class JobRunner
         }
 
         // A fresh run has no shard of its own anywhere yet: the free slots are FreeFor with none placed, dealt round-robin as DispatchShards does.
-        var dealt = Scheduler.Deal(Placeable(assessed, template.MinMemGb, _ => 0, _ => 0), shards, (_, _) => true);
+        var dealt = Scheduler.Deal(Placeable(assessed, template, _ => 0, _ => 0), shards, (_, _) => true);
         List<ShardPlacement> placement = [.. dealt
             .GroupBy(d => d.Machine.Machine.Name, StringComparer.Ordinal)
             .Select(g => new ShardPlacement(g.First().Machine.Machine, [.. g.Select(d => d.Item.Index).Order()]))];

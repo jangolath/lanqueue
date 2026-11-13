@@ -123,6 +123,13 @@ public sealed record JobRequest(
     /// </summary>
     public IReadOnlyList<JobEnvVar> Env { get; init; } = [];
 
+    /// <summary>
+    /// lanq run --exclusive (lanq.yml exclusive: true): the job takes every slot of its machine (<see cref="RemoteScripts.AcquireAll"/>), so no
+    /// other lanq job runs there while it does; it waits, like any busy machine, until every slot is free (no reservation). With --shards each
+    /// shard takes a whole machine, so N is at most the machines that can take the job.
+    /// </summary>
+    public bool Exclusive { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -242,7 +249,7 @@ public sealed partial class JobRunner(
     private List<Machine> Candidates(JobRequest req) => Pinning.Candidates(config, req.On);
 
     /// <summary>What the job asks of a machine (capabilities, --mem, --size / --min-size, Windows-safe arguments for <paramref name="windowsUnsafe"/>).</summary>
-    private static JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe) { Size = req.Size };
+    private static JobNeeds NeedsOf(JobRequest req, bool windowsUnsafe) => new(req.Needs, req.MinMemGb, windowsUnsafe) { Size = req.Size, Exclusive = req.Exclusive };
 
     /// <summary>
     /// The checks on the command line alone (--on names, policy, secrets in it, --env (<see cref="PrecheckEnv"/>), Windows-safe arguments), before
@@ -378,7 +385,8 @@ public sealed partial class JobRunner(
 
     /// <summary>
     /// The per-shard command-line checks of lanq run --shards (<see cref="Precheck"/> on each shard's substituted arguments, in index order):
-    /// the first refusal with its message ("shard i/N: ..."), or null when every shard may run.
+    /// the first refusal with its message ("shard i/N: ..."), or null when every shard may run. An exclusive run's N may not exceed the
+    /// machines that can take the job as far as the config says (<see cref="ExclusiveMachines"/>): each shard takes a whole machine.
     /// </summary>
     private (string Message, JobResult Refused)? PrecheckShards(JobRequest template, IReadOnlyList<ShardInfo> shards)
     {
@@ -390,8 +398,23 @@ public sealed partial class JobRunner(
             }
         }
 
+        if (template.Exclusive && ExclusiveMachines(template) is var machines && shards.Count > machines)
+        {
+            var message = string.Create(
+                CultureInfo.InvariantCulture,
+                $"--exclusive --shards {shards.Count}: only {machines} machine{(machines == 1 ? "" : "s")} can take this job");
+            return (message, new JobResult("shard", JobStatus.Rejected, 2, null, message) { RejectKind = Jobs.RejectKind.Arguments });
+        }
+
         return null;
     }
+
+    /// <summary>
+    /// How many candidate machines (<see cref="Candidates"/>) could ever take the job as far as the config says: every capability it needs and
+    /// no declared size: outside --size / --min-size (as <see cref="NeverByConfig"/> judges them).
+    /// </summary>
+    private int ExclusiveMachines(JobRequest req) =>
+        Candidates(req).Count(m => Eligibility.Missing(m, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(m, req.Size) is null);
 
     /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
     private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
@@ -839,7 +862,10 @@ public sealed partial class JobRunner(
         var clock = Stopwatch.StartNew();
         var command = string.Join(' ', req.Argv);
 
-        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.AcquireSlot(machine, jobId, req.Timeout ?? JobRequest.DefaultTimeout)), null, TimeSpan.FromSeconds(30), ct)
+        // --exclusive claims every slot of the machine, all or nothing (SLOTS=1,...,n or SLOT=FULL).
+        var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
+        var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout);
+        var acquire = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, claim), null, TimeSpan.FromSeconds(30), ct)
             .ConfigureAwait(false);
         var slot = ParseSlot(acquire.Output);
         if (!acquire.Ok || slot is null)
@@ -848,7 +874,9 @@ public sealed partial class JobRunner(
         }
 
         onSlot?.Invoke();
-        emit($"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
+        emit(slot.Contains(',', StringComparison.Ordinal)
+            ? $"[lanq] job {jobId} -> {machine.Name} (slots {slot}, exclusive)"
+            : $"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
         var logPath = log.LogPathFor(jobId);
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
         var logFile = new StreamWriter(logPath, append: false);
@@ -908,6 +936,7 @@ public sealed partial class JobRunner(
                 RunSeconds = result.RunSeconds,
                 PlanJob = req.PlanJob,
                 PlanRun = req.PlanRun,
+                Exclusive = req.Exclusive ? true : null,
                 EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
             });
             return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
@@ -1368,13 +1397,32 @@ public sealed partial class JobRunner(
         });
     }
 
+    /// <summary>
+    /// The slot a claim printed: "n" from <c>SLOT=n</c> (<see cref="RemoteScripts.AcquireSlot"/>), or "1,2,...,n" from <c>SLOTS=...</c>
+    /// (<see cref="RemoteScripts.AcquireAll"/>: every slot, distinct and ascending); null for <c>SLOT=FULL</c> or anything unreadable.
+    /// The result is what <see cref="RemoteScripts.Cleanup"/> takes back.
+    /// </summary>
     internal static string? ParseSlot(string output)
     {
-        var line = output.Split('\n', StringSplitOptions.TrimEntries).FirstOrDefault(l => l.StartsWith("SLOT=", StringComparison.Ordinal));
-        var value = line?["SLOT=".Length..];
-        return value is not null && int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0
-            ? n.ToString(CultureInfo.InvariantCulture)
-            : null;
+        foreach (var line in output.Split('\n', StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("SLOT=", StringComparison.Ordinal))
+            {
+                return PositiveInt(line["SLOT=".Length..]) is { } n ? n.ToString(CultureInfo.InvariantCulture) : null;
+            }
+
+            if (line.StartsWith("SLOTS=", StringComparison.Ordinal))
+            {
+                var slots = line["SLOTS=".Length..].Split(',').Select(PositiveInt).ToList();
+                return slots.Count <= 1024 && slots.All(n => n is not null) && slots.Zip(slots.Skip(1)).All(p => p.First < p.Second)
+                    ? string.Join(',', slots.Select(n => n!.Value.ToString(CultureInfo.InvariantCulture)))
+                    : null;
+            }
+        }
+
+        return null;
+
+        static int? PositiveInt(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n > 0 ? n : null;
     }
 
     private static bool IsRepoId(string id)
