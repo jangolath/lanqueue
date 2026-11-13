@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- `--shards` with `--mem`: a shard that started while lanq was probing the machines was counted as running, as if its
+  memory showed in the probe's answer, although the machine answered before it ran. The next round could then place
+  one shard too many on that machine. Which shards are not running yet is now taken before the probe.
+
+### Tests
+
+- Two tests that failed now and then on GitHub's Windows runner are now deterministic. The `--mem` placement test's
+  fake machine now reports less free memory once a shard's upload is done, as a real job would use it. The newline-free flood test now measures the reader's
+  memory on one thread, not process-wide, where work left by earlier tests counted too.
+
 ## 0.8.1 (2026-11-10)
 
 ### Security

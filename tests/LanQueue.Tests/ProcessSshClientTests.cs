@@ -3,11 +3,6 @@ using Xunit;
 
 namespace LanQueue.Tests;
 
-/// <summary>The allocation check reads a process-wide counter, so this class never runs alongside other test classes.</summary>
-[CollectionDefinition("alloc", DisableParallelization = true)]
-public sealed class AllocationCollection;
-
-[Collection("alloc")]
 public class ProcessSshClientTests
 {
     private const char Cr = (char)13, Lf = (char)10;
@@ -193,14 +188,53 @@ public class ProcessSshClientTests
             "$s = [string]::new([char]0, 1048576); for ($i = 0; $i -lt 50; $i++) { [Console]::Out.Write($s) }",
             "dd if=/dev/zero bs=1048576 count=50 2>/dev/null");
         var longest = 0;
-        var before = GC.GetTotalAllocatedBytes(precise: true);
         var r = await ProcessSshClient.Execute(exe, args, l => longest = Math.Max(longest, l.Length), TimeSpan.FromMinutes(2), CancellationToken.None);
-        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
 
+        // What reading it costs is measured on one thread in AFloodCostsAFixedAmountOfMemory: a process-wide count here also saw work left
+        // running by earlier tests (once 70 MB on a CI runner, against 6 MB alone).
         Assert.Equal(0, r.ExitCode);
         Assert.True(longest <= OutputCollector.MaxLineChars + 100, $"a line of {longest} chars was delivered");
         Assert.True(r.Output.Length <= OutputCollector.TailChars + 200, $"kept {r.Output.Length} chars");
-        Assert.True(allocated < 64L * 1024 * 1024, $"allocated {allocated / (1024 * 1024)} MB reading a 50 MB stream");
+    }
+
+    /// <summary>
+    /// 50 MB with no newline, split and kept the way a job's output is, costs a fixed amount of memory: one capped line and the kept tail,
+    /// never a copy of the stream (that alone would be 100 MB of UTF-16). The reader completes every read at once, so everything runs on
+    /// this thread and its own allocation count sees nothing else.
+    /// </summary>
+    [Fact]
+    public async Task AFloodCostsAFixedAmountOfMemory()
+    {
+        var kept = new OutputCollector(keepTailOnly: true);
+        var longest = 0;
+        void OnLine(string l)
+        {
+            longest = Math.Max(longest, l.Length);
+            kept.Add(l);
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var pump = LineReader.PumpAsync(new NulReader(50 * 1024 * 1024), OnLine);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(pump.IsCompletedSuccessfully);
+        await pump;
+        Assert.Equal(OutputCollector.MaxLineChars + LineReader.Truncated.Length, longest);
+        Assert.True(allocated < 1024 * 1024, $"allocated {allocated / 1024} KB reading a 50 MB stream");
+    }
+
+    /// <summary>Hands out <paramref name="length"/> NUL characters, each read completed at once and without allocating.</summary>
+    private sealed class NulReader(long length) : TextReader
+    {
+        private long _left = length;
+
+        public override ValueTask<int> ReadAsync(Memory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            var n = (int)Math.Min(buffer.Length, _left);
+            buffer.Span[..n].Clear();
+            _left -= n;
+            return ValueTask.FromResult(n);
+        }
     }
 
     [Fact]

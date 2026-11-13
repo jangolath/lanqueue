@@ -557,19 +557,35 @@ public sealed class ShardReviewTests : IDisposable
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var tinyRan = false;
+        var uploadingToBig = 0;
         var ssh = new PoolSsh
         {
-            ProbeExtra = m => m.Name == "big-01" ? "mem_free_gb=9" : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5",
             OnUpload = async (m, ct) =>
             {
                 if (m.Name == "big-01")
                 {
-                    await release.Task.WaitAsync(ct);
+                    Interlocked.Increment(ref uploadingToBig);
+                    try
+                    {
+                        await release.Task.WaitAsync(ct);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref uploadingToBig);
+                    }
                 }
 
                 return new SshResult(0, "");
             },
         };
+
+        // big-01 has 9 GB free less 4 GB for each slot taken there whose upload is done: a shard still uploading uses no memory yet (so the
+        // probe cannot see it, and only counting it as placed keeps a third shard off), one past its upload uses its 4 GB until its slot is
+        // given back. A constant 9 GB would let a correct scheduler place a third shard once the first two run, and the peak would read 3.
+        ssh.ProbeExtra = m => m.Name == "big-01"
+            ? string.Create(
+                System.Globalization.CultureInfo.InvariantCulture, $"mem_free_gb={9 - (4 * (ssh.Used("big-01") - Volatile.Read(ref uploadingToBig)))}")
+            : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5";
         ssh.RefuseSlot = m =>
         {
             if (m.Name == "big-01" && ssh.Peak.TryGetValue("big-01", out var peak) && peak >= 2)
@@ -605,6 +621,88 @@ public sealed class ShardReviewTests : IDisposable
         var r = await runner.RunShardsAsync(Jest(wait: TimeSpan.FromMinutes(5)) with { MinMemGb = 4 }, new ShardOptions(4), CancellationToken.None);
 
         Assert.Equal("Completed", r.Status);
+        Assert.Equal(2, ssh.Peak["big-01"]);
+    }
+
+    /// <summary>
+    /// Two shards on big-01 start while a probe is out: the machine answered before they ran, so its free memory (9 GB) does not show them.
+    /// They still count as placed but not running for that look, so no third shard goes there.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ShardsThatStartDuringAProbeStillCountAsNotRunning()
+    {
+        var uploads = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bothRunning = new Countdown(2);
+        var tinyRan = false;
+        var runningOnBig = 0;
+        var bigProbes = 0;
+        var stale = false;
+        var ssh = new PoolSsh
+        {
+            // big-01's free memory drops by 4 GB for each job running there.
+            ProbeExtra = m => m.Name == "big-01"
+                ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"mem_free_gb={9 - (4 * Volatile.Read(ref runningOnBig))}")
+                : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5",
+            OnUpload = async (m, ct) =>
+            {
+                if (m.Name == "big-01")
+                {
+                    await uploads.Task.WaitAsync(ct);
+                }
+
+                return new SshResult(0, "");
+            },
+            OnExecute = async (e, ct) =>
+            {
+                if (e.Machine.Name == "tiny-01")
+                {
+                    Volatile.Write(ref tinyRan, true);
+                    return e.Exit(0);
+                }
+
+                Interlocked.Increment(ref runningOnBig);
+                bothRunning.Signal();
+                await release.Task.WaitAsync(ct);
+                Interlocked.Decrement(ref runningOnBig);
+                return e.Exit(0);
+            },
+            AfterProbe = async (m, r, ct) =>
+            {
+                if (m.Name == "big-01" && Interlocked.Increment(ref bigProbes) == 2)
+                {
+                    // The look after tiny-01's shard ended was taken while both big-01 shards were still uploading: answer it only once both run.
+                    uploads.TrySetResult();
+                    await bothRunning.Reached.WaitAsync(ct);
+                    Volatile.Write(ref stale, true);
+                }
+
+                return r;
+            },
+        };
+        ssh.RefuseSlot = m =>
+        {
+            if (m.Name == "big-01" && ssh.Used("big-01") >= 2)
+            {
+                release.TrySetResult(); // a third claim on big-01 while two run: over-placed (end the wait so the assertion below reports it)
+            }
+
+            return false;
+        };
+        var runner = Runner(ssh, new RunnerTests.FakePayloads(""), delay: (_, ct) =>
+        {
+            if (Volatile.Read(ref stale))
+            {
+                release.TrySetResult(); // the stale look placed nothing on big-01: let its two shards finish
+            }
+
+            return Task.Delay(TimeSpan.FromMilliseconds(10), ct);
+        });
+
+        var r = await runner.RunShardsAsync(Jest(wait: TimeSpan.FromMinutes(5)) with { MinMemGb = 4 }, new ShardOptions(4), CancellationToken.None);
+
+        Assert.Equal("Completed", r.Status);
+        Assert.True(Volatile.Read(ref stale));
         Assert.Equal(2, ssh.Peak["big-01"]);
     }
 
