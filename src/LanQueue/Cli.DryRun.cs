@@ -60,7 +60,11 @@ public static partial class Cli
             await stdout.WriteLineAsync(JsonSerializer.Serialize(
                 PlanJsonOf(plan, p.LogTail, p.Exclusive) with
                 {
-                    NextSteps = next, Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), Baseline = BaselineJsonOf(plan.Baseline), ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
+                    NextSteps = next,
+                    Env = EnvNames(p.Env),
+                    Exclusive = Flag(p.Exclusive),
+                    Baseline = BaselineJsonOf(plan.Baseline),
+                    ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
                 },
                 LanqJson.Default.PlanJson)).ConfigureAwait(false);
         }
