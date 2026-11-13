@@ -23,8 +23,20 @@
   `suggestedMachine.env` included), as JSON.md always promised; before, the JSON paths printed them as the worker
   sent them. `suggestedMachine.path_prepend` and `env` are kept only when the text and `--add` would use them (exactly
   one usable folder, `env` exactly `DOTNET_ROOT` set to it).
+- lanq's own Linux safe-folder rule (the toolchain search of `lanq doctor --remote` and `lanq makeready --add`, before
+  a folder is proposed for `path_prepend:`) now reads POSIX ACLs, exactly as lanq-makeready 0.4.1: `getfacl -cpn` (at
+  most 5 s); a named `user:ID`/`group:ID` entry whose effective rights include write, or a `default:` entry whose own
+  rights do, for an ID other than root, the build account or its private group, makes the folder open; so do
+  `getfacl` failing and output with no `user::` line. Without `getfacl`, `ls -ld` failing or showing the `+` ACL marker
+  (or a missing marker column) is open, and with BusyBox `ls` any group write is. Parent folders are checked unless they
+  are links or sticky. macOS is not checked. Before, a folder writable by another account through an ACL was proposed.
 
 ### Behaviour changes
+
+- `lanq makeready` runs lanq-makeready 0.4.1 (embedded, SHA-256 pinned): its safe-folder check reads POSIX ACLs, so a
+  `path_prepend` suggestion may now be left out (and listed in `lanqWithheld`, or the text's comment) where 0.4.0
+  proposed it. A folder lanq or lanq-makeready calls open is reported, never proposed; install the `acl` package on a
+  Linux worker that uses ACLs, or the folder stays open.
 
 - A run 0.9.1 accepted may now be `Rejected` (2) for a secret in such a file. The finding names
   `uncommitted file <path> (binary per git)`, never the value, and the message adds: "A file git shows as binary is

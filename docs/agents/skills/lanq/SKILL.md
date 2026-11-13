@@ -202,7 +202,8 @@ than one case.
   entry, rename, compress, move or re-encode a file, or move a secret into a `-diff` file. Report `scanSkipped` (files
   over the scan's caps, not read in full) and a `scan-incomplete` refusal (lanq could not read a file from git); do
   not try to fix them.
-- Do not write `lanq makeready` JSON `suggestedMachine` into the machines file: it is advice for the developer.
+- Do not write `lanq makeready` JSON `suggestedMachine` into the machines file: it is advice for the developer. Do not
+  change a worker's permissions or ACLs to get a folder proposed for `path_prepend`.
   `lanqWithheld` lists what lanq left out of the report.
 - Do not edit `lanq.yml` or the scripts it runs (shard scripts included) to turn a red run green.
 - Do not run lanq's release smoke (`scripts/smoke-workers.ps1`) unless the developer asks, and never edit its

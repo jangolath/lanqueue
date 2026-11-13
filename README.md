@@ -305,7 +305,7 @@ The check names and every field are in [docs/JSON.md](docs/JSON.md#lanq-doctor--
 
 Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
 .NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
-(v0.4.0, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner: lanq-makeready's fix
+(v0.4.1, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner: lanq-makeready's fix
 script is never built in or sent), sent on ssh **stdin** and run from memory with
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
@@ -345,7 +345,7 @@ prints one table:
 
 ```text
 $ lanq makeready --all
-lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.4.0)
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.4.1)
 
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending

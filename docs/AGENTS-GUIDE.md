@@ -120,7 +120,9 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 | (no JSON) | any | lanq was killed, or is not installed. | Report it. | To check the lanq install. |
 
 A tool "not found" on a worker usually means a non-login ssh session does not see it. The fix is `path_prepend:` in
-`machines.yml`; the agent reports it and does not try to fix the worker.
+`machines.yml`; the agent reports it and does not try to fix the worker. A note that a folder "is not proposed for
+path_prepend: other local users can write there" (by mode bits or, on Linux since 0.9.2, POSIX ACLs) is reported as
+it is: the agent never changes a worker's permissions or ACLs, and never suggests that folder anyway.
 
 ## Waiting
 

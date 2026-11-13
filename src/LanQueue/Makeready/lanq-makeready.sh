@@ -8,7 +8,7 @@
 #        --out FILE also saves the human report to FILE (a new file only: an existing file is never overwritten)
 # Exit:  0 = worker-ready, 1 = not ready, 2 = bad arguments.
 
-TOOL_VERSION=0.4.0
+TOOL_VERSION=0.4.1
 SEP=$(printf '\037')
 CHECKS=""
 
@@ -692,23 +692,49 @@ sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTN
   return 0
 }
 
+acl_ok() { # $1 = folder: false (open) when other users could write there by POSIX ACL. Uses the globals _u (this uid) and _pg (the private gid, or 0)
+  # set by safe_dir. Trusted ids: 0, _u, _pg. Not read on macOS (no getfacl; a Mac never gets an entry). NFSv4 ACLs and SELinux are not read.
+  [ "$(uname -s)" = Darwin ] && return 0
+  if command -v getfacl >/dev/null 2>&1; then
+    _acl=$(run_t 5 getfacl -cpn -- "$1" 2>/dev/null) || return 1 # getfacl failing or timing out: open
+    # Each line is split on ":" once "#effective:" is cut off. user:ID / group:ID: the effective rights (under the mask) count. default:user:ID /
+    # default:group:ID: the raw rights count (new folders inherit them). user::, group::, other:: and mask:: are left to the mode bits.
+    _aw='{ e = $0; eff = ""; i = index(e, "#effective:"); if (i) { eff = substr(e, i + 11); e = substr(e, 1, i - 1) }'
+    _aw=$_aw' gsub(/[ \t]+$/, "", e); gsub(/[ \t]/, "", eff); n = split(e, f, ":");'
+    _aw=$_aw' if (n == 3 && f[1] == "user" && f[2] == "") seen = 1;'
+    _aw=$_aw' if (n == 4 && f[1] == "default") { t = f[2]; id = f[3]; p = f[4] } else if (n == 3) { t = f[1]; id = f[2]; p = (eff != "") ? eff : f[3] } else next;'
+    _aw=$_aw' if (p !~ /w/ || id == "" || id == 0) next;'
+    _aw=$_aw' if ((t == "user" && id != u) || (t == "group" && id != g)) bad = 1 }'
+    _aw=$_aw' END { exit (bad || !seen) }' # no user:: line: empty or unknown output, open
+    printf '%s\n' "$_acl" | awk -v u="$_u" -v g="$_pg" "$_aw"
+  else # no getfacl: ls failing, a short line or the ACL marker (+) is open. busybox ls shows no marker, and with an ACL the group bits are the mask,
+    # so there group write is open even for root's or the private group
+    _m=$(run_t 5 ls -ld -- "$1" 2>/dev/null) || return 1
+    case "$_m" in ??????????[!+]*) ;; *) return 1 ;; esac
+    case "$(run_t 5 ls --help 2>&1)" in *BusyBox*) case "$_m" in ?????w*) return 1 ;; esac ;; esac
+  fi
+}
+
 safe_dir() { # $1 = folder, $2 = its newest SDK: true when other local users cannot plant code a job's dotnet runs. The folder, its
   # dotnet, sdk and that SDK folder, host, host/fxr and its version folders, shared with every framework and version folder, packs, sdk-manifests
   # (each resolved): owned by root or this user, writable by nobody
-  # else (a group may write when it is root's or this user's own private group). Every parent folder of the path as given and as
-  # resolved: owned by root or this user, and not writable by others or another group unless sticky (then nobody can rename our entry).
+  # else (a group may write when it is root's or this user's own private group), by the mode bits and by the POSIX ACL (acl_ok). Every parent folder of
+  # the path as given and as resolved: owned by root or this user, and not writable by others or another group (mode or ACL) unless sticky (then nobody
+  # can rename our entry).
   _u=$(id -u 2>/dev/null); _pg=0; [ "$(id -gn 2>/dev/null)" = "$(id -un 2>/dev/null)" ] && _pg=$(id -g 2>/dev/null)
   case "$1" in /*) ;; *) return 1 ;; esac
   for _x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1"/shared/* "$1"/shared/*/* "$1/packs" "$1/sdk-manifests"; do
     case "$_x" in "$1/host"*|"$1/shared"*|"$1/packs"|"$1/sdk-manifests"|"$1/sdk"|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
     _x=$(readlink -f -- "$_x" 2>/dev/null) || return 1
     [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) 2>/dev/null)" ] || return 1
+    acl_ok "$_x" || return 1
   done
   _r=$(readlink -f -- "$1" 2>/dev/null) || return 1
   for _a in "$1" "$_r"; do
     while _n=${_a%/*}; [ "$_n" != "$_a" ] && [ -n "$_n" ]; do
       _a=$_n
       [ -n "$(find "$_a" -maxdepth 0 \( -user 0 -o -user "$_u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) \) \) 2>/dev/null)" ] || return 1
+      [ -L "$_a" ] || [ -n "$(find "$_a" -maxdepth 0 -perm -1000 2>/dev/null)" ] || acl_ok "$_a" || return 1
     done
   done
   return 0

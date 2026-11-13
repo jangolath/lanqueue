@@ -105,7 +105,9 @@ For `--shards`, read the overall `status`, then report each entry in `shards` th
   `.gitattributes` entry, rename, compress, move or re-encode a file (or move a secret into a `-diff` file) to get past
   the scan. A `scan-incomplete` refusal means lanq could not read a file from git: report it (the developer checks
   with `git fsck`). Report `scanSkipped` (files over the scan's caps, not read in full); do not try to get them read.
-- `lanq makeready` JSON `suggestedMachine` is advice for the developer: never write it into `machines.yml`.
+- `lanq makeready` JSON `suggestedMachine` is advice for the developer: never write it into `machines.yml`. A folder
+  lanq or lanq-makeready calls open ("other local users can write there", by mode bits or POSIX ACLs) is reported,
+  never proposed anyway; never change a worker's permissions or ACLs.
   `lanqWithheld` lists what lanq left out of the report (lanq's own key; a worker cannot send it).
 - Never edit `lanq.yml` or the scripts it runs (such as `scripts/lanq/*` shard scripts) to turn a red run green.
 - A `preexisting` baseline verdict means the failure was there before your change. Report it as such; fix it only if

@@ -25,12 +25,13 @@ public static partial class RemoteScripts
     /// fixed drive; on Linux and macOS /etc/dotnet/install_location (and _ARCH), /usr/share/dotnet, /usr/lib/dotnet, /usr/lib64/dotnet,
     /// /opt/dotnet, /snap/dotnet-sdk/current, /usr/local/share/dotnet and the Homebrew folders. When the dotnet on PATH has no SDK but a
     /// runtime, it also prints <c>runtime.dotnet=VERSION</c> (the highest Microsoft.NETCore.App). A folder other local users could plant code
-    /// in prints <c>open.dotnet=DIR|VERSION</c> instead and is never proposed for path_prepend, as lanq-makeready 0.3.0 judges it. Trusted:
+    /// in prints <c>open.dotnet=DIR|VERSION</c> instead and is never proposed for path_prepend, as lanq-makeready 0.4.1 judges it. Trusted:
     /// Administrators, SYSTEM, TrustedInstaller (root), members of the local Administrators group and this account. The folder, its dotnet,
     /// sdk and the newest SDK folder, host, host/fxr, shared (every framework), packs, sdk-manifests and their version folders: a trusted owner and a
     /// DACL giving nobody else more than read/execute (on Linux no write for others, nor for a group other than root's or the account's own
-    /// private group; POSIX ACLs are not read). Every parent folder: a trusted owner, and nobody else may delete or rename what is in it (on
-    /// Linux: not writable by others or another group unless sticky). Only absolute folders; on Windows a junction or link folder is refused.
+    /// private group, by the mode bits and by POSIX ACL: <see cref="LinuxAclCheck"/>, as lanq-makeready 0.4.1). Every parent folder: a trusted
+    /// owner, and nobody else may delete or rename what is in it (on Linux: not writable by others or another group, by mode or ACL, unless
+    /// sticky). Only absolute folders; on Windows a junction or link folder is refused.
     /// </summary>
     public static string FindToolchain(Machine m, string tool)
     {
@@ -98,19 +99,49 @@ public static partial class RemoteScripts
                 exit 0
         """;
 
-    private const string LinuxDotnetSearch = """
+    /// <summary>
+    /// The POSIX ACL part of the Linux safe-folder rule, as lanq-makeready 0.4.1's acl_ok judges it (kept identical; tests run it with fake
+    /// getfacl, ls and uname). <c>acl DIR</c> is false (open) when another user could write there by ACL. It reads <c>getfacl -cpn</c> (at
+    /// most 5 s): a named <c>user:ID</c> or <c>group:ID</c> entry whose effective rights (after <c>#effective:</c>) include w, or a
+    /// <c>default:user:ID</c>/<c>default:group:ID</c> entry whose own rights do (new folders inherit it), for an ID other than 0, this user
+    /// (<c>u</c>) or the private group (<c>g</c>), is open; so are getfacl failing or timing out and an output with no <c>user::</c> line.
+    /// Without getfacl: <c>ls -ld</c> failing, or its 11th character being + or missing, is open, and with BusyBox ls (no marker) any group
+    /// write is. Not read on macOS.
+    /// </summary>
+    internal const string LinuxAclCheck = """
+                tm() { # tm CMD ARGS: at most 5 s, stdin closed
+                  if command -v timeout >/dev/null 2>&1; then timeout 5 "$@" </dev/null; return $?; fi
+                  "$@" </dev/null & tp=$!; ( sleep 5; kill "$tp" ) >/dev/null 2>&1 & tk=$!; wait "$tp"; ts=$?; kill "$tk" >/dev/null 2>&1; return "$ts"
+                }
+                acl() { # $1 = folder: false (open) when another user could write there by POSIX ACL (as lanq-makeready 0.4.1 judges it)
+                  [ "$(uname -s)" = Darwin ] && return 0
+                  if command -v getfacl >/dev/null 2>&1; then
+                    al=$(tm getfacl -cpn -- "$1" 2>/dev/null) || return 1
+                    printf '%s\n' "$al" | awk -v u="$u" -v g="$g" '{ e = $0; eff = ""; i = index(e, "#effective:"); if (i) { eff = substr(e, i + 11); e = substr(e, 1, i - 1) } gsub(/[ \t]+$/, "", e); gsub(/[ \t]/, "", eff); n = split(e, f, ":"); if (n == 3 && f[1] == "user" && f[2] == "") seen = 1; if (n == 4 && f[1] == "default") { t = f[2]; id = f[3]; p = f[4] } else if (n == 3) { t = f[1]; id = f[2]; p = (eff != "") ? eff : f[3] } else next; if (p !~ /w/ || id == "" || id == 0) next; if ((t == "user" && id != u) || (t == "group" && id != g)) bad = 1 } END { exit (bad || !seen) }'
+                  else
+                    am=$(tm ls -ld -- "$1" 2>/dev/null) || return 1
+                    case "$am" in ??????????[!+]*) ;; *) return 1 ;; esac
+                    case "$(tm ls --help 2>&1)" in *BusyBox*) case "$am" in ?????w*) return 1 ;; esac ;; esac
+                  fi
+                }
+
+        """;
+
+    private const string LinuxDotnetSearch = LinuxAclCheck + """
                 end=$(( $(date +%s) + 5 ))
                 u=$(id -u); g=0; [ "$(id -gn)" = "$(id -un)" ] && g=$(id -g)
-                safe() { # $1 = folder, $2 = its newest SDK: no other local user can plant code a job's dotnet runs (as lanq-makeready 0.3.0 judges it)
+                safe() { # $1 = folder, $2 = its newest SDK: no other local user can plant code a job's dotnet runs (as lanq-makeready 0.4.1 judges it)
                   for x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1"/shared/* "$1"/shared/*/* "$1/packs" "$1/sdk-manifests"; do
                     case "$x" in "$1/host"*|"$1/shared"*|"$1/packs"|"$1/sdk-manifests") [ -e "$x" ] || continue ;; esac
                     x=$(readlink -f -- "$x" 2>/dev/null) && [ -n "$(find "$x" -maxdepth 0 \( -user 0 -o -user "$u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) 2>/dev/null)" ] || return 1
+                    acl "$x" || return 1
                   done
                   r=$(readlink -f -- "$1" 2>/dev/null) || return 1
                   for a in "$1" "$r"; do
                     while n=${a%/*}; [ "$n" != "$a" ] && [ -n "$n" ]; do
                       a=$n
                       [ -n "$(find "$a" -maxdepth 0 \( -user 0 -o -user "$u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$g" \) \) \) 2>/dev/null)" ] || return 1
+                      [ -L "$a" ] || [ -n "$(find "$a" -maxdepth 0 -perm -1000 2>/dev/null)" ] || acl "$a" || return 1
                     done
                   done
                   return 0
