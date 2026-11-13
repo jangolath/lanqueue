@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text;
 
 namespace LanQueue.Payload;
@@ -135,24 +136,38 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         var bundle = Path.Combine(outputDir, usedBase is null ? jobId + ".bundle" : $"{jobId}-{usedBase}.bundle");
         var refName = $"refs/lanq/{jobId}";
         await Git(top, null, ct, "update-ref", refName, sha).ConfigureAwait(false);
+        ExceptionDispatchInfo? failed = null;
         try
         {
             string[] args = ["bundle", "create", bundle, refName, .. exclude.Count > 0 ? ["--not", .. exclude] : Array.Empty<string>()];
             await Git(top, null, ct, args).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
             // A failed or killed bundle create (timeout, Ctrl+C) can leave its lock file; the next try must not trip over it. Best effort:
             // a delete that fails (Windows, a handle still open) must not replace the GitTimeoutException, which ends the retries.
             TryDelete(bundle + ".lock");
-            throw;
+            failed = ExceptionDispatchInfo.Capture(ex);
         }
-        finally
+
+        if (failed is null)
+        {
+            await Git(top, null, CancellationToken.None, "update-ref", "-d", refName).ConfigureAwait(false);
+            return new BundleBuild(bundle, usedBase);
+        }
+
+        // The build already failed: removing the temporary ref is best effort, and its own failure only adds a note to the real error.
+        try
         {
             await Git(top, null, CancellationToken.None, "update-ref", "-d", refName).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            throw WithLeftoverRef(failed.SourceException, refName);
+        }
 
-        return new BundleBuild(bundle, usedBase);
+        failed.Throw();
+        throw failed.SourceException; // not reached
     }
 
     /// <summary>The commits to exclude for an incremental bundle on <paramref name="baseSha"/>, or none when only a full bundle is safe.</summary>
@@ -591,6 +606,22 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
         return psi;
     }
 
+    /// <summary>
+    /// <paramref name="error"/> with a note that the temporary ref <paramref name="refName"/> was left in the local repository (nothing prunes
+    /// refs/lanq/* later) and how to delete it. A GitTimeoutException stays one (it ends the build's retries); another InvalidOperationException
+    /// gets the note in a new one; anything else (Ctrl+C) is returned as it is.
+    /// </summary>
+    internal static Exception WithLeftoverRef(Exception error, string refName)
+    {
+        var note = $"; the local ref {refName} was left behind (delete it with: git update-ref -d {refName})";
+        return error switch
+        {
+            GitTimeoutException t => new GitTimeoutException(t.Subcommand, t.Timeout, note),
+            InvalidOperationException => new InvalidOperationException(error.Message + note, error),
+            _ => error,
+        };
+    }
+
     /// <summary>Waits at most 5 s for a killed process to be gone.</summary>
     private static void WaitBriefly(Process p)
     {
@@ -636,8 +667,9 @@ public sealed class GitPayloadBuilder : IPayloadBuilder
 /// A local git call that outlived its limit and was killed (<see cref="GitPayloadBuilder.TimeoutFor"/>). An <see cref="InvalidOperationException"/>,
 /// so every path that reports a failed git call (InfraError 70 for a snapshot or bundle, Rejected 2 for a --baseline base) reports this one too.
 /// </summary>
-public sealed class GitTimeoutException(string subcommand, TimeSpan timeout)
-    : InvalidOperationException($"git {subcommand} did not finish within {Ssh.ProcessSshClient.Describe(timeout)} and was stopped (lanq never gives git any input; look for a stale lock or a slow disk)")
+/// <param name="note">Appended to the message (a ref left behind by the failed build).</param>
+public sealed class GitTimeoutException(string subcommand, TimeSpan timeout, string note = "")
+    : InvalidOperationException($"git {subcommand} did not finish within {Ssh.ProcessSshClient.Describe(timeout)} and was stopped (lanq never gives git any input; look for a stale lock or a slow disk){note}")
 {
     public string Subcommand => subcommand;
 

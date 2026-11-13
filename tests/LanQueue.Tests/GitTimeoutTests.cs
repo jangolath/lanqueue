@@ -112,6 +112,29 @@ public class GitTimeoutTests
         }
     }
 
+    /// <summary>
+    /// A bundle build that failed and whose temporary ref could not be removed either: the build's own error is kept (a timeout stays a
+    /// GitTimeoutException, so it is still not retried) and names the leftover ref and how to delete it. Ctrl+C stays a cancellation.
+    /// </summary>
+    [Fact]
+    public void ALeftoverRefIsANoteOnTheBuildsOwnError()
+    {
+        const string Ref = "refs/lanq/20260101-120000-aaaaaa";
+        const string Note = "the local ref " + Ref + " was left behind (delete it with: git update-ref -d " + Ref + ")";
+
+        var timeout = Assert.IsType<GitTimeoutException>(GitPayloadBuilder.WithLeftoverRef(new GitTimeoutException("bundle", TimeSpan.FromMinutes(30)), Ref));
+        Assert.Equal(("bundle", TimeSpan.FromMinutes(30)), (timeout.Subcommand, timeout.Timeout));
+        Assert.StartsWith("git bundle did not finish within 30 min", timeout.Message, StringComparison.Ordinal);
+        Assert.EndsWith(Note, timeout.Message, StringComparison.Ordinal);
+
+        var failed = GitPayloadBuilder.WithLeftoverRef(new InvalidOperationException("git bundle failed: disk full"), Ref);
+        Assert.IsType<InvalidOperationException>(failed);
+        Assert.Equal("git bundle failed: disk full; " + Note, failed.Message);
+
+        var cancelled = new OperationCanceledException();
+        Assert.Same(cancelled, GitPayloadBuilder.WithLeftoverRef(cancelled, Ref));
+    }
+
     /// <summary>The archive's long-lived cat-file --batch stream has its own limit: on expiry it fails as a timeout and leaves no archive.</summary>
     [Fact]
     public async Task TheArchiveStreamTimesOutAndLeavesNoArchive()
