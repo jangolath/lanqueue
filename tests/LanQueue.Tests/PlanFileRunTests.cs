@@ -87,10 +87,11 @@ public sealed partial class PlanFileRunTests : IDisposable
     internal static string JobOf(PoolSsh.Exec e) => PlanJobRegex().Match(e.Command).Groups[1].Value;
 
     private async Task<(int Code, string Stdout, string Stderr)> Run(
-        PoolSsh ssh, RunnerTests.FakePayloads payloads, string[] args, CancellationToken ct = default, string? repoDir = null, string fleet = Fleet)
+        PoolSsh ssh, RunnerTests.FakePayloads payloads, string[] args, CancellationToken ct = default, string? repoDir = null, string fleet = Fleet,
+        StringWriter? stderr = null)
     {
         var o = new StringWriter();
-        var e = new StringWriter();
+        var e = stderr ?? new StringWriter();
         var code = await Cli.RunPlanFile(
             ParsedArgs.Parse(["run", .. args]), ConfigLoader.Parse(fleet), ssh, payloads, new HealthProbe(ssh, TimeProvider.System), Log, Home, repoDir ?? Repo, o, e, ct,
             (_, c) => Task.Delay(Timeout.InfiniteTimeSpan, c));
@@ -371,17 +372,58 @@ public sealed partial class PlanFileRunTests : IDisposable
             return e.Exit(0);
         };
 
-        // --wait 0: with one slot, the second job waits behind the first (a plain run would end NoCapacity at once), then runs.
-        var run = Run(ssh, new RunnerTests.FakePayloads(""), ["--plan", "--json", "--wait", "0"], fleet: Solo);
+        // --wait 0: with one slot, the second job waits behind the first (a plain run would end NoCapacity at once), then runs. The first job
+        // is let go only once the second has said it waits: released earlier, the second's look could find the slot free already (its probe
+        // answering after the first's cleanup) or look again at once for the slot given back (Relook), and rightly print no waiting line.
+        const string Waiting = "[second] [lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)";
+        var stderrLines = new LineSignal(Waiting);
+        var run = Run(ssh, new RunnerTests.FakePayloads(""), ["--plan", "--json", "--wait", "0"], fleet: Solo, stderr: stderrLines);
         await firstRuns.Task;
+        await stderrLines.Seen;
         release.SetResult();
         var (code, stdout, stderr) = await run;
 
         Assert.Equal(0, code);
         Assert.Equal(2, ssh.Executes.Count);
         Assert.Equal(1, ssh.Peak["solo-01"]);
-        Assert.Contains("[second] [lanq] no eligible machine; waiting for a slot (this plan's other jobs hold some)", stderr, StringComparison.Ordinal);
+        Assert.Contains(Waiting, stderr, StringComparison.Ordinal);
         Assert.Equal("Completed", Json(stdout).GetProperty("status").GetString());
+    }
+
+    /// <summary>A StringWriter whose <see cref="Seen"/> completes once a line containing <paramref name="text"/> is written (from any thread).</summary>
+    private sealed class LineSignal(string text) : StringWriter
+    {
+        private readonly TaskCompletionSource _seen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Lock _gate = new();
+
+        public Task Seen => _seen.Task;
+
+        public override void WriteLine(string? value)
+        {
+            lock (_gate)
+            {
+                base.WriteLine(value);
+            }
+
+            if (value?.Contains(text, StringComparison.Ordinal) == true)
+            {
+                _seen.TrySetResult();
+            }
+        }
+
+        public override Task WriteLineAsync(string? value)
+        {
+            WriteLine(value);
+            return Task.CompletedTask;
+        }
+
+        public override string ToString()
+        {
+            lock (_gate)
+            {
+                return base.ToString();
+            }
+        }
     }
 
     /// <summary>
