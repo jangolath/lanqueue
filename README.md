@@ -1312,7 +1312,7 @@ Each default below is enforced in code and covered by a unit test.
   up to 8 MB per file and 64 MB in all; in a modified file only new lines or strings count. Compressed or encrypted
   content (a zip, a `.gz`) is not unpacked, so a secret inside it is not seen. The diff of ordinary text files is
   scanned with its added and its removed lines; since 0.10.1 a private key replaced in place there (a new body under
-  the same BEGIN line, which the diff does not show; only a block that ends in its END line within 8192 lines, holds only key material with a base64 line of 16 or more characters, and changed between BEGIN and END, so code that handles PEM is never refused; see SECURITY.md for the forms recognised; a changed text file whose path is not valid UTF-8 refuses the job) is found too: changed text files with a `-----BEGIN` line are
+  the same BEGIN line, which the diff does not show; only a block that ends in its END line within 8192 lines, holds only key material with a base64 line of 16 or more characters that has a digit, `+` or `/`, and changed between BEGIN and END, so code that handles PEM is never refused; see SECURITY.md for the forms recognised; a changed text file whose path is not valid UTF-8, or two changed paths that decode to the same name, refuse the job) is found too: changed text files with a `-----BEGIN` line are
   compared with their old version (renames included), up to 32 MB per version, and refused like a new key, sample
   keys in tracked text files included (generate test keys when the tests run instead). A file over a cap
   (`text_over_cap` for such a text file) is not refused: it is named on

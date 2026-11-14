@@ -57,7 +57,7 @@ public sealed partial class GitPayloadBuilder
     internal static List<string> GrepCandidates(IReadOnlyDictionary<string, RawEntry> raw, IReadOnlyDictionary<string, long?> numstat) =>
         [.. raw.Where(r => r.Value.Status is not ('A' or 'D')
                 && !(numstat.TryGetValue(r.Key, out var added) && added is null or 0)
-                && !r.Key.Contains('�', StringComparison.Ordinal))
+                && !r.Key.Contains('\uFFFD', StringComparison.Ordinal))
             .Select(r => r.Key)
             .Order(StringComparer.Ordinal)];
 
@@ -99,9 +99,10 @@ public sealed partial class GitPayloadBuilder
     /// status", then its path, or for R and C its old and new paths); any other token is a numstat record ("added TAB deleted TAB path", or
     /// "added TAB deleted TAB" then the old and new paths). A record's paths are always taken as its next tokens, so a path that starts with
     /// ':' or holds a tab is never read as a record. Both maps are keyed by the new path; a numstat count is null for a file git shows as
-    /// binary ("-") and -1 when it cannot be read. Before any filtering, every path holding U+FFFD (git gave bytes that are not UTF-8, which
-    /// cannot be named back to git, and two of which can decode to the same string) and every new path seen twice in raw or in numstat is a
-    /// scan-incomplete finding (fails closed), once per path.
+    /// binary ("-") and -1 when it cannot be read. Scan-incomplete findings (fail closed), once per path: every new path seen twice in raw or
+    /// in numstat, whatever the file (two names git gave in bytes that are not UTF-8 can decode to the same string, which would hide one of
+    /// them from this scan and from the binary scan alike), and every text candidate (modified, renamed, copied or type-changed, text, with
+    /// added lines) whose path holds U+FFFD: it cannot be named back to git to be grepped. Other such files (binary, added, deleted) pass.
     /// </summary>
     internal static (Dictionary<string, RawEntry> Raw, Dictionary<string, long?> Numstat, List<SecretFinding> Undecodable) ParseRawNumstat(string output)
     {
@@ -110,7 +111,7 @@ public sealed partial class GitPayloadBuilder
         var flagged = new SortedSet<string>(StringComparer.Ordinal);
         void Check(string path, bool duplicate)
         {
-            if (duplicate || path.Contains('�', StringComparison.Ordinal))
+            if (duplicate)
             {
                 flagged.Add(path);
             }
@@ -138,11 +139,6 @@ public sealed partial class GitPayloadBuilder
 
                 if (status != '?')
                 {
-                    if (pair)
-                    {
-                        Check(parts[i + 1], duplicate: false);
-                    }
-
                     Check(parts[at], raw.ContainsKey(parts[at]));
                     raw[parts[at]] = new RawEntry(f[0], f[1], f[2], f[3], status, pair ? parts[i + 1] : null);
                 }
@@ -175,6 +171,15 @@ public sealed partial class GitPayloadBuilder
 
             Check(path, numstat.ContainsKey(path));
             numstat[path] = n[0] == "-" ? null : long.TryParse(n[0], NumberStyles.None, CultureInfo.InvariantCulture, out var added) ? added : -1;
+        }
+
+        foreach (var (path, e) in raw)
+        {
+            if (e.Status is 'M' or 'R' or 'C' or 'T' && !(numstat.TryGetValue(path, out var added) && added is null or 0)
+                && path.Contains('\uFFFD', StringComparison.Ordinal))
+            {
+                flagged.Add(path);
+            }
         }
 
         return (raw, numstat, [.. flagged.Select(p => new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(p)))]);

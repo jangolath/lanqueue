@@ -13,16 +13,20 @@
   stripping whitespace, quotes and one-letter string prefixes or suffixes, concatenation such as `+ . .. & || , ;`,
   `\n` and `\r\n` escapes, a trailing `\`, XML CR/LF character references, comment or quote markers `# // * >` and a
   YAML `- `: blank, base64 or an armor header such as `Proc-Type: ...`), at least one a base64 line of 16 or more
-  characters, and the new line strictly between BEGIN and END (an edit to the END line alone does not count). Code
+  characters with a digit, `+` or `/` (lines over 16 KB are never key material), and the new line strictly between BEGIN and END (an edit to the END line alone does not count). Code
   that handles PEM (header and footer constants, adjacent or with parser code between them) never refuses an edit; a
   key in a string concatenation, a comment or a YAML block is still found. A key with no END line, longer than 8192
   lines or written in a form not stripped (see SECURITY.md) is not found when replaced in place, and neither is a
-  UTF-16 text file a `diff` attribute forces to text. A changed text file whose path git gives in bytes that are not
-  UTF-8, or two paths that decode to the same name, refuse the job (`scan-incomplete`). The finding reads `private-key-block in uncommitted file
+  UTF-16 text file a `diff` attribute forces to text. A changed text file (modified or renamed, with added lines) whose
+  path git gives in bytes that are not UTF-8 refuses the job (`scan-incomplete`); other files with such names pass as
+  before. The finding reads `private-key-block in uncommitted file
   <path> (key block changed in place)` and never shows the key. A file lanq cannot look up or read refuses the job
   (`scan-incomplete`, with a `git fsck` hint). Such a file is read up to 32 MB per version and 256 MB in all; one over
   that is listed in `scanSkipped` with the new reason `text_over_cap` (the larger version's size) and on stderr, not
   refused. Added files are not read (every line is already in the diff), nor files without a BEGIN line.
+- **Colliding file names fail closed.** Two changed paths that git gives in bytes that are not UTF-8 and that decode
+  to the same name now refuse the job (`scan-incomplete`), whatever the files are. Before, one of them could hide the
+  other from the content scans, the binary scan included.
 - **One rename mode for the text scan.** The diff, its file list and the new comparison now always use `-M`,
   whatever `diff.renames` says, so a renamed file is compared with its old version everywhere. The pathspec variables (`GIT_LITERAL_PATHSPECS`,
   `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS`, `GIT_ICASE_PATHSPECS`) are removed from lanq's local git calls. The binary scan

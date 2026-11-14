@@ -283,33 +283,40 @@ internal static class BlobScan
                 return changed && body;
             }
 
-            var length = KeyLine(lines[j]);
+            var length = KeyLine(lines[j], out var strong);
             if (length < 0)
             {
                 return false;
             }
 
-            body |= length >= MinBodyChars;
+            body |= length >= MinBodyChars && strong;
             changed |= !known.Contains(lines[j]);
         }
 
         return false; // no END line within the cap: not a key block
     }
 
-    /// <summary>A text key block needs at least one base64 body line this long (after stripping), so header and footer strings alone are no key.</summary>
+    /// <summary>
+    /// A text key block needs at least one base64 body line this long (after stripping) that also holds a digit, <c>+</c> or <c>/</c>, so
+    /// header and footer strings alone, banners (<c># =====</c>) and long identifiers are no key.
+    /// </summary>
     internal const int MinBodyChars = 16;
 
+    /// <summary>A line longer than this is never key material (a one-line PEM body of a 4096-bit key is about 3.2 KB).</summary>
+    internal const int MaxKeyLineChars = 16 * 1024;
+
     /// <summary>Whether a line can sit inside an armored key (0.10.1): <see cref="KeyLine"/> is not -1.</summary>
-    internal static bool LooksLikeKeyLine(string line) => KeyLine(line) >= 0;
+    internal static bool LooksLikeKeyLine(string line) => KeyLine(line, out _) >= 0;
 
-    /// <summary>Prefixes stripped from a key line, one at a time (longer first where they overlap).</summary>
-    private static readonly string[] KeyLinePrefixes = ["//", "||", "..", "- ", "#", "*", ">", "+", ".", "&", ",", ";", "\"", "'"];
+    /// <summary>Single-character markers stripped, as runs, from the start of a key line: whitespace, quotes, concatenation, comments, a YAML dash.</summary>
+    private static readonly char[] KeyLineLead = [' ', '\t', '\r', '\f', '\v', '"', '\'', '+', '.', '&', ',', ';', '#', '*', '>', '|', '-', '/'];
 
-    /// <summary>Suffixes stripped from a key line, one at a time (longer first where they overlap).</summary>
+    /// <summary>Single-character markers stripped, as runs, from the end of a key line: whitespace, quotes, concatenation, a continuation.</summary>
+    private static readonly char[] KeyLineTrail = [' ', '\t', '\r', '\f', '\v', '"', '\'', '+', '.', '&', ',', ';', '_', '\\', '|'];
+
+    /// <summary>Escapes and character references stripped from the end of a key line (with or without the reference's ';').</summary>
     private static readonly string[] KeyLineSuffixes =
-    [
-        @"\r\n", @"\n", "&#xD;", "&#xd;", "&#13;", "&#xA;", "&#xa;", "&#10;", "& _", "||", "..", @"\", "+", ".", "&", "_", ",", ";", "\"", "'",
-    ];
+        [@"\r\n", @"\n", "&#xD;", "&#xd;", "&#13;", "&#xA;", "&#xa;", "&#10;", "&#xD", "&#xd", "&#13", "&#xA", "&#xa", "&#10"];
 
     /// <summary>
     /// What a line inside an armored key is (0.10.1): -1 when it cannot be key material, 0 for a blank line or an armor header
@@ -317,30 +324,34 @@ internal static class BlobScan
     /// repeatedly, whitespace and the syntax a key is quoted or commented in are stripped: quotes and a one-letter string prefix or suffix
     /// (<c>b"</c>, <c>r"</c>, <c>"u8</c>), concatenation (<c>+</c>, <c>.</c>, <c>..</c>, <c>&amp;</c>, VB's <c>&amp; _</c>, <c>||</c>, <c>,</c>,
     /// <c>;</c>), a trailing <c>\n</c> or <c>\r\n</c> escape, a trailing <c>\</c> continuation, XML character references for CR and LF, comment
-    /// and quote markers (<c>#</c>, <c>//</c>, <c>*</c>, <c>&gt;</c>) and a YAML sequence dash.
+    /// and quote markers (<c>#</c>, <c>//</c>, <c>*</c>, <c>&gt;</c>) and a YAML sequence dash. Runs of single-character markers go in one
+    /// step. A line over <see cref="MaxKeyLineChars"/> is -1. <paramref name="strong"/>: the base64 holds a digit, <c>+</c> or <c>/</c>.
     /// </summary>
-    internal static int KeyLine(string line)
+    internal static int KeyLine(string line, out bool strong)
     {
+        strong = false;
+        if (line.Length > MaxKeyLineChars)
+        {
+            return -1;
+        }
+
         var t = line.AsSpan();
         while (true)
         {
             var before = t.Length;
-            t = t.Trim();
-            foreach (var p in KeyLinePrefixes)
+            t = t.TrimStart(KeyLineLead);
+            for (var stripped = true; stripped;)
             {
-                if (t.StartsWith(p, StringComparison.Ordinal))
+                stripped = false;
+                t = t.TrimEnd(KeyLineTrail);
+                foreach (var s in KeyLineSuffixes)
                 {
-                    t = t[p.Length..];
-                    break;
-                }
-            }
-
-            foreach (var s in KeyLineSuffixes)
-            {
-                if (t.EndsWith(s, StringComparison.Ordinal))
-                {
-                    t = t[..^s.Length];
-                    break;
+                    if (t.EndsWith(s, StringComparison.Ordinal))
+                    {
+                        t = t[..^s.Length];
+                        stripped = true;
+                        break;
+                    }
                 }
             }
 
@@ -370,6 +381,7 @@ internal static class BlobScan
         }
 
         var base64 = true;
+        var mixed = false;
         foreach (var c in t)
         {
             if (!(char.IsAsciiLetterOrDigit(c) || c is '+' or '/' or '='))
@@ -377,10 +389,13 @@ internal static class BlobScan
                 base64 = false;
                 break;
             }
+
+            mixed |= char.IsAsciiDigit(c) || c is '+' or '/';
         }
 
         if (base64)
         {
+            strong = mixed;
             return t.Length;
         }
 
