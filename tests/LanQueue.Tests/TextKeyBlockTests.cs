@@ -81,8 +81,11 @@ public sealed class TextKeyBlockTests : IDisposable
     /// <summary>What the diff scan alone finds (the gap: nothing, for a key replaced in place).</summary>
     private static IReadOnlyList<SecretFinding> DiffFindings(JobPayload p) => SecretScanner.ScanText(p.OverlayDiff, "uncommitted changes");
 
+    /// <summary>A 64-character base64 body line (it holds digits, '+' and '/', as a real key body does).</summary>
+    private static string K(char c) => new string(c, 60) + "0+/9";
+
     private static string Body(char c, int changedLine = -1, string indent = "", string eol = "\n") =>
-        string.Concat(Enumerable.Range(0, 4).Select(k => indent + new string(k == changedLine ? (char)(c + 1) : c, 64) + eol));
+        string.Concat(Enumerable.Range(0, 4).Select(k => indent + K(k == changedLine ? (char)(c + 1) : c) + eol));
 
     private static string Pem(char body, string tail = "tail", string type = "RSA PRIVATE KEY", string eol = "\n") =>
         "config" + eol + Begin + type + "-----" + eol + Body(body, eol: eol) + "-----END " + type + "-----" + eol + tail + eol;
@@ -194,7 +197,7 @@ public sealed class TextKeyBlockTests : IDisposable
     public async Task ChangeBeyondBlockCapIsNotFlagged()
     {
         static string Long(int lines, char last) =>
-            Begin + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat(new string('A', 64) + "\n", lines)) + new string(last, 64)
+            Begin + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat(K('A') + "\n", lines)) + K(last)
             + "\n-----END RSA PRIVATE KEY-----\n";
         Write("medium.txt", Long(600, 'A'));
         Write("huge.txt", Long(BlobScan.TextMaxBlockLines + 10, 'A'));
@@ -238,7 +241,7 @@ public sealed class TextKeyBlockTests : IDisposable
     {
         static string Code(char c) =>
             "public static class Fixture\n{\n    public const string Key =\n        \"" + Begin + "EC PRIVATE KEY-----\\n\" +\n"
-            + string.Concat(Enumerable.Range(0, 3).Select(_ => "        \"" + new string(c, 64) + "\\n\" +\n"))
+            + string.Concat(Enumerable.Range(0, 3).Select(_ => "        \"" + K(c) + "\\n\" +\n"))
             + "        \"-----END EC PRIVATE KEY-----\\n\";\n}\n";
         Write("Fixture.cs", Code('A'));
         Commit();
@@ -293,28 +296,29 @@ public sealed class TextKeyBlockTests : IDisposable
     public void EndLineIsFoundInAnyCase()
     {
         var begin = Begin + "RSA PRIVATE KEY-----";
-        var body = new string('B', 64);
-        Assert.Equal([begin], BlobScan.ChangedBlockStarts([begin, body, "-----end rsa private key-----"], [begin, new string('A', 64), "-----end rsa private key-----"]));
+        var body = K('B');
+        Assert.Equal([begin], BlobScan.ChangedBlockStarts([begin, body, "-----end rsa private key-----"], [begin, K('A'), "-----end rsa private key-----"]));
     }
 
     /// <summary>
-    /// Any path holding U+FFFD (bytes that are not UTF-8), binary or added included, and any new path seen twice (two undecodable names that
-    /// decode alike) fail closed before any filtering; such paths are never grepped.
+    /// A modified text file whose path holds U+FFFD (bytes that are not UTF-8) cannot be grepped and fails closed; a non-UTF-8 binary, added,
+    /// deleted or renamed-from name passes, as in 0.10.0. Any new path seen twice (two undecodable names that decode alike), binary included,
+    /// fails closed. Undecodable paths are never grepped.
     /// </summary>
     [Fact]
     public void UndecodableOrDuplicatePathFailsClosed()
     {
-        var (a, b) = (new string('a', 40), new string('b', 40));
+        var (a, b, zero) = (new string('a', 40), new string('b', 40), new string('0', 40));
         var (raw, numstat, undecodable) = GitPayloadBuilder.ParseRawNumstat(
             $":100644 100644 {a} {b} M\0bad\uFFFDname.txt\0:100644 100644 {a} {b} M\0good.txt\0:100644 100644 {a} {b} M\0bad\uFFFDbin.dat\0"
-            + $":100644 100644 {a} {b} M\0twice.txt\0:100644 100644 {b} {a} M\0twice.txt\0:000000 100644 {new string('0', 40)} {b} A\0new\uFFFD.txt\0"
-            + $":100644 100644 {a} {b} R090\0old\uFFFD.txt\0moved.txt\0"
+            + $":100644 100644 {a} {b} M\0twice.txt\0:100644 100644 {b} {a} M\0twice.txt\0:000000 100644 {zero} {b} A\0new\uFFFD.txt\0"
+            + $":100644 100644 {a} {b} R090\0old\uFFFD.txt\0moved.txt\0:100644 000000 {a} {zero} D\0gone\uFFFD.txt\0"
+            + $":100644 100644 {a} {b} M\0dup\uFFFD.bin\0:100644 100644 {b} {a} M\0dup\uFFFD.bin\0"
             + "1\t1\tbad\uFFFDname.txt\0" + "1\t1\tgood.txt\0" + "-\t-\tbad\uFFFDbin.dat\0" + "1\t1\ttwice.txt\0" + "2\t0\ttwice.txt\0"
-            + "1\t0\tnew\uFFFD.txt\0" + "1\t1\t\0old\uFFFD.txt\0moved.txt\0");
+            + "1\t0\tnew\uFFFD.txt\0" + "1\t1\t\0old\uFFFD.txt\0moved.txt\0" + "0\t1\tgone\uFFFD.txt\0" + "-\t-\tdup\uFFFD.bin\0" + "-\t-\tdup\uFFFD.bin\0");
 
         Assert.Equal(
-            new[] { "bad\uFFFDbin.dat", "bad\uFFFDname.txt", "new\uFFFD.txt", "old\uFFFD.txt", "twice.txt" }
-                .Select(p => new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(p))),
+            new[] { "bad\uFFFDname.txt", "dup\uFFFD.bin", "twice.txt" }.Select(p => new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(p))),
             undecodable);
         Assert.Equal(["good.txt", "moved.txt", "twice.txt"], GitPayloadBuilder.GrepCandidates(raw, numstat));
         Assert.Contains("could not read a changed text file", JobRunner.SecretRefusal("j1", undecodable).Message, StringComparison.Ordinal);
@@ -426,7 +430,7 @@ public sealed class TextKeyBlockTests : IDisposable
     {
         var begin = Begin + "RSA PRIVATE KEY-----";
         var other = Begin + "EC PRIVATE KEY-----";
-        var (a, a2, b, c) = (new string('A', 64), new string('A', 40) + "2", new string('B', 64), new string('C', 64));
+        var (a, a2, b, c) = (K('A'), new string('A', 40) + "2", K('B'), K('C'));
         string[] old = ["config", begin, a, a2, "-----END RSA PRIVATE KEY-----", other, c, "-----END EC PRIVATE KEY-----", "tail"];
         string[] changed = ["config", begin, b, a2, "-----END RSA PRIVATE KEY-----", other, c, "-----END EC PRIVATE KEY-----", "tail 2"];
 
@@ -465,6 +469,58 @@ public sealed class TextKeyBlockTests : IDisposable
         Assert.Empty(DiffFindings(p));
         Assert.Empty(p.TextKeyFindings);
         Assert.Equal(2, p.TextBlobsRead);
+    }
+
+    /// <summary>
+    /// A body needs a base64 line of 16 or more characters with a digit, '+' or '/': a banner and a long identifier between header and
+    /// footer strings are no key, however they change.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task BannerAndLongIdentifierBodiesAreNotFlagged()
+    {
+        static string Banner(int width) => "notes:\n" + Begin + "RSA PRIVATE KEY-----\n# " + new string('=', width) + "\n-----END RSA PRIVATE KEY-----\n";
+        static string Enum(string member) =>
+            "const string Begin = \"" + Begin + "RSA PRIVATE KEY-----\";\n    " + member + ",\nconst string End = \"-----END RSA PRIVATE KEY-----\";\n";
+        Write("banner.txt", Banner(40));
+        Write("Kinds.cs", Enum("TraditionalRsaPrivateKeyFormat"));
+        Commit();
+        Write("banner.txt", Banner(60));
+        Write("Kinds.cs", Enum("TraditionalRsaPrivateKeyLayout"));
+
+        var p = await Snapshot();
+
+        Assert.Empty(p.TextKeyFindings);
+        Assert.Equal(4, p.TextBlobsRead);
+    }
+
+    /// <summary>A line over 16 KB is never key material: a 1 MB '#' line inside a candidate block is rejected at once, not stripped.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task HugeLineInsideABlockIsNotKeyMaterial()
+    {
+        static string Doc(char last) => Begin + "RSA PRIVATE KEY-----\n" + K('A') + "\n" + new string('#', 1024 * 1024) + "\n" + K(last) + "\n-----END RSA PRIVATE KEY-----\n";
+        Write("huge.txt", Doc('A'));
+        Commit();
+        Write("huge.txt", Doc('B'));
+
+        var watch = Stopwatch.StartNew();
+        var p = await Snapshot();
+
+        Assert.Empty(p.TextKeyFindings);
+        Assert.Equal(2, p.TextBlobsRead);
+        Assert.Equal(-1, BlobScan.KeyLine(new string('#', 1024 * 1024), out _));
+        Assert.Equal(-1, BlobScan.KeyLine(new string('A', BlobScan.MaxKeyLineChars + 1), out _));
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), watch.Elapsed.ToString());
+    }
+
+    [Theory]
+    [InlineData("MIIEpAIBAAKCAQEA0123", 20, true)]
+    [InlineData("TraditionalRsaPrivateKeyFormat,", 30, false)]
+    [InlineData("# ========================================", 40, false)]
+    [InlineData(@"    ""abc+def/ghiJKLmnop\n"" +", 18, true)]
+    public void KeyLineMeasuresBase64AndItsMix(string line, int length, bool strong)
+    {
+        Assert.Equal(length, BlobScan.KeyLine(line, out var s));
+        Assert.Equal(strong, s);
     }
 
     /// <summary>BEGIN and END with only blank lines between them hold no key: not flagged however the blanks change.</summary>
@@ -581,7 +637,13 @@ public sealed class TextKeyBlockTests : IDisposable
             + $":120000 100644 {a} {b} T\0link.txt\0:100644 100644 {a} {b} X\0odd.txt\0");
         var numstat = new Dictionary<string, long?>
         {
-            ["mod.txt"] = 1, ["add.txt"] = 9, ["moved.txt"] = 2, ["bin.dat"] = null, ["shrunk.txt"] = 0, ["link.txt"] = 5, ["odd.txt"] = 1,
+            ["mod.txt"] = 1,
+            ["add.txt"] = 9,
+            ["moved.txt"] = 2,
+            ["bin.dat"] = null,
+            ["shrunk.txt"] = 0,
+            ["link.txt"] = 5,
+            ["odd.txt"] = 1,
         };
 
         var (targets, incomplete) = GitPayloadBuilder.PlanTextReads(
