@@ -83,6 +83,7 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `fetch` | `--fetch` | A pattern or a list of patterns, as `--fetch`. |
 | `fetch_max` | `--fetch-max` | With `fetch:`. May only lower the 200 MB default (0.10.0); see [Fetch limits and folder](#fetch-limits-and-folder). |
 | `fetch_max_files` | `--fetch-max-files` | With `fetch:`. May only lower the 500-file default (0.10.0). |
+| `results` | `--results FORMAT:PATH` | `{ format: trx, path: TestResults/*.trx }` (`format:` is `trx` or `junit`; `path:` a fetch pattern, also fetched): count the job's tests and warn when none ran (0.11.0); see [Make "no tests ran" fail](#make-no-tests-ran-fail). `results: false` on a job drops the `defaults:` value. |
 | `env` | `--env NAME=VALUE` | A mapping of `NAME: value`, one `--env` per entry (0.9.0). Only names in your `policy.allowed_env`; see [Environment variables: env](#environment-variables-env). |
 | `exclusive` | `--exclusive` | `true`: the job takes every slot of its machine (0.9.0); see [Exclusive jobs](#exclusive-jobs). |
 | `baseline` | `--baseline` | `true`: if the job fails, rerun it at the base commit and report whether the failure is new (0.9.0); see [Baseline](#baseline-is-the-failure-new). |
@@ -90,7 +91,8 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `after` | (none) | Job names this job starts after; see [Ordering](#ordering-after). |
 
 **Defaults are replaced, not merged.** A job's own value replaces the default as a whole: `needs: [node]` on a job
-drops `needs: [dotnet]` from `defaults:` (write `needs: [dotnet, node]` for both). `size` and `min_size` are one
+drops `needs: [dotnet]` from `defaults:` (write `needs: [dotnet, node]` for both), and its `results:` replaces the
+defaults' (`results: false` drops it). `size` and `min_size` are one
 setting, so either one on a job drops both defaults. `baseline` and `baseline_ref` combine as described under
 [Baseline](#baseline-is-the-failure-new). **`env` is the exception:** it is merged by name (see below).
 
@@ -326,7 +328,9 @@ the left-out jobs did not run.
 ### Fetch limits and folder
 
 A job with `fetch:` brings files back to your PC: at most 500 files and 200 MB by default, under `.lanq/artifacts` at
-the repository top. Since 0.10.0:
+the repository top. A job with `results:` (0.11.0) fetches too: its `path:` joins its `fetch:` patterns (once, when
+`fetch:` already names it; it counts toward the 16), so everything below applies to it, and it shows the fetch fields
+in `--json`. Since 0.10.0:
 
 - `fetch_max` and `fetch_max_files` (on a job, or in `defaults:` for the jobs that fetch) are `--fetch-max` and
   `--fetch-max-files`. They may only **lower** the defaults. A larger value is refused (exit 2): "lanq.yml may lower
@@ -427,7 +431,11 @@ Make the later jobs depend on it (`after: [guard]`) when they are expensive, or 
 
 ### Make "no tests ran" fail
 
-A job that runs zero tests usually exits 0 and shows `Completed`. Make it fail instead:
+A job that runs zero tests usually exits 0 and shows `Completed`. Since 0.11.0, a job with `results:` (or `lanq run
+--results`) is counted from its TRX or JUnit files, and when it completed but executed no test lanq **reports** it: a
+`[lanq] warning: no tests ran in job unit: ...` line, `noTests: true` in `--json` and an `ask_developer` step. It never
+fails the job: the status and exit code stay `Completed` 0. A `require_tests` option that turns it into a failure is
+planned (it needs its own exit code and must skip the baseline rerun). Until then, make the job itself fail:
 
 - .NET: `dotnet test` with a filter that matches nothing prints "No test matches the given testcase filter" and exits
   0. Check the count in your shard script, or with the Microsoft.Testing.Platform runner pass

@@ -204,6 +204,7 @@ public sealed partial class JobRunner
         var req = t.Request with
         {
             Fetch = null,
+            Results = null,
             Progress = gate,
             Placed = null,
             RunId = null,

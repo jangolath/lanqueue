@@ -293,7 +293,9 @@ public sealed partial class TestSplitTests : IDisposable
         Assert.Equal(AllowLines[1], JobPolicy.AllowedBy(config.Policy, guard.Argv));
         Assert.All(plan.Jobs, j => Assert.True(j.Args.Baseline));
         Assert.All(plan.Jobs, j => Assert.Equal(30, j.Args.TimeoutMinutes));
-        Assert.Equal(["tests/LanQueue.Tests/TestResults/*.trx"], windows.Fetch);
+        Assert.Equal(["tests/LanQueue.Tests/TestResults/*.trx"], windows.Fetch); // results: (0.11.0) names the same pattern: fetched once
+        Assert.Equal("trx:tests/LanQueue.Tests/TestResults/*.trx", windows.Results!.Text);
+        Assert.Null(guard.Results);
         Assert.All(plan.Jobs, j => Assert.True(JobPolicy.ValidateForWindows(j.Args.Argv).Ok));
     }
 
@@ -314,6 +316,9 @@ public sealed partial class TestSplitTests : IDisposable
         Assert.Equal(["dotnet", "linux"], guard.Needs);
         Assert.Equal(AllowLines[2], JobPolicy.AllowedBy(config.Policy, linux.Argv));
         Assert.Equal(AllowLines[3], JobPolicy.AllowedBy(config.Policy, guard.Argv));
+        Assert.Equal("trx:tests/LanQueue.Tests/TestResults/*.trx", linux.Results!.Text);
+        Assert.Equal(["tests/LanQueue.Tests/TestResults/*.trx"], linux.Fetch);
+        Assert.Null(guard.Results);
     }
 
     [Fact]

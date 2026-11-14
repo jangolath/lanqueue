@@ -10,6 +10,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/results/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/LanQueue/LanQueue.csproj" />

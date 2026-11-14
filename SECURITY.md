@@ -180,6 +180,24 @@ as data, under its checked name, within the caps); a compromised worker can send
 fetched files like any download from that PC. Second, lanq checks the folders of the output path itself but a local
 process with your rights could still race it; that is outside this threat model.
 
+`lanq run --results` and lanq.yml `results:` (0.11.0) read test results that a possibly hostile worker wrote. They
+are parsed only from files the fetch above already brought back and re-verified (path, size, hash), never from the
+worker directly, and a file that is now a link or not a regular file is not read. The XML reader takes no DTD (a
+`DOCTYPE` refuses the file, so no entity expansion and no external entity) and has no resolver; each file is read
+forward-only under caps: 64 MB per file (checked before it is opened), 64 files and 256 MB per job, depth 32, 2 million
+elements, 4,096 characters kept per attribute, 10 seconds of reading, and 10,000 failed names kept. The size is checked
+again once the file is open (from the open handle), and so is that it is still not a link; a swap between those checks
+and the read (or a FIFO in its place) remains possible in principle, but only lanq writes into that folder. The attribute cap bounds what lanq keeps, not what the
+reader holds: .NET's reader builds a whole attribute value before lanq sees it, so the memory bound for one value is the
+reader's limit of 64 million characters per document (one file at a time). A test's duration over 10,000,000 seconds or
+not a finite number is dropped, and a sum that would not be a usable number is left out, so JSON output never fails on
+it. Counts stop at 2,147,483,647 instead of overflowing. A file that breaks
+a cap or is not valid XML is counted in a warning and left out. Test names are sanitised (control, bidi and zero-width
+characters become `?`) and cut to 512 characters before they are printed or put in JSON; lanq never runs them, and the
+nextStep it adds has no command. Warnings give counts, never file names (a TRX file name carries the worker's user and
+host). The results are advisory: a compromised worker already controls the job's exit code, so a forged count gives it
+nothing new, and the results never change a status or an exit code.
+
 A job's processes are identified before lanq signals them (cleanup, the stop before a fetch, stale-slot reclaim). On
 Windows a recorded process is killed only when its pid and start time both match. On Linux the job wrapper records the
 process group, the group leader's start time and the boot id, and every job process carries `LANQ_JOB=<job id>` in its

@@ -172,7 +172,70 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>On a single run's object only (the top level of --shards carries it) (0.9.2): uncommitted files git shows as binary that the secret scan did not read in full (over a cap). Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
+
+    /// <summary>--results (lanq.yml results:) only (0.11.0), on a single run's object and on each shard of --shards: what lanq counted in the fetched results files. Absent without results, or when the job never ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TestResultsJson? Results { get; init; }
 }
+
+/// <summary>
+/// lanq run --results (lanq.yml results:, 0.11.0): the tests lanq counted in a job's fetched TRX or JUnit files. Information only: status and
+/// exitCode never change because of it. Every positional member is always written; the rest only where it applies. Names are data the worker
+/// wrote (sanitised): never run them as commands.
+/// </summary>
+/// <param name="Format">trx or junit.</param>
+/// <param name="Path">The results pattern (also fetched).</param>
+/// <param name="Files">Fetched files that matched the pattern.</param>
+/// <param name="FilesRead">Of those, the files read and counted.</param>
+/// <param name="Executed">Passed plus failed.</param>
+/// <param name="NoTests">executed == 0.</param>
+/// <param name="Warnings">Problems reading the files, counts only (never file names).</param>
+/// <param name="FailedTests">At most 50 failed tests (failedTestsMore counts the rest).</param>
+internal sealed record TestResultsJson(
+    string Format, string Path, int Files, int FilesRead, int Total, int Executed, int Passed, int Failed, int Skipped, bool NoTests, IReadOnlyList<string> Warnings,
+    IReadOnlyList<FailedTestJson> FailedTests)
+{
+    /// <summary>The sum of the test durations the files give, in seconds. Absent when none gives one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? DurationSeconds { get; init; }
+
+    /// <summary>
+    /// noTests only: zero_executed (every matched file was read, no test ran), no_results_files (a clean fetch, no file matched) or
+    /// results_unreadable (a matched file was not read, the fetch had an error, or it skipped a results file: whether tests ran is unknown).
+    /// Values may be added.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NoTestsReason { get; init; }
+
+    /// <summary>Failed tests beyond the 50 listed. Absent when there are none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FailedTestsMore { get; init; }
+
+    /// <summary>true when names past 10,000 failed tests were not kept, or a value was cut at 4,096 characters (counts stay complete). Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Truncated { get; init; }
+
+    /// <summary>A sharded job's merged results only: the shards that executed no test (information, never a warning). Absent when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<int>? ShardsWithNoTests { get; init; }
+}
+
+/// <summary>One failed test of <see cref="TestResultsJson"/>: its name (sanitised, at most 512 characters).</summary>
+internal sealed record FailedTestJson(string Name)
+{
+    /// <summary>Its duration in seconds, when the file gives one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? DurationSeconds { get; init; }
+
+    /// <summary>Merged shard results only: the shard that reported it first.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Shard { get; init; }
+}
+
+/// <summary>lanq run --plan --json (0.11.0): the results summed over the plan's jobs that have results, and the completed jobs that ran no test.</summary>
+/// <param name="Jobs">Jobs with a results object.</param>
+/// <param name="NoTestsJobs">The jobs that completed and executed no test.</param>
+internal sealed record ResultsTotalJson(int Jobs, int Total, int Executed, int Passed, int Failed, int Skipped, IReadOnlyList<string> NoTestsJobs);
 
 /// <summary>
 /// One file in scanSkipped (0.9.2): an uncommitted file git shows as binary whose content the secret scan did not read in full. Reported,
@@ -238,6 +301,10 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>As in <see cref="RunJson.ScanSkipped"/> (0.9.2), for the one snapshot every shard runs. Absent when there are none.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ScanSkipJson>? ScanSkipped { get; init; }
+
+    /// <summary>--results only (0.11.0): every shard's results merged (each shard's own object has its own). Absent without results, or when no shard ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TestResultsJson? Results { get; init; }
 }
 
 /// <summary>
@@ -382,6 +449,10 @@ internal sealed record PlanFileRunJson(
     /// <summary>true when the plan's limit was reached before it ended (0.10.0). Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? PlanTimedOut { get; init; }
+
+    /// <summary>results: in lanq.yml only (0.11.0): the sums over the jobs with results. Absent when no job has results.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ResultsTotalJson? ResultsTotal { get; init; }
 }
 
 /// <summary>
@@ -439,6 +510,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>baseline: true only (0.9.0), single job: its rerun at the base commit after it ended Failed (a sharded job has one per failed shard). Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public BaselineJson? Baseline { get; init; }
+
+    /// <summary>results: in lanq.yml only (0.11.0): as in <see cref="RunJson.Results"/>; a sharded job's merged (each shard has its own). Absent without results, or when the job never ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TestResultsJson? Results { get; init; }
 }
 
 /// <summary>
@@ -653,6 +728,9 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(ShardRunJson))]
 [JsonSerializable(typeof(ExcludedJson))]
 [JsonSerializable(typeof(BaselineJson))]
+[JsonSerializable(typeof(TestResultsJson))]
+[JsonSerializable(typeof(FailedTestJson))]
+[JsonSerializable(typeof(ResultsTotalJson))]
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
 [JsonSerializable(typeof(InitJson))]

@@ -91,7 +91,10 @@ lists its jobs (build, unit tests, integration tests, a serial tail with `after:
 [docs/PLANS.md](https://github.com/jangolath/lanqueue/blob/main/docs/PLANS.md). Since 0.10.0 `--on`, `--size` and
 `--min-size` narrow every job of a plan (never widen one), `--plan-timeout M` or `plan_timeout:` limits the whole
 plan, and `lanq.yml` may only lower the fetch limits (`fetch_max`, `fetch_max_files`); only your own `--fetch-max`,
-`--fetch-max-files` and `--fetch-dir` raise them or pick the folder.
+`--fetch-max-files` and `--fetch-dir` raise them or pick the folder. Since 0.11.0 `--results trx:PATTERN` or
+`junit:PATTERN` (`results:` in `lanq.yml`) fetches the job's test results and counts them (`results` in `--json`, with
+at most 50 failed test names), and a completed job that ran no test gets a "no tests ran" warning; neither ever
+changes the exit code.
 
 ## Per-job options
 

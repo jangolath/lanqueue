@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.10.1/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.11.0/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.10.1 --repo jangolath/lanqueue
+gh release download v0.11.0 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.10.1    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.11.0    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -227,6 +227,7 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | `lanq run ... --env NAME=VALUE ... -- CMD...` | Sets a variable for this job only; the name must be in `policy.allowed_env`. See [Job variables](#job-variables---env). |
 | `lanq run ... --exclusive -- CMD...` | Takes every slot of the machine, so nothing else runs there meanwhile. See [Exclusive jobs](#exclusive-jobs---exclusive). |
 | `lanq run ... --baseline [--baseline-ref REF] -- CMD...` | After a failure, runs the same command at the base commit and says whether the failure is new. See [Is this failure new?](#is-this-failure-new---baseline) |
+| `lanq run ... --results trx:PATTERN \| junit:PATTERN -- CMD...` | Fetches the job's TRX or JUnit files and counts its tests (since 0.11.0); a completed job that ran no test gets a warning. Never changes the exit code. See [Test results](#test-results---results). |
 | `lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--dry-run] [--json]` | Runs the jobs of the repository's `lanq.yml` side by side on one snapshot, ordered by `after:`, with one result; see [docs/PLANS.md](docs/PLANS.md). Since 0.10.0 also `--on`/`--size`/`--min-size` (narrow every job, never widen), `--plan-timeout M` (the whole plan's limit) and `--fetch-dir`/`--fetch-max`/`--fetch-max-files` (for every fetching job). |
 | `lanq run ... --json --log-tail N -- CMD...` | Adds the last N lines (1 to 200) of the job's log to the JSON object as `logTail`; `logPath` is always there. |
 | `lanq run ... --dry-run [--json] -- CMD...` | Says what `lanq run` would do now (the checks, the snapshot scan, the machine, every excluded machine and why, `--shards` N and placement) and does none of it. |
@@ -453,7 +454,8 @@ when the job never started.
 - Caps: 500 files and 200 MB in all by default; `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (for example
   `500M` or `1G`, up to `2G`) change them. Files are taken in sorted order until a cap is hit; the rest are listed as
   skipped.
-- `--fetch-dir DIR` writes to `DIR/<job id>/` instead.
+- `--fetch-dir DIR` writes to `DIR/<job id>/` instead. Keep it gitignored or under `.lanq/`: fetched files (a TRX file
+  carries the worker's user and host) would otherwise be sent with the next snapshot.
 - The fetch has its own 10-minute limit, and on a machine with `allowed_hours` it never runs more than 2 minutes past
   the end of the window plus grace.
 - A job that timed out or was stopped by its window can still be running on the worker (which enforces the limit
@@ -485,6 +487,29 @@ The summary goes to the job output (stderr with `--json`):
 ```
 
 The worker is treated as untrusted for this step; see [Security model](#security-model).
+
+### Test results (--results)
+
+```bash
+lanq run --needs dotnet --dir tests --results trx:TestResults/*.trx -- dotnet test --logger trx
+lanq run --needs node --results junit:reports/junit.xml -- npx jest --reporters=default --reporters=jest-junit
+```
+
+Since 0.11.0 `--results trx:PATTERN` or `junit:PATTERN` (in `lanq.yml`: `results: { format: trx, path: ... }`) names
+the results files the job writes. The pattern is a `--fetch` pattern and is fetched too (it counts as `--fetch`,
+unless a `--fetch` already names it), so the fetch rules, limits and fields all apply. After the fetch, `lanq` counts
+the tests in the fetched files that match: VSTest TRX (xUnit, NUnit, MSTest) or JUnit XML (pytest, jest-junit,
+Maven Surefire and most others). The job output gets the reader's warnings, `[lanq] results: 120 tests, 118 passed,
+1 failed, 1 skipped` and up to 10 `[lanq]   failed NAME` lines; `--json` gets a `results` object.
+
+When a job **completed** but its results show no test executed (no file matched, or every test was skipped), `lanq`
+prints `[lanq] warning: no tests ran: 0 executed in 0 results file(s) (results path TestResults/*.trx)` before the Next
+lines and adds an `ask_developer` step: a wrong filter or test project would otherwise pass silently. When the results
+could not be read (a file over a cap or not valid XML, a fetch error, a results file the fetch skipped), `noTestsReason`
+is `results_unreadable` and lanq says `results could not be read` instead: whether tests ran is unknown. It is
+information only: the status and exit code never change (a sharded job is judged after its shards are merged; a
+single empty shard never warns). Making it fail is planned as an opt-in (see
+[docs/PLANS.md](docs/PLANS.md#make-no-tests-ran-fail)). Test names are data the worker wrote, sanitised: never run them.
 
 ### JSON output
 
@@ -522,7 +547,9 @@ With `--fetch` the object also has `fetched` (`[{"path":"TestResults/unit.trx","
 `fetchSkipped` (`[{"path":"TestResults/latest.trx","reason":"..."}]`), both present and possibly empty on every path
 (also when the job never started, the command line was refused or the config could not be read), plus `fetchDir` when a fetch ran, `fetchError` when the fetch as a whole had a
 problem (timed out, cut short, the machine's hours ended, the ssh connection was lost) and `fetchSkippedMore` when more than 200 files were skipped.
-Without `--fetch` none of these keys appear.
+Without `--fetch` none of these keys appear. `--results` counts as `--fetch`; since 0.11.0 it also adds `results` (the
+counts, `noTests`, at most 50 `failedTests` and warnings) whenever the job ran, as the last key
+([docs/JSON.md](docs/JSON.md#results-conditional-0110)).
 
 Since 0.9.0, with `--env` the object has `env` (the variable names, never their values); with `--exclusive`,
 `"exclusive":true`; and with `--baseline`, after a failure, a `baseline` object (`ref`, `sha`, `status`, `exitCode`,
@@ -1463,8 +1490,9 @@ lanq's repository runs its own test suite through lanq on Windows workers: [`lan
 (`scripts/lanq/check-test-split.ps1`, which fails unless every test lands in exactly one shard) and the suite in two
 Windows shards, each rerun at the base on failure (`baseline: true`), with a fixed shard count so history compares
 like with like. The shard scripts are the [SHARDING.md](docs/SHARDING.md#net) recipe. `lanq run --plan --json
---no-wake` is the release gate's "full suite on the pool". Your `machines.yml` must allow exactly these commands, and
-tag the workers `windows`:
+--no-wake` is the release gate's "full suite on the pool"; it needs lanq 0.11.0 or later (`unit-windows` has
+`results:`, which an older lanq refuses). Your `machines.yml` must allow exactly these commands, and tag the workers
+`windows`:
 
 ```yaml
 policy:

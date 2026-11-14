@@ -53,6 +53,9 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
     /// <summary>What --fetch brought back for the shard's last attempt; null when no fetch was asked for or it never ran.</summary>
     public FetchReport? Fetch { get; init; }
 
+    /// <summary>--results (0.11.0): what lanq counted in the shard's last attempt's fetched results files; null without results or when it never ran.</summary>
+    public LanQueue.Results.TestResults? Results { get; init; }
+
     /// <summary>NoCapacity only: see <see cref="JobResult.Retryable"/>.</summary>
     public bool? Retryable { get; init; }
 
@@ -734,6 +737,7 @@ public sealed partial class JobRunner
         st.Final = new ShardResult(st.Shard.Index, r.Status.ToString(), r.CliExitCode, r.Machine, r.JobId, a.Duration, st.Attempts, message)
         {
             Fetch = r.Fetch,
+            Results = r.Results,
             Retryable = r.Retryable,
             Excluded = r.Excluded,
             LogPath = r.LogPath ?? LogIfCreated(a),

@@ -162,7 +162,7 @@ public static partial class Cli
     }
 
     /// <summary>--timeout (when not the default), --fetch, --env, --exclusive and --log-tail as lanq run would use them; null when none was given.</summary>
-    private static string? OptionsText(ParsedArgs p)
+    internal static string? OptionsText(ParsedArgs p)
     {
         var parts = new List<string>();
         if (p.TimeoutMinutes != ParsedArgs.DefaultTimeoutMinutes)
@@ -176,6 +176,11 @@ public static partial class Cli
             parts.Add(string.Create(
                 CultureInfo.InvariantCulture,
                 $"--fetch {JobRunner.SafeLine(string.Join(", ", p.Fetch))} into {JobRunner.SafeLine(p.FetchDir ?? ".lanq/artifacts")}/<job id>/ (at most {p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles} files, {JobRunner.Size(bytes)}; a dry run fetches nothing)"));
+        }
+
+        if (p.Results is { } results)
+        {
+            parts.Add($"--results {JobRunner.SafeLine(results.Text)} (counted from the fetched files)");
         }
 
         if (p.Env.Count > 0)

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="3" failures="1" errors="0" time="1.234">
+  <testsuite name="math" errors="0" failures="1" skipped="0" timestamp="2026-11-13T10:00:00" time="1.1" tests="3">
+    <testcase classname="math adds" name="math adds" time="0.003">
+    </testcase>
+    <testcase classname="math divides by zero" name="math divides by zero" time="0.010">
+      <failure>Error: expect(received).toThrow()</failure>
+    </testcase>
+    <testcase classname="math" name="multiplies" time="0.004">
+    </testcase>
+  </testsuite>
+</testsuites>

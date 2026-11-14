@@ -18,9 +18,9 @@ public static class PlanFetch
 
     /// <summary>The refusal of --fetch-dir, --fetch-max or --fetch-max-files when no selected job fetches.</summary>
     public const string NoFetchingJob =
-        "--fetch-dir, --fetch-max and --fetch-max-files with --plan set where and how much the plan's jobs fetch, but none of the selected jobs has fetch: in lanq.yml; leave them out";
+        "--fetch-dir, --fetch-max and --fetch-max-files with --plan set where and how much the plan's jobs fetch, but none of the selected jobs has fetch: or results: in lanq.yml; leave them out";
 
-    /// <summary>Whether any of the jobs fetches files (fetch: in lanq.yml).</summary>
+    /// <summary>Whether any of the jobs fetches files (fetch: in lanq.yml, or results:, whose path is fetched too).</summary>
     public static bool AnyFetches(IEnumerable<PlanJob> jobs) => jobs.Any(j => j.Args.Fetch.Count > 0);
 
     /// <summary>

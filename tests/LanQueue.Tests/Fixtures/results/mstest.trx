@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="4f8a2c1e-0000-4000-8000-000000000003" name="worker@build-01" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Results>
+    <UnitTestResult executionId="m1" testId="00000000-0000-0000-0000-00000000c001" testName="Rows" computerName="build-01" resultType="DataDrivenTest">
+      <InnerResults>
+        <UnitTestResult executionId="m1a" parentExecutionId="m1" testId="00000000-0000-0000-0000-00000000c001" testName="Rows (1)" duration="00:00:00.1000000" outcome="Passed" resultType="DataDrivenDataRow" />
+        <UnitTestResult executionId="m1b" parentExecutionId="m1" testId="00000000-0000-0000-0000-00000000c001" testName="Rows (2)" duration="00:00:00.2000000" outcome="Failed" resultType="DataDrivenDataRow" />
+      </InnerResults>
+    </UnitTestResult>
+    <UnitTestResult executionId="m2" testId="00000000-0000-0000-0000-00000000c002" testName="Grouped" computerName="build-01" duration="00:00:00.3000000" outcome="Passed" resultType="DataDrivenTest">
+      <InnerResults>
+        <UnitTestResult executionId="m2a" parentExecutionId="m2" testId="00000000-0000-0000-0000-00000000c002" testName="Grouped (1)" duration="00:00:00.1000000" outcome="Passed" />
+        <UnitTestResult executionId="m2b" parentExecutionId="m2" testId="00000000-0000-0000-0000-00000000c002" testName="Grouped (2)" duration="00:00:00.2000000" outcome="Passed" />
+      </InnerResults>
+    </UnitTestResult>
+  </Results>
+  <TestDefinitions>
+    <UnitTest name="Rows" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000c001">
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://mstestadapter/v2" className="Sample.DataTests, Sample.Tests, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null" name="Rows" />
+    </UnitTest>
+    <UnitTest name="Grouped" storage="/home/worker/src/bin/sample.tests.dll" id="00000000-0000-0000-0000-00000000c002">
+      <TestMethod codeBase="/home/worker/src/bin/Sample.Tests.dll" adapterTypeName="executor://mstestadapter/v2" className="Sample.DataTests, Sample.Tests, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null" name="Grouped" />
+    </UnitTest>
+  </TestDefinitions>
+  <ResultSummary outcome="Failed">
+    <Counters total="3" executed="3" passed="2" failed="1" />
+  </ResultSummary>
+</TestRun>
