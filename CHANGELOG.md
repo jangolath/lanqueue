@@ -9,13 +9,16 @@
   so it was not recognised (files git shows as binary already got this in 0.9.2). Now lanq greps the snapshot's changed
   text files for `-----BEGIN` (`git grep --cached`, only those files), and for each modified or renamed one compares its
   old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line is scanned again only for a key
-  block: a line holding `-----END` (any case) within 8192 lines, every line between them key material (after
-  stripping indentation, quotes, `+`, `,`, `;` and a trailing `\n` or `\r\n` escape: blank, base64 or an armor header
-  such as `Proc-Type: ...` or `DEK-Info: ...`), and the new line one of those lines or the END line. Code that handles
-  PEM (a header constant, parser code, a footer constant) never refuses an edit; a key in a C# string concatenation or
-  a YAML block scalar is still found. A key with no END line, longer than 8192 lines or with other text inside its
-  block is not found when replaced in place, and neither is a UTF-16 text file a `diff` attribute forces to text. A
-  changed text file whose path git gives in bytes that are not UTF-8 refuses the job (`scan-incomplete`). The finding reads `private-key-block in uncommitted file
+  block: a line holding `-----END` (any case) within 8192 lines, every line strictly between them key material (after
+  stripping whitespace, quotes and one-letter string prefixes or suffixes, concatenation such as `+ . .. & || , ;`,
+  `\n` and `\r\n` escapes, a trailing `\`, XML CR/LF character references, comment or quote markers `# // * >` and a
+  YAML `- `: blank, base64 or an armor header such as `Proc-Type: ...`), at least one a base64 line of 16 or more
+  characters, and the new line strictly between BEGIN and END (an edit to the END line alone does not count). Code
+  that handles PEM (header and footer constants, adjacent or with parser code between them) never refuses an edit; a
+  key in a string concatenation, a comment or a YAML block is still found. A key with no END line, longer than 8192
+  lines or written in a form not stripped (see SECURITY.md) is not found when replaced in place, and neither is a
+  UTF-16 text file a `diff` attribute forces to text. A changed text file whose path git gives in bytes that are not
+  UTF-8, or two paths that decode to the same name, refuse the job (`scan-incomplete`). The finding reads `private-key-block in uncommitted file
   <path> (key block changed in place)` and never shows the key. A file lanq cannot look up or read refuses the job
   (`scan-incomplete`, with a `git fsck` hint). Such a file is read up to 32 MB per version and 256 MB in all; one over
   that is listed in `scanSkipped` with the new reason `text_over_cap` (the larger version's size) and on stderr, not
