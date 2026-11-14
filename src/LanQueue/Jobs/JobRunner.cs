@@ -1484,11 +1484,6 @@ public sealed partial class JobRunner(
             onLine("[lanq]   failed " + TestResultsParser.SafeName(f.Name));
         }
 
-        if (r.FailedKnown > 10)
-        {
-            onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq]   ... and {r.FailedKnown - 10} more failed"));
-        }
-
         return r;
     }
 

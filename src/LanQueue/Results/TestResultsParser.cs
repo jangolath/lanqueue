@@ -271,7 +271,7 @@ public static class TestResultsParser
     /// <summary>One results file, read in full under the caps; throws on anything that is not a complete, valid file of the format.</summary>
     private static FileCounts ReadFile(ResultsFormat format, string path, TimeProvider clock)
     {
-        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
         using var reader = XmlReader.Create(stream, Settings);
         var guard = new Guard(clock);
         return format == ResultsFormat.Trx ? ReadTrx(reader, guard) : ReadJunit(reader, guard);
