@@ -818,13 +818,15 @@ switch ($Mode) {
     }
 
     # 10. 0.11.0 test results, when this binary has them. Probed without any network: --plan --results is refused by every binary, and
-    #     only 0.11.0 and later say "--results comes from lanq.yml" (an older one calls it an unknown option); anything else is N/A. The
-    #     match avoids the apostrophe of "job's", which JSON may escape.
+    #     only 0.11.0 and later say "--results comes from lanq.yml"; 0.10 says "Unknown or incomplete option" (N/A). Anything else is a
+    #     FAIL. The matches avoid quoted text (the apostrophe of "job's", the quotes around the option), which JSON may escape.
     #     --results junit counts the fixed file (two tests, Smoke.Fails failed) and names the failure; with no file at all the job still
     #     completes 0, and the results say noTests (no_results_files) with an ask_developer step.
     $probe10 = Lanq @('run', '--plan', '--dry-run', '--json', '--no-wake', '--results', 'junit:TestResults/*.xml')
-    if (-not ($probe10.Stdout -match '--results comes from lanq\.yml')) {
+    if ($probe10.Stdout -match 'Unknown or incomplete option') {
         Add-Result '10 test results' 'N/A' 'this binary has no --results (before 0.11.0)'
+    } elseif (-not ($probe10.Stdout -match '--results comes from lanq\.yml')) {
+        Add-Result '10 test results' 'FAIL' "the --results probe answered neither as 0.10 nor as 0.11 (exit $($probe10.Code))"
     } else {
         OnMachine '10a results counted' $main 'machine' {
             $j = Assert-LanqResult (Lanq (@('run') + $common + @('--on', $main, '--results', 'junit:TestResults/*.xml', '--') + (Check $mainOs) + @('results', '0', 'junit'))) 0 'Completed'

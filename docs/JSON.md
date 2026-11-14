@@ -275,7 +275,7 @@ such objects are exactly as before.
 | `noTests` | boolean | `executed == 0`: no test was counted as executed. Also `true` when the results could not be read (`noTestsReason: results_unreadable`); then whether tests ran is unknown. |
 | `warnings` | array of string | Problems reading the files, as counts only (never a file name: TRX names carry the worker's user and host). For example `1 results file(s) were not valid TRX XML and were not counted`. |
 | `failedTests` | array of `{name, durationSeconds?, shard?}` | At most 50, without repeats. `name` is `class.method` (TRX: `className` cut at its first `,`; JUnit: `classname.name`, or `name` when it already starts with `classname`), sanitised and at most 512 characters. `shard` only in a sharded job's merged object: the first shard that reported it. |
-| `durationSeconds` | number | Conditional: the sum of the test durations the files give. A test's duration over 10,000,000 s (or not a finite number) is dropped; a sum over 10^12 s is left out with a warning. |
+| `durationSeconds` | number | Conditional: the sum of the test durations the files give. A test's duration over 10,000,000 s (or not a finite number) is dropped; a sum over 10^12 s is left out with a warning, and a sharded job's merged sum is left out when any shard's was. |
 | `noTestsReason` | string | Conditional, with `noTests`: `zero_executed` (every matched file was read, and no test passed or failed), `no_results_files` (the fetch completed, skipped no file the pattern matches, and no file matched) or `results_unreadable` (a matched file was not read, over a cap or not valid XML, or the fetch had a `fetchError` or skipped a file the pattern matches, or more files than `fetchSkipped` lists: results may be missing). Values may be added. |
 | `failedTestsMore` | number | Conditional: failed tests beyond the 50 listed. |
 | `truncated` | boolean | Conditional: `true` when names past 10,000 failed tests were not kept, or a value was cut at 4,096 characters. The counts stay complete. |
@@ -299,7 +299,7 @@ merged, each shard its own) and the plan has `resultsTotal`:
 completed jobs with `noTests`, whatever the reason; each job's `noTestsReason` tells them apart). The sums stop at
 2147483647.
 
-jq: `jq -r '.results.failedTests[]?.name'` lists the failed tests; `jq '.results.noTests'` is `true` when nothing ran.
+jq: `jq -r '.results.failedTests[]?.name'` lists the failed tests; `jq '.results.noTestsReason'` is `"zero_executed"` or `"no_results_files"` when no test ran, and `"results_unreadable"` when the results could not be read (whether tests ran is unknown).
 
 ### baseline
 

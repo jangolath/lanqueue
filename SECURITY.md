@@ -186,7 +186,8 @@ worker directly, and a file that is now a link or not a regular file is not read
 `DOCTYPE` refuses the file, so no entity expansion and no external entity) and has no resolver; each file is read
 forward-only under caps: 64 MB per file (checked before it is opened), 64 files and 256 MB per job, depth 32, 2 million
 elements, 4,096 characters kept per attribute, 10 seconds of reading, and 10,000 failed names kept. The size is checked
-again once the file is open, and so is that it is still not a link. The attribute cap bounds what lanq keeps, not what the
+again once the file is open (from the open handle), and so is that it is still not a link; a swap between those checks
+and the read (or a FIFO in its place) remains possible in principle, but only lanq writes into that folder. The attribute cap bounds what lanq keeps, not what the
 reader holds: .NET's reader builds a whole attribute value before lanq sees it, so the memory bound for one value is the
 reader's limit of 64 million characters per document (one file at a time). A test's duration over 10,000,000 seconds or
 not a finite number is dropped, and a sum that would not be a usable number is left out, so JSON output never fails on

@@ -33,6 +33,9 @@ public sealed record TestResults(
     /// </summary>
     public bool Unreadable { get; init; }
 
+    /// <summary>The durations did not add up to a usable number, so <see cref="DurationSeconds"/> was left out (a merge leaves its sum out too).</summary>
+    public bool DurationDropped { get; init; }
+
     /// <summary>No test was counted as executed (none passed or failed).</summary>
     public bool NoTests => Executed == 0;
 
@@ -183,14 +186,15 @@ public static class TestResultsParser
             {
                 using var stream = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
 
-                // Again once open: the file may have grown, or been swapped for a link, since it was checked.
-                if (stream.Length > MaxFileBytes)
+                // Again once open, from the handle: the file may have grown, or been swapped for a link, since it was checked.
+                var length = RandomAccess.GetLength(stream.SafeFileHandle);
+                if (length > MaxFileBytes)
                 {
                     oversize++;
                     continue;
                 }
 
-                if (bytes + stream.Length > MaxTotalBytes)
+                if (bytes + length > MaxTotalBytes)
                 {
                     overTotal++;
                     continue;
@@ -203,7 +207,7 @@ public static class TestResultsParser
                     continue;
                 }
 
-                bytes += stream.Length;
+                bytes += length;
                 var one = ReadFile(spec.Format, stream, clock);
                 badDuration |= job.Add(one);
                 read++;
@@ -281,6 +285,7 @@ public static class TestResultsParser
             job.Skipped, badDuration ? null : job.Duration, job.Names, Saturate((long)job.Names.Count + job.NamesPastCap), job.NamesPastCap > 0 || job.Cut, warnings, [])
         {
             Unreadable = unreadable,
+            DurationDropped = badDuration,
         };
     }
 
@@ -341,6 +346,8 @@ public static class TestResultsParser
             warnings.Add(DurationWarning);
         }
 
+        // A shard that left its own sum out (its warning says so) would make the merged sum too small: leave it out too.
+        var dropped = present.Any(s => s.R!.DurationDropped);
         return new TestResults(
             first.Format,
             first.Path,
@@ -351,7 +358,7 @@ public static class TestResultsParser
             Sum(present.Select(s => s.R!.Passed)),
             Sum(present.Select(s => s.R!.Failed)),
             Sum(present.Select(s => s.R!.Skipped)),
-            badDuration ? null : duration,
+            badDuration || dropped ? null : duration,
             names,
             Saturate((long)names.Count + pastCap),
             pastCap > 0 || present.Any(s => s.R!.Truncated),
@@ -359,6 +366,7 @@ public static class TestResultsParser
             [.. present.Where(s => s.R!.Executed == 0).Select(s => s.Shard)])
         {
             Unreadable = present.Any(s => s.R!.Unreadable),
+            DurationDropped = badDuration || dropped,
         };
     }
 

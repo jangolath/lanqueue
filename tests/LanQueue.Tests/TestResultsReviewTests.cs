@@ -75,6 +75,7 @@ public sealed class TestResultsReviewTests : IDisposable
 
         Assert.Equal(100_001, r.Passed);
         Assert.Null(r.DurationSeconds);
+        Assert.True(r.DurationDropped);
         Assert.Equal(TestResultsParser.DurationWarning, Assert.Single(r.Warnings));
     }
 
@@ -88,8 +89,17 @@ public sealed class TestResultsReviewTests : IDisposable
         Assert.Null(merged.DurationSeconds);
         Assert.Equal(TestResultsParser.DurationWarning, Assert.Single(merged.Warnings));
 
+        Assert.True(merged.DurationDropped);
+
         var nan = TestResultsParser.Merge([(1, Of(1, double.NaN)), (2, Of(1, 1))])!;
         Assert.Null(nan.DurationSeconds);
+
+        // A shard that dropped its own sum: the merged sum would be too small, so it is left out too (the shard's warning explains it).
+        var partial = TestResultsParser.Merge([(1, Of(1, null) with { DurationDropped = true, Warnings = [TestResultsParser.DurationWarning] }), (2, Of(1, 2))])!;
+        Assert.Null(partial.DurationSeconds);
+        Assert.True(partial.DurationDropped);
+        Assert.Equal(["shard 1/2: " + TestResultsParser.DurationWarning], partial.Warnings);
+        Assert.Equal(2.0, TestResultsParser.Merge([(1, Of(1, null)), (2, Of(1, 2))])!.DurationSeconds);
 
         // Whatever comes in, the JSON writer never meets a non-finite number.
         var text = JsonSerializer.Serialize(Cli.ResultsJsonOf(Of(1, double.PositiveInfinity) with { FailedTests = [new FailedTest("y", double.NaN, 1)] })!, LanqJson.Default.TestResultsJson);
@@ -246,7 +256,12 @@ public sealed class TestResultsReviewTests : IDisposable
 
         var script = File.ReadAllText(Path.Combine(T.RepoRoot, "scripts", "smoke-workers.ps1"));
         Assert.Contains("$probe10 = Lanq @('run', '--plan', '--dry-run', '--json', '--no-wake', '--results', 'junit:TestResults/*.xml')", script, StringComparison.Ordinal);
-        Assert.Contains("if (-not ($probe10.Stdout -match '--results comes from lanq\\.yml'))", script, StringComparison.Ordinal);
+        Assert.Contains("if ($probe10.Stdout -match 'Unknown or incomplete option') {", script, StringComparison.Ordinal);
+        Assert.Contains("} elseif (-not ($probe10.Stdout -match '--results comes from lanq\\.yml')) {", script, StringComparison.Ordinal);
+        Assert.Contains("Add-Result '10 test results' 'FAIL'", script, StringComparison.Ordinal);
+
+        // What a binary before 0.11.0 says for --results: an unknown option (the same words lanq still uses for any unknown option).
+        Assert.StartsWith("Unknown or incomplete option", Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--plan", "--no-such-option"])).Message, StringComparison.Ordinal);
         Assert.DoesNotContain("does not take --results", script, StringComparison.Ordinal);
     }
 }

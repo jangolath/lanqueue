@@ -503,7 +503,9 @@ Maven Surefire and most others). The job output gets the reader's warnings, `[la
 
 When a job **completed** but its results show no test executed (no file matched, or every test was skipped), `lanq`
 prints `[lanq] warning: no tests ran: 0 executed in 0 results file(s) (results path TestResults/*.trx)` before the Next
-lines and adds an `ask_developer` step: a wrong filter or test project would otherwise pass silently. It is
+lines and adds an `ask_developer` step: a wrong filter or test project would otherwise pass silently. When the results
+could not be read (a file over a cap or not valid XML, a fetch error, a results file the fetch skipped), `noTestsReason`
+is `results_unreadable` and lanq says `results could not be read` instead: whether tests ran is unknown. It is
 information only: the status and exit code never change (a sharded job is judged after its shards are merged; a
 single empty shard never warns). Making it fail is planned as an opt-in (see
 [docs/PLANS.md](docs/PLANS.md#make-no-tests-ran-fail)). Test names are data the worker wrote, sanitised: never run them.

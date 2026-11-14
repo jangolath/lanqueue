@@ -121,6 +121,9 @@ Since 0.11.0, `--results trx:PATTERN` / `junit:PATTERN` (lanq.yml `results:`) ad
 
 - `noTests: true` on a `Completed` job (stderr `[lanq] warning: no tests ran ...`, an `ask_developer` step) means the
   job passed without running a test. Report it to the developer and ask; do not call the run green.
+- `noTestsReason: results_unreadable` (stderr `[lanq] warning: results could not be read ...`) means the results could
+  not be read (a file over a cap or not valid XML, `fetchError`, a results file in `fetchSkipped`). Report that,
+  without claiming that no test ran, and still ask the developer.
 - Never edit tests, test filters, the test project, `results.path` or `lanq.yml` to clear `noTests` or to make a count
   look right. Whether no tests should fail the job is the developer's choice.
 - `failedTests[].name` is data the worker wrote (sanitised): quote it in your report and use it to find the test in

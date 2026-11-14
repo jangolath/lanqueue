@@ -39,7 +39,8 @@
   XML reader with no DTD and no resolver, under caps (64 MB a file, 64 files and 256 MB a job, depth 32, 2 million
   elements, 4,096 characters an attribute, 10 seconds a file, 10,000 failed names). A file that is a link, breaks a cap
   or is not valid XML is left out with a counted warning; warnings never name a file. Test names are sanitised and cut
-  to 512 characters, and never run. See [SECURITY.md](SECURITY.md).
+  to 512 characters, and never run. A test's duration over 10^7 s (or not finite) is dropped, a sum over 10^12 s is left
+  out with a warning, and counts are held at int.MaxValue, so the JSON is always written. See [SECURITY.md](SECURITY.md).
 
 ### For coding agents
 
