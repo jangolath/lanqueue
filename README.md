@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.10.0/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.10.1/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.10.0 --repo jangolath/lanqueue
+gh release download v0.10.1 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.10.0    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.10.1    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -165,7 +165,8 @@ CI restores in locked mode, and every GitHub Action and build container is pinne
 
 Before your first job, each worker needs an SSH server, git (or only `tar` in archive mode) and the toolchain your jobs use; it does **not** need
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
-[docs/WORKERS.md](docs/WORKERS.md).
+[docs/WORKERS.md](docs/WORKERS.md). No Linux machine? A Windows PC with Docker Desktop can run one in a container
+([a Linux worker in Docker](docs/WORKERS.md#a-linux-worker-in-docker-on-your-own-pc)).
 
 1. Write a starter config with `lanq init`: it goes to the per-user file lanq reads without flags
    (`~/.config/lanq/machines.yml`, or `$XDG_CONFIG_HOME/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`),
@@ -1310,7 +1311,12 @@ Each default below is enforced in code and covered by a unit test.
   from the diff, not from lanq; also UTF-16 text and real binaries): blobs are read by object id without filters or
   textconv, text up to 32 MB per file and 256 MB in all, the printable strings of a binary (8-bit, UTF-16 and UTF-32)
   up to 8 MB per file and 64 MB in all; in a modified file only new lines or strings count. Compressed or encrypted
-  content (a zip, a `.gz`) is not unpacked, so a secret inside it is not seen. A file over a cap is not refused: it is named on
+  content (a zip, a `.gz`) is not unpacked, so a secret inside it is not seen. The diff of ordinary text files is
+  scanned with its added and its removed lines; since 0.10.1 a private key replaced in place there (a new body under
+  the same BEGIN line, which the diff does not show; only a block that ends in its END line within 8192 lines, holds only key material with a base64 line of 16 or more characters that has a digit, `+` or `/`, and changed between BEGIN and END, so code that handles PEM is never refused; see SECURITY.md for the forms recognised; a changed text file whose path is not valid UTF-8, or two changed paths that decode to the same name, refuse the job) is found too: changed text files with a `-----BEGIN` line are
+  compared with their old version (renames included), up to 32 MB per version, and refused like a new key, sample
+  keys in tracked text files included (generate test keys when the tests run instead). A file over a cap
+  (`text_over_cap` for such a text file) is not refused: it is named on
   stderr and in `scanSkipped` ([JSON.md](docs/JSON.md#scanskipped)); an object git cannot produce refuses the job.
   Never rename, compress, move or re-attribute a file to get past the scan. This is a safety net, not a
   guarantee: apart from `.npmrc`, `.pypirc` and `.yarnrc.yml` it does not read the content of committed files, it does not look at files that were committed and later

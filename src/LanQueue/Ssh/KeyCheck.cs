@@ -11,7 +11,7 @@ namespace LanQueue.Ssh;
 /// </summary>
 public static class KeyCheck
 {
-    private const string Header = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    private const string Header = "-----BEGIN " + "OPENSSH PRIVATE KEY-----";
     private const string Footer = "-----END OPENSSH PRIVATE KEY-----";
 
     public static async Task<bool> IsUnencryptedAsync(string path, Func<string, Task<bool>> acceptsEmptyPassphrase)

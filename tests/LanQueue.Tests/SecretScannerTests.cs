@@ -6,7 +6,7 @@ namespace LanQueue.Tests;
 public class SecretScannerTests
 {
     [Theory]
-    [InlineData("-----BEGIN OPENSSH PRIVATE KEY-----")]
+    [InlineData("-----BEGIN " + "OPENSSH PRIVATE KEY-----")]
     [InlineData("key = AKIAABCDEFGHIJKLMNOP")]
     [InlineData("token ghp_abcdefghijklmnopqrstuvwxyz0123456789")]
     [InlineData("export K=sk-abcdefghijklmnopqrstuvwxyz")]

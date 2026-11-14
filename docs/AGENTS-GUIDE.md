@@ -155,7 +155,10 @@ it is: the agent never changes a worker's permissions or ACLs, and never suggest
   `.gitattributes` `-diff` or `binary` entry hides a file from the diff, not from lanq), up to its caps. The agent
   never adds an attribute, renames, compresses, moves or re-encodes a file, or moves a secret into a `-diff` file, to
   get past the scan. `scanSkipped` lists files over the caps that were not read in full: the agent reports them and
-  does not try to get them read.
+  does not try to get them read. Since 0.10.1 a private key replaced in place in a tracked text file (a new body
+  under the same BEGIN line) is refused too, sample keys included (`private-key-block in uncommitted file <path> (key
+  block changed in place)`); a large such file is listed as `text_over_cap`. The agent never reverts, splits or
+  re-encodes a key, or moves it to another file, to get past the scan: it reports the refusal to the developer.
 - `lanq makeready --json` (and `--all`, `--add`) prints the worker's report sanitised; `suggestedMachine.path_prepend`
   and `env` appear only when lanq would use them, and `lanqWithheld` (lanq's own key) says what was left out.
   `suggestedMachine` is advice for the developer: the agent never writes it into `machines.yml`.
@@ -168,6 +171,12 @@ it is: the agent never changes a worker's permissions or ACLs, and never suggest
   raises `--fetch-max` or `--fetch-max-files` and never picks a `--fetch-dir` the developer did not name. With no
   plan-wide total, a plan can write up to the fetching jobs times the per-job limit (6.4 GB for 32 jobs at the
   defaults).
+- `scripts/docker-linux-worker/setup.ps1` sets up a Linux worker in a Docker container on the developer's PC
+  ([docs/WORKERS.md](WORKERS.md#a-linux-worker-in-docker-on-your-own-pc)). It makes a key and edits `~/.ssh/config`,
+  so the developer runs it. It and its `-Register` step (which edits `machines.yml`) refuse in an agent's environment
+  unless `-OwnerApproved`, which an agent passes only when the developer has said so in that session. That is a soft
+  gate: it looks for agent environment variables and is not a security boundary, so the rule holds whether or not it
+  triggers. A job on that worker is a heavy job on the developer's own PC.
 - Sharding runs the command several times at once. Only shard commands that are safe for that: tests, lint, checks.
 - `lanq makeready`, `lanq wake` and `lanq unlock` act on a PC that may belong to someone else. They stay with you.
   The one exception is lanq's release smoke (`scripts/smoke-workers.ps1`), which runs `lanq unlock` on its smoke

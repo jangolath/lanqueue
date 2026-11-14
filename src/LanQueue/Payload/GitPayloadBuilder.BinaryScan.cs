@@ -21,8 +21,11 @@ namespace LanQueue.Payload;
 /// </summary>
 public sealed partial class GitPayloadBuilder
 {
-    /// <summary>One <c>--raw</c> entry: the old and new modes and object ids and the status letter (A, M, T, D; no renames).</summary>
-    internal sealed record RawEntry(string OldMode, string NewMode, string OldOid, string NewOid, char Status);
+    /// <summary>
+    /// One <c>--raw</c> entry: the old and new modes and object ids and the status letter (A, M, T, D; R and C only from the text key-block
+    /// scan's rename-aware call, 0.10.1, which also gives <paramref name="OldPath"/>, the source path).
+    /// </summary>
+    internal sealed record RawEntry(string OldMode, string NewMode, string OldOid, string NewOid, char Status, string? OldPath = null);
 
     /// <summary>A file to read: its new blob, and the old one when it is modified (null for an added file).</summary>
     internal sealed record BlobTarget(string Path, string NewOid, string? OldOid);
@@ -55,7 +58,10 @@ public sealed partial class GitPayloadBuilder
             .Where(r => r.StartsWith("-\t-\t", StringComparison.Ordinal))
             .Select(r => r[4..])];
 
-    /// <summary>The <c>--raw -z</c> entries by path: ":oldmode newmode oldoid newoid status" NUL path NUL.</summary>
+    /// <summary>
+    /// The <c>--raw -z</c> entries by path: ":oldmode newmode oldoid newoid status" NUL path NUL; for a rename or copy (status R or C with
+    /// a score, only from a rename-aware call) ":... R086" NUL old path NUL new path NUL, keyed by the new path.
+    /// </summary>
     internal static Dictionary<string, RawEntry> ParseRaw(string raw)
     {
         var map = new Dictionary<string, RawEntry>(StringComparer.Ordinal);
@@ -68,6 +74,17 @@ public sealed partial class GitPayloadBuilder
             }
 
             var f = parts[i][1..].Split(' ');
+            if (f.Length == 5 && f[4].Length > 0 && f[4][0] is 'R' or 'C')
+            {
+                if (i + 2 < parts.Length)
+                {
+                    map[parts[i + 2]] = new RawEntry(f[0], f[1], f[2], f[3], f[4][0], parts[i + 1]);
+                }
+
+                i += 2;
+                continue;
+            }
+
             if (f.Length == 5 && f[4].Length > 0)
             {
                 map[parts[i + 1]] = new RawEntry(f[0], f[1], f[2], f[3], f[4][0]);
@@ -372,7 +389,7 @@ public sealed partial class GitPayloadBuilder
                 if (f.Length != 3 || f[0] != oid || f[1] != "blob"
                     || !long.TryParse(f[2], NumberStyles.None, CultureInfo.InvariantCulture, out var size) || size > BlobScan.TextCap)
                 {
-                    throw new InvalidOperationException("git cat-file returned an unexpected header while reading a file git shows as binary.");
+                    throw new InvalidOperationException("git cat-file returned an unexpected header while reading a file for the secret scan.");
                 }
 
                 var data = new byte[size];

@@ -593,7 +593,7 @@ public sealed partial class JobRunner(
             return (null, new JobResult(payloadId, JobStatus.InfraError, 70, null, "Could not snapshot the repository: " + ex.Message) { InfraKind = Jobs.InfraKind.Snapshot });
         }
 
-        // Files git shows as binary that were over a cap and not read in full (0.9.2): said once, kept for the JSON (scanSkipped). One
+        // Files over a cap of the content scans, not read in full (0.9.2; text key-bearing files 0.10.1): said once, kept for the JSON (scanSkipped). One
         // snapshot per lanq run (one job, every shard, a whole plan), so this is set once.
         if (payload.ScanSkipped.Count > 0)
         {
@@ -611,8 +611,8 @@ public sealed partial class JobRunner(
     }
 
     /// <summary>
-    /// "[lanq] secret scan: 2 file(s) not read in full: assets/big.bin (52 MB), ..." (at most 5 named, sanitised): files git shows as binary
-    /// that were over a cap of the content scan.
+    /// "[lanq] secret scan: 2 file(s) not read in full: assets/big.bin (52 MB), ..." (at most 5 named, sanitised): files git shows as binary,
+    /// and changed text files with a private-key BEGIN line (0.10.1), that were over a cap of the content scans.
     /// </summary>
     internal static string ScanSkippedLine(IReadOnlyList<ScanSkip> skipped)
     {
@@ -630,6 +630,7 @@ public sealed partial class JobRunner(
     {
         var findings = SecretScanner.ScanText(payload.OverlayDiff, "uncommitted changes")
             .Concat(payload.BinaryFindings)
+            .Concat(payload.TextKeyFindings)
             .Concat(SecretScanner.ScanFileNames(payload.ChangedFiles))
             .Concat(SecretScanner.ScanCommittedFileNames(payload.CommittedFiles ?? []))
             .Concat((payload.CommittedConfigs ?? new Dictionary<string, string?>()).SelectMany(c => SecretScanner.ScanCommittedConfig(c.Key, c.Value)))
@@ -1768,9 +1769,19 @@ public sealed partial class JobRunner(
             hint += " A file git shows as binary is read anyway: a .gitattributes entry (-diff or binary) hides a file from diffs, not from lanq; take the secret out of the file.";
         }
 
+        if (findings.Any(f => f.Rule != BlobScan.TextIncompleteRule && f.Where.EndsWith(BlobScan.TextWhereSuffix, StringComparison.Ordinal)))
+        {
+            hint += " A private key whose body changed under an unchanged BEGIN line is refused like a new one (sample keys too); take the key out of the file.";
+        }
+
         if (findings.Any(f => f.Rule == BlobScan.IncompleteRule))
         {
             hint += " lanq could not read a file git shows as binary from git, so it could not be checked; check the repository with git fsck.";
+        }
+
+        if (findings.Any(f => f.Rule == BlobScan.TextIncompleteRule))
+        {
+            hint += " lanq could not read a changed text file with a private-key block from git, so it could not be checked; check the repository with git fsck.";
         }
 
         return new(jobId, JobStatus.Rejected, 2, null, "Refused: possible secrets in payload (" + listed + ")." + hint + " Nothing was sent.") { RejectKind = Jobs.RejectKind.Secret };

@@ -17,7 +17,10 @@ public sealed partial class GitPayloadBuilder : IPayloadBuilder
     /// </summary>
     internal static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(60);
 
-    /// <summary>The limit for the calls that read the whole working tree or diff it (add -A, diff), or walk the history (rev-list, merge-base).</summary>
+    /// <summary>
+    /// The limit for the calls that read the whole working tree or diff it (add -A, diff, the text key-block scan's grep), or walk the history
+    /// (rev-list, merge-base).
+    /// </summary>
     internal static readonly TimeSpan WorkTreeTimeout = TimeSpan.FromMinutes(10);
 
     /// <summary>The limit for building a payload file (bundle create, and the archive's cat-file --batch stream), which grows with the repository.</summary>
@@ -29,7 +32,7 @@ public sealed partial class GitPayloadBuilder : IPayloadBuilder
     /// </summary>
     internal static TimeSpan TimeoutFor(string subcommand) => subcommand switch
     {
-        "add" or "diff" or "rev-list" or "merge-base" => WorkTreeTimeout,
+        "add" or "diff" or "grep" or "rev-list" or "merge-base" => WorkTreeTimeout,
         "bundle" => BuildTimeout,
         _ => MetadataTimeout,
     };
@@ -56,16 +59,20 @@ public sealed partial class GitPayloadBuilder : IPayloadBuilder
             await Git(top, env, ct, "add", "-A", "--", ".", ":(exclude,glob)**/.lanq/**").ConfigureAwait(false);
             var tree = (await Git(top, env, ct, "write-tree").ConfigureAwait(false)).Trim();
             var headTree = (await Git(top, null, ct, "rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
+            // The file list, the diff and the text key-block scan's numstat and raw all detect renames the same way (-M, whatever the user's
+            // diff.renames says), so a renamed file is compared with its old version everywhere (0.10.1).
             var changed = tree == headTree
                 ? []
-                : (await Git(top, env, ct, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD").ConfigureAwait(false))
+                : (await Git(top, env, ct, "diff", "--cached", "--no-ext-diff", "--no-textconv", "-M", "--name-only", "HEAD").ConfigureAwait(false))
                     .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var diff = tree == headTree
                 ? ""
-                : await Git(top, env, ct, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "HEAD").ConfigureAwait(false);
+                : await Git(top, env, ct, [.. TextDiff, "-U0", "HEAD"]).ConfigureAwait(false);
             // Files git shows as binary (an attribute such as -diff or binary, a NUL byte, UTF-16, core.bigFileThreshold) never appear in
             // the diff above: their blobs are read and scanned separately, under caps (0.9.2).
             var blobs = tree == headTree ? BinaryScanResult.None : await ScanBinaryChangesAsync(top, env, ct).ConfigureAwait(false);
+            // A private key replaced in place in a text file keeps its BEGIN line, so the diff above never shows it: compared separately (0.10.1).
+            var keys = tree == headTree ? TextKeyScanResult.None : await ScanTextKeyBlocksAsync(top, env, ct).ConfigureAwait(false);
             var sha = tree == headTree
                 ? head
                 : (await Git(top, env, ct, "commit-tree", tree, "-p", head, "-m", "lanq snapshot " + jobId).ConfigureAwait(false)).Trim();
@@ -88,8 +95,10 @@ public sealed partial class GitPayloadBuilder : IPayloadBuilder
             return new JobPayload(sha, changed, diff, built?.Path, built?.SkippedSymlinks ?? 0, built?.SkippedSubmodules ?? 0, repoId, head, committed, configs)
             {
                 BinaryFindings = blobs.Findings,
-                ScanSkipped = blobs.Skipped,
+                TextKeyFindings = keys.Findings,
+                ScanSkipped = [.. blobs.Skipped, .. keys.Skipped],
                 BlobsRead = blobs.BlobsRead,
+                TextBlobsRead = keys.BlobsRead,
             };
         }
         finally
@@ -604,9 +613,15 @@ public sealed partial class GitPayloadBuilder : IPayloadBuilder
         }
     }
 
-    /// <summary>Removed from git's environment (0.9.1): lanq's local git calls always work on the repository they run in.</summary>
+    /// <summary>
+    /// Removed from git's environment (0.9.1): lanq's local git calls always work on the repository they run in. The pathspec variables
+    /// (0.10.1) would change how the text key-block scan's literal pathspecs are read.
+    /// </summary>
     internal static readonly string[] InheritedGitVariables =
-        ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE"];
+    [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE",
+        "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+    ];
 
     /// <summary>
     /// git may never wait for a person: no terminal prompt (GIT_TERMINAL_PROMPT=0), no Git Credential Manager dialog (GCM_INTERACTIVE=never),

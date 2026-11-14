@@ -63,8 +63,34 @@ files cannot use up the totals before a small one; a single file over a per-file
 listed, not refused, so a secret placed in a very large binary or text file is not seen. In a modified file only new
 lines count, except that an unchanged private-key BEGIN line is scanned again when any line of its block (up to its
 END line, indented or not) is new, so a key replaced in place is found (PEM, OpenSSH and PGP blocks, encrypted ones
-included); in ordinary text files the diff shows only changed lines, so a key whose body is replaced while its
-BEGIN line stays the same is not recognised there. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
+included). The diff of ordinary text files is scanned with both its added and its removed lines, but it shows only
+changed lines, so since 0.10.1 lanq also finds the changed text files whose new version has a `-----BEGIN` line
+(`git grep --cached` of the snapshot, those files only) and compares their old and new blobs the same way, renames included (the diff,
+its file list and this comparison all use `-M`). A key whose body changed under an unchanged BEGIN line is refused
+like a new key, sample keys kept in tracked text files included. Such a file is read up to 32 MB per version and
+256 MB in all; one over that is listed in `scanSkipped` (`text_over_cap`), not refused. In text files a BEGIN line is
+rescanned only for a key block: a line holding `-----END` (any case) comes within 8192 lines, every line strictly
+between BEGIN and END looks like key material, at least one of them a base64 line of 16 or more characters that holds a digit, `+` or `/` (so banners and long
+identifiers are no key), and the
+new line is one of the lines strictly between BEGIN and END (an edit to the END line alone does not count). Key
+material means that, after stripping whitespace and the syntax a key is quoted or commented in, the line is blank,
+base64 (`[A-Za-z0-9+/=]`) or an armor header (`Name: value`, such as Proc-Type, DEK-Info, Comment or Version). The
+syntax stripped: at the start of a line, runs of the characters `"`, `'`, `+`, `.`, `&`, `,`, `;`, `#`, `*`, `>`, `|`,
+`-` and `/` (quotes, concatenation, comments such as `#`, `//` and ` * `, a quoted mail's `>`, a YAML `- `) and a
+one-letter string prefix (`b"`, `r'`); at the end, runs of the characters `"`, `'`, `+`, `.`, `&`, `,`, `;`, `_`, `\`
+and `|` (quotes, concatenation such as VB's `& _` or SQL's `||`, a `\` continuation), a `\n` or `\r\n` escape, the XML
+character references `&#xD;`, `&#13;`, `&#xA;` and `&#10;`, and a short string suffix (`"u8`). A line over 16 KB is never key material. So code that handles PEM (header and footer constants, adjacent or with parser code
+between them) never refuses an edit, while a key kept in a string concatenation, a comment or a YAML block is still
+found. The other side of this, a key replaced in place in a text file is not seen when it has no END line, is longer
+than 8192 lines, or is written in a form not stripped above: a newline given by name or call (VB's `vbLf` or
+`vbCrLf`, `Chr(10)`, `Environment.NewLine`, `os.linesep`), string interpolation or formatting, an escape other than
+`\n` and `\r\n` (`\x0a`, `%0A`), an HTML or XML element around each line, or any other text inside its block. A
+changed text file (modified or renamed, with added lines) whose path git gives in bytes that are not UTF-8 refuses the
+job (`scan-incomplete`): lanq could not name it back to git to check it. Other files with such names (binary, added,
+deleted) pass as before. Two changed paths that decode to the same name refuse the job whatever the files are, since
+one of them would be hidden from the content scans. A UTF-16 text file that a `diff` attribute forces to text is not
+scanned by this comparison (nor, usefully, by the diff scan: its ASCII patterns do not match UTF-16 bytes); without
+that attribute git shows UTF-16 as binary and the binary scan reads it. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).
 A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_ref:`), never a commit id, `HEAD` or

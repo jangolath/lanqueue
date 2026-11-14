@@ -28,11 +28,23 @@ public sealed record JobPayload(
     /// </summary>
     public IReadOnlyList<Policy.SecretFinding> BinaryFindings { get; init; } = [];
 
-    /// <summary>Uncommitted files git shows as binary that were over a cap and not read in full (0.9.2): reported in scanSkipped, never refused.</summary>
+    /// <summary>
+    /// Findings of the text key-block scan (0.10.1; see <c>GitPayloadBuilder.TextKeyScan.cs</c>): a private key replaced in place in a changed
+    /// text file, whose BEGIN line the diff does not show, including the fail-closed scan-incomplete finding; scanned with the rest of the payload.
+    /// </summary>
+    public IReadOnlyList<Policy.SecretFinding> TextKeyFindings { get; init; } = [];
+
+    /// <summary>
+    /// Uncommitted files that were over a cap and not read in full: files git shows as binary (0.9.2) and changed text files with a
+    /// private-key BEGIN line (0.10.1). Reported in scanSkipped, never refused.
+    /// </summary>
     public IReadOnlyList<Policy.ScanSkip> ScanSkipped { get; init; } = [];
 
     /// <summary>How many blobs the binary scan read (whole or a first part): 0 on a clean tree or when git shows nothing as binary.</summary>
     public int BlobsRead { get; init; }
+
+    /// <summary>How many blobs the text key-block scan read (0.10.1): 0 unless a changed text file has a BEGIN line.</summary>
+    public int TextBlobsRead { get; init; }
 }
 
 /// <summary>A built archive plus how many entries a tar.gz cannot carry (symlinks, submodules) were left out.</summary>

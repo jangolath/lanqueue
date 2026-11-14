@@ -4,9 +4,10 @@ using System.Text.RegularExpressions;
 namespace LanQueue.Policy;
 
 /// <summary>
-/// An uncommitted file git shows as binary whose content the secret scan did not read in full (0.9.2): it was over a cap. Reported, never
-/// refused. <see cref="Reason"/> is <see cref="BlobScan.BinaryOverFileCap"/>, <see cref="BlobScan.BinaryOverTotalCap"/> or
-/// <see cref="BlobScan.MaskedTextOverCap"/>.
+/// An uncommitted file whose content the secret scan did not read in full: it was over a cap. Reported, never refused. <see cref="Reason"/>
+/// is <see cref="BlobScan.BinaryOverFileCap"/>, <see cref="BlobScan.BinaryOverTotalCap"/>, <see cref="BlobScan.MaskedTextOverCap"/> or
+/// <see cref="BlobScan.MaskedTextOverTotalCap"/> for a file git shows as binary (0.9.2), and <see cref="BlobScan.TextOverCap"/> for a
+/// changed text file that holds a private-key BEGIN line (0.10.1).
 /// </summary>
 /// <param name="Path">The file's path in the repository, as git gives it (unsanitised; sanitised wherever it is shown).</param>
 /// <param name="Bytes">The file's size.</param>
@@ -58,6 +59,12 @@ internal static class BlobScan
 
     internal const string MaskedTextOverTotalCap = "masked_text_over_total_cap";
 
+    /// <summary>
+    /// A changed text file with a private-key BEGIN line whose old or new version is over <see cref="TextCap"/>, or that would take the text
+    /// key scan past <see cref="TextTotalCap"/> (0.10.1): its key blocks were not compared.
+    /// </summary>
+    internal const string TextOverCap = "text_over_cap";
+
     /// <summary>The finding when a file git shows as binary could not be looked up or read (fails closed: the run is refused).</summary>
     internal const string IncompleteRule = "scan-incomplete (refusing: a file git shows as binary could not be read)";
 
@@ -72,6 +79,17 @@ internal static class BlobScan
     internal static string Where(string path) => $"uncommitted file {Jobs.JobRunner.SafeLine(path)}{WhereSuffix}";
 
     internal const string WhereSuffix = " (binary per git)";
+
+    /// <summary>
+    /// The finding when a changed text file with a private-key BEGIN line could not be looked up or read for the key-block scan (0.10.1; fails
+    /// closed: the run is refused).
+    /// </summary>
+    internal const string TextIncompleteRule = "scan-incomplete (refusing: a changed text file with a private-key block could not be read)";
+
+    /// <summary>The "where" of a finding of the text key-block scan (0.10.1); the path is sanitised.</summary>
+    internal static string TextWhere(string path) => $"uncommitted file {Jobs.JobRunner.SafeLine(path)}{TextWhereSuffix}";
+
+    internal const string TextWhereSuffix = " (key block changed in place)";
 
     /// <summary>UTF-16 (a byte order mark), masked text (no NUL in the first <see cref="ClassifyBytes"/> bytes) or a real binary.</summary>
     internal static Kind Classify(ReadOnlySpan<byte> data)
@@ -105,6 +123,9 @@ internal static class BlobScan
             : [.. SplitLines(Encoding.UTF8.GetString(data)), .. Strings(data)],
         _ => Strings(data),
     };
+
+    /// <summary>The lines of an ordinary text file (UTF-8, invalid bytes replaced; a trailing CR dropped, as on both sides of a comparison).</summary>
+    internal static List<string> TextLines(byte[] data) => SplitLines(Encoding.UTF8.GetString(data));
 
     private static List<string> SplitLines(string text)
     {
@@ -211,6 +232,203 @@ internal static class BlobScan
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The text key-block scan (0.10.1): only the old BEGIN lines that are unchanged themselves but start a changed key block
+    /// (<see cref="TextKeyBlockChanged"/>). Every other new line is a line the overlay diff already shows as added (and scans), so it is left
+    /// out here. Lines are matched by content (set membership), as in <see cref="NewContent"/>: a new key added under a BEGIN line identical
+    /// to an old one can be reported twice, once by the diff and once here (harmless: either refuses).
+    /// </summary>
+    internal static List<string> ChangedBlockStarts(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
+    {
+        var known = new HashSet<string>(oldLines, StringComparer.Ordinal);
+        var result = new List<string>();
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            if (line.Contains("-----", StringComparison.Ordinal) && known.Contains(line) && SecretScanner.StartsASecretBlock(line) && TextKeyBlockChanged(lines, i, known))
+            {
+                result.Add(line);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>The longest block the text key-block scan looks for an END line in (0.10.1).</summary>
+    internal const int TextMaxBlockLines = 8192;
+
+    /// <summary>
+    /// Whether the block that starts at <paramref name="begin"/> in a text file is a key block with a new line (0.10.1). It counts only when
+    /// it is terminated, a line holding <c>-----END</c> (any case) within <see cref="TextMaxBlockLines"/> lines, and every line strictly
+    /// between BEGIN and END looks like key material (<see cref="KeyLine"/>), at least one of them a base64 line of
+    /// <see cref="MinBodyChars"/> or more characters that holds a digit, <c>+</c> or <c>/</c> (so banners and long identifiers are no key
+    /// body). The new line must be one of the lines strictly between BEGIN and END: an edit to the
+    /// END line alone does not count. A real key replaced in place keeps its END line and its base64 body; header and footer strings in code
+    /// (a parser, a scanner, a test), adjacent or with code between them, are no key, so ordinary edits near them are never refused. A BEGIN
+    /// line that itself holds <c>-----END</c> (a one-line JSON or escaped key) has no block.
+    /// </summary>
+    private static bool TextKeyBlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
+    {
+        if (lines[begin].Contains("-----END", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        bool changed = false, body = false;
+        for (var j = begin + 1; j < lines.Count && j <= begin + TextMaxBlockLines; j++)
+        {
+            if (lines[j].Contains("-----END", StringComparison.OrdinalIgnoreCase))
+            {
+                return changed && body;
+            }
+
+            var length = KeyLine(lines[j], out var strong);
+            if (length < 0)
+            {
+                return false;
+            }
+
+            body |= length >= MinBodyChars && strong;
+            changed |= !known.Contains(lines[j]);
+        }
+
+        return false; // no END line within the cap: not a key block
+    }
+
+    /// <summary>
+    /// A text key block needs at least one base64 body line this long (after stripping) that also holds a digit, <c>+</c> or <c>/</c>, so
+    /// header and footer strings alone, banners (<c># =====</c>) and long identifiers are no key.
+    /// </summary>
+    internal const int MinBodyChars = 16;
+
+    /// <summary>A line longer than this is never key material (a one-line PEM body of a 4096-bit key is about 3.2 KB).</summary>
+    internal const int MaxKeyLineChars = 16 * 1024;
+
+    /// <summary>Whether a line can sit inside an armored key (0.10.1): <see cref="KeyLine"/> is not -1.</summary>
+    internal static bool LooksLikeKeyLine(string line) => KeyLine(line, out _) >= 0;
+
+    /// <summary>Single-character markers stripped, as runs, from the start of a key line: whitespace, quotes, concatenation, comments, a YAML dash.</summary>
+    private static readonly char[] KeyLineLead = [' ', '\t', '\r', '\f', '\v', '"', '\'', '+', '.', '&', ',', ';', '#', '*', '>', '|', '-', '/'];
+
+    /// <summary>Single-character markers stripped, as runs, from the end of a key line: whitespace, quotes, concatenation, a continuation.</summary>
+    private static readonly char[] KeyLineTrail = [' ', '\t', '\r', '\f', '\v', '"', '\'', '+', '.', '&', ',', ';', '_', '\\', '|'];
+
+    /// <summary>Escapes and character references stripped from the end of a key line (with or without the reference's ';').</summary>
+    private static readonly string[] KeyLineSuffixes =
+        [@"\r\n", @"\n", "&#xD;", "&#xd;", "&#13;", "&#xA;", "&#xa;", "&#10;", "&#xD", "&#xd", "&#13", "&#xA", "&#xa", "&#10"];
+
+    /// <summary>
+    /// What a line inside an armored key is (0.10.1): -1 when it cannot be key material, 0 for a blank line or an armor header
+    /// (<c>Name: value</c>, such as Proc-Type, DEK-Info, Comment, Version), else the length of its base64 (<c>[A-Za-z0-9+/=]</c>). First,
+    /// repeatedly, whitespace and the syntax a key is quoted or commented in are stripped: at the start, runs of the characters
+    /// <c>" ' + . &amp; , ; # * &gt; | - /</c> (quotes, concatenation, comments such as <c>#</c>, <c>//</c> and <c>*</c>, a quoted mail's
+    /// <c>&gt;</c>, a YAML dash), and a one-letter string prefix (<c>b"</c>, <c>r'</c>); at the end, runs of the characters
+    /// <c>" ' + . &amp; , ; _ \ |</c> (quotes, concatenation such as VB's <c>&amp; _</c> or SQL's <c>||</c>, a <c>\</c> continuation), a
+    /// <c>\n</c> or <c>\r\n</c> escape, XML character references for CR and LF, and a one- or two-letter string suffix (<c>"u8</c>). Runs go in
+    /// one step, so a line of a thousand <c>#</c> costs one pass. A line over <see cref="MaxKeyLineChars"/> is -1. <paramref name="strong"/>: the base64 holds a digit, <c>+</c> or <c>/</c>.
+    /// </summary>
+    internal static int KeyLine(string line, out bool strong)
+    {
+        strong = false;
+        if (line.Length > MaxKeyLineChars)
+        {
+            return -1;
+        }
+
+        var t = line.AsSpan();
+        while (true)
+        {
+            var before = t.Length;
+            t = t.TrimStart(KeyLineLead);
+            for (var stripped = true; stripped;)
+            {
+                stripped = false;
+                t = t.TrimEnd(KeyLineTrail);
+                foreach (var s in KeyLineSuffixes)
+                {
+                    if (t.EndsWith(s, StringComparison.Ordinal))
+                    {
+                        t = t[..^s.Length];
+                        stripped = true;
+                        break;
+                    }
+                }
+            }
+
+            if (t.Length >= 2 && char.IsAsciiLetter(t[0]) && t[1] is '"' or '\'')
+            {
+                t = t[2..]; // b"..., r'...
+            }
+
+            for (var k = 1; k <= 2; k++)
+            {
+                if (t.Length > k && t[^(k + 1)] is '"' or '\'' && IsAsciiLettersOrDigits(t[^k..]))
+                {
+                    t = t[..^k]; // ..."u8, ..."L
+                    break;
+                }
+            }
+
+            if (t.Length == before)
+            {
+                break;
+            }
+        }
+
+        if (t.IsEmpty)
+        {
+            return 0;
+        }
+
+        var base64 = true;
+        var mixed = false;
+        foreach (var c in t)
+        {
+            if (!(char.IsAsciiLetterOrDigit(c) || c is '+' or '/' or '='))
+            {
+                base64 = false;
+                break;
+            }
+
+            mixed |= char.IsAsciiDigit(c) || c is '+' or '/';
+        }
+
+        if (base64)
+        {
+            strong = mixed;
+            return t.Length;
+        }
+
+        var colon = t.IndexOf(": ", StringComparison.Ordinal);
+        if (colon <= 0)
+        {
+            return -1;
+        }
+
+        foreach (var c in t[..colon])
+        {
+            if (!(char.IsAsciiLetter(c) || c == '-'))
+            {
+                return -1;
+            }
+        }
+
+        return 0;
+    }
+
+    private static bool IsAsciiLettersOrDigits(ReadOnlySpan<char> s)
+    {
+        foreach (var c in s)
+        {
+            if (!char.IsAsciiLetterOrDigit(c))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>The longest block <see cref="BlockChanged"/> looks at: a key with no END line within it is judged on these lines only.</summary>
