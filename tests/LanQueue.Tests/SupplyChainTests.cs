@@ -335,10 +335,12 @@ public sealed partial class SupplyChainTests
     }
 
     /// <summary>
-    /// Runs a copy of scripts/sync-makeready.sh in a scratch tree with a fake gh (which "downloads" two scripts and the given SHA256SUMS and
-    /// accepts every attestation), so only the SHA256SUMS check decides. Returns the exit code, output and whether the scripts were copied.
+    /// Runs a copy of scripts/sync-makeready.sh in a scratch tree with a fake gh (which "downloads" the four scripts and the given SHA256SUMS
+    /// and accepts every attestation), so only the SHA256SUMS check decides. <paramref name="sums"/> writes the two scanner lines; the two tune
+    /// lines (0.5.0+) follow unless <paramref name="withTune"/> is false. Returns the exit code, output and whether the scripts were copied
+    /// (all four, or none).
     /// </summary>
-    private static (int Code, string Output, bool Copied) RunSync(Func<string, string, string> sums)
+    private static (int Code, string Output, bool Copied) RunSync(Func<string, string, string> sums, bool withTune = true)
     {
         var tree = Path.Combine(Path.GetTempPath(), "lanq-sync-" + Guid.NewGuid().ToString("N"));
         var bin = Path.Combine(tree, "fake-bin");
@@ -351,12 +353,14 @@ public sealed partial class SupplyChainTests
             File.Copy(Path.Combine(Root, "scripts", "sync-makeready.sh"), Path.Combine(tree, "scripts", "sync-makeready.sh"));
             static string Sha(string text) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
             var sumsFile = Path.Combine(tree, "sums.txt");
-            File.WriteAllText(sumsFile, sums(Sha("ps1\n"), Sha("sh\n")));
+            var tune = withTune ? $"{Sha("tps1\n")}  lanq-makeready-tune.ps1\n{Sha("tsh\n")}  lanq-makeready-tune.sh\n" : "";
+            File.WriteAllText(sumsFile, sums(Sha("ps1\n"), Sha("sh\n")) + tune);
             var gh = Path.Combine(bin, "gh");
             File.WriteAllText(gh, string.Join('\n',
                 "#!/bin/sh",
                 "case \"$1 $2\" in",
-                "  'release download') printf 'ps1\\n' > lanq-makeready.ps1; printf 'sh\\n' > lanq-makeready.sh; cp \"$FAKE_SUMS\" SHA256SUMS ;;",
+                "  'release download') printf 'ps1\\n' > lanq-makeready.ps1; printf 'sh\\n' > lanq-makeready.sh;"
+                    + " printf 'tps1\\n' > lanq-makeready-tune.ps1; printf 'tsh\\n' > lanq-makeready-tune.sh; cp \"$FAKE_SUMS\" SHA256SUMS ;;",
                 "  'attestation verify') exit 0 ;;",
                 "  *) exit 9 ;;",
                 "esac",
@@ -372,7 +376,10 @@ public sealed partial class SupplyChainTests
                 ["FAKE_SUMS"] = sumsFile.Replace('\\', '/'),
             };
             var (code, output) = Shells.Exec(Shells.Sh!, [Path.Combine(tree, "scripts", "sync-makeready.sh").Replace('\\', '/'), "v0.1.0"], env);
-            return (code, output, File.Exists(Path.Combine(dest, "lanq-makeready.ps1")));
+            string[] names = ["lanq-makeready.ps1", "lanq-makeready.sh", "lanq-makeready-tune.ps1", "lanq-makeready-tune.sh"];
+            var copied = names.Count(n => File.Exists(Path.Combine(dest, n)));
+            Assert.True(copied is 0 or 4, "the sync copies all four scripts or none");
+            return (code, output, copied == 4);
         }
         finally
         {
@@ -395,6 +402,12 @@ public sealed partial class SupplyChainTests
         (code, output, copied) = RunSync((ps1, sh) => $"{ps1}  lanq-makeready.ps1\n{sh} *lanq-makeready.sh\n0000000000000000000000000000000000000000000000000000000000000000  other.zip\n");
         Assert.True(code == 0, output);
         Assert.True(copied);
+
+        // 0.5.0+: the tune scripts must be listed too.
+        (code, output, copied) = RunSync((ps1, sh) => $"{ps1}  lanq-makeready.ps1\n{sh}  lanq-makeready.sh\n", withTune: false);
+        Assert.NotEqual(0, code);
+        Assert.Contains("lanq-makeready-tune.ps1", output, StringComparison.Ordinal);
+        Assert.False(copied);
     }
 
     [Fact]
