@@ -75,6 +75,11 @@ internal sealed partial record TuneReport(
             throw new FormatException("an item id is missing or not a lanq-makeready-tune id");
         }
 
+        if (items.Select(i => i.Id).Distinct(StringComparer.Ordinal).Count() != items.Count)
+        {
+            throw new FormatException("duplicate item id");
+        }
+
         if (items.Any(i => !Statuses.Contains(i.Status, StringComparer.Ordinal)))
         {
             throw new FormatException("an item status is not OK/INFO/WARN/SKIP");
@@ -147,8 +152,11 @@ internal sealed partial record TuneReport(
                 var fix = TuneFix(os, i.Id!, i.Status!) is { } f && f == i.FixId ? f : null;
                 return new TuneItem(i.Id, S(i.Title, TitleMax), i.Status, S(i.Detail, TextMax), S(i.Advice, TextMax), i.NeedsAdmin, fix, i.Security && SecurityItem(os, i.Id!));
             })],
-            Summary);
+            Summary! with { Seconds = Summary!.Seconds is >= 0 and <= MaxSeconds ? Summary.Seconds : null });
     }
+
+    /// <summary>The largest summary.seconds lanq keeps (the script stops after about 90 s); anything else is written as absent.</summary>
+    internal const int MaxSeconds = 3600;
 }
 
 /// <summary>Where the tune scan ran: in a container, elevated, and the work_root and hours it was given (each optional).</summary>

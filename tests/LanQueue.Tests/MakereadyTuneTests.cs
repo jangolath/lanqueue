@@ -93,12 +93,19 @@ public class MakereadyTuneTests
         Assert.Null(Cli.TuneWorkRoot(m));
     }
 
+    /// <summary>
+    /// The scanner gets -Hours only for one every-day window (its suggested allowed_hours can never be wider than the configured one); the
+    /// tune scan gets the common times with the days dropped.
+    /// </summary>
     [Theory]
-    [InlineData(new[] { "22:00-07:00" }, "22:00-07:00")]
-    [InlineData(new[] { "Mon-Fri 18:00-23:00", "Sat,Sun 18:00-23:00" }, "18:00-23:00")] // the same times: days dropped
-    [InlineData(new[] { "Mon-Fri 18:00 - 23:00" }, "18:00-23:00")] // normalised
-    [InlineData(new[] { "Mon-Fri 18:00-23:00", "Sat,Sun 08:00-22:00" }, null)] // different windows
-    public void HoursArePassedOnlyForOneCommonWindow(string[] entries, string? expected)
+    [InlineData(new[] { "22:00-07:00" }, "22:00-07:00", "22:00-07:00")]
+    [InlineData(new[] { "22:00-07:00", "22:00 - 07:00" }, "22:00-07:00", "22:00-07:00")] // normalised
+    [InlineData(new[] { "Mon-Fri 18:00-23:00", "Sat,Sun 18:00-23:00" }, null, "18:00-23:00")] // days: tune only
+    [InlineData(new[] { "Mon-Fri 18:00 - 23:00" }, null, "18:00-23:00")]
+    [InlineData(new[] { "18:00-23:00", "Sat 18:00-23:00" }, null, "18:00-23:00")]
+    [InlineData(new[] { "Mon-Fri 18:00-23:00", "Sat,Sun 08:00-22:00" }, null, null)] // different windows
+    [InlineData(new[] { "18:00-23:00", "08:00-12:00" }, null, null)]
+    public void HoursArePassedOnlyForOneCommonWindow(string[] entries, string? scanner, string? tune)
     {
         var m = T.Linux();
         var hours = new HoursList();
@@ -109,8 +116,10 @@ public class MakereadyTuneTests
 
         m.AllowedHours = hours;
 
-        Assert.Equal(expected, Cli.ScanHours(m));
-        Assert.Null(Cli.ScanHours(T.Linux()));
+        Assert.Equal(scanner, Cli.ScanHours(m, dropDays: false));
+        Assert.Equal(tune, Cli.ScanHours(m, dropDays: true));
+        Assert.Null(Cli.ScanHours(T.Linux(), dropDays: false));
+        Assert.Null(Cli.ScanHours(T.Linux(), dropDays: true));
     }
 
     [Fact]
@@ -309,7 +318,9 @@ public class MakereadyTuneTests
         Assert.Equal(75, code);
         Assert.Equal(2, plainSsh.InputRuns.Count);
         Assert.Equal(4, ssh.InputRuns.Count); // alpha and bravo, scan and tune; charlie held
+        // bravo's allowed_hours name days: the tune scan gets the times, the scanner nothing (it could suggest a wider window).
         Assert.Contains(ssh.InputRuns, r => r.Machine.Name == "bravo" && r.Command.Contains("-Hours '22:00-07:00' -WorkRoot 'C:/lanq'", StringComparison.Ordinal));
+        Assert.Contains(ssh.InputRuns, r => r.Machine.Name == "bravo" && r.Command.EndsWith("-Json - -Redact\"", StringComparison.Ordinal));
 
         using var doc = JsonDocument.Parse(o);
         var rows = doc.RootElement.GetProperty("machines").EnumerateArray().ToDictionary(r => r.GetProperty("machine").GetString()!);
@@ -331,15 +342,18 @@ public class MakereadyTuneTests
         Assert.Matches(@"(?m)^charlie\s+linux\s+held\s+-\s+paused", o);
     }
 
-    /// <summary>H1: the single-machine report (no naming policy) and the --all row (camelCase) write lanqTune identically.</summary>
-    [Fact]
-    public async Task SingleAndAllWriteTheSameLanqTune()
+    /// <summary>H1: the single-machine report (no naming policy) and the --all row (camelCase) write lanqTune identically, Ok or failed.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SingleAndAllWriteTheSameLanqTune(bool timedOut)
     {
-        var (_, single, _, _) = await Run(["build-01", "--json", "--tune"]);
+        SshResult Tune() => timedOut ? new SshResult(124, "", TimedOut: true) : new SshResult(0, LinuxTune());
+        var (_, single, _, _) = await Run(["build-01", "--json", "--tune"], tuneResult: Tune());
         var ssh = new FakeSsh
         {
             Handler = (_, _) => new SshResult(0, Healthy),
-            InputHandler = (_, _, input) => IsTune(input) ? new SshResult(0, LinuxTune()) : new SshResult(0, MakereadyTests.Report()),
+            InputHandler = (_, _, input) => IsTune(input) ? Tune() : new SshResult(0, MakereadyTests.Report()),
         };
         var config = ConfigLoader.Parse(T.Yaml.Replace("allowed_hours: \"22:00-07:00\"", "", StringComparison.Ordinal));
         var o = new StringWriter();
@@ -348,14 +362,71 @@ public class MakereadyTuneTests
         var fromAll = row["report"]!["lanqTune"]!.DeepClone();
         var fromSingle = JsonNode.Parse(single)!["lanqTune"]!.DeepClone();
 
-        // The suggested rescan differs only by what was typed (no --all); there is none here (Ok), so the objects must be equal.
+        // TimedOut: both suggest lanq makeready build-01 --tune (no --config was typed), so the objects are equal there too.
         Assert.True(JsonNode.DeepEquals(fromSingle, fromAll), $"{fromSingle.ToJsonString()}\n{fromAll.ToJsonString()}");
-        foreach (var key in new[] { "status", "report", "nextSteps" })
+        Assert.Equal(timedOut ? "TimedOut" : "Ok", fromSingle["status"]!.GetValue<string>());
+        foreach (var key in timedOut ? new[] { "status", "error", "nextSteps" } : ["status", "report", "nextSteps"])
         {
             Assert.NotNull(fromSingle[key]);
         }
 
         Assert.NotNull(fromSingle["nextSteps"]![0]!["safeToRunUnattended"]);
         Assert.Null(fromSingle["NextSteps"]);
+    }
+
+    /// <summary>Ctrl+C during the tune scan: exit 130 and the one Cancelled object, never a partial report.</summary>
+    [Fact]
+    public async Task CancellingDuringTheTuneScanPrintsNoPartialReport()
+    {
+        using var cts = new CancellationTokenSource();
+        var ssh = new FakeSsh
+        {
+            Handler = (_, _) => new SshResult(0, Healthy),
+            InputHandler = (_, _, input) =>
+            {
+                if (!IsTune(input))
+                {
+                    return new SshResult(0, MakereadyTests.Report());
+                }
+
+                cts.Cancel();
+                throw new OperationCanceledException(cts.Token);
+            },
+        };
+        var o = new StringWriter();
+        var code = await Cli.Makeready(ParsedArgs.Parse(["makeready", "build-01", "--json", "--tune"]), T.Config, ssh, new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), cts.Token);
+        Assert.Equal(130, code);
+        Assert.Equal(2, ssh.InputRuns.Count);
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.Equal("Cancelled", doc.RootElement.GetProperty("status").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("schema", out _));
+        Assert.DoesNotContain("lanq-makeready/v1", o.ToString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>An ssh error (which can quote the worker's or ssh's stderr) quotes at most 256 sanitised characters of it in lanqTune.error.</summary>
+    [Fact]
+    public async Task ALongTuneErrorIsCapped()
+    {
+        var stderr = "kex_exchange_identification: " + new string('x', 5000) + "\u001b[2J";
+        var (code, o, _, _) = await Run(["build-01", "--json", "--tune"], tuneResult: new SshResult(255, "") { ErrorOutput = stderr });
+        Assert.Equal(0, code);
+        var error = JsonNode.Parse(o)!["lanqTune"]!["error"]!.GetValue<string>();
+        Assert.True(error.Length <= Cli.StderrLineMax + 64, error.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.DoesNotContain((char)27, error);
+    }
+
+    /// <summary>The scanner's own ssh error is capped the same way (the --all problem, the single-machine message).</summary>
+    [Fact]
+    public async Task ALongScannerErrorIsCapped()
+    {
+        var stderr = "kex_exchange_identification: " + new string('x', 5000);
+        var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, Healthy), InputHandler = (_, _, _) => new SshResult(255, "") { ErrorOutput = stderr } };
+        var o = new StringWriter();
+        var config = ConfigLoader.Parse(T.Yaml.Replace("allowed_hours: \"22:00-07:00\"", "", StringComparison.Ordinal));
+        var code = await Cli.Makeready(ParsedArgs.Parse(["makeready", "--all", "--json"]), () => config, ssh, new HealthProbe(ssh, TimeProvider.System), o, new StringWriter(), CancellationToken.None);
+        Assert.Equal(70, code);
+        var problem = JsonNode.Parse(o.ToString())!["machines"]![0]!["problem"]!.GetValue<string>();
+        Assert.True(problem.Length <= Cli.StderrLineMax + 64, problem.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Assert.True(Cli.ErrorText(new string('y', 5000)).Length <= Cli.ErrorTextMax);
     }
 }

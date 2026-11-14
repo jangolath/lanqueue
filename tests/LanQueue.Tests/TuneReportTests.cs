@@ -69,6 +69,7 @@ public class TuneReportTests
         { Report([Item("sys main", "OK")]), "id" },
         { Report([Item("sysmain", "OK")], summary: """{ "ok": 2, "info": 0, "warn": 0, "skip": 0 }"""), "summary" },
         { Report([Item("sysmain", "OK")], summary: "null"), "summary" },
+        { Report([Item("sysmain", "OK"), Item("sysmain", "WARN")]), "duplicate item id" },
         { Report([.. Enumerable.Range(0, 65).Select(n => Item($"x{n}", "OK"))]), "64" },
         { Report([Item("sysmain", "OK")]).Replace("\"items\"", "\"things\"", StringComparison.Ordinal), "items" },
         { Report([Item("sysmain", "OK")])[..200], "not valid JSON" }, // truncated output
@@ -195,5 +196,19 @@ public class TuneReportTests
         }
 
         Assert.Equal("services.unused", TuneReport.TuneFix(MachineOs.Linux, "services.unused", "INFO"));
+    }
+
+    [Theory]
+    [InlineData("12", 12)]
+    [InlineData("0", 0)]
+    [InlineData("3600", 3600)]
+    [InlineData("3601", null)]
+    [InlineData("-1", null)]
+    [InlineData("2147483647", null)]
+    [InlineData("null", null)]
+    public void SummarySecondsOutsideZeroToAnHourAreDropped(string seconds, int? expected)
+    {
+        var json = Report([Item("sysmain", "OK")], summary: $$"""{ "ok": 1, "info": 0, "warn": 0, "skip": 0, "seconds": {{seconds}} }""");
+        Assert.Equal(expected, TuneReport.Parse(json).ForJson(MachineOs.Windows).Summary!.Seconds);
     }
 }

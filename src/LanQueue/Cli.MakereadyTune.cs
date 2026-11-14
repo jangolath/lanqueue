@@ -21,12 +21,12 @@ public static partial class Cli
     {
         var name = configured ? machine.Name : machine.Ssh;
         MakereadyTuneJson Failed(string status, string error) =>
-            new(status, JobRunner.SafeLine(error), null, Steps(NextSteps.ForTune(status, 0, name, again)));
+            new(status, ErrorText(error), null, Steps(NextSteps.ForTune(status, 0, name, again)));
 
         SshResult r;
         try
         {
-            var command = TuneCommand(machine.Os, configured ? ScanHours(machine) : null, configured ? TuneWorkRoot(machine) : null);
+            var command = TuneCommand(machine.Os, configured ? ScanHours(machine, dropDays: true) : null, configured ? TuneWorkRoot(machine) : null);
             r = await ssh.RunWithInputAsync(machine, command, TuneScript(machine.Os), TuneReport.MaxChars, TuneTimeout, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
@@ -41,7 +41,7 @@ public static partial class Cli
 
         if (r.ExitCode == 255)
         {
-            return Failed("Unreachable", "ssh failed: " + SshErrors.Explain(r.ErrorOutput, machine.Ssh));
+            return Failed("Unreachable", "ssh failed: " + SshErrors.Explain(QuotableStderr(r.ErrorOutput), machine.Ssh));
         }
 
         try

@@ -111,16 +111,32 @@ public static partial class Cli
             : $"sh -s -- --json - --redact{extra}";
     }
 
+    /// <summary>The longest line of ssh's or the worker's stderr lanq quotes in a scan or tune error.</summary>
+    internal const int StderrLineMax = 256;
+
+    /// <summary>The longest whole error text (lanq's own guidance, such as the known_hosts steps, plus at most one quoted line).</summary>
+    internal const int ErrorTextMax = 1024;
+
+    /// <summary>An error line for the report, the --all table and lanqTune: sanitised, then cut to <see cref="ErrorTextMax"/>.</summary>
+    internal static string ErrorText(string text) => Truncate(JobRunner.SafeLine(text), ErrorTextMax);
+
+    /// <summary>stderr as lanq may quote it: at most 64 lines, each sanitised and cut to <see cref="StderrLineMax"/>.</summary>
+    internal static string QuotableStderr(string stderr) => string.Join(
+        '\n',
+        stderr.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Take(64).Select(l => Truncate(JobRunner.SafeLine(l), StderrLineMax)));
+
     /// <summary>
-    /// The -Hours lanq passes for a configured machine (0.12.0): the HH:mm-HH:mm window when every allowed_hours entry has the same times (day
-    /// prefixes dropped), normalised from the parsed entry; null without allowed_hours, with different windows, or for an ad-hoc --ssh PC.
+    /// The -Hours lanq passes for a configured machine (0.12.0), normalised HH:mm-HH:mm from the parsed entries; null without allowed_hours or
+    /// with different windows. For the scanner (<paramref name="dropDays"/> false) only when no entry has days, so the allowed_hours it
+    /// suggests can never be wider than the configured one; for the tune scan (true) the days are dropped, as it only compares schedules
+    /// with the window's times.
     /// </summary>
-    internal static string? ScanHours(Machine m)
+    internal static string? ScanHours(Machine m, bool dropDays)
     {
         string? common = null;
         foreach (var entry in m.AllowedHours ?? [])
         {
-            if (!HoursWindow.TryParse(entry, out var w) || w.IsSingleInstant || (common is not null && common != w.TimeText))
+            if (!HoursWindow.TryParse(entry, out var w) || w.IsSingleInstant || (!dropDays && w.HasDays) || (common is not null && common != w.TimeText))
             {
                 return null;
             }
@@ -297,9 +313,9 @@ public static partial class Cli
         SshResult r;
         try
         {
-            // 0.12.0: a configured machine's job window goes to the scanner as -Hours (it then suggests that allowed_hours and compares
-            // Windows Update's active hours with it); an ad-hoc PC (no policy) gets none.
-            var hours = policy is null ? null : ScanHours(machine);
+            // 0.12.0: a configured machine's one every-day window goes to the scanner as -Hours (it then suggests that allowed_hours and
+            // compares Windows Update's active hours with it); day-limited windows and an ad-hoc PC (no policy) get none.
+            var hours = policy is null ? null : ScanHours(machine, dropDays: false);
             r = await ssh.RunWithInputAsync(machine, MakereadyCommand(machine.Os, hours), MakereadyScript(machine.Os), MakereadyReport.MaxChars, MakereadyTimeout, ct)
                 .ConfigureAwait(false);
         }
@@ -310,9 +326,9 @@ public static partial class Cli
 
         if (r.TimedOut || r.ExitCode == 255)
         {
-            var why = JobRunner.SafeLine(r.TimedOut
+            var why = ErrorText(r.TimedOut
                 ? "timed out after " + ProcessSshClient.Describe(MakereadyTimeout)
-                : "ssh failed: " + SshErrors.Explain(r.ErrorOutput, machine.Ssh));
+                : "ssh failed: " + SshErrors.Explain(QuotableStderr(r.ErrorOutput), machine.Ssh));
             return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why, SetupWouldHelp: !r.TimedOut && SshErrors.SetupWouldHelp(r.ErrorOutput));
         }
 
@@ -323,8 +339,8 @@ public static partial class Cli
         }
         catch (FormatException ex)
         {
-            var detail = FirstLine(r.ErrorOutput);
-            var why = JobRunner.SafeLine(
+            var detail = FirstLine(QuotableStderr(r.ErrorOutput));
+            var why = ErrorText(
                 $"unusable lanq-makeready report ({ex.Message}; script exit {r.ExitCode.ToString(CultureInfo.InvariantCulture)})"
                 + (detail.Length > 0 ? ": " + detail : ""));
             return new(70, null, JobRunner.SafeLine($"{name}: {why}"), why, Unusable: true);

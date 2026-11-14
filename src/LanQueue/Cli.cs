@@ -735,7 +735,7 @@ public static partial class Cli
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
-        A configured machine's allowed_hours window (the same HH:mm-HH:mm in every entry) goes to the check as -Hours.
+        A configured machine's allowed_hours goes to the check as -Hours when it is one every-day HH:mm-HH:mm window (no days named).
         makeready --tune also runs the read-only lanq-makeready-tune scan after a report (the same way, on ssh stdin; up to 150 s): what slows
         the PC down as a build worker (power plan, PC-maker updaters, Defender exclusions and scan times, inotify, journald, ...), OK / INFO /
         WARN / SKIP, never FAIL. The text adds a tune section (WARN and INFO items with advice and fix ids; --all a TUNE column); --json adds
