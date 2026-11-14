@@ -35,9 +35,9 @@ public sealed partial class GitPayloadBuilder
     /// <summary>The text key-block scan of the snapshot's temporary index (<paramref name="env"/>) against HEAD.</summary>
     private static async Task<TextKeyScanResult> ScanTextKeyBlocksAsync(string top, Dictionary<string, string> env, CancellationToken ct)
     {
-        var (raw, numstat) = ParseRawNumstat(
+        var (raw, numstat, undecodable) = ParseRawNumstat(
             await Git(top, env, ct, [.. TextDiff, "--raw", "--numstat", "-z", "--full-index", "--no-abbrev", "HEAD"]).ConfigureAwait(false));
-        var (changed, undecodable) = GrepCandidates(raw, numstat);
+        var changed = GrepCandidates(raw, numstat);
         var keyed = await KeyBearingPathsAsync(top, env, changed, ct).ConfigureAwait(false);
         if (keyed.Count == 0)
         {
@@ -51,32 +51,15 @@ public sealed partial class GitPayloadBuilder
 
     /// <summary>
     /// The files that can need a read, to grep: changed (not added or deleted) text files with added lines, or with an unreadable count. A
-    /// path git gave in bytes that are not UTF-8 (decoded with U+FFFD) cannot be named back to git, so it is a scan-incomplete finding
-    /// instead (fails closed).
+    /// path holding U+FFFD (bytes that are not UTF-8) cannot be named back to git and is left out: <see cref="ParseRawNumstat"/> has already
+    /// made it a scan-incomplete finding.
     /// </summary>
-    internal static (List<string> Paths, List<SecretFinding> Undecodable) GrepCandidates(
-        IReadOnlyDictionary<string, RawEntry> raw, IReadOnlyDictionary<string, long?> numstat)
-    {
-        var paths = new List<string>();
-        var undecodable = new List<SecretFinding>();
-        foreach (var (path, e) in raw.OrderBy(r => r.Key, StringComparer.Ordinal))
-        {
-            if (e.Status is 'A' or 'D' || (numstat.TryGetValue(path, out var added) && added is null or 0))
-            {
-                continue;
-            }
-
-            if (path.Contains('�', StringComparison.Ordinal))
-            {
-                undecodable.Add(new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(path)));
-                continue;
-            }
-
-            paths.Add(path);
-        }
-
-        return (paths, undecodable);
-    }
+    internal static List<string> GrepCandidates(IReadOnlyDictionary<string, RawEntry> raw, IReadOnlyDictionary<string, long?> numstat) =>
+        [.. raw.Where(r => r.Value.Status is not ('A' or 'D')
+                && !(numstat.TryGetValue(r.Key, out var added) && added is null or 0)
+                && !r.Key.Contains('�', StringComparison.Ordinal))
+            .Select(r => r.Key)
+            .Order(StringComparer.Ordinal)];
 
     /// <summary>The most characters of paths given to one git grep (Windows limits a command line to 32,767).</summary>
     private const int GrepPathChars = 16_000;
@@ -116,12 +99,23 @@ public sealed partial class GitPayloadBuilder
     /// status", then its path, or for R and C its old and new paths); any other token is a numstat record ("added TAB deleted TAB path", or
     /// "added TAB deleted TAB" then the old and new paths). A record's paths are always taken as its next tokens, so a path that starts with
     /// ':' or holds a tab is never read as a record. Both maps are keyed by the new path; a numstat count is null for a file git shows as
-    /// binary ("-") and -1 when it cannot be read.
+    /// binary ("-") and -1 when it cannot be read. Before any filtering, every path holding U+FFFD (git gave bytes that are not UTF-8, which
+    /// cannot be named back to git, and two of which can decode to the same string) and every new path seen twice in raw or in numstat is a
+    /// scan-incomplete finding (fails closed), once per path.
     /// </summary>
-    internal static (Dictionary<string, RawEntry> Raw, Dictionary<string, long?> Numstat) ParseRawNumstat(string output)
+    internal static (Dictionary<string, RawEntry> Raw, Dictionary<string, long?> Numstat, List<SecretFinding> Undecodable) ParseRawNumstat(string output)
     {
         var raw = new Dictionary<string, RawEntry>(StringComparer.Ordinal);
         var numstat = new Dictionary<string, long?>(StringComparer.Ordinal);
+        var flagged = new SortedSet<string>(StringComparer.Ordinal);
+        void Check(string path, bool duplicate)
+        {
+            if (duplicate || path.Contains('�', StringComparison.Ordinal))
+            {
+                flagged.Add(path);
+            }
+        }
+
         var parts = output.Split('\0');
         for (var i = 0; i < parts.Length; i++)
         {
@@ -144,6 +138,12 @@ public sealed partial class GitPayloadBuilder
 
                 if (status != '?')
                 {
+                    if (pair)
+                    {
+                        Check(parts[i + 1], duplicate: false);
+                    }
+
+                    Check(parts[at], raw.ContainsKey(parts[at]));
                     raw[parts[at]] = new RawEntry(f[0], f[1], f[2], f[3], status, pair ? parts[i + 1] : null);
                 }
 
@@ -173,10 +173,11 @@ public sealed partial class GitPayloadBuilder
                 path = n[2];
             }
 
+            Check(path, numstat.ContainsKey(path));
             numstat[path] = n[0] == "-" ? null : long.TryParse(n[0], NumberStyles.None, CultureInfo.InvariantCulture, out var added) ? added : -1;
         }
 
-        return (raw, numstat);
+        return (raw, numstat, [.. flagged.Select(p => new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(p)))]);
     }
 
     /// <summary>

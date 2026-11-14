@@ -261,11 +261,12 @@ internal static class BlobScan
 
     /// <summary>
     /// Whether the block that starts at <paramref name="begin"/> in a text file is a key block with a new line (0.10.1). It counts only when
-    /// it is terminated: a line holding <c>-----END</c> (any case) comes within <see cref="TextMaxBlockLines"/> lines, and every line between
-    /// BEGIN and END looks like key material (<see cref="LooksLikeKeyLine"/>). The new line is one of those lines or the END line. A real key
-    /// replaced in place keeps its END line and its base64 body; a header string in code (a parser, a scanner, a test), with or without a
-    /// footer string further down, has code between them, so ordinary edits near it are never refused. A BEGIN line that itself holds
-    /// <c>-----END</c> (a one-line JSON or escaped key) has no block.
+    /// it is terminated, a line holding <c>-----END</c> (any case) within <see cref="TextMaxBlockLines"/> lines, and every line strictly
+    /// between BEGIN and END looks like key material (<see cref="KeyLine"/>), at least one of them a base64 line of
+    /// <see cref="MinBodyChars"/> or more characters. The new line must be one of the lines strictly between BEGIN and END: an edit to the
+    /// END line alone does not count. A real key replaced in place keeps its END line and its base64 body; header and footer strings in code
+    /// (a parser, a scanner, a test), adjacent or with code between them, are no key, so ordinary edits near them are never refused. A BEGIN
+    /// line that itself holds <c>-----END</c> (a one-line JSON or escaped key) has no block.
     /// </summary>
     private static bool TextKeyBlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
     {
@@ -274,45 +275,87 @@ internal static class BlobScan
             return false;
         }
 
-        var changed = false;
+        bool changed = false, body = false;
         for (var j = begin + 1; j < lines.Count && j <= begin + TextMaxBlockLines; j++)
         {
-            var isNew = !known.Contains(lines[j]);
             if (lines[j].Contains("-----END", StringComparison.OrdinalIgnoreCase))
             {
-                return changed || isNew;
+                return changed && body;
             }
 
-            if (!LooksLikeKeyLine(lines[j]))
+            var length = KeyLine(lines[j]);
+            if (length < 0)
             {
                 return false;
             }
 
-            changed |= isNew;
+            body |= length >= MinBodyChars;
+            changed |= !known.Contains(lines[j]);
         }
 
         return false; // no END line within the cap: not a key block
     }
 
+    /// <summary>A text key block needs at least one base64 body line this long (after stripping), so header and footer strings alone are no key.</summary>
+    internal const int MinBodyChars = 16;
+
+    /// <summary>Whether a line can sit inside an armored key (0.10.1): <see cref="KeyLine"/> is not -1.</summary>
+    internal static bool LooksLikeKeyLine(string line) => KeyLine(line) >= 0;
+
+    /// <summary>Prefixes stripped from a key line, one at a time (longer first where they overlap).</summary>
+    private static readonly string[] KeyLinePrefixes = ["//", "||", "..", "- ", "#", "*", ">", "+", ".", "&", ",", ";", "\"", "'"];
+
+    /// <summary>Suffixes stripped from a key line, one at a time (longer first where they overlap).</summary>
+    private static readonly string[] KeyLineSuffixes =
+    [
+        @"\r\n", @"\n", "&#xD;", "&#xd;", "&#13;", "&#xA;", "&#xa;", "&#10;", "& _", "||", "..", @"\", "+", ".", "&", "_", ",", ";", "\"", "'",
+    ];
+
     /// <summary>
-    /// Whether a line can sit inside an armored key (0.10.1): after stripping indentation (a YAML block scalar too), surrounding quotes and
-    /// string-concatenation syntax (<c>"</c>, <c>'</c>, <c>+</c>, <c>,</c>, <c>;</c>) and a trailing <c>\n</c> or <c>\r\n</c> escape, it
-    /// is blank, base64 (<c>[A-Za-z0-9+/=]</c>) or an armor header (<c>Name: value</c>, such as Proc-Type, DEK-Info, Comment, Version).
+    /// What a line inside an armored key is (0.10.1): -1 when it cannot be key material, 0 for a blank line or an armor header
+    /// (<c>Name: value</c>, such as Proc-Type, DEK-Info, Comment, Version), else the length of its base64 (<c>[A-Za-z0-9+/=]</c>). First,
+    /// repeatedly, whitespace and the syntax a key is quoted or commented in are stripped: quotes and a one-letter string prefix or suffix
+    /// (<c>b"</c>, <c>r"</c>, <c>"u8</c>), concatenation (<c>+</c>, <c>.</c>, <c>..</c>, <c>&amp;</c>, VB's <c>&amp; _</c>, <c>||</c>, <c>,</c>,
+    /// <c>;</c>), a trailing <c>\n</c> or <c>\r\n</c> escape, a trailing <c>\</c> continuation, XML character references for CR and LF, comment
+    /// and quote markers (<c>#</c>, <c>//</c>, <c>*</c>, <c>&gt;</c>) and a YAML sequence dash.
     /// </summary>
-    internal static bool LooksLikeKeyLine(string line)
+    internal static int KeyLine(string line)
     {
         var t = line.AsSpan();
         while (true)
         {
             var before = t.Length;
-            t = t.Trim().Trim("\"',;+");
-            if (t.EndsWith(@"\r\n", StringComparison.Ordinal))
+            t = t.Trim();
+            foreach (var p in KeyLinePrefixes)
             {
-                t = t[..^4];
+                if (t.StartsWith(p, StringComparison.Ordinal))
+                {
+                    t = t[p.Length..];
+                    break;
+                }
             }
-            else if (t.EndsWith(@"\n", StringComparison.Ordinal))
+
+            foreach (var s in KeyLineSuffixes)
             {
-                t = t[..^2];
+                if (t.EndsWith(s, StringComparison.Ordinal))
+                {
+                    t = t[..^s.Length];
+                    break;
+                }
+            }
+
+            if (t.Length >= 2 && char.IsAsciiLetter(t[0]) && t[1] is '"' or '\'')
+            {
+                t = t[2..]; // b"..., r'...
+            }
+
+            for (var k = 1; k <= 2; k++)
+            {
+                if (t.Length > k && t[^(k + 1)] is '"' or '\'' && IsAsciiLettersOrDigits(t[^k..]))
+                {
+                    t = t[..^k]; // ..."u8, ..."L
+                    break;
+                }
             }
 
             if (t.Length == before)
@@ -323,7 +366,7 @@ internal static class BlobScan
 
         if (t.IsEmpty)
         {
-            return true;
+            return 0;
         }
 
         var base64 = true;
@@ -338,18 +381,31 @@ internal static class BlobScan
 
         if (base64)
         {
-            return true;
+            return t.Length;
         }
 
         var colon = t.IndexOf(": ", StringComparison.Ordinal);
         if (colon <= 0)
         {
-            return false;
+            return -1;
         }
 
         foreach (var c in t[..colon])
         {
             if (!(char.IsAsciiLetter(c) || c == '-'))
+            {
+                return -1;
+            }
+        }
+
+        return 0;
+    }
+
+    private static bool IsAsciiLettersOrDigits(ReadOnlySpan<char> s)
+    {
+        foreach (var c in s)
+        {
+            if (!char.IsAsciiLetterOrDigit(c))
             {
                 return false;
             }
