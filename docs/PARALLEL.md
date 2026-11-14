@@ -7,7 +7,7 @@ who uses it and for whatever else they are building there.
 ```bash
 git worktree add ../app-parser -b fix/parser       # one worktree per agent or task
 cd ../app-parser
-lanq run --json --no-wake --needs dotnet -- dotnet test --filter "FullyQualifiedName~Parser"
+lanq run --json --no-wake --min-size heavy --needs dotnet -- dotnet test --filter "FullyQualifiedName~Parser"
 ```
 
 This page covers how to lay out the worktrees, how to send every kind of check to the pool, how many tasks a pool can
@@ -37,12 +37,34 @@ git worktree list
 
 The point is that nothing heavy runs on the dev PC. That means the quick checks too, not only the full suite.
 
+### Keep the work off your own PC
+
+When the pool includes a worker that runs on the dev machine itself (a local container or VM, such as the
+[Docker Linux worker](#a-local-container-worker)), every build and test run from a parallel agent must carry
+`--min-size heavy` (or a `--needs` capability the local worker lacks). Without it, the scheduler may pick the local
+worker, and the "quiet dev machine" is no longer quiet.
+
+This works because the local worker declares `size: medium`, and a declared size wins over the probe. Your real
+workers must be `heavy`: probed (16 GB or more with 4+ cores) or declared `size: heavy` in `machines.yml`. Check with
+`lanq health --needs dotnet --min-size heavy --json`: the local worker must show `eligible: false` (`wrong_size`) and
+the real ones `true`.
+
+For a plan, the jobs' own `needs:`, `size:` and `min_size:` in `lanq.yml` still apply, and `lanq run --plan` takes
+`--min-size heavy` (0.10.0) to narrow every job further; it never widens one. It does not take `--needs`. So:
+
+- `lanq run --plan --json --no-wake --min-size heavy` is the form to use.
+- A plan whose jobs already need a capability the local worker lacks (for example `needs: [dotnet, windows]` when the
+  local worker is Linux) stays off it without the option; adding it does no harm when every real worker is heavy.
+- A job that declares `size: [light, medium]` (a cheap guard, say) has no size left under `--min-size heavy`, and the
+  plan ends before anything is sent: `NoCapacity` (75, `retryable: false`). Narrow with `--on` instead, naming only
+  the real workers (`lanq run --plan --json --no-wake --on big-01,big-02`), and keep the local worker's name out of it.
+
 ### Targeted tests while you work
 
 Run only the tests that cover the change, as often as you like:
 
 ```bash
-lanq run --json --log-tail 40 --no-wake --needs dotnet -- dotnet test --filter "FullyQualifiedName~Parser|FullyQualifiedName~Lexer"
+lanq run --json --log-tail 40 --no-wake --min-size heavy --needs dotnet -- dotnet test --filter "FullyQualifiedName~Parser|FullyQualifiedName~Lexer"
 ```
 
 The quotes are for your shell; lanq receives `FullyQualifiedName~Parser|FullyQualifiedName~Lexer` as one argument.
@@ -52,18 +74,19 @@ The quotes are for your shell; lanq receives `FullyQualifiedName~Parser|FullyQua
 A check that fails only in CI costs a whole CI round. Run it on the pool before you push:
 
 ```bash
-lanq run --json --no-wake --needs dotnet -- dotnet format --verify-no-changes
-lanq run --json --no-wake --needs dotnet --min-size heavy -- dotnet build -c Release -warnaserror
+lanq run --json --no-wake --min-size heavy --needs dotnet -- dotnet format --verify-no-changes
+lanq run --json --no-wake --min-size heavy --needs dotnet -- dotnet build -c Release -warnaserror
 ```
 
-`--min-size heavy` keeps a big build off small machines (see [Routing jobs](../README.md#routing-jobs)).
+`--min-size heavy` keeps these off a worker on your own PC and off small machines (see
+[Routing jobs](../README.md#routing-jobs)).
 
 ### The full suite
 
 When the targeted runs pass, run the repository's whole plan once:
 
 ```bash
-lanq run --plan --json --log-tail 40 --no-wake
+lanq run --plan --json --log-tail 40 --no-wake --min-size heavy
 ```
 
 ### Allowlist the checkers up front
@@ -121,7 +144,7 @@ shards can hold three slots at once, which is a whole three-slot pool. So:
 every machine. Instead:
 
 - give the run a `--wait` (seconds) so lanq queues it for you, checking every 15 seconds:
-  `lanq run --json --no-wake --wait 600 --needs dotnet -- dotnet test`;
+  `lanq run --json --no-wake --wait 600 --min-size heavy --needs dotnet -- dotnet test`;
 - or run the `wait` step in `nextSteps` once, then tell the developer.
 
 `retryable: false` means no machine can ever take the job as asked (a missing capability, a size no machine has):
@@ -146,8 +169,9 @@ are trying to keep quiet. A job there is a heavy job on your PC like any other. 
     size: medium         # a declared size wins over the probe, so --min-size heavy work stays off it
 ```
 
-The setup script's `-Register` step writes these values. Send it Linux-only work (`--needs linux`), and keep `--min-size heavy` on the
-big builds so they go to real workers.
+The setup script's `-Register` step writes these values. With such a worker in the pool, follow
+[Keep the work off your own PC](#keep-the-work-off-your-own-pc): parallel agents add `--min-size heavy` to every build
+and test run. Send the local worker only work you start on purpose, when the PC is otherwise idle.
 
 ## Sharding and speed
 
@@ -176,7 +200,7 @@ explains `--target-minutes`.
   the run locally (nothing is sent). Build the arguments as an explicit array and pass that:
 
   ```powershell
-  $lanqArgs = @('run', '--json', '--no-wake', '--needs', 'dotnet', '--', 'dotnet', 'test', '--filter', 'FullyQualifiedName~Parser')
+  $lanqArgs = @('run', '--json', '--no-wake', '--min-size', 'heavy', '--needs', 'dotnet', '--', 'dotnet', 'test', '--filter', 'FullyQualifiedName~Parser')
   & lanq $lanqArgs
   ```
 
@@ -198,8 +222,12 @@ explains `--target-minutes`.
 The rules, in short. They match [AGENTS.md](../AGENTS.md) and the snippets in [agents/](agents/).
 
 - Never run heavy builds or tests on the dev PC. Use `lanq run --json --no-wake ...` for every build, test and check.
+- When the pool has a worker on the dev PC itself (a local container or VM), add `--min-size heavy` to every run and
+  plan (or use a `--needs` capability it lacks). If that leaves a plan job no machine (`NoCapacity`,
+  `retryable: false`), ask the developer which `--on` list of real workers to use. Never send work to the local
+  worker unless the developer asks.
 - Work only in your own worktree. Never check out, switch, reset or stash in a worktree another agent or person uses.
-- Run targeted tests while you work; run the full plan (`lanq run --plan --json --no-wake`) once, when they pass.
+- Run targeted tests while you work; run the full plan (`lanq run --plan --json --no-wake --min-size heavy`) once, when they pass.
 - On `NoCapacity` with `retryable: true`, use `--wait` or the `wait` step once; never retry in a loop.
 - Never edit `machines.yml`, `lanq.yml` or the allowlists. A checker that is refused: ask the developer to allow it.
 
@@ -211,7 +239,7 @@ run to a log in its worktree (keep it gitignored or under `.lanq/`):
 ```text
 utc_start             wall_s  kind      machines         status     tests
 2026-01-10T09:12:03Z  58.2    targeted  big-01           Completed  P187/F0
-2026-01-10T09:20:41Z  147.0   full      big-01,small-01  Completed  P2950/F0/S113
+2026-01-10T09:20:41Z  147.0   full      big-01,big-02    Completed  P2950/F0/S113
 ```
 
 `durationSeconds`, `machine` and `status` come from the `--json` object; with `--results` the counts come from
@@ -219,8 +247,10 @@ utc_start             wall_s  kind      machines         status     tests
 
 ## Worked example: three agents, three slots
 
-The pool: `big-01` (`max_jobs: 2`) and `small-01` (`max_jobs: 1`), three slots. The repository's `lanq.yml` has a
-guard job and a two-shard test job. The developer has allowlisted `dotnet build`, `dotnet test` and `dotnet format`.
+The pool: `big-01` (`max_jobs: 2`) and `big-02` (`max_jobs: 1`), both heavy, three slots; plus `linux-local`, the
+Docker worker on the dev PC (`size: medium`, `max_jobs: 1`), which the agents keep off with `--min-size heavy`. The
+repository's `lanq.yml` has a guard job and a two-shard test job, neither with a `size:` of its own. The developer has
+allowlisted `dotnet build`, `dotnet test` and `dotnet format`.
 
 ```bash
 git worktree add ../app-parser -b fix/parser          # agent A
@@ -229,11 +259,12 @@ git worktree add ../app-docs   -b docs/install        # agent C
 ```
 
 1. A and B each edit code and run targeted tests from their own worktree, about once every few minutes:
-   `lanq run --json --no-wake --wait 600 --needs dotnet -- dotnet test --filter "FullyQualifiedName~Parser"`.
+   `lanq run --json --no-wake --wait 600 --min-size heavy --needs dotnet -- dotnet test --filter "FullyQualifiedName~Parser"`.
    They hold one slot each for a minute or two.
-2. C changes documentation and sample code, and runs `dotnet format --verify-no-changes` on the pool: the third slot.
-3. A's targeted tests pass. A runs `lanq run --plan --json --no-wake --wait 600`. The guard and two shards need all
-   three slots, so the plan's jobs start as B's and C's runs finish; meanwhile B's next targeted run waits within its
+2. C changes documentation and sample code, and runs the format check on the pool, the third slot:
+   `lanq run --json --no-wake --wait 600 --min-size heavy --needs dotnet -- dotnet format --verify-no-changes`.
+3. A's targeted tests pass. A runs `lanq run --plan --json --no-wake --wait 600 --min-size heavy`. The guard and two
+   shards need all three slots, so the plan's jobs start as B's and C's runs finish; meanwhile B's next targeted run waits within its
    `--wait`.
 4. The plan completes. A reports the result and pushes. B and C carry on.
 

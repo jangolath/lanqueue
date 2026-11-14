@@ -5,7 +5,8 @@
 ### Documentation
 
 - **Parallel development.** New [docs/PARALLEL.md](docs/PARALLEL.md): several developers or AI agents in parallel git
-  worktrees on one PC, with every build, test run and format check on the lanq pool (allowlisting checkers up front,
+  worktrees on one PC, with every build, test run and format check on the lanq pool (`--min-size heavy` on every run
+  and plan when a worker runs on the dev PC itself, allowlisting checkers up front,
   counting `max_jobs` slots, running the full plan after targeted tests, a local Docker worker, what sharding buys
   when compile time dominates, pitfalls, agent rules and a worked example). Linked from the README and `llms.txt`;
   AGENTS.md, docs/AGENTS-GUIDE.md, the lanq skill and both instruction-file snippets gain a short "Parallel

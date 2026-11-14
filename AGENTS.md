@@ -138,8 +138,12 @@ When several agents work on one PC at once (see [docs/PARALLEL.md](docs/PARALLEL
   person uses. lanq ships your worktree's HEAD plus its uncommitted changes; no setup is needed.
 - Never run heavy builds or tests on the dev PC. Every build, test run and check (`dotnet format
   --verify-no-changes` and the like) goes through `lanq run --json --no-wake ...`.
-- Run targeted tests while you work; run the full plan (`lanq run --plan --json --no-wake`) once they pass, since a
-  plan can take several slots.
+- When the pool has a worker on the dev PC itself (a local container or VM), every build and test run carries
+  `--min-size heavy` (or a `--needs` capability that worker lacks); otherwise lanq may pick it and the dev PC is
+  no longer quiet. For a plan: `lanq run --plan --json --no-wake --min-size heavy`; if that leaves a job no machine
+  (`NoCapacity`, `retryable: false`), ask the developer, who may narrow with `--on` and the real workers instead.
+- Run targeted tests while you work; run the full plan (`lanq run --plan --json --no-wake --min-size heavy`) once they
+  pass, since a plan can take several slots.
 - The pool is shared: on `NoCapacity` with `retryable: true`, use `--wait` or the `wait` step once; never retry in a
   loop.
 - A checker that is `Rejected` because it is not allowlisted: ask the developer. Never edit `machines.yml`,

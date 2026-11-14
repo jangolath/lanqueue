@@ -203,8 +203,14 @@ When several agents share one PC, each in its own git worktree (LanQueue's docs/
   person uses. lanq ships your worktree's HEAD plus its uncommitted changes; no setup is needed.
 - Never run heavy builds or tests locally. Every build, test run and check (for example
   `dotnet format --verify-no-changes`) goes through `lanq run --json --no-wake ...`.
-- Run targeted tests while you work (`-- dotnet test --filter "FullyQualifiedName~X|FullyQualifiedName~Y"`), and the
-  full plan (`lanq run --plan --json --no-wake`) once they pass: a plan can take several slots.
+- When the pool has a worker on the dev PC itself (a local container or VM), every build and test run carries
+  `--min-size heavy` (or a `--needs` capability that worker lacks); otherwise lanq may pick it and the dev PC is
+  no longer quiet. For a plan: `lanq run --plan --json --no-wake --min-size heavy`; if that leaves a job no machine
+  (`NoCapacity`, `retryable: false`), ask the developer, who may narrow with `--on` and the real workers instead.
+- Run targeted tests while you work
+  (`lanq run --json --no-wake --min-size heavy --needs dotnet -- dotnet test --filter "FullyQualifiedName~X|FullyQualifiedName~Y"`),
+  and the full plan (`lanq run --plan --json --no-wake --min-size heavy`) once they pass: a plan can take several
+  slots.
 - The pool is shared: on `NoCapacity` with `retryable: true`, use `--wait` or the `wait` step once; never retry in a
   loop.
 - A checker refused as not allowlisted: ask the developer. Never edit the machines file, `lanq.yml` or the allowlists.
