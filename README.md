@@ -165,7 +165,8 @@ CI restores in locked mode, and every GitHub Action and build container is pinne
 
 Before your first job, each worker needs an SSH server, git (or only `tar` in archive mode) and the toolchain your jobs use; it does **not** need
 GitHub access, Docker (unless your jobs use it) or lanqueue itself. Checklist and setup steps:
-[docs/WORKERS.md](docs/WORKERS.md).
+[docs/WORKERS.md](docs/WORKERS.md). No Linux machine? A Windows PC with Docker Desktop can run one in a container
+([a Linux worker in Docker](docs/WORKERS.md#a-linux-worker-in-docker-on-your-own-pc)).
 
 1. Write a starter config with `lanq init`: it goes to the per-user file lanq reads without flags
    (`~/.config/lanq/machines.yml`, or `$XDG_CONFIG_HOME/lanq/machines.yml`; on Windows `%APPDATA%\lanq\machines.yml`),

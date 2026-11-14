@@ -205,6 +205,101 @@ environment, so other users of the worker can see them: they are for settings, n
 A build script may read them, for example to tag its output. On Linux lanq also uses it to recognise the job's processes when it stops or cleans up a job whose group leader has already gone, so do not remove it from
 the environment of long-running helper processes you want stopped with the job.
 
+## A Linux worker in Docker on your own PC
+
+No Linux machine on the network? `scripts/docker-linux-worker/` runs one in a container on your Windows PC (Docker
+Desktop, Linux containers): Ubuntu 24.04 with the .NET 10 SDK (base image pinned by digest), git and sshd, key-only
+login as the user `lanq` (no password, no sudo), `work_root` `/srv/lq` on a Docker volume.
+
+```powershell
+# PowerShell, on your PC (Docker Desktop running). Prints no key material.
+scripts\docker-linux-worker\setup.ps1 -Name linux-01 -Port 2222 -KeyEnv LANQ_KEY_LINUX01 -Memory 8g -Cpus 4
+# Then, yourself (it edits your lanq config): adds the entry and keeps it only when lanq doctor --remote passes for it.
+scripts\docker-linux-worker\setup.ps1 -Name linux-01 -Port 2222 -KeyEnv LANQ_KEY_LINUX01 -Register
+lanq makeready linux-01
+```
+
+What `setup.ps1` does (its header has the details):
+
+- **Key.** A new ed25519 key `~\.ssh\lanq-linux-01_ed25519` without a passphrase. It has an owner-only ACL, and the user
+  variable `LANQ_KEY_LINUX01` holds its path. `lanq health` warns about the missing passphrase. That is the trade-off:
+  - the container is published only on `127.0.0.1`, so nothing else on the network can reach it;
+  - the key line inside carries `restrict`: no pty and no forwarding of any kind.
+
+  An existing key is reused, never overwritten. An existing `LANQ_KEY_LINUX01` that points elsewhere is never
+  changed unless you add `-ReplaceKeyEnv` (`-Force` does not).
+- **Host key.** It is made on your PC, under `%LOCALAPPDATA%\lanq-docker-worker\<name>`, and mounted read-only under
+  `/root` (0700) in the container, so job code running as `lanq` cannot read it. The container keeps the same host key
+  across rebuilds, and it is known before the first login.
+- **Limits.**
+  - `--memory`/`--memory-swap` 8 GB;
+  - `--cpus 4` with a `--cpuset-cpus` of the same size, the last 4 CPUs by default, so `nproc` inside says 4;
+  - `--pids-limit`, `no-new-privileges`, `--init` and `--restart unless-stopped`;
+  - `--cap-drop ALL`, keeping only the six capabilities sshd and the entrypoint need: CHOWN, DAC_OVERRIDE, FOWNER,
+    SETUID, SETGID and SYS_CHROOT.
+- **ssh.** It writes `~\.ssh\config.d\lanq-<name>`:
+  - `HostName 127.0.0.1`, the port, `HostKeyAlias lanq-<name>`;
+  - a private `UserKnownHostsFile` `~\.ssh\known_hosts.d\lanq-<name>`, with an owner-only ACL (Windows OpenSSH checks
+    included files).
+
+  It adds an `Include` line at the **top** of `~\.ssh\config` after a backup. The line goes in front of the file's
+  bytes as they are, and the file's ACL is not changed; a UTF-16 file is refused. It then checks the result with
+  `ssh -G` and one login, and prints the steps to undo the setup when either fails. The machine's `ssh:` is `lanq@lanq-<name>`, because lanq's `ssh:` has no port field.
+- **`-Register`.** It is separate, and the owner runs it. For your `machines.yml`, and `machines.smoke.yml` when there
+  is one, it:
+  - checks every file first, and refuses them all when one cannot be edited safely: flow style, `machines:` not last,
+    or the name already there;
+  - backs each file up;
+  - appends the entry: `os: linux`, `capabilities: [dotnet, linux]`, `max_jobs: 1`, `transfer: git`, **`size:
+    medium`**, and `DOTNET_CLI_TELEMETRY_OPTOUT`/`DOTNET_NOLOGO` under `env:`;
+  - runs `lanq doctor --config <file> --remote --json`, for 5 minutes at most;
+  - restores **every** file from its backup unless each config loads and this machine has no failing check.
+
+  It prints only "added" or "refused". Job settings belong under the machine's `env:`: sshd does not pass `docker -e`
+  or the image's `ENV` on to a login.
+
+What it proves and what it does not:
+
+- **It proves:** your code builds and tests on Linux (glibc, case-sensitive paths, `/` separators, Linux line endings in
+  tools) with the same lanq flow as a real worker. Jobs run with lanq's Linux scripts (`timeout`, `setsid`, `nice`,
+  `ionice`) and the same `pgrep`/sshd checks.
+- **It does not prove:** another distribution or an older glibc, other CPUs, real hardware, systemd services, a real
+  network between machines, or anything that needs root or Docker inside the job.
+- **It shares this PC.** A build in the container is a heavy job on your PC like any other. Do not start one while
+  another heavy build or test run is going on here. That is why `max_jobs` is 1 and the size is declared `medium`. A
+  declared `size:` wins over the probe, so `--min-size heavy` runs stay off it.
+- **Load and memory are the VM's, not the container's.** Inside, `/proc/meminfo` and the load average describe Docker
+  Desktop's whole VM (all its containers), not the 8 GB limit. `lanq health` and `lanq-makeready` therefore report the
+  VM's memory (and makeready may suggest `heavy` and `max_jobs: 4`: ignore that; the declared values win). A job that
+  goes over 8 GB is OOM-killed rather than held back. `nproc` honours only `--cpuset-cpus`, which is why the script
+  sets it. The .NET GC follows the cgroup limit on its own.
+- **makeready warnings you can ignore here:** "disk type: HDD" (the VM's virtual disk) and "no wired Ethernet adapter"
+  (Wake-on-LAN does not apply).
+- **Docker Desktop must be running.** It starts after you log in. While it is stopped, the worker shows as down (and a
+  release smoke that lists it fails). The port goes through Docker Desktop's own proxy, not WSL's localhost forwarding.
+- **Updates.** The base image is pinned by digest (a test checks it), so Dependabot does not move it. To update, see the
+  comment at the top of the `Dockerfile`, then run `setup.ps1 -Force`. That replaces the container and keeps the
+  volumes, the key and the host key.
+
+**Host key changed?** If `%LOCALAPPDATA%\lanq-docker-worker\<name>` was deleted, the next `setup.ps1` makes a new host
+key and rewrites the private known_hosts file. If you replaced the host key some other way, lanq reports that the host
+key has CHANGED. In that case:
+
+1. Check that nothing else is listening on the port.
+2. Remove the old line with `ssh-keygen -R lanq-linux-01 -f ~\.ssh\known_hosts.d\lanq-linux-01`. Without `-f`,
+   `ssh-keygen -R` looks only in `~\.ssh\known_hosts`, not in the private file.
+3. Run `setup.ps1 -Force`.
+
+To remove the worker:
+
+1. Run `docker rm -f lanq-linux-01`.
+2. Run `docker volume rm lanq-linux-01-work lanq-linux-01-nuget`.
+3. Delete the Include line, `config.d\lanq-linux-01`, `known_hosts.d\lanq-linux-01`, the key, the user variable and
+   the entry in `machines.yml` (and `machines.smoke.yml`).
+4. Delete the host key folder `%LOCALAPPDATA%\lanq-docker-worker\linux-01`.
+5. Delete the backups once you no longer need them: `~\.ssh\config.bak-*` and the `machines*.yml.bak-*` files next to
+   your lanq config.
+
 ## Then, on your PC
 
 1. Make sure the worker's host key is in your `known_hosts` (connect once with `ssh` and compare the fingerprint
