@@ -43,7 +43,10 @@ Releases are tag-driven and publish to nuget.org with NuGet Trusted Publishing (
    smoke machine and a check, by a job that must see its own slot, that no slot of a smoke job is left. Scenario 8 (from
    0.10.0) checks that `--plan-timeout 1` ends a plan `TimedOut` (124) with its job cleaned up, that `--plan --on` puts
    every job on the machine named, and that a narrowing which leaves a job no machine is `NoCapacity` (75) with a rerun
-   `--only`; an older binary gets N/A there.
+   `--only`; an older binary gets N/A there. Scenario 10 (from 0.11.0) checks test results: `--results junit:...` must
+   count a fixed file (two tests, `Smoke.Fails` failed), and a run that writes no file must be `Completed` 0 with
+   `noTests` and an `ask_developer` step; a binary before 0.11.0 gets N/A there (and any other answer to the probe is a
+   FAIL).
 
    It prints a PASS/FAIL/SKIP/N/A table and **exits 0 only when every scenario that applies passed**. N/A means the
    smoke config has no machine of that kind (a Windows-only pool has no Linux scenarios; no machine with `max_jobs` of

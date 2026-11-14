@@ -454,7 +454,8 @@ when the job never started.
 - Caps: 500 files and 200 MB in all by default; `--fetch-max-files N` (up to 5000) and `--fetch-max SIZE` (for example
   `500M` or `1G`, up to `2G`) change them. Files are taken in sorted order until a cap is hit; the rest are listed as
   skipped.
-- `--fetch-dir DIR` writes to `DIR/<job id>/` instead.
+- `--fetch-dir DIR` writes to `DIR/<job id>/` instead. Keep it gitignored or under `.lanq/`: fetched files (a TRX file
+  carries the worker's user and host) would otherwise be sent with the next snapshot.
 - The fetch has its own 10-minute limit, and on a machine with `allowed_hours` it never runs more than 2 minutes past
   the end of the window plus grace.
 - A job that timed out or was stopped by its window can still be running on the worker (which enforces the limit
@@ -1489,8 +1490,9 @@ lanq's repository runs its own test suite through lanq on Windows workers: [`lan
 (`scripts/lanq/check-test-split.ps1`, which fails unless every test lands in exactly one shard) and the suite in two
 Windows shards, each rerun at the base on failure (`baseline: true`), with a fixed shard count so history compares
 like with like. The shard scripts are the [SHARDING.md](docs/SHARDING.md#net) recipe. `lanq run --plan --json
---no-wake` is the release gate's "full suite on the pool". Your `machines.yml` must allow exactly these commands, and
-tag the workers `windows`:
+--no-wake` is the release gate's "full suite on the pool"; it needs lanq 0.11.0 or later (`unit-windows` has
+`results:`, which an older lanq refuses). Your `machines.yml` must allow exactly these commands, and tag the workers
+`windows`:
 
 ```yaml
 policy:

@@ -199,7 +199,11 @@ internal sealed record TestResultsJson(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? DurationSeconds { get; init; }
 
-    /// <summary>noTests only: no_results_files (no file matched) or zero_executed (files were read, no test ran). Values may be added.</summary>
+    /// <summary>
+    /// noTests only: zero_executed (every matched file was read, no test ran), no_results_files (a clean fetch, no file matched) or
+    /// results_unreadable (a matched file was not read, the fetch had an error, or it skipped a results file: whether tests ran is unknown).
+    /// Values may be added.
+    /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? NoTestsReason { get; init; }
 

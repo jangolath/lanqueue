@@ -3,7 +3,8 @@
 Small, focused pull requests are welcome.
 
 - Build and test: `dotnet test` (needs the .NET 10 SDK and `git`). Warnings are errors. With a lanq pool, the same
-  suite runs as `lanq run --plan --json --no-wake` (see "Developing lanq" in the README for the allowlist lines).
+  suite runs as `lanq run --plan --json --no-wake` (see "Developing lanq" in the README for the allowlist lines); that
+  needs lanq 0.11.0 or later, since an older lanq refuses `results:` in `lanq.yml`.
 - Every behaviour change needs a unit test; SSH is behind `ISshClient`, so tests never need real hosts.
 - Safe defaults (key-only SSH, allowlists, secret refusal, no permission-skipping flags) must stay enforced by tests.
   Changes that loosen them need a clear justification in the PR.

@@ -26,7 +26,8 @@ and returns the job's exit code. The developer sets up the pool and owns its con
 You may run: `lanq health --json` (also with `--needs`, `--mem`, `--on`, `--size`, `--min-size`), `lanq run --json ...`
 (with `--needs`, `--dir`, `--wait`, `--timeout`, `--mem`, `--on`, `--size`, `--min-size`, `--no-wake`, `--fetch`,
 `--log-tail`, `--dry-run`, `--shards`, `--shard-retries 1`, `--fail-fast`, `--target-minutes`, `--exclusive`,
-`--baseline`, `--baseline-ref`, and `--env NAME=VALUE` only for names already in `policy.allowed_env`), `lanq run --plan --json
+`--baseline`, `--baseline-ref`, `--results trx:PATTERN|junit:PATTERN`, and `--env NAME=VALUE` only for names already in
+`policy.allowed_env`), `lanq run --plan --json
 --no-wake` (with `--only`, `--dry-run`, `--fail-fast`, `--log-tail`, `--on`, `--size`, `--min-size`, `--plan-timeout`,
 and `--fetch-dir` only for a folder the developer named; never `--fetch-max` or `--fetch-max-files`), `lanq doctor --json`, `lanq doctor --remote
 --json`, `lanq stats --json`, `lanq --version`.
@@ -168,7 +169,8 @@ Since 0.11.0, `--results trx:PATTERN` / `junit:PATTERN` (lanq.yml `results:`) ad
 ### In lanq's own repository
 
 You may run its test plan with `lanq run --plan --json --no-wake` (a `guard` job and two Windows shards; it needs the
-developer's `machines.yml` to allow the script commands listed in `lanq.yml`). Report a red `guard` as a broken split,
+developer's `machines.yml` to allow the script commands listed in `lanq.yml`, and lanq 0.11.0 or later: an older lanq
+refuses `results:`). Report a red `guard` as a broken split,
 not as a test failure. Run `scripts/smoke-workers.ps1` (the release-candidate smoke on real workers) only when the
 developer asks: it needs their `machines.smoke.yml`, which lives in the same per-user folder as `machines.yml`: `%APPDATA%\lanq\machines.smoke.yml` on Windows, `~/.config/lanq/machines.smoke.yml` (or `$XDG_CONFIG_HOME/lanq/machines.smoke.yml`) elsewhere. Never edit `machines.yml` or
 `machines.smoke.yml`; the repository's `machines.example.yml` is only a template that lanq never reads.

@@ -19,7 +19,7 @@ JSON field is in [JSON.md](JSON.md).
 | `lanq makeready --setup`, `lanq makeready --add` (and its `--yes`), `lanq init` | runs | never |
 | `lanq makeready`, `lanq unlock`, `lanq wake`, `lanq health --wake` | runs | only when asked |
 | lanq-makeready-fix (`lanq-makeready-fix.ps1` / `.sh`, which `lanq makeready` may point to) | passes on to the PC's owner, who runs it at that PC (local and interactive only) | never |
-| `lanq health --json` (also `--needs`, `--on`, `--size`, `--min-size`), `lanq run --json` (also `--dry-run`, `--on`, `--size`, `--min-size`, `--exclusive`, `--baseline`, `--baseline-ref`), `lanq run --plan --json --no-wake` (also `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
+| `lanq health --json` (also `--needs`, `--on`, `--size`, `--min-size`), `lanq run --json` (also `--dry-run`, `--on`, `--size`, `--min-size`, `--exclusive`, `--baseline`, `--baseline-ref`, `--results trx:PATTERN\|junit:PATTERN`), `lanq run --plan --json --no-wake` (also `--only`, `--dry-run`), `lanq doctor --json` (also `--remote`), `lanq stats --json` | runs | runs |
 | `lanq run --env NAME=VALUE` | lists the names jobs may set in `policy.allowed_env` | runs, only with names already listed; never secrets |
 | `jobs.jsonl`, `jobs.1.jsonl` and `logs/` in lanq's state folder | owns (lanq writes them) | never touches (reads them through `lanq stats --json` and `logPath`) |
 | `nextSteps` with `safeToRunUnattended: true` | | runs, at most once |
