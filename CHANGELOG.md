@@ -8,16 +8,21 @@
   shows only changed lines: a key whose body changed while its BEGIN line stayed the same never showed its BEGIN line,
   so it was not recognised (files git shows as binary already got this in 0.9.2). Now lanq greps the snapshot's changed
   text files for `-----BEGIN` (`git grep --cached`, only those files), and for each modified or renamed one compares its
-  old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line whose block reaches its END line
-  within 512 lines and has a new line between the two is scanned again. Unterminated blocks are not rescanned in text
-  files (a lone key header in code, such as a parser or a test, never refuses an edit near it), so a key with no END
-  line, or longer than 512 lines, replaced in place is not found. The finding reads `private-key-block in uncommitted file
+  old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line is scanned again only for a key
+  block: a line holding `-----END` (any case) within 8192 lines, every line between them key material (after
+  stripping indentation, quotes, `+`, `,`, `;` and a trailing `\n` or `\r\n` escape: blank, base64 or an armor header
+  such as `Proc-Type: ...` or `DEK-Info: ...`), and the new line one of those lines or the END line. Code that handles
+  PEM (a header constant, parser code, a footer constant) never refuses an edit; a key in a C# string concatenation or
+  a YAML block scalar is still found. A key with no END line, longer than 8192 lines or with other text inside its
+  block is not found when replaced in place, and neither is a UTF-16 text file a `diff` attribute forces to text. A
+  changed text file whose path git gives in bytes that are not UTF-8 refuses the job (`scan-incomplete`). The finding reads `private-key-block in uncommitted file
   <path> (key block changed in place)` and never shows the key. A file lanq cannot look up or read refuses the job
   (`scan-incomplete`, with a `git fsck` hint). Such a file is read up to 32 MB per version and 256 MB in all; one over
   that is listed in `scanSkipped` with the new reason `text_over_cap` (the larger version's size) and on stderr, not
   refused. Added files are not read (every line is already in the diff), nor files without a BEGIN line.
 - **One rename mode for the text scan.** The diff, its file list and the new comparison now always use `-M`,
-  whatever `diff.renames` says, so a renamed file is compared with its old version everywhere. The binary scan
+  whatever `diff.renames` says, so a renamed file is compared with its old version everywhere. The pathspec variables (`GIT_LITERAL_PATHSPECS`,
+  `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS`, `GIT_ICASE_PATHSPECS`) are removed from lanq's local git calls. The binary scan
   keeps `--no-renames` (a moved binary is read whole).
 
 ### Behaviour changes

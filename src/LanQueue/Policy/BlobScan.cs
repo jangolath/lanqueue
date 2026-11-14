@@ -235,13 +235,10 @@ internal static class BlobScan
     }
 
     /// <summary>
-    /// The text key-block scan (0.10.1): only the old BEGIN lines <see cref="NewContent"/> scans again, those that are unchanged themselves
-    /// but start a block with a new line. Every other line <see cref="NewContent"/> returns is a line the overlay diff already shows as added
-    /// (and scans), so it is left out here. Lines are matched by content (set membership), as in <see cref="NewContent"/>: a new key added
-    /// under a BEGIN line identical to an old one can be reported twice, once by the diff and once here (harmless: either refuses).
-    /// Only terminated blocks count here: the block must reach a line holding <c>-----END</c> within <see cref="MaxBlockLines"/> lines, and
-    /// the new line must lie between the BEGIN and that END line (the END line included). A real key replaced in place always keeps its END
-    /// line; a lone header string in code (a parser, a scanner, a test) has none, so ordinary edits near it are never refused.
+    /// The text key-block scan (0.10.1): only the old BEGIN lines that are unchanged themselves but start a changed key block
+    /// (<see cref="TextKeyBlockChanged"/>). Every other new line is a line the overlay diff already shows as added (and scans), so it is left
+    /// out here. Lines are matched by content (set membership), as in <see cref="NewContent"/>: a new key added under a BEGIN line identical
+    /// to an old one can be reported twice, once by the diff and once here (harmless: either refuses).
     /// </summary>
     internal static List<string> ChangedBlockStarts(IReadOnlyList<string> lines, IReadOnlyList<string> oldLines)
     {
@@ -250,14 +247,115 @@ internal static class BlobScan
         for (var i = 0; i < lines.Count; i++)
         {
             var line = lines[i];
-            if (line.Contains("-----", StringComparison.Ordinal) && known.Contains(line) && SecretScanner.StartsASecretBlock(line)
-                && BlockChanged(lines, i, known, terminatedOnly: true))
+            if (line.Contains("-----", StringComparison.Ordinal) && known.Contains(line) && SecretScanner.StartsASecretBlock(line) && TextKeyBlockChanged(lines, i, known))
             {
                 result.Add(line);
             }
         }
 
         return result;
+    }
+
+    /// <summary>The longest block the text key-block scan looks for an END line in (0.10.1).</summary>
+    internal const int TextMaxBlockLines = 8192;
+
+    /// <summary>
+    /// Whether the block that starts at <paramref name="begin"/> in a text file is a key block with a new line (0.10.1). It counts only when
+    /// it is terminated: a line holding <c>-----END</c> (any case) comes within <see cref="TextMaxBlockLines"/> lines, and every line between
+    /// BEGIN and END looks like key material (<see cref="LooksLikeKeyLine"/>). The new line is one of those lines or the END line. A real key
+    /// replaced in place keeps its END line and its base64 body; a header string in code (a parser, a scanner, a test), with or without a
+    /// footer string further down, has code between them, so ordinary edits near it are never refused. A BEGIN line that itself holds
+    /// <c>-----END</c> (a one-line JSON or escaped key) has no block.
+    /// </summary>
+    private static bool TextKeyBlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
+    {
+        if (lines[begin].Contains("-----END", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var changed = false;
+        for (var j = begin + 1; j < lines.Count && j <= begin + TextMaxBlockLines; j++)
+        {
+            var isNew = !known.Contains(lines[j]);
+            if (lines[j].Contains("-----END", StringComparison.OrdinalIgnoreCase))
+            {
+                return changed || isNew;
+            }
+
+            if (!LooksLikeKeyLine(lines[j]))
+            {
+                return false;
+            }
+
+            changed |= isNew;
+        }
+
+        return false; // no END line within the cap: not a key block
+    }
+
+    /// <summary>
+    /// Whether a line can sit inside an armored key (0.10.1): after stripping indentation (a YAML block scalar too), surrounding quotes and
+    /// string-concatenation syntax (<c>"</c>, <c>'</c>, <c>+</c>, <c>,</c>, <c>;</c>) and a trailing <c>\n</c> or <c>\r\n</c> escape, it
+    /// is blank, base64 (<c>[A-Za-z0-9+/=]</c>) or an armor header (<c>Name: value</c>, such as Proc-Type, DEK-Info, Comment, Version).
+    /// </summary>
+    internal static bool LooksLikeKeyLine(string line)
+    {
+        var t = line.AsSpan();
+        while (true)
+        {
+            var before = t.Length;
+            t = t.Trim().Trim("\"',;+");
+            if (t.EndsWith(@"\r\n", StringComparison.Ordinal))
+            {
+                t = t[..^4];
+            }
+            else if (t.EndsWith(@"\n", StringComparison.Ordinal))
+            {
+                t = t[..^2];
+            }
+
+            if (t.Length == before)
+            {
+                break;
+            }
+        }
+
+        if (t.IsEmpty)
+        {
+            return true;
+        }
+
+        var base64 = true;
+        foreach (var c in t)
+        {
+            if (!(char.IsAsciiLetterOrDigit(c) || c is '+' or '/' or '='))
+            {
+                base64 = false;
+                break;
+            }
+        }
+
+        if (base64)
+        {
+            return true;
+        }
+
+        var colon = t.IndexOf(": ", StringComparison.Ordinal);
+        if (colon <= 0)
+        {
+            return false;
+        }
+
+        foreach (var c in t[..colon])
+        {
+            if (!(char.IsAsciiLetter(c) || c == '-'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>The longest block <see cref="BlockChanged"/> looks at: a key with no END line within it is judged on these lines only.</summary>
@@ -269,29 +367,12 @@ internal static class BlobScan
     /// in the middle. The block ends at the first line that holds <c>-----END</c> anywhere (an indented key in a YAML block scalar too), and
     /// after at most <see cref="MaxBlockLines"/> lines; a BEGIN line that itself holds <c>-----END</c> (a one-line JSON or escaped key) has
     /// no block, so an unclosed BEGIN can never reach a far-away edit.
-    /// With <paramref name="terminatedOnly"/> (the text key-block scan, 0.10.1) a block counts only when it reaches its END line within
-    /// <see cref="MaxBlockLines"/> lines, and that END line is part of the block.
     /// </summary>
-    private static bool BlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known, bool terminatedOnly = false)
+    private static bool BlockChanged(IReadOnlyList<string> lines, int begin, HashSet<string> known)
     {
         if (lines[begin].Contains("-----END", StringComparison.Ordinal))
         {
             return false;
-        }
-
-        if (terminatedOnly)
-        {
-            var changed = false;
-            for (var j = begin + 1; j < lines.Count && j <= begin + MaxBlockLines; j++)
-            {
-                changed |= !known.Contains(lines[j]);
-                if (lines[j].Contains("-----END", StringComparison.Ordinal))
-                {
-                    return changed;
-                }
-            }
-
-            return false; // no END line within the cap: not a key block
         }
 
         for (var j = begin + 1; j < lines.Count && j <= begin + MaxBlockLines && !lines[j].Contains("-----END", StringComparison.Ordinal); j++)

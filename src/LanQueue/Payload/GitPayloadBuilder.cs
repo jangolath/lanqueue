@@ -613,9 +613,15 @@ public sealed partial class GitPayloadBuilder : IPayloadBuilder
         }
     }
 
-    /// <summary>Removed from git's environment (0.9.1): lanq's local git calls always work on the repository they run in.</summary>
+    /// <summary>
+    /// Removed from git's environment (0.9.1): lanq's local git calls always work on the repository they run in. The pathspec variables
+    /// (0.10.1) would change how the text key-block scan's literal pathspecs are read.
+    /// </summary>
     internal static readonly string[] InheritedGitVariables =
-        ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE"];
+    [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXTERNAL_DIFF", "GIT_INDEX_FILE",
+        "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+    ];
 
     /// <summary>
     /// git may never wait for a person: no terminal prompt (GIT_TERMINAL_PROMPT=0), no Git Credential Manager dialog (GCM_INTERACTIVE=never),

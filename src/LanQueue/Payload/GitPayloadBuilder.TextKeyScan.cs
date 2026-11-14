@@ -7,16 +7,16 @@ namespace LanQueue.Payload;
 /// The text key-block scan (0.10.1): a private key replaced in place in an ordinary text file. The overlay diff (<c>-U0</c>) shows only the
 /// changed lines, so a key whose body changed while its BEGIN line stayed the same never shows its BEGIN line to the scan. So:
 /// <list type="number">
-/// <item>the rename-aware (<c>-M</c>, like the overlay diff and its file list) <c>--numstat -z</c> and <c>--raw -z</c> of the snapshot's
-/// temporary index against HEAD say which files are text, modified (or renamed or copied) with added lines, and their old and new object
-/// ids;</item>
+/// <item>one rename-aware (<c>-M</c>, like the overlay diff and its file list) <c>--raw --numstat -z</c> of the snapshot's temporary index
+/// against HEAD says which files are text, modified (or renamed or copied) with added lines, and their old and new object ids;</item>
 /// <item><c>git grep --cached -l -z -i -F -e -----BEGIN</c> under the same index, given only those files, keeps the ones whose new
 /// version has a BEGIN line at all (a BEGIN line only the old version has is a removed line, which the diff scan sees already); one of
-/// them that cannot be looked up fails closed (<see cref="BlobScan.TextIncompleteRule"/>);</item>
+/// them that cannot be looked up, or whose path git gave in bytes that are not UTF-8, fails closed
+/// (<see cref="BlobScan.TextIncompleteRule"/>);</item>
 /// <item>their sizes come from one <c>git cat-file --batch-check</c>, so a file over the caps is listed (<see cref="BlobScan.TextOverCap"/>)
 /// before anything is read; the rest are read by object id from one <c>git cat-file --batch</c> (no filters, no textconv);</item>
-/// <item>only the unchanged BEGIN lines whose terminated block (an END line within 512 lines) has a new line are scanned
-/// (<see cref="BlobScan.ChangedBlockStarts"/>): every other new line is in the diff already, and a lone header string in code is no key.</item>
+/// <item>only the unchanged BEGIN lines of a changed key block are scanned (<see cref="BlobScan.ChangedBlockStarts"/>: terminated within
+/// 8192 lines, key material between BEGIN and END): every other new line is in the diff already, and a header string in code is no key.</item>
 /// </list>
 /// Added files are not read (every line is in the diff), nor deleted files, files git shows as binary (the binary scan's), symlinks and
 /// submodules. Content is never written anywhere and never echoed.
@@ -35,26 +35,47 @@ public sealed partial class GitPayloadBuilder
     /// <summary>The text key-block scan of the snapshot's temporary index (<paramref name="env"/>) against HEAD.</summary>
     private static async Task<TextKeyScanResult> ScanTextKeyBlocksAsync(string top, Dictionary<string, string> env, CancellationToken ct)
     {
-        var numstat = ParseNumstat(await Git(top, env, ct, [.. TextDiff, "--numstat", "-z", "HEAD"]).ConfigureAwait(false));
-        if (!numstat.Values.Any(a => a != 0 && a is not null))
-        {
-            return TextKeyScanResult.None; // no text file has an added line
-        }
-
-        var raw = ParseRaw(await Git(top, env, ct, [.. TextDiff, "--raw", "-z", "--full-index", "--no-abbrev", "HEAD"]).ConfigureAwait(false));
-
-        // Only files that can need a read are grepped: changed (not added or deleted) text files with added lines, or with an unreadable count.
-        var changed = raw.Where(r => r.Value.Status is not ('A' or 'D') && (!numstat.TryGetValue(r.Key, out var a) || (a is not null && a != 0)))
-            .Select(r => r.Key).Order(StringComparer.Ordinal).ToList();
+        var (raw, numstat) = ParseRawNumstat(
+            await Git(top, env, ct, [.. TextDiff, "--raw", "--numstat", "-z", "--full-index", "--no-abbrev", "HEAD"]).ConfigureAwait(false));
+        var (changed, undecodable) = GrepCandidates(raw, numstat);
         var keyed = await KeyBearingPathsAsync(top, env, changed, ct).ConfigureAwait(false);
         if (keyed.Count == 0)
         {
-            return TextKeyScanResult.None;
+            return undecodable.Count == 0 ? TextKeyScanResult.None : new TextKeyScanResult(undecodable, [], 0);
         }
 
         var (targets, incomplete) = PlanTextReads(raw, numstat, keyed);
         var read = await ScanTextBlobsAsync(top, targets, ct).ConfigureAwait(false);
-        return read with { Findings = [.. incomplete, .. read.Findings] };
+        return read with { Findings = [.. undecodable, .. incomplete, .. read.Findings] };
+    }
+
+    /// <summary>
+    /// The files that can need a read, to grep: changed (not added or deleted) text files with added lines, or with an unreadable count. A
+    /// path git gave in bytes that are not UTF-8 (decoded with U+FFFD) cannot be named back to git, so it is a scan-incomplete finding
+    /// instead (fails closed).
+    /// </summary>
+    internal static (List<string> Paths, List<SecretFinding> Undecodable) GrepCandidates(
+        IReadOnlyDictionary<string, RawEntry> raw, IReadOnlyDictionary<string, long?> numstat)
+    {
+        var paths = new List<string>();
+        var undecodable = new List<SecretFinding>();
+        foreach (var (path, e) in raw.OrderBy(r => r.Key, StringComparer.Ordinal))
+        {
+            if (e.Status is 'A' or 'D' || (numstat.TryGetValue(path, out var added) && added is null or 0))
+            {
+                continue;
+            }
+
+            if (path.Contains('�', StringComparison.Ordinal))
+            {
+                undecodable.Add(new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(path)));
+                continue;
+            }
+
+            paths.Add(path);
+        }
+
+        return (paths, undecodable);
     }
 
     /// <summary>The most characters of paths given to one git grep (Windows limits a command line to 32,767).</summary>
@@ -91,23 +112,53 @@ public sealed partial class GitPayloadBuilder
     }
 
     /// <summary>
-    /// The <c>--numstat -z</c> entries by (new) path: the added line count, or null for a file git shows as binary ("-"). A rename or copy is
-    /// "added TAB deleted TAB" NUL old path NUL new path NUL.
+    /// One <c>--raw --numstat -z</c> output, walked token by token: a token starting with ':' is a raw record (":oldmode newmode oldoid newoid
+    /// status", then its path, or for R and C its old and new paths); any other token is a numstat record ("added TAB deleted TAB path", or
+    /// "added TAB deleted TAB" then the old and new paths). A record's paths are always taken as its next tokens, so a path that starts with
+    /// ':' or holds a tab is never read as a record. Both maps are keyed by the new path; a numstat count is null for a file git shows as
+    /// binary ("-") and -1 when it cannot be read.
     /// </summary>
-    internal static Dictionary<string, long?> ParseNumstat(string numstat)
+    internal static (Dictionary<string, RawEntry> Raw, Dictionary<string, long?> Numstat) ParseRawNumstat(string output)
     {
-        var map = new Dictionary<string, long?>(StringComparer.Ordinal);
-        var parts = numstat.Split('\0');
+        var raw = new Dictionary<string, RawEntry>(StringComparer.Ordinal);
+        var numstat = new Dictionary<string, long?>(StringComparer.Ordinal);
+        var parts = output.Split('\0');
         for (var i = 0; i < parts.Length; i++)
         {
-            var f = parts[i].Split('\t', 3);
-            if (f.Length != 3)
+            var token = parts[i];
+            if (token.Length == 0)
+            {
+                continue;
+            }
+
+            if (token[0] == ':')
+            {
+                var f = token[1..].Split(' ');
+                var status = f.Length == 5 && f[4].Length > 0 ? f[4][0] : '?';
+                var pair = status is 'R' or 'C';
+                var at = i + (pair ? 2 : 1);
+                if (at >= parts.Length)
+                {
+                    break;
+                }
+
+                if (status != '?')
+                {
+                    raw[parts[at]] = new RawEntry(f[0], f[1], f[2], f[3], status, pair ? parts[i + 1] : null);
+                }
+
+                i = at;
+                continue;
+            }
+
+            var n = token.Split('\t', 3);
+            if (n.Length != 3)
             {
                 continue;
             }
 
             string path;
-            if (f[2].Length == 0)
+            if (n[2].Length == 0)
             {
                 if (i + 2 >= parts.Length)
                 {
@@ -119,13 +170,13 @@ public sealed partial class GitPayloadBuilder
             }
             else
             {
-                path = f[2];
+                path = n[2];
             }
 
-            map[path] = f[0] == "-" ? null : long.TryParse(f[0], NumberStyles.None, CultureInfo.InvariantCulture, out var added) ? added : -1;
+            numstat[path] = n[0] == "-" ? null : long.TryParse(n[0], NumberStyles.None, CultureInfo.InvariantCulture, out var added) ? added : -1;
         }
 
-        return map;
+        return (raw, numstat);
     }
 
     /// <summary>

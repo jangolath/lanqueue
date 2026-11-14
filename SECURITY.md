@@ -68,11 +68,17 @@ changed lines, so since 0.10.1 lanq also finds the changed text files whose new 
 (`git grep --cached` of the snapshot, those files only) and compares their old and new blobs the same way, renames included (the diff,
 its file list and this comparison all use `-M`). A key whose body changed under an unchanged BEGIN line is refused
 like a new key, sample keys kept in tracked text files included. Such a file is read up to 32 MB per version and
-256 MB in all; one over that is listed in `scanSkipped` (`text_over_cap`), not refused. In text files only terminated
-blocks are rescanned: the block must reach its END line within 512 lines, and the new line must lie between BEGIN and
-END. Unterminated blocks are not rescanned in text files, so a lone key header in code (a parser or a test) never
-refuses an edit near it, and a key with no END line, or one longer than 512 lines, replaced in place is not seen. It
-does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
+256 MB in all; one over that is listed in `scanSkipped` (`text_over_cap`), not refused. In text files a BEGIN line is
+rescanned only for a key block: a line holding `-----END` (any case) comes within 8192 lines, every line between BEGIN
+and END looks like key material, and the new line is one of those lines or the END line. Key material means that,
+after stripping indentation (a YAML block scalar too), surrounding quotes and string-concatenation syntax (`"`, `'`,
+`+`, `,`, `;`) and a trailing `\n` or `\r\n` escape, the line is blank, base64 (`[A-Za-z0-9+/=]`) or an armor header
+(`Name: value`, such as Proc-Type, DEK-Info, Comment or Version). So code that handles PEM (a header constant, parser
+code, a footer constant) never refuses an edit, while a key kept in a string concatenation or a YAML block is still
+found. The other side of this: a key with no END line, one longer than 8192 lines, or one with other text inside its
+block, replaced in place in a text file, is not seen. A UTF-16 text file that a `diff` attribute forces to text is not
+scanned by this comparison (nor, usefully, by the diff scan: its ASCII patterns do not match UTF-16 bytes); without
+that attribute git shows UTF-16 as binary and the binary scan reads it. It does not read other committed file contents or older commits, so a secret committed and later deleted still travels in a
 bundle. Archive mode sends only the current files, never history, with one exception: a `lanq run --baseline` rerun
 sends the base commit's tree (an older version of the files, after the same committed-name and package-config scans).
 A repository's `lanq.yml` can name that base only as a branch or tag (`baseline_ref:`), never a commit id, `HEAD` or

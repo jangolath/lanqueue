@@ -186,20 +186,119 @@ public sealed class TextKeyBlockTests : IDisposable
         Assert.Single(p.TextKeyFindings);
     }
 
-    /// <summary>A block whose END line is more than 512 lines down is not a key block: a change inside it is not rescanned (documented).</summary>
+    /// <summary>
+    /// A text key block is looked for up to 8192 lines: a 600-line key replaced in place is found, a block whose END line is further down
+    /// is not a key block and a change inside it is not rescanned (documented).
+    /// </summary>
     [Fact(Timeout = TestTimeout)]
     public async Task ChangeBeyondBlockCapIsNotFlagged()
     {
-        static string Long(string last) =>
-            Begin + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Range(0, 600).Select(i => $"line {i}\n")) + last + "\n-----END RSA PRIVATE KEY-----\n";
-        Write("notes.txt", Long("end"));
+        static string Long(int lines, char last) =>
+            Begin + "RSA PRIVATE KEY-----\n" + string.Concat(Enumerable.Repeat(new string('A', 64) + "\n", lines)) + new string(last, 64)
+            + "\n-----END RSA PRIVATE KEY-----\n";
+        Write("medium.txt", Long(600, 'A'));
+        Write("huge.txt", Long(BlobScan.TextMaxBlockLines + 10, 'A'));
         Commit();
 
-        Write("notes.txt", Long("end changed"));
+        Write("medium.txt", Long(600, 'B'));
+        Write("huge.txt", Long(BlobScan.TextMaxBlockLines + 10, 'B'));
         var p = await Snapshot();
 
+        Assert.True(Has(p, "medium.txt"), Show(p));
+        Assert.False(Has(p, "huge.txt"), Show(p));
+        Assert.Equal(4, p.TextBlobsRead);
+    }
+
+    /// <summary>
+    /// Code that handles PEM (a header constant, parser code, a footer constant) is no key block: the lines between BEGIN and END are not key
+    /// material, so editing the parser is never refused.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task PemParserCodeWithHeaderAndFooterLiteralsIsNotFlagged()
+    {
+        static string Code(string limit) =>
+            "public static class Pem\n{\n    private const string Header = \"" + Begin + "RSA PRIVATE KEY-----\";\n\n"
+            + "    public static string Body(string text)\n    {\n        var start = text.IndexOf(Header) + Header.Length;\n"
+            + "        var end = text.IndexOf(Footer, start);\n        return text.Length > " + limit + " ? text[start..end] : \"\";\n    }\n\n"
+            + "    private const string Footer = \"-----END RSA PRIVATE KEY-----\";\n}\n";
+        Write("Pem.cs", Code("10"));
+        Commit();
+        Write("Pem.cs", Code("20"));
+
+        var p = await Snapshot();
+
+        Assert.Empty(DiffFindings(p));
         Assert.Empty(p.TextKeyFindings);
         Assert.Equal(2, p.TextBlobsRead);
+    }
+
+    /// <summary>A key kept in a C# string concatenation (quotes, \n escapes, +) is key material: replaced in place, it is still found.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task QuotedKeyInCSharpConcatenationIsFound()
+    {
+        static string Code(char c) =>
+            "public static class Fixture\n{\n    public const string Key =\n        \"" + Begin + "EC PRIVATE KEY-----\\n\" +\n"
+            + string.Concat(Enumerable.Range(0, 3).Select(_ => "        \"" + new string(c, 64) + "\\n\" +\n"))
+            + "        \"-----END EC PRIVATE KEY-----\\n\";\n}\n";
+        Write("Fixture.cs", Code('A'));
+        Commit();
+        Write("Fixture.cs", Code('B'));
+
+        var p = await Snapshot();
+
+        Assert.Empty(DiffFindings(p));
+        Assert.True(Has(p, "Fixture.cs"), Show(p));
+    }
+
+    [Theory]
+    [InlineData("MIIEpAIBAAKCAQEA0123456789abcdefABCDEF+/==", true)]
+    [InlineData("    MIIEpAIBAAKCAQEA", true)] // YAML block scalar indentation
+    [InlineData("        \"MIIEpAIBAAKCAQEA\\n\" +", true)] // C# concatenation
+    [InlineData("  'MIIEpAIBAAKCAQEA\\r\\n',", true)] // a quoted list item with a CRLF escape
+    [InlineData("\"MIIEpAIBAAKCAQEA\";", true)]
+    [InlineData("", true)]
+    [InlineData("   ", true)]
+    [InlineData("Proc-Type: 4,ENCRYPTED", true)]
+    [InlineData("DEK-Info: AES-128-CBC,0123456789ABCDEF", true)]
+    [InlineData("Comment: \"made by hand\"", true)]
+    [InlineData("=Xy12", true)] // a PGP checksum
+    [InlineData("var start = text.IndexOf(Header);", false)]
+    [InlineData("{", false)]
+    [InlineData("    }", false)]
+    [InlineData("return x;", false)]
+    [InlineData("Proc Type: x", false)]
+    public void LooksLikeKeyLineAcceptsOnlyKeyMaterial(string line, bool expected) =>
+        Assert.Equal(expected, BlobScan.LooksLikeKeyLine(line));
+
+    [Fact]
+    public void EndLineIsFoundInAnyCase()
+    {
+        var begin = Begin + "RSA PRIVATE KEY-----";
+        Assert.Equal([begin], BlobScan.ChangedBlockStarts([begin, "BBBB", "-----end rsa private key-----"], [begin, "AAAA", "-----end rsa private key-----"]));
+    }
+
+    [Fact]
+    public void UndecodablePathFailsClosed()
+    {
+        var (a, b) = (new string('a', 40), new string('b', 40));
+        var (raw, numstat) = GitPayloadBuilder.ParseRawNumstat(
+            $":100644 100644 {a} {b} M\0bad\uFFFDname.txt\0:100644 100644 {a} {b} M\0good.txt\0:100644 100644 {a} {b} M\0bad\uFFFDbin.dat\0"
+            + "1\t1\tbad\uFFFDname.txt\0" + "1\t1\tgood.txt\0" + "-\t-\tbad\uFFFDbin.dat\0");
+
+        var (paths, undecodable) = GitPayloadBuilder.GrepCandidates(raw, numstat);
+
+        Assert.Equal(["good.txt"], paths);
+        Assert.Equal([new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere("bad\uFFFDname.txt"))], undecodable);
+        Assert.Contains("could not read a changed text file", JobRunner.SecretRefusal("j1", undecodable).Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PathspecVariablesAreScrubbed()
+    {
+        foreach (var name in new[] { "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS" })
+        {
+            Assert.Contains(name, GitPayloadBuilder.InheritedGitVariables);
+        }
     }
 
     /// <summary>A renamed file is compared with its old version even when diff.renames is off: lanq pins -M on the text path.</summary>
@@ -352,15 +451,60 @@ public sealed class TextKeyBlockTests : IDisposable
     }
 
     [Fact]
-    public void ParseNumstatReadsRenamesAndBinaries()
+    public void ParseRawNumstatReadsBothRecordKinds()
     {
-        var n = GitPayloadBuilder.ParseNumstat("3\t1\ta b.txt\0" + "-\t-\tlogo.png\0" + "2\t2\t\0old.txt\0new.txt\0" + "0\t4\tshrunk.txt\0");
+        var (a, b, c) = (new string('a', 40), new string('b', 40), new string('c', 40));
+        var (raw, n) = GitPayloadBuilder.ParseRawNumstat(
+            $":100644 100644 {a} {b} M\0a b.txt\0:100644 100644 {a} {b} M\0logo.png\0:100644 100644 {a} {c} R086\0old.txt\0new.txt\0"
+            + $":100644 100644 {b} {c} M\0shrunk.txt\0:100644 100644 {a} {b} M\0:odd\tname\0:100644 100644 {a} {b} C075\0src.txt\0copy.txt\0"
+            + "3\t1\ta b.txt\0" + "-\t-\tlogo.png\0" + "2\t2\t\0old.txt\0new.txt\0" + "0\t4\tshrunk.txt\0" + "1\t0\t:odd\tname\0"
+            + "5\t1\t\0src.txt\0copy.txt\0" + "x\t1\tweird.txt\0");
 
         Assert.Equal(3, n["a b.txt"]);
         Assert.Null(n["logo.png"]);
         Assert.Equal(2, n["new.txt"]);
         Assert.False(n.ContainsKey("old.txt"));
         Assert.Equal(0, n["shrunk.txt"]);
+        Assert.Equal(1, n[":odd\tname"]); // a path that starts with ':' and holds a tab is a path, not a record
+        Assert.Equal(5, n["copy.txt"]);
+        Assert.Equal(-1, n["weird.txt"]);
+        Assert.Equal(new GitPayloadBuilder.RawEntry("100644", "100644", a, c, 'R', "old.txt"), raw["new.txt"]);
+        Assert.Equal(new GitPayloadBuilder.RawEntry("100644", "100644", a, b, 'M'), raw[":odd\tname"]);
+        Assert.Equal(new GitPayloadBuilder.RawEntry("100644", "100644", a, b, 'C', "src.txt"), raw["copy.txt"]);
+        Assert.Equal(["a b.txt", "logo.png", "new.txt", "shrunk.txt", ":odd\tname", "copy.txt"], raw.Keys);
+    }
+
+    /// <summary>Real git output of one --raw --numstat -z call (rename, modification, binary, addition, deletion) parses as expected.</summary>
+    [Fact]
+    public void RealRawNumstatOutputParses()
+    {
+        var filler = string.Concat(Enumerable.Range(0, 40).Select(i => $"setting{i}: value {i}\n"));
+        Write("old name.txt", filler);
+        Write("mod.txt", "one\n");
+        Write("gone.txt", "bye\n");
+        File.WriteAllBytes(Path.Combine(_repo, "logo.bin"), [0, 1, 2, 3]);
+        Commit();
+        File.Delete(Path.Combine(_repo, "old name.txt"));
+        Write("new name.txt", filler + "more\n");
+        Write("mod.txt", "one\ntwo\nthree\n");
+        File.Delete(Path.Combine(_repo, "gone.txt"));
+        File.WriteAllBytes(Path.Combine(_repo, "logo.bin"), [0, 1, 2, 4]);
+        Write("fresh.txt", "new\n");
+        Git("add", "-A");
+
+        var (raw, n) = GitPayloadBuilder.ParseRawNumstat(
+            Git("diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", "-M", "--raw", "--numstat", "-z", "--full-index", "--no-abbrev", "HEAD"));
+
+        Assert.Equal('R', raw["new name.txt"].Status);
+        Assert.Equal("old name.txt", raw["new name.txt"].OldPath);
+        Assert.Equal(('M', 'D', 'A', 'M'), (raw["mod.txt"].Status, raw["gone.txt"].Status, raw["fresh.txt"].Status, raw["logo.bin"].Status));
+        Assert.Equal(5, raw.Count);
+        Assert.Equal(1, n["new name.txt"]);
+        Assert.Equal(2, n["mod.txt"]);
+        Assert.Equal(0, n["gone.txt"]);
+        Assert.Equal(1, n["fresh.txt"]);
+        Assert.Null(n["logo.bin"]);
+        Assert.Equal(5, n.Count);
     }
 
     [Fact]
