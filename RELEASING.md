@@ -151,12 +151,16 @@ pin is bumped. Checklist for a bump:
 
 ## Updating the embedded lanq-makeready
 
-`lanq makeready` embeds the two scripts of a [lanq-makeready](https://github.com/jangolath/lanq-makeready) release in
-`src/LanQueue/Makeready/` (byte-identical: `.gitattributes` marks them `-text`). Never edit them by hand. To move to a
-new release, run `scripts/sync-makeready.sh v0.2.0` (needs `gh` and `sha256sum`): it downloads the release, checks both
-files with `sha256sum -c` against its `SHA256SUMS` and with `gh attestation verify`, and only then copies them in. Then
-set the two pinned hashes in `tests/LanQueue.Tests/MakereadyTests.cs` and `Cli.MakereadyVersion`, check that the
-report schema is still `lanq-makeready/v1`, run the tests, and commit scripts and pins together.
+`lanq makeready` embeds four scripts of a [lanq-makeready](https://github.com/jangolath/lanq-makeready) release in
+`src/LanQueue/Makeready/` (byte-identical: `.gitattributes` marks them `-text`): the read-only scanner
+(`lanq-makeready.ps1`, `lanq-makeready.sh`) and, since 0.12.0 (lanq-makeready 0.5.0), the read-only tune scan
+(`lanq-makeready-tune.ps1`, `lanq-makeready-tune.sh`). The fix script is never embedded. Never edit them by hand. To
+move to a new release, run `scripts/sync-makeready.sh v0.5.0` (needs `gh` and `sha256sum`): it downloads the release,
+checks all four files with `sha256sum -c` against its `SHA256SUMS` (each listed exactly once) and with
+`gh attestation verify`, and only then copies them in. Then set the four pinned hashes in
+`tests/LanQueue.Tests/MakereadyTests.cs` and `Cli.MakereadyVersion`, check that the report schemas are still
+`lanq-makeready/v1` and `lanq-makeready-tune/v1`, run the tests (`TuneReportTests` checks that lanq's fix-id table still
+matches the tune scripts' fix ids), and commit scripts and pins together.
 
 ## Dependencies
 

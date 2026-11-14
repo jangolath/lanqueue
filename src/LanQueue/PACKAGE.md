@@ -33,7 +33,7 @@ manifest: https://github.com/jangolath/lanqueue#install
 Onboarding a PC: `lanq makeready --ssh user@old-pc.lan --os windows` runs the read-only
 [lanq-makeready](https://github.com/jangolath/lanq-makeready) check over SSH (built in, sent on stdin, nothing written to
 the PC) and suggests a `machines.yml` entry; `lanq makeready --all` checks every configured machine and prints one
-summary table (`--json` for one object). `lanq unlock <machine>` clears slots left by a crashed run.
+summary table (`--json` for one object); `--tune` adds the read-only tune scan (what slows the PC down as a worker). `lanq unlock <machine>` clears slots left by a crashed run.
 
 For scripts and coding agents, `run`, `health`, `doctor`, `stats`, `makeready`, `init` and `wake` take `--json` and
 print one object with suggested `nextSteps`. `lanq run --dry-run` shows where a job would go without sending it,

@@ -110,7 +110,15 @@ values a test pins; they are updated only through `scripts/sync-makeready.sh`, w
 `SHA256SUMS` and its build-provenance attestation first. The script is sent on ssh stdin and runs from memory, so
 nothing is written to the worker. Its JSON report is untrusted: read up to 1 MB, parsed by a source-generated
 deserializer (no reflection), validated against the `lanq-makeready/v1` schema, sanitised before display, and never
-executed. `lanq doctor --remote` writes and removes one empty temporary file in `work_root` and runs version
+executed. `lanq makeready --tune` (0.12.0) runs the embedded read-only lanq-makeready-tune script the same way (from
+the same verified release; the fix script is never embedded, sent or run). Its report is a second untrusted input:
+read up to 256 KB, parsed by a source-generated deserializer with depth 8, checked against `lanq-makeready-tune/v1`
+(the tool name, at most 64 items, ids, statuses `OK`/`INFO`/`WARN`/`SKIP`, summary counts that match the items),
+and rebuilt with every string sanitised and cut to length; a refusal never echoes what the worker sent. Its `fixId`s
+come from lanq's own table (only when the worker's value matches) and its `security` flags from lanq's own per-OS
+list, so a worker cannot point a reader at a fix or flag of its choosing. `advice` and `detail` stay text for the PC's
+owner: nothing in them is run. The `-Hours` and `-WorkRoot` values lanq puts on the worker's command line come from
+your config, are checked against a fixed character set and single-quoted. `lanq doctor --remote` writes and removes one empty temporary file in `work_root` and runs version
 commands (`go` with `GOTOOLCHAIN=local`, `cargo` with `RUSTUP_AUTO_INSTALL=0`, each stopped after 20 seconds) in the job
 environment, and, like `makeready`, skips a machine that is paused or outside its allowed hours unless `--force`; `lanq doctor` without `--remote` makes no network
 connection. When a capability's tool is missing there, doctor also lists a few install folders and asks the dotnet on `PATH`
