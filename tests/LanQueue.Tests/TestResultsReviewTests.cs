@@ -80,7 +80,10 @@ public sealed class TestResultsReviewTests : IDisposable
     }
 
     private static TestResults Of(int total, double? duration, bool unreadable = false) => new(
-        ResultsFormat.Junit, "r/*.xml", 1, unreadable ? 0 : 1, total, total, total, 0, 0, duration, [new FailedTest("x", duration, null)], 1, false, [], []) { Unreadable = unreadable };
+        ResultsFormat.Junit, "r/*.xml", 1, unreadable ? 0 : 1, total, total, total, 0, 0, duration, [new FailedTest("x", duration, null)], 1, false, [], [])
+    {
+        Unreadable = unreadable,
+    };
 
     [Fact]
     public void TestResultsMergedDurationThatOverflowsIsLeftOut()
