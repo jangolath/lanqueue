@@ -1,0 +1,8 @@
+exit=75
+--- commands
+
+--- stdout
+
+--- stderr
+charlie is paused (a PAUSE file is in its work_root); not scanning it now. Add --force to scan anyway.
+Next: (for the developer) the machine is paused or outside its allowed hours; check it later: lanq makeready charlie

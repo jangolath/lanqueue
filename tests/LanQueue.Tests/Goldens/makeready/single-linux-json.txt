@@ -1,0 +1,71 @@
+exit=0
+--- commands
+alpha: sh -s -- --json - --redact
+--- stdout
+{
+  "schema": "lanq-makeready/v1",
+  "tool": {
+    "name": "lanq-makeready",
+    "version": "0.1.0"
+  },
+  "generatedAt": "2026-11-09T06:39:14Z",
+  "host": {
+    "hostname": "\u003Credacted\u003E",
+    "user": "\u003Credacted\u003E",
+    "os": "Ubuntu 24.04",
+    "arch": "x64"
+  },
+  "verdicts": {
+    "worker_git": "OK",
+    "worker_archive": "OK",
+    "dotnet10": "OK",
+    "docker": "SKIP",
+    "overnight": "WARN"
+  },
+  "checks": [
+    {
+      "id": "os.version",
+      "title": "OS",
+      "status": "OK",
+      "detail": "Ubuntu 24.04",
+      "advice": "",
+      "needsAdmin": false
+    },
+    {
+      "id": "reboot.pending",
+      "title": "Pending reboot",
+      "status": "WARN",
+      "detail": "a restart is pending",
+      "advice": "Restart the PC when convenient.",
+      "needsAdmin": false
+    },
+    {
+      "id": "ssh.server",
+      "title": "OpenSSH Server",
+      "status": "OK",
+      "detail": "sshd",
+      "advice": "Install openssh-server yourself.",
+      "needsAdmin": true
+    }
+  ],
+  "capabilities": [
+    "dotnet",
+    "java"
+  ],
+  "suggestedMachine": {
+    "name": "old-pc",
+    "os": "linux",
+    "ssh": "\u003Cuser\u003E@\u003Chostname\u003E.lan",
+    "work_root": "/srv/lq",
+    "capabilities": [
+      "dotnet",
+      "java",
+      "linux"
+    ],
+    "max_jobs": 1,
+    "transfer": "git",
+    "allowed_hours": "00:00-07:00"
+  }
+}
+
+--- stderr

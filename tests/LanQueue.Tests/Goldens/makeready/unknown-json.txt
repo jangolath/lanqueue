@@ -1,0 +1,9 @@
+exit=2
+--- commands
+
+--- stdout
+{"status":"Rejected","exitCode":2,"message":"No machine named \u0027echo\u0027 in the config. Configured: alpha, bravo, charlie, delta","nextSteps":[{"action":"fix_command","reason":"fix the command line: No machine named \u0027echo\u0027 in the config. Configured: alpha, bravo, charlie, delta","safeToRunUnattended":false}]}
+
+--- stderr
+No machine named 'echo' in the config. Configured: alpha, bravo, charlie, delta
+Next: fix the command line: No machine named 'echo' in the config. Configured: alpha, bravo, charlie, delta

@@ -1,0 +1,19 @@
+exit=70
+--- commands
+alpha: sh -s -- --json - --redact
+bravo: powershell -NoProfile -NonInteractive -Command "& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact"
+--- stdout
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready <embedded>)
+
+MACHINE  OS       VERDICT      TOP PROBLEM
+alpha    linux    WARN 1       Pending reboot: a restart is pending
+bravo    windows  FAIL 1       OpenSSH Server: not installed
+charlie  linux    held         paused (a PAUSE file is in its work_root); --force scans anyway
+delta    linux    unreachable  ssh: connect to host 10.20.30.14 port 22: No route to host
+
+Details, advice and a suggested machines.yml entry for one machine: lanq makeready <machine>
+lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
+
+--- stderr
+Next: check this computer's ssh setup and known_hosts: lanq doctor
+Next: no usable report from: delta

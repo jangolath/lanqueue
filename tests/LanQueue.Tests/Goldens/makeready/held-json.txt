@@ -1,0 +1,9 @@
+exit=75
+--- commands
+
+--- stdout
+{"status":"Held","exitCode":75,"message":"charlie is paused (a PAUSE file is in its work_root); not scanning it now. Add --force to scan anyway.","nextSteps":[{"action":"wait","reason":"the machine is paused or outside its allowed hours; check it later","command":"lanq makeready charlie","argv":["lanq","makeready","charlie"],"safeToRunUnattended":false}]}
+
+--- stderr
+charlie is paused (a PAUSE file is in its work_root); not scanning it now. Add --force to scan anyway.
+Next: (for the developer) the machine is paused or outside its allowed hours; check it later: lanq makeready charlie
