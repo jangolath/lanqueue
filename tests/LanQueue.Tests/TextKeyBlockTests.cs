@@ -324,6 +324,30 @@ public sealed class TextKeyBlockTests : IDisposable
         Assert.Contains("could not read a changed text file", JobRunner.SecretRefusal("j1", undecodable).Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The U+FFFD refusal and the grep use one test of a text candidate: a renamed text file refuses, and so does one missing from numstat
+    /// (its count is unknown); a modified file with no added lines, a type change from a symlink, a symlink and a submodule pass, as in
+    /// 0.10.0 (the key-block scan never reads them).
+    /// </summary>
+    [Fact]
+    public void UndecodablePathRefusesOnlyTextCandidates()
+    {
+        var (a, b, c, d) = (new string('a', 40), new string('b', 40), new string('c', 40), new string('d', 40));
+        var (raw, numstat, undecodable) = GitPayloadBuilder.ParseRawNumstat(
+            $":100644 100644 {a} {b} R090\0old.txt\0ren�.txt\0:100644 100644 {a} {b} M\0nocount�.txt\0"
+            + $":100644 100644 {a} {b} M\0shrunk�.txt\0:120000 100644 {a} {b} T\0was-link�.txt\0"
+            + $":120000 120000 {a} {c} M\0link�\0:160000 160000 {c} {d} M\0sub�\0:100644 100644 {a} {b} X\0odd�.txt\0"
+            + "1\t1\t\0old.txt\0ren�.txt\0" + "0\t3\tshrunk�.txt\0" + "2\t0\twas-link�.txt\0" + "1\t1\tlink�\0"
+            + "1\t1\tsub�\0" + "1\t0\todd�.txt\0");
+
+        Assert.Equal(
+            new[] { "nocount�.txt", "odd�.txt", "ren�.txt" }.Select(p => new SecretFinding(BlobScan.TextIncompleteRule, BlobScan.TextWhere(p))),
+            undecodable);
+        Assert.Empty(GitPayloadBuilder.GrepCandidates(raw, numstat));
+        Assert.True(GitPayloadBuilder.IsTextCandidate("x.txt", new GitPayloadBuilder.RawEntry("100644", "100755", a, b, 'M'), new Dictionary<string, long?> { ["x.txt"] = 3 }));
+        Assert.False(GitPayloadBuilder.IsTextCandidate("x.txt", new GitPayloadBuilder.RawEntry("100644", "160000", a, b, 'T'), new Dictionary<string, long?> { ["x.txt"] = 3 }));
+    }
+
     [Fact]
     public void PathspecVariablesAreScrubbed()
     {
