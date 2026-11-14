@@ -50,14 +50,21 @@ public sealed partial class GitPayloadBuilder
     }
 
     /// <summary>
-    /// The files that can need a read, to grep: changed (not added or deleted) text files with added lines, or with an unreadable count. A
-    /// path holding U+FFFD (bytes that are not UTF-8) cannot be named back to git and is left out: <see cref="ParseRawNumstat"/> has already
-    /// made it a scan-incomplete finding.
+    /// The one test of a text candidate, a file the key-block scan may need to read: not added or deleted, a regular file before and after
+    /// (a symlink or submodule is never read), and text with added lines in numstat, or missing from it or with an unreadable count (those
+    /// fail closed later, in <see cref="PlanTextReads"/>).
+    /// </summary>
+    internal static bool IsTextCandidate(string path, RawEntry e, IReadOnlyDictionary<string, long?> numstat) =>
+        e.Status is not ('A' or 'D')
+        && ArchiveWriter.IsRegularMode(e.OldMode) && ArchiveWriter.IsRegularMode(e.NewMode)
+        && !(numstat.TryGetValue(path, out var added) && added is null or 0);
+
+    /// <summary>
+    /// The files to grep: the text candidates (<see cref="IsTextCandidate"/>). A path holding U+FFFD (bytes that are not UTF-8) cannot be
+    /// named back to git and is left out: <see cref="ParseRawNumstat"/> has already made it a scan-incomplete finding.
     /// </summary>
     internal static List<string> GrepCandidates(IReadOnlyDictionary<string, RawEntry> raw, IReadOnlyDictionary<string, long?> numstat) =>
-        [.. raw.Where(r => r.Value.Status is not ('A' or 'D')
-                && !(numstat.TryGetValue(r.Key, out var added) && added is null or 0)
-                && !r.Key.Contains('\uFFFD', StringComparison.Ordinal))
+        [.. raw.Where(r => IsTextCandidate(r.Key, r.Value, numstat) && !r.Key.Contains('\uFFFD', StringComparison.Ordinal))
             .Select(r => r.Key)
             .Order(StringComparer.Ordinal)];
 
@@ -101,8 +108,8 @@ public sealed partial class GitPayloadBuilder
     /// ':' or holds a tab is never read as a record. Both maps are keyed by the new path; a numstat count is null for a file git shows as
     /// binary ("-") and -1 when it cannot be read. Scan-incomplete findings (fail closed), once per path: every new path seen twice in raw or
     /// in numstat, whatever the file (two names git gave in bytes that are not UTF-8 can decode to the same string, which would hide one of
-    /// them from this scan and from the binary scan alike), and every text candidate (modified, renamed, copied or type-changed, text, with
-    /// added lines) whose path holds U+FFFD: it cannot be named back to git to be grepped. Other such files (binary, added, deleted) pass.
+    /// them from this scan and from the binary scan alike), and every text candidate (<see cref="IsTextCandidate"/>) whose path holds
+    /// U+FFFD: it cannot be named back to git to be grepped. Other such files (binary, added, deleted, symlinks, submodules) pass.
     /// </summary>
     internal static (Dictionary<string, RawEntry> Raw, Dictionary<string, long?> Numstat, List<SecretFinding> Undecodable) ParseRawNumstat(string output)
     {
@@ -175,8 +182,7 @@ public sealed partial class GitPayloadBuilder
 
         foreach (var (path, e) in raw)
         {
-            if (e.Status is 'M' or 'R' or 'C' or 'T' && !(numstat.TryGetValue(path, out var added) && added is null or 0)
-                && path.Contains('\uFFFD', StringComparison.Ordinal))
+            if (path.Contains('\uFFFD', StringComparison.Ordinal) && IsTextCandidate(path, e, numstat))
             {
                 flagged.Add(path);
             }

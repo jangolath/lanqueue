@@ -10,9 +10,9 @@
   text files for `-----BEGIN` (`git grep --cached`, only those files), and for each modified or renamed one compares its
   old and new blobs (read by object id, no filters or textconv): an unchanged BEGIN line is scanned again only for a key
   block: a line holding `-----END` (any case) within 8192 lines, every line strictly between them key material (after
-  stripping whitespace, quotes and one-letter string prefixes or suffixes, concatenation such as `+ . .. & || , ;`,
-  `\n` and `\r\n` escapes, a trailing `\`, XML CR/LF character references, comment or quote markers `# // * >` and a
-  YAML `- `: blank, base64 or an armor header such as `Proc-Type: ...`), at least one a base64 line of 16 or more
+  stripping whitespace, runs of the characters `" ' + . & , ; # * > | - /` at the start and `" ' + . & , ; _ \ |` at
+  the end (quotes, concatenation, comment and quote markers, a YAML `- `, a `\` continuation), one-letter string
+  prefixes and short suffixes (`b"`, `"u8`), `\n` and `\r\n` escapes and XML CR/LF character references: blank, base64 or an armor header such as `Proc-Type: ...`), at least one a base64 line of 16 or more
   characters with a digit, `+` or `/` (lines over 16 KB are never key material), and the new line strictly between BEGIN and END (an edit to the END line alone does not count). Code
   that handles PEM (header and footer constants, adjacent or with parser code between them) never refuses an edit; a
   key in a string concatenation, a comment or a YAML block is still found. A key with no END line, longer than 8192

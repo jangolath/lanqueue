@@ -263,7 +263,8 @@ internal static class BlobScan
     /// Whether the block that starts at <paramref name="begin"/> in a text file is a key block with a new line (0.10.1). It counts only when
     /// it is terminated, a line holding <c>-----END</c> (any case) within <see cref="TextMaxBlockLines"/> lines, and every line strictly
     /// between BEGIN and END looks like key material (<see cref="KeyLine"/>), at least one of them a base64 line of
-    /// <see cref="MinBodyChars"/> or more characters. The new line must be one of the lines strictly between BEGIN and END: an edit to the
+    /// <see cref="MinBodyChars"/> or more characters that holds a digit, <c>+</c> or <c>/</c> (so banners and long identifiers are no key
+    /// body). The new line must be one of the lines strictly between BEGIN and END: an edit to the
     /// END line alone does not count. A real key replaced in place keeps its END line and its base64 body; header and footer strings in code
     /// (a parser, a scanner, a test), adjacent or with code between them, are no key, so ordinary edits near them are never refused. A BEGIN
     /// line that itself holds <c>-----END</c> (a one-line JSON or escaped key) has no block.
@@ -321,11 +322,12 @@ internal static class BlobScan
     /// <summary>
     /// What a line inside an armored key is (0.10.1): -1 when it cannot be key material, 0 for a blank line or an armor header
     /// (<c>Name: value</c>, such as Proc-Type, DEK-Info, Comment, Version), else the length of its base64 (<c>[A-Za-z0-9+/=]</c>). First,
-    /// repeatedly, whitespace and the syntax a key is quoted or commented in are stripped: quotes and a one-letter string prefix or suffix
-    /// (<c>b"</c>, <c>r"</c>, <c>"u8</c>), concatenation (<c>+</c>, <c>.</c>, <c>..</c>, <c>&amp;</c>, VB's <c>&amp; _</c>, <c>||</c>, <c>,</c>,
-    /// <c>;</c>), a trailing <c>\n</c> or <c>\r\n</c> escape, a trailing <c>\</c> continuation, XML character references for CR and LF, comment
-    /// and quote markers (<c>#</c>, <c>//</c>, <c>*</c>, <c>&gt;</c>) and a YAML sequence dash. Runs of single-character markers go in one
-    /// step. A line over <see cref="MaxKeyLineChars"/> is -1. <paramref name="strong"/>: the base64 holds a digit, <c>+</c> or <c>/</c>.
+    /// repeatedly, whitespace and the syntax a key is quoted or commented in are stripped: at the start, runs of the characters
+    /// <c>" ' + . &amp; , ; # * &gt; | - /</c> (quotes, concatenation, comments such as <c>#</c>, <c>//</c> and <c>*</c>, a quoted mail's
+    /// <c>&gt;</c>, a YAML dash), and a one-letter string prefix (<c>b"</c>, <c>r'</c>); at the end, runs of the characters
+    /// <c>" ' + . &amp; , ; _ \ |</c> (quotes, concatenation such as VB's <c>&amp; _</c> or SQL's <c>||</c>, a <c>\</c> continuation), a
+    /// <c>\n</c> or <c>\r\n</c> escape, XML character references for CR and LF, and a one- or two-letter string suffix (<c>"u8</c>). Runs go in
+    /// one step, so a line of a thousand <c>#</c> costs one pass. A line over <see cref="MaxKeyLineChars"/> is -1. <paramref name="strong"/>: the base64 holds a digit, <c>+</c> or <c>/</c>.
     /// </summary>
     internal static int KeyLine(string line, out bool strong)
     {

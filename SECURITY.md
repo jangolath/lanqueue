@@ -75,10 +75,11 @@ identifiers are no key), and the
 new line is one of the lines strictly between BEGIN and END (an edit to the END line alone does not count). Key
 material means that, after stripping whitespace and the syntax a key is quoted or commented in, the line is blank,
 base64 (`[A-Za-z0-9+/=]`) or an armor header (`Name: value`, such as Proc-Type, DEK-Info, Comment or Version). The
-syntax stripped: quotes (`"`, `'`) and a one-letter string prefix or suffix (`b"`, `r"`, `"u8`); concatenation (`+`,
-`.`, `..`, `&`, VB's `& _`, `||`, `,`, `;`); a trailing `\n` or `\r\n` escape and a trailing `\` continuation; the XML
-character references `&#xD;`, `&#13;`, `&#xA;` and `&#10;`; comment and quote markers (`#`, `//`, `*`, `>`); and a
-YAML sequence dash (`- `). A line over 16 KB is never key material. So code that handles PEM (header and footer constants, adjacent or with parser code
+syntax stripped: at the start of a line, runs of the characters `"`, `'`, `+`, `.`, `&`, `,`, `;`, `#`, `*`, `>`, `|`,
+`-` and `/` (quotes, concatenation, comments such as `#`, `//` and ` * `, a quoted mail's `>`, a YAML `- `) and a
+one-letter string prefix (`b"`, `r'`); at the end, runs of the characters `"`, `'`, `+`, `.`, `&`, `,`, `;`, `_`, `\`
+and `|` (quotes, concatenation such as VB's `& _` or SQL's `||`, a `\` continuation), a `\n` or `\r\n` escape, the XML
+character references `&#xD;`, `&#13;`, `&#xA;` and `&#10;`, and a short string suffix (`"u8`). A line over 16 KB is never key material. So code that handles PEM (header and footer constants, adjacent or with parser code
 between them) never refuses an edit, while a key kept in a string concatenation, a comment or a YAML block is still
 found. The other side of this, a key replaced in place in a text file is not seen when it has no END line, is longer
 than 8192 lines, or is written in a form not stripped above: a newline given by name or call (VB's `vbLf` or
