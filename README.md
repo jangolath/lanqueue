@@ -884,6 +884,13 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
 `max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs; setting up the pool itself is in
 [docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md).
 
+**Parallel worktrees.** Several developers or AI agents can work on one PC at once, each in its own `git worktree`,
+while every build, test run and format check goes to the pool: lanq ships each worktree's HEAD plus its uncommitted
+changes with no setup, so the dev PC only edits files and runs git. [docs/PARALLEL.md](docs/PARALLEL.md) covers the
+worktree layout, allowlisting checkers such as `dotnet format` up front, counting `max_jobs` slots against agents,
+running the full plan only after targeted tests pass, a local Docker worker, what sharding buys when compile time
+dominates, and a short rule set for agents.
+
 ## Routing jobs
 
 Most jobs need only `--needs` (capabilities, all required). In a pool of small and big machines two more options and
@@ -1222,7 +1229,8 @@ repository. (A `.lanq/` folder in the repository is excluded from the snapshot.)
 
 **Using lanq with AI agents.** [AGENTS.md](AGENTS.md) is the short, tool-agnostic rule set an agent reads;
 [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md) covers setup, instruction-file snippets and a failure playbook; and
-[docs/JSON.md](docs/JSON.md) is the `--json` contract (every field, status and exit code).
+[docs/JSON.md](docs/JSON.md) is the `--json` contract (every field, status and exit code). Running several agents at
+once, one worktree each, on one quiet dev PC: [docs/PARALLEL.md](docs/PARALLEL.md).
 
 Ready-to-copy assets live in [docs/agents/](docs/agents/):
 

@@ -28,6 +28,8 @@ Since 0.11.0 `--results trx:PATTERN` / `junit:PATTERN` (lanq.yml `results:`) add
 - [Plan files](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/PLANS.md): `lanq.yml` and `lanq run --plan`, several jobs (build, tests, a serial tail) routed by size across a mixed pool, one snapshot and one result; per-job `env:`, `exclusive:` and `baseline:`
 - [Sharding](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/SHARDING.md): splitting long test suites across the pool with `--shards`, picking N from history with `--target-minutes`, and balancing shards by duration, per ecosystem; the .NET recipe assigns each test class by a hash (`cksum`), the same on every machine and locale, with a guard script
 
+- [Parallel development](https://raw.githubusercontent.com/jangolath/lanqueue/main/docs/PARALLEL.md): several developers or AI agents in parallel git worktrees on one PC, every build, test and format check on the pool; allowlisting checkers, counting slots, a local Docker worker, pitfalls and agent rules
+
 ## Optional
 
 - [Changelog](https://raw.githubusercontent.com/jangolath/lanqueue/main/CHANGELOG.md): what changed in each release

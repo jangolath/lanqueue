@@ -63,6 +63,18 @@
 - Never edit or delete lanq's `jobs.jsonl` or its `logs/` folder (in lanq's state folder); read them through
   `lanq stats --json` and `logPath`.
 
+## Parallel worktrees
+
+- When several agents share this PC, each works only in its own git worktree. Never check out, switch branches,
+  reset or stash in a worktree another agent or person uses; lanq ships your worktree's HEAD plus its uncommitted
+  changes, with no setup.
+- Never run heavy builds or tests locally. Every build, test run and check (for example
+  `dotnet format --verify-no-changes`) goes through `lanq run --json --no-wake ...`.
+- Run targeted tests while you work, and the full plan (`lanq run --plan --json --no-wake`) once they pass: a plan
+  can take several slots of the shared pool.
+- On `NoCapacity` with `retryable: true`, use `--wait` or the `wait` step once; never retry in a loop.
+- A checker refused as not allowlisted: ask the developer. Never edit the machines file, `lanq.yml` or the allowlists.
+
 ## Route jobs and run a plan file
 
 - Narrow where a job may run: `--size light,medium` or `--min-size heavy` (machine size: `size:` in the machines file,

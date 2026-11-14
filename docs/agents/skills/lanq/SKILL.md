@@ -195,6 +195,20 @@ Rules:
 - Never shard a command that is not idempotent or that writes shared state (deploys, migrations against a shared
   database, publishing, pushing).
 
+## Parallel worktrees
+
+When several agents share one PC, each in its own git worktree (LanQueue's docs/PARALLEL.md):
+
+- Work only in your own worktree. Never check out, switch branches, reset or stash in a worktree another agent or
+  person uses. lanq ships your worktree's HEAD plus its uncommitted changes; no setup is needed.
+- Never run heavy builds or tests locally. Every build, test run and check (for example
+  `dotnet format --verify-no-changes`) goes through `lanq run --json --no-wake ...`.
+- Run targeted tests while you work (`-- dotnet test --filter "FullyQualifiedName~X|FullyQualifiedName~Y"`), and the
+  full plan (`lanq run --plan --json --no-wake`) once they pass: a plan can take several slots.
+- The pool is shared: on `NoCapacity` with `retryable: true`, use `--wait` or the `wait` step once; never retry in a
+  loop.
+- A checker refused as not allowlisted: ask the developer. Never edit the machines file, `lanq.yml` or the allowlists.
+
 ## Reading the result
 
 Read `status` as well as the exit code: a job's own exit code can be any number, and `124` and `75` each cover more

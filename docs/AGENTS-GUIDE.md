@@ -78,6 +78,8 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
   pre-existing and do not fix it unless that is your task. "new" with sameMachine false ran on another machine:
   report it with that caveat (it may be machine-specific), not as certainly new. Status and exit code never change.
 - Never edit or delete lanq's jobs.jsonl or logs/ folder.
+- Parallel worktrees: work only in your own worktree (never check out, switch, reset or stash in another's); never
+  run heavy builds or tests locally; run targeted tests first and the full plan once they pass.
 ```
 
 ## The standard loop
@@ -117,6 +119,24 @@ You can run builds and tests on the developer's LAN machines with the lanq CLI.
 
 `lanq stats --json` also lists `planJobs` (0.10.0): per plan file and job, runs, passes, failures and the median wall
 time of a plan run. The plan file is a full path, so a clone in another folder is a separate entry.
+
+## Parallel worktrees
+
+Several agents can work on one PC at once, one `git worktree` each, with every build, test and check on the pool, so
+the PC stays free for you ([PARALLEL.md](PARALLEL.md)). lanq needs no setup per worktree: each run ships that
+worktree's HEAD plus its uncommitted changes. Before you start them:
+
+- Allowlist every checker your CI runs (`dotnet format`, a linter) in `policy.allowed_commands`. Entries match leading
+  tokens, so `dotnet test` already allows `--filter ...`. A checker the agents cannot run only fails in CI.
+- Count the pool's `max_jobs` slots against the number of agents. A plan with shards can take several slots at once.
+
+What the agents are told (and the snippets say):
+
+- Never run heavy builds or tests on the dev PC; use `lanq run --json --no-wake ...` for every build, test and check.
+- Work only in their own worktree; never check out, switch branches, reset or stash in one another agent uses.
+- Run targeted tests while working, and the full plan (`lanq run --plan --json --no-wake`) once they pass.
+- On `NoCapacity` with `retryable: true`, use `--wait` or the `wait` step once; never retry in a loop.
+- Never edit `machines.yml`, `lanq.yml` or the allowlists; ask you instead.
 
 ## Failure playbook
 
