@@ -692,7 +692,7 @@ public static partial class PlanFileLoader
             }
         }
 
-        if (format is null)
+        if (string.IsNullOrWhiteSpace(format))
         {
             throw error($"results: format: is required: trx or junit (line {node.Start.Line}).");
         }
@@ -702,7 +702,7 @@ public static partial class PlanFileLoader
             throw error($"results: format: must be trx or junit (line {formatLine}).");
         }
 
-        return path is null
+        return string.IsNullOrWhiteSpace(path)
             ? throw error($"results: path: is required: the fetch pattern of the results files, for example path: TestResults/*.trx (line {node.Start.Line}).")
             : format + ":" + path;
     }

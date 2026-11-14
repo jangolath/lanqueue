@@ -30,7 +30,8 @@ public sealed class TestResultsHostileTests : IDisposable
         Assert.Equal((1, 0, 0), (r.Files, r.FilesRead, r.Total));
         Assert.Equal(warning, Assert.Single(r.Warnings));
         Assert.True(r.NoTests);
-        Assert.Equal("zero_executed", r.NoTestsReason);
+        Assert.Equal("results_unreadable", r.NoTestsReason); // a matched file was not read: whether tests ran is unknown
+        Assert.True(r.Unreadable);
     }
 
     private const string NotValidJunit = "1 results file(s) were not valid JUnit XML and were not counted";

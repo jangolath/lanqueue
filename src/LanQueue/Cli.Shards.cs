@@ -127,7 +127,7 @@ public static partial class Cli
         var merged = MergedResults(result);
         if (NoTestsRan(result.Status, merged) is { } noTests)
         {
-            next = NextSteps.WithNoTests(next, "the job");
+            next = WithNoTestsSteps(next, [(null, noTests)]);
             await stderr.WriteLineAsync(NoTestsLine(null, noTests)).ConfigureAwait(false);
         }
 

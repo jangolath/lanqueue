@@ -88,6 +88,23 @@ public sealed partial class PlanFileRunTests
         Assert.StartsWith("[lanq] Completed", lines[^1], StringComparison.Ordinal);
     }
 
+    /// <summary>Durations of 1e308 s in every job and shard: dropped, so the plan's one JSON object is still written and the status line is last.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task TestResultsPlanHugeDurations()
+    {
+        Plan(WithResults);
+        const string Huge = "<testsuites><testcase classname=\"c\" name=\"a\" time=\"1e308\"/><testcase classname=\"c\" name=\"b\" time=\"1e308\"/></testsuites>";
+        var ssh = new ResultsSsh(new PoolSsh(), _ => FetchRunnerTests.Stream(("reports/x.xml", Huge)));
+
+        var (code, stdout, stderr) = await RunWithResults(ssh, "--plan", "--json");
+
+        Assert.Equal(0, code);
+        var json = Json(stdout);
+        Assert.Equal(6, json.GetProperty("resultsTotal").GetProperty("total").GetInt32());
+        Assert.All(JobsOf(json).Values.Where(j => j.TryGetProperty("results", out _)), j => Assert.False(j.GetProperty("results").TryGetProperty("durationSeconds", out _)));
+        Assert.StartsWith("[lanq] Completed", Lines(stderr)[^1], StringComparison.Ordinal);
+    }
+
     /// <summary>Without results: in lanq.yml, no plan object gains results or resultsTotal.</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task TestResultsPlanWithoutResultsIsUnchanged()

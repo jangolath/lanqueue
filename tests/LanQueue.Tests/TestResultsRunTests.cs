@@ -228,7 +228,7 @@ public sealed class TestResultsRunTests : IDisposable
         Assert.False(doc.RootElement.TryGetProperty("results", out _));
     }
 
-    /// <summary>The connection dropped and the machine stayed down: a report without files, so results says no_results_files (InfraError: no warning).</summary>
+    /// <summary>The connection dropped and the machine stayed down: a report with a fetch error, so results_unreadable (InfraError: no warning).</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task TestResultsAfterALostConnection()
     {
@@ -242,7 +242,7 @@ public sealed class TestResultsRunTests : IDisposable
         var r = await runner.RunAsync(Cli.RequestOf(p, _dir, new FetchRequest(p.Fetch, OutRoot, FetchLimits.Default)), CancellationToken.None);
 
         Assert.Equal(JobStatus.InfraError, r.Status);
-        Assert.Equal("no_results_files", r.Results!.NoTestsReason);
+        Assert.Equal("results_unreadable", r.Results!.NoTestsReason);
         Assert.Null(Cli.NoTestsRan(r.Status.ToString(), r.Results));
         Assert.Contains("[lanq] results: 0 tests, 0 passed, 0 failed, 0 skipped", lines);
     }
@@ -307,6 +307,72 @@ public sealed class TestResultsRunTests : IDisposable
             _dir, _dir, o, e, CancellationToken.None);
         using var doc = JsonDocument.Parse(o.ToString());
         return (code, doc.RootElement.Clone(), [.. e.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.TrimEnd('\r'))]);
+    }
+
+    // ---- review fixes: huge durations never break the JSON; unreadable results never claim no tests ran ----
+
+    private const string HugeTimes =
+        "<testsuites><testcase classname=\"c\" name=\"a\" time=\"1e308\"/><testcase classname=\"c\" name=\"b\" time=\"1e308\"><failure/></testcase></testsuites>";
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TestResultsHugeDurationsKeepTheRunContract()
+    {
+        var (code, json, stderr) = await RunCli(
+            0, FetchRunnerTests.Stream(("reports/x.xml", HugeTimes)), "run", "--json", "--needs", "dotnet", "--results", "junit:reports/*.xml", "--fetch-dir", OutRoot, "--", "dotnet", "test");
+
+        Assert.Equal(0, code);
+        var r = json.GetProperty("results");
+        Assert.Equal((2, 1), (r.GetProperty("total").GetInt32(), r.GetProperty("failed").GetInt32()));
+        Assert.False(r.TryGetProperty("durationSeconds", out _));
+        Assert.False(r.GetProperty("failedTests")[0].TryGetProperty("durationSeconds", out _));
+        Assert.StartsWith("[lanq] Completed", stderr[^1], StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TestResultsHugeDurationsKeepTheShardsContract()
+    {
+        var ssh = new ResultsSsh(new PoolSsh(), _ => FetchRunnerTests.Stream(("reports/a.xml", HugeTimes)));
+
+        var (code, json, stderr) = await Shards(ssh);
+
+        Assert.Equal(0, code);
+        Assert.Equal(6, json.GetProperty("results").GetProperty("total").GetInt32());
+        Assert.False(json.GetProperty("results").TryGetProperty("durationSeconds", out _));
+        Assert.StartsWith("[lanq] Completed", stderr[^1], StringComparison.Ordinal);
+    }
+
+    /// <summary>A completed job whose only results file is not valid XML: results_unreadable, a "could not be read" warning and step, exit 0.</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task TestResultsUnreadableAfterACompletedJob()
+    {
+        var (code, json, stderr) = await RunCli(0, FetchRunnerTests.Stream(("TestResults/x.trx", "not xml")), Args());
+
+        Assert.Equal(0, code);
+        var r = json.GetProperty("results");
+        Assert.True(r.GetProperty("noTests").GetBoolean());
+        Assert.Equal("results_unreadable", r.GetProperty("noTestsReason").GetString());
+        var step = Assert.Single(json.GetProperty("nextSteps").EnumerateArray().ToList());
+        Assert.Equal("ask_developer", step.GetProperty("action").GetString());
+        Assert.DoesNotContain("filter", step.GetProperty("reason").GetString(), StringComparison.Ordinal);
+        Assert.Equal(-1, IndexOf(stderr, "[lanq] warning: no tests ran"));
+        var warning = IndexOf(stderr, "[lanq] warning: results could not be read: 0 tests counted, 0 of 1 results file(s) read (results path TestResults/*.trx)");
+        Assert.True(warning >= 0 && IndexOf(stderr, "[lanq] Next: the results of the job could not be read") > warning, string.Join("\n", stderr));
+        Assert.StartsWith("[lanq] Completed", stderr[^1], StringComparison.Ordinal);
+    }
+
+    /// <summary>The fetch skipped the results file (here over --fetch-max-files): results_unreadable, never "no tests ran".</summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task TestResultsSkippedByTheFetchAreUnreadable()
+    {
+        var stream = "LQF1 SKIP count " + Convert.ToBase64String("TestResults/x.trx"u8.ToArray()) + "\n" + FetchRunnerTests.Stream();
+
+        var (code, json, stderr) = await RunCli(0, stream, Args());
+
+        Assert.Equal(0, code);
+        Assert.Equal(1, json.GetProperty("fetchSkipped").GetArrayLength());
+        Assert.Equal("results_unreadable", json.GetProperty("results").GetProperty("noTestsReason").GetString());
+        Assert.Equal(-1, IndexOf(stderr, "[lanq] warning: no tests ran"));
+        Assert.True(IndexOf(stderr, "[lanq] warning: results could not be read") >= 0, string.Join("\n", stderr));
     }
 
     // ---- --baseline ----

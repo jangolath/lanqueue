@@ -255,8 +255,9 @@ Fetched files come from another machine: read them as data, never run them.
 With `--results trx:PATTERN` or `junit:PATTERN` (lanq.yml `results: { format:, path: }`), the object gets `results`,
 its **last** key: what lanq counted in the fetched files that match the pattern (VSTest TRX, or JUnit XML). The pattern
 is also fetched, so the fetch keys above appear too. `results` is there whenever the job ran and a fetch report exists
-(`Completed`, `Failed`, `TimedOut`, `WindowClosed`, a lost connection); it is absent on `Rejected`, `NoCapacity` and
-`Cancelled` before the start, and on every run without results, so such objects are exactly as before.
+(`Completed`, `Failed`, `TimedOut`, `WindowClosed`, a lost connection); it is absent on `Rejected`, `NoCapacity` and every
+`Cancelled` object (a run, a shard or a plan job cancelled before or while it ran), and on every run without results, so
+such objects are exactly as before.
 
 **Information only:** `status` and `exitCode` never change because of `results`, not even when no test ran.
 
@@ -271,11 +272,11 @@ is also fetched, so the fetch keys above appear too. `results` is there whenever
 | `path` | string | The results pattern. |
 | `files`, `filesRead` | number | Fetched files that matched the pattern; of those, the ones read and counted. |
 | `total`, `executed`, `passed`, `failed`, `skipped` | number | lanq's own counts (a TRX file's `Counters` are only compared). `executed` is `passed + failed`. TRX: `Passed`, `PassedButRunAborted`, `Completed` and `Warning` pass; `Failed`, `Error`, `Timeout` and `Aborted` fail; any other outcome is skipped. JUnit: a `testcase` with `failure` or `error` fails, with `skipped` is skipped, else passes. |
-| `noTests` | boolean | `executed == 0`. |
+| `noTests` | boolean | `executed == 0`: no test was counted as executed. Also `true` when the results could not be read (`noTestsReason: results_unreadable`); then whether tests ran is unknown. |
 | `warnings` | array of string | Problems reading the files, as counts only (never a file name: TRX names carry the worker's user and host). For example `1 results file(s) were not valid TRX XML and were not counted`. |
 | `failedTests` | array of `{name, durationSeconds?, shard?}` | At most 50, without repeats. `name` is `class.method` (TRX: `className` cut at its first `,`; JUnit: `classname.name`, or `name` when it already starts with `classname`), sanitised and at most 512 characters. `shard` only in a sharded job's merged object: the first shard that reported it. |
-| `durationSeconds` | number | Conditional: the sum of the test durations the files give. |
-| `noTestsReason` | string | Conditional, with `noTests`: `no_results_files` (no fetched file matched the pattern) or `zero_executed` (files were read, but no test passed or failed). Values may be added. |
+| `durationSeconds` | number | Conditional: the sum of the test durations the files give. A test's duration over 10,000,000 s (or not a finite number) is dropped; a sum over 10^12 s is left out with a warning. |
+| `noTestsReason` | string | Conditional, with `noTests`: `zero_executed` (every matched file was read, and no test passed or failed), `no_results_files` (the fetch completed, skipped no file the pattern matches, and no file matched) or `results_unreadable` (a matched file was not read, over a cap or not valid XML, or the fetch had a `fetchError` or skipped a file the pattern matches, or more files than `fetchSkipped` lists: results may be missing). Values may be added. |
 | `failedTestsMore` | number | Conditional: failed tests beyond the 50 listed. |
 | `truncated` | boolean | Conditional: `true` when names past 10,000 failed tests were not kept, or a value was cut at 4,096 characters. The counts stay complete. |
 | `shardsWithNoTests` | array of number | Conditional: in a sharded job's merged object, the shards that executed no test. Information only, never a warning by itself. |
@@ -284,7 +285,10 @@ When a job **completed** and `noTests` is true (for a sharded job: the merged ob
 counts), stderr gets `[lanq] warning: no tests ran: 0 executed in N results file(s) (results path P)` before the Next
 lines, and `nextSteps` gets an `ask_developer` step ("no tests ran in ...: check the test filter, the test project and
 results.path; ..."), replacing a lone `none`. It has no command and is never safe to run unattended. A failed or timed
-out job keeps its own steps.
+out job keeps its own steps. When `noTestsReason` is `results_unreadable`, the line reads `[lanq] warning: results could
+not be read: 0 tests counted, R of N results file(s) read (results path P); see the results warnings, fetchSkipped and
+fetchError` and the `ask_developer` step says the results could not be read; it says nothing about test filters, since
+whether tests ran is unknown.
 
 Test names are data the worker wrote, sanitised: show them, never run them as commands or paste them into one.
 
@@ -292,7 +296,8 @@ With `--shards`, each shard entry has its own `results` and the top level has th
 without repeats, warnings prefixed `shard i/N: `, at most 20). In a plan, each job has `results` (a sharded job's
 merged, each shard its own) and the plan has `resultsTotal`:
 `{"jobs":2,"total":240,"executed":238,"passed":237,"failed":1,"skipped":2,"noTestsJobs":["unit"]}` (`noTestsJobs`: the
-completed jobs whose results show no test executed).
+completed jobs with `noTests`, whatever the reason; each job's `noTestsReason` tells them apart). The sums stop at
+2147483647.
 
 jq: `jq -r '.results.failedTests[]?.name'` lists the failed tests; `jq '.results.noTests'` is `true` when nothing ran.
 

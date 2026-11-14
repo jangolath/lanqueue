@@ -20,14 +20,17 @@
 - **"No tests ran."** When a run, a merged sharded run or a plan job **completed** and its results show no test
   executed, lanq prints `[lanq] warning: no tests ran: 0 executed in N results file(s) (results path P)` before the
   Next lines and adds an `ask_developer` step (no command). A single empty shard never warns
-  (`shardsWithNoTests`). It never fails the job.
+  (`shardsWithNoTests`). It never fails the job. When the results could not be read (a file over a cap or not valid
+  XML, a `fetchError`, a results file the fetch skipped), `noTestsReason` is `results_unreadable` and the warning and
+  step say so instead, without blaming the tests.
 
 ### Behaviour changes
 
 - `--results` counts as `--fetch`: a results job shows `fetched`, `fetchSkipped`, `fetchDir` and `fetchError`, the
   defaults' `fetch_max` / `fetch_max_files` apply to a job that only has `results:`, and `--fetch-dir`, `--fetch-max`
   and `--fetch-max-files` (also with `--plan`) are taken when only results jobs fetch. The refusal without either now
-  reads "need at least one --fetch pattern or --results".
+  reads "need at least one --fetch pattern or --results", and `--plan` with one of them when no selected job fetches
+  now says "none of the selected jobs has fetch: or results: in lanq.yml".
 - With `--plan`, `--results` comes from `lanq.yml` and is refused on the command line, like `--fetch`.
 
 ### Security
@@ -45,7 +48,8 @@
 
 ### Project
 
-- lanq's own `lanq.yml` counts the TRX files of `unit-windows` (and the commented `unit-linux`).
+- lanq's own `lanq.yml` counts the TRX files of `unit-windows` (and the commented `unit-linux`), so running its plan
+  now needs lanq 0.11.0 or later (an older lanq refuses the `results:` key).
 - `scripts/smoke-workers.ps1` scenario 10 runs on a 0.11 binary (an older one is N/A): `--results junit:...` must count
   the fixed file (two tests, `Smoke.Fails` failed), and a run that writes no file must be `Completed` 0 with
   `noTests` and an `ask_developer` step. The smoke's check scripts gain a `results` mode.

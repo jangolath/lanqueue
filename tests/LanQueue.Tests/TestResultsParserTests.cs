@@ -147,7 +147,7 @@ public sealed class TestResultsParserTests : IDisposable
     [Fact]
     public void TestResultsNoFileIsNoResultsFiles()
     {
-        foreach (var report in new[] { Report(_dir), null, new FetchReport(_dir, [], [], "not fetched: the SSH connection failed during the job, and the machine did not answer afterwards") })
+        foreach (var report in new[] { Report(_dir), null })
         {
             var r = TestResultsParser.Parse(Trx, report, ignoreCase: false);
 

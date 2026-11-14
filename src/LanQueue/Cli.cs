@@ -972,7 +972,7 @@ public static partial class Cli
         var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
         if (NoTestsRan(result.Status.ToString(), result.Results) is { } noTests)
         {
-            next = NextSteps.WithNoTests(next, "the job");
+            next = WithNoTestsSteps(next, [(null, noTests)]);
             await stderr.WriteLineAsync(NoTestsLine(null, noTests)).ConfigureAwait(false);
         }
 

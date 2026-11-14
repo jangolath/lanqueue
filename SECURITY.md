@@ -185,7 +185,12 @@ are parsed only from files the fetch above already brought back and re-verified 
 worker directly, and a file that is now a link or not a regular file is not read. The XML reader takes no DTD (a
 `DOCTYPE` refuses the file, so no entity expansion and no external entity) and has no resolver; each file is read
 forward-only under caps: 64 MB per file (checked before it is opened), 64 files and 256 MB per job, depth 32, 2 million
-elements, 4,096 characters kept per attribute, 10 seconds of reading, and 10,000 failed names kept. A file that breaks
+elements, 4,096 characters kept per attribute, 10 seconds of reading, and 10,000 failed names kept. The size is checked
+again once the file is open, and so is that it is still not a link. The attribute cap bounds what lanq keeps, not what the
+reader holds: .NET's reader builds a whole attribute value before lanq sees it, so the memory bound for one value is the
+reader's limit of 64 million characters per document (one file at a time). A test's duration over 10,000,000 seconds or
+not a finite number is dropped, and a sum that would not be a usable number is left out, so JSON output never fails on
+it. Counts stop at 2,147,483,647 instead of overflowing. A file that breaks
 a cap or is not valid XML is counted in a warning and left out. Test names are sanitised (control, bidi and zero-width
 characters become `?`) and cut to 512 characters before they are printed or put in JSON; lanq never runs them, and the
 nextStep it adds has no command. Warnings give counts, never file names (a TRX file name carries the worker's user and

@@ -27,11 +27,21 @@ public sealed record TestResults(
     ResultsFormat Format, string Path, int Files, int FilesRead, int Total, int Executed, int Passed, int Failed, int Skipped, double? DurationSeconds,
     IReadOnlyList<FailedTest> FailedTests, int FailedKnown, bool Truncated, IReadOnlyList<string> Warnings, IReadOnlyList<int> ShardsWithNoTests)
 {
-    /// <summary>No test was executed (none passed or failed).</summary>
+    /// <summary>
+    /// Some results may be missing: a matching file was not read (a cap, not valid XML, a link), the fetch had an error, or the fetch
+    /// skipped a file the results path matches (or more files than it lists). With no test counted, lanq cannot tell whether tests ran.
+    /// </summary>
+    public bool Unreadable { get; init; }
+
+    /// <summary>No test was counted as executed (none passed or failed).</summary>
     public bool NoTests => Executed == 0;
 
-    /// <summary>no_results_files (no file matched the pattern) or zero_executed (files were there, no test ran); null when tests ran.</summary>
-    public string? NoTestsReason => !NoTests ? null : Files == 0 ? "no_results_files" : "zero_executed";
+    /// <summary>
+    /// With <see cref="NoTests"/>: results_unreadable (<see cref="Unreadable"/>: whether tests ran is unknown), no_results_files (the fetch
+    /// completed, skipped no results file, and no file matched) or zero_executed (every matched file was read and no test ran); null when
+    /// tests ran.
+    /// </summary>
+    public string? NoTestsReason => !NoTests ? null : Unreadable ? TestResultsParser.ResultsUnreadable : Files == 0 ? "no_results_files" : "zero_executed";
 }
 
 /// <summary>
@@ -52,6 +62,17 @@ public static class TestResultsParser
     internal const int CheckEvery = 4096;
     internal const int MaxMergedWarnings = 20;
     internal static readonly TimeSpan MaxReadTime = TimeSpan.FromSeconds(10);
+
+    /// <summary>One test's duration above this (or not a finite number) is dropped.</summary>
+    internal const double MaxCaseSeconds = 1e7;
+
+    /// <summary>A sum of durations above this (or not a finite number) is left out (durationSeconds absent) with a warning.</summary>
+    internal const double MaxSumSeconds = 1e12;
+
+    /// <summary>The noTestsReason when results may be missing (<see cref="TestResults.Unreadable"/>).</summary>
+    internal const string ResultsUnreadable = "results_unreadable";
+
+    internal const string DurationWarning = "the test durations do not add up to a usable number; durationSeconds is left out";
 
     /// <summary>The namespace of a VSTest TRX file (a TRX file without a namespace is read too).</summary>
     internal const string TrxNamespace = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
@@ -86,7 +107,30 @@ public static class TestResultsParser
     }
 
     private static TestResults Empty(ResultsSpec spec, string warning) =>
-        new(spec.Format, spec.Path, 0, 0, 0, 0, 0, 0, 0, null, [], 0, false, [warning], []);
+        new(spec.Format, spec.Path, 0, 0, 0, 0, 0, 0, 0, null, [], 0, false, [warning], []) { Unreadable = true };
+
+    /// <summary>A count that cannot overflow: summed as long, then held at int.MaxValue.</summary>
+    internal static int Saturate(long value) => (int)Math.Clamp(value, 0, int.MaxValue);
+
+    /// <summary>The saturating sum of counts.</summary>
+    internal static int Sum(IEnumerable<int> values) => Saturate(values.Sum(v => (long)v));
+
+    /// <summary>a + b for durations; a sum that is not finite or above <see cref="MaxSumSeconds"/> sets <paramref name="bad"/>.</summary>
+    private static double? AddSeconds(double? a, double? b, ref bool bad)
+    {
+        if (b is not { } add)
+        {
+            return a;
+        }
+
+        var sum = (a ?? 0) + add;
+        if (!double.IsFinite(sum) || sum < 0 || sum > MaxSumSeconds)
+        {
+            bad = true;
+        }
+
+        return sum;
+    }
 
     private static TestResults ParseFiles(ResultsSpec spec, FetchReport? report, bool ignoreCase, TimeProvider clock)
     {
@@ -97,6 +141,7 @@ public static class TestResultsParser
         var job = new Totals();
         int read = 0, invalid = 0, oversize = 0, beyond = 0, overTotal = 0, capped = 0, slow = 0, mismatched = 0, notRegular = 0;
         long bytes = 0;
+        var badDuration = false;
         for (var i = 0; i < files.Count; i++)
         {
             if (i >= MaxFiles)
@@ -134,11 +179,33 @@ public static class TestResultsParser
                 continue;
             }
 
-            bytes += info.Length;
             try
             {
-                var one = ReadFile(spec.Format, local, clock);
-                job.Add(one);
+                using var stream = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+
+                // Again once open: the file may have grown, or been swapped for a link, since it was checked.
+                if (stream.Length > MaxFileBytes)
+                {
+                    oversize++;
+                    continue;
+                }
+
+                if (bytes + stream.Length > MaxTotalBytes)
+                {
+                    overTotal++;
+                    continue;
+                }
+
+                var again = new FileInfo(local);
+                if (again.LinkTarget is not null || (again.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.Device)) != 0)
+                {
+                    notRegular++;
+                    continue;
+                }
+
+                bytes += stream.Length;
+                var one = ReadFile(spec.Format, stream, clock);
+                badDuration |= job.Add(one);
                 read++;
                 mismatched += one.CountersDisagree ? 1 : 0;
             }
@@ -191,9 +258,30 @@ public static class TestResultsParser
             warnings.Add($"more than {MaxFailedKept} failed tests; names after that are not kept (counts are complete)");
         }
 
+        if (badDuration)
+        {
+            warnings.Add(DurationWarning);
+        }
+
+        // Results may be missing when the fetch did not finish, or skipped a file the results path matches (or more than it lists).
+        var fetchSkips = report?.Skipped.Count(f => matcher.IsMatch(f.Path)) ?? 0;
+        if (fetchSkips > 0)
+        {
+            warnings.Add($"{fetchSkips.ToString(CultureInfo.InvariantCulture)} results file(s) were skipped by the fetch and not read (see fetchSkipped)");
+        }
+
+        if (report is { Error: not null })
+        {
+            warnings.Add("the fetch did not complete (see fetchError); results files may be missing");
+        }
+
+        var unreadable = read < files.Count || fetchSkips > 0 || report is { Error: not null } || report is { MoreSkipped: > 0 };
         return new TestResults(
-            spec.Format, spec.Path, files.Count, read, job.Passed + job.Failed + job.Skipped, job.Passed + job.Failed, job.Passed, job.Failed, job.Skipped,
-            job.Duration, job.Names, job.Names.Count + job.NamesPastCap, job.NamesPastCap > 0 || job.Cut, warnings, []);
+            spec.Format, spec.Path, files.Count, read, Saturate((long)job.Passed + job.Failed + job.Skipped), Saturate((long)job.Passed + job.Failed), job.Passed, job.Failed,
+            job.Skipped, badDuration ? null : job.Duration, job.Names, Saturate((long)job.Names.Count + job.NamesPastCap), job.NamesPastCap > 0 || job.Cut, warnings, [])
+        {
+            Unreadable = unreadable,
+        };
     }
 
     /// <summary>
@@ -215,6 +303,7 @@ public static class TestResultsParser
         var pastCap = 0;
         var warnings = new List<string>();
         double? duration = null;
+        var badDuration = false;
         var count = shards.Count.ToString(CultureInfo.InvariantCulture);
         foreach (var (shard, r) in present)
         {
@@ -235,7 +324,7 @@ public static class TestResultsParser
                 }
             }
 
-            pastCap += r.FailedKnown - r.FailedTests.Count;
+            pastCap = Saturate((long)pastCap + Math.Max(0, r.FailedKnown - r.FailedTests.Count));
             foreach (var w in r.Warnings)
             {
                 if (warnings.Count < MaxMergedWarnings)
@@ -244,34 +333,38 @@ public static class TestResultsParser
                 }
             }
 
-            if (r.DurationSeconds is { } d)
-            {
-                duration = (duration ?? 0) + d;
-            }
+            duration = AddSeconds(duration, r.DurationSeconds, ref badDuration);
+        }
+
+        if (badDuration)
+        {
+            warnings.Add(DurationWarning);
         }
 
         return new TestResults(
             first.Format,
             first.Path,
-            present.Sum(s => s.R!.Files),
-            present.Sum(s => s.R!.FilesRead),
-            present.Sum(s => s.R!.Total),
-            present.Sum(s => s.R!.Executed),
-            present.Sum(s => s.R!.Passed),
-            present.Sum(s => s.R!.Failed),
-            present.Sum(s => s.R!.Skipped),
-            duration,
+            Sum(present.Select(s => s.R!.Files)),
+            Sum(present.Select(s => s.R!.FilesRead)),
+            Sum(present.Select(s => s.R!.Total)),
+            Sum(present.Select(s => s.R!.Executed)),
+            Sum(present.Select(s => s.R!.Passed)),
+            Sum(present.Select(s => s.R!.Failed)),
+            Sum(present.Select(s => s.R!.Skipped)),
+            badDuration ? null : duration,
             names,
-            names.Count + pastCap,
+            Saturate((long)names.Count + pastCap),
             pastCap > 0 || present.Any(s => s.R!.Truncated),
             warnings,
-            [.. present.Where(s => s.R!.Executed == 0).Select(s => s.Shard)]);
+            [.. present.Where(s => s.R!.Executed == 0).Select(s => s.Shard)])
+        {
+            Unreadable = present.Any(s => s.R!.Unreadable),
+        };
     }
 
     /// <summary>One results file, read in full under the caps; throws on anything that is not a complete, valid file of the format.</summary>
-    private static FileCounts ReadFile(ResultsFormat format, string path, TimeProvider clock)
+    private static FileCounts ReadFile(ResultsFormat format, Stream stream, TimeProvider clock)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
         using var reader = XmlReader.Create(stream, Settings);
         var guard = new Guard(clock);
         return format == ResultsFormat.Trx ? ReadTrx(reader, guard) : ReadJunit(reader, guard);
@@ -452,7 +545,8 @@ public static class TestResultsParser
                 var name = g.Attr(r, "name") ?? "(unnamed)";
                 var className = g.Attr(r, "classname") ?? "";
                 caseName = className.Length == 0 || name.StartsWith(className, StringComparison.Ordinal) ? name : className + "." + name;
-                caseTime = double.TryParse(g.Attr(r, "time"), NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var s) && double.IsFinite(s) && s >= 0
+                caseTime = double.TryParse(g.Attr(r, "time"), NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var s)
+                    && double.IsFinite(s) && s is >= 0 and <= MaxCaseSeconds
                     ? s
                     : null;
                 caseOutcome = Outcome.Passed;
@@ -503,7 +597,9 @@ public static class TestResultsParser
     };
 
     private static double? TrxSeconds(string? text) =>
-        text is not null && TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out var span) && span >= TimeSpan.Zero ? span.TotalSeconds : null;
+        text is not null && TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out var span) && span >= TimeSpan.Zero && span.TotalSeconds <= MaxCaseSeconds
+            ? span.TotalSeconds
+            : null;
 
     /// <summary>A test name for output: sanitised (no control, bidi or zero-width characters), then cut to 512 characters.</summary>
     internal static string SafeName(string name)
@@ -611,16 +707,15 @@ public static class TestResultsParser
         public int NamesPastCap;
         public readonly List<FailedTest> Names = [];
 
-        public void Add(FileCounts c)
+        /// <summary>Adds one file's counts; true when the durations no longer add up to a usable number (see <see cref="AddSeconds"/>).</summary>
+        public bool Add(FileCounts c)
         {
-            Passed += c.Passed;
-            Failed += c.Failed;
-            Skipped += c.Skipped;
+            Passed = Saturate((long)Passed + c.Passed);
+            Failed = Saturate((long)Failed + c.Failed);
+            Skipped = Saturate((long)Skipped + c.Skipped);
             Cut |= c.Cut;
-            if (c.Duration is { } d)
-            {
-                Duration = (Duration ?? 0) + d;
-            }
+            var bad = false;
+            Duration = AddSeconds(Duration, c.Duration, ref bad);
 
             foreach (var (name, duration) in c.FailedNames)
             {
@@ -639,6 +734,8 @@ public static class TestResultsParser
                     NamesPastCap++;
                 }
             }
+
+            return bad;
         }
     }
 }

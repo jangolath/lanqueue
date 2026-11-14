@@ -219,7 +219,7 @@ public static partial class Cli
 
         // results: (0.11.0): every completed job whose results show no test executed, whatever the plan's status.
         var noTests = result.Jobs.Select(j => (j.Name, Results: NoTestsRan(j.Status, PlanJobResults(j)))).Where(x => x.Results is not null).ToList();
-        next = WithNoTestsStep(next, [.. noTests.Select(x => x.Name)]);
+        next = WithNoTestsSteps(next, [.. noTests.Select(x => ((string?)x.Name, x.Results!))]);
         foreach (var (name, r) in noTests)
         {
             await stderr.WriteLineAsync(NoTestsLine(name, r!)).ConfigureAwait(false);

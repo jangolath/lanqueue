@@ -304,6 +304,18 @@ internal static class NextSteps
     }
 
     /// <summary>
+    /// A completed run whose results could not be read and counted no test (results_unreadable, 0.11.0): an ask_developer step without a
+    /// command, replacing a lone none. It does not blame the tests: whether any ran is unknown.
+    /// </summary>
+    public static List<NextStepJson> WithUnreadableResults(List<NextStepJson> steps, string jobs)
+    {
+        var step = Step(
+            NextAction.AskDeveloper,
+            $"the results of {jobs} could not be read, so lanq counted no test and cannot tell whether any ran; see results.warnings, fetchSkipped and fetchError, and ask the developer");
+        return steps is [{ } only] && only.Action == Name(NextAction.None) ? [step] : [.. steps, step];
+    }
+
+    /// <summary>
     /// The lines for people: "Next: reason: command" per step (none left out), "(for the developer)" before a command that is not safe to run
     /// unattended, and only the reason when there is no command line. <paramref name="prefix"/> is "[lanq] " inside lanq run.
     /// </summary>
