@@ -28,6 +28,8 @@ cat "$work/version.txt"
 head -n 1 "$work/version.txt" | grep -q -E "^lanq $(printf '%s' "$want" | sed 's/[.]/[.]/g')([+].*)?\$" || fail "--version is not lanq $want"
 grep -q -E '^lanq-makeready [0-9.]+ [(]embedded: lanq-makeready[.]ps1 [1-9][0-9]* bytes, lanq-makeready[.]sh [1-9][0-9]* bytes[)]' "$work/version.txt" \
   || fail "the embedded lanq-makeready scripts did not load"
+grep -q -E '^lanq-makeready-tune [0-9.]+ [(]embedded: lanq-makeready-tune[.]ps1 [1-9][0-9]* bytes, lanq-makeready-tune[.]sh [1-9][0-9]* bytes[)]' "$work/version.txt" \
+  || fail "the embedded lanq-makeready-tune scripts did not load"
 
 echo "== lanq doctor --config machines.example.yml"
 # Its exit code depends on this host (ssh, git, known_hosts); only the config line matters here.

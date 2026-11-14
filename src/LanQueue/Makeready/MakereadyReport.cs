@@ -176,7 +176,15 @@ internal sealed record MakereadyReportJson(
     [property: JsonPropertyName("checks")] List<MakereadyCheck>? Checks,
     [property: JsonPropertyName("capabilities")] List<string>? Capabilities,
     [property: JsonPropertyName("suggestedMachine")] MakereadySuggestion? SuggestedMachine,
-    [property: JsonPropertyName("lanqWithheld")] List<MakereadyWithheld>? LanqWithheld);
+    [property: JsonPropertyName("lanqWithheld")] List<MakereadyWithheld>? LanqWithheld)
+{
+    /// <summary>
+    /// lanq makeready --tune (0.12.0): the tune scan's outcome, lanq's own object, last in the report; absent without --tune. The parse type
+    /// (<see cref="MakereadyReport"/>) has no such member, so a worker that sends "lanqTune" is ignored.
+    /// </summary>
+    [JsonPropertyName("lanqTune")]
+    public MakereadyTuneJson? LanqTune { get; init; }
+}
 
 /// <summary>One key of the report lanq left out of its JSON (0.9.2): the dotted key and why.</summary>
 internal sealed record MakereadyWithheld([property: JsonPropertyName("key")] string Key, [property: JsonPropertyName("reason")] string Reason);

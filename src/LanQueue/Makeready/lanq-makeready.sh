@@ -8,7 +8,7 @@
 #        --out FILE also saves the human report to FILE (a new file only: an existing file is never overwritten)
 # Exit:  0 = worker-ready, 1 = not ready, 2 = bad arguments.
 
-TOOL_VERSION=0.4.1
+TOOL_VERSION=0.5.0
 SEP=$(printf '\037')
 CHECKS=""
 

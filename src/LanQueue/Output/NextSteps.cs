@@ -190,14 +190,25 @@ internal sealed class SuggestedCommand
     /// lanq makeready MACHINE [--config FILE] (or --ssh user@host --os X [--key-env VAR]): it runs a script on someone else's PC, so never safe
     /// unattended.
     /// </summary>
-    public static SuggestedCommand? Makeready(string? machine, string? config, string? sshTarget = null, MachineOs? os = null, string? keyEnv = null)
+    /// <param name="tune">Adds --tune (0.12.0): the read-only tune scan after the check (also a script on someone else's PC).</param>
+    public static SuggestedCommand? Makeready(string? machine, string? config, string? sshTarget = null, MachineOs? os = null, string? keyEnv = null, bool tune = false)
     {
         if (sshTarget is not null && os is { } o)
         {
-            return Make(WithKeyEnv(["lanq", "makeready", "--ssh", sshTarget, "--os", OsWord(o)], keyEnv), safe: false);
+            return Make(WithTune(WithKeyEnv(["lanq", "makeready", "--ssh", sshTarget, "--os", OsWord(o)], keyEnv), tune), safe: false);
         }
 
-        return machine is null ? null : Make(WithConfig(["lanq", "makeready", machine], config), safe: false);
+        return machine is null ? null : Make(WithConfig(WithTune(["lanq", "makeready", machine], tune), config), safe: false);
+    }
+
+    private static List<string> WithTune(List<string> argv, bool tune)
+    {
+        if (tune)
+        {
+            argv.Add("--tune");
+        }
+
+        return argv;
     }
 
     /// <summary>
@@ -943,6 +954,25 @@ internal static class NextSteps
             ],
         };
     }
+
+    /// <summary>
+    /// The steps inside lanqTune (lanq makeready --tune, 0.12.0). Ok with items lanq-makeready-fix can change: ask_developer without a command
+    /// (only the PC's owner runs the fix script, at that PC). Ok without: none. TimedOut or Unreachable: retry, Unusable: ask_developer, each
+    /// with <paramref name="again"/> (lanq makeready ... --tune, never safe unattended: it runs scripts on someone else's PC).
+    /// </summary>
+    public static List<NextStepJson> ForTune(string status, int fixable, string machine, SuggestedCommand? again) => status switch
+    {
+        "Ok" when fixable > 0 =>
+        [
+            Step(
+                NextAction.AskDeveloper,
+                $"{machine}: the PC's owner may change {fixable.ToString(CultureInfo.InvariantCulture)} setting(s) at that PC with lanq-makeready-fix "
+                + "(preview: lanq-makeready-fix.ps1 -Tune -WhatIf, or sudo sh lanq-makeready-fix.sh --tune --dry-run); local and interactive only, lanq never runs it"),
+        ],
+        "Ok" => Nothing($"{machine}: nothing in the tune scan that lanq-makeready-fix can change"),
+        "TimedOut" or "Unreachable" => [Step(NextAction.Retry, $"{machine}: the tune scan did not finish ({status}); the readiness result stands; try again later", again)],
+        _ => [Step(NextAction.AskDeveloper, $"{machine}: the tune scan sent no usable report; the readiness result stands", again)],
+    };
 
     /// <summary>
     /// lanq doctor --json: Ok without a held machine -> none. A warn or fail -> one ask_developer naming up to five "machine check" pairs and

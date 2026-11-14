@@ -59,6 +59,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>makeready --add --name NAME: the new machine's name.</summary>
     public string? Name { get; init; }
 
+    /// <summary>makeready --tune (0.12.0): after the check, also run the read-only lanq-makeready-tune scan and report it (lanqTune).</summary>
+    public bool Tune { get; init; }
+
     /// <summary>lanq doctor --remote: also check each worker over ssh.</summary>
     public bool Remote { get; init; }
 
@@ -182,7 +185,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
         ["doctor"] = ["--remote", "--force", "--json"],
-        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes"],
+        ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes", "--tune"],
         ["init"] = ["--json"],
         ["wake"] = ["--wait", "--json"],
         ["--version"] = [],
@@ -221,6 +224,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         string? keyEnv = null;
         var setup = false;
         var add = false;
+        var tune = false;
         string? name = null;
         string? target = null;
         var fetch = new List<string>();
@@ -419,6 +423,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                 case "--add":
                     add = true;
                     break;
+                case "--tune":
+                    tune = true;
+                    break;
                 case "--name" when i + 1 < own.Length:
                     name = own[++i];
                     break;
@@ -507,6 +514,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             KeyEnv = keyEnv,
             Setup = setup,
             Add = add,
+            Tune = tune,
             Name = name,
             Fetch = FetchPatterns.Validate(fetch, results?.Path),
             Results = results,
@@ -529,8 +537,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     }
 
     /// <summary>
-    /// The makeready options that only make sense together: --key-env only with --ssh; --setup only prints text (no --json, --add, --all or
-    /// --force); --name and --yes only with --add. Whether --ssh, --os and --name are all there is checked by the command itself, so that
+    /// The makeready options that only make sense together: --key-env only with --ssh; --setup only prints text (no --json, --add, --all,
+    /// --force or --tune); --name and --yes only with --add; --tune not with --add. Whether --ssh, --os and --name are all there is checked by the command itself, so that
     /// lanq makeready --add --json still answers with its own object.
     /// </summary>
     private static void CheckMakereadyOptions(List<string> seen, bool json, bool setup, bool add)
@@ -540,9 +548,14 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException("--key-env goes with --ssh user@host (a configured machine uses its key_env from machines.yml).");
         }
 
-        if (setup && (json || add || seen.Contains("--all") || seen.Contains("--force")))
+        if (setup && (json || add || seen.Contains("--all") || seen.Contains("--force") || seen.Contains("--tune")))
         {
-            throw new ArgumentException("--setup only prints the one-time setup for people; it takes no --json, --add, --all or --force.");
+            throw new ArgumentException("--setup only prints the one-time setup for people; it takes no --json, --add, --all, --force or --tune.");
+        }
+
+        if (add && seen.Contains("--tune"))
+        {
+            throw new ArgumentException("--tune does not go with --add: add the PC first, then run lanq makeready NAME --tune.");
         }
 
         if (!add && (seen.Contains("--name") || seen.Contains("--yes")))
@@ -643,11 +656,11 @@ public static partial class Cli
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
-          lanq makeready <machine> [--json] [--force] [--config FILE]
-          lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]
+          lanq makeready <machine> [--json] [--force] [--tune] [--config FILE]
+          lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json] [--tune]
           lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]
           lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]
-          lanq makeready --all [--json] [--force] [--config FILE]
+          lanq makeready --all [--json] [--force] [--tune] [--config FILE]
           lanq init [--config FILE] [--json]
           lanq wake <machine> [--wait] [--json] [--config FILE]
           lanq --version
@@ -722,6 +735,12 @@ public static partial class Cli
         makeready --all checks every machine in the config (four at a time, same rules) and prints one table (machine, OS, verdict OK / WARN n /
         FAIL n / unreachable / held / error, top problem; FAIL only when the machine is NOT READY); exit 70 any machine unreachable or its
         report unusable, else 1 any NOT READY, else 75 any held, else 0 (warnings alone exit 0); 2 bad arguments or config; 130 Ctrl+C.
+        A configured machine's allowed_hours window (the same HH:mm-HH:mm in every entry) goes to the check as -Hours.
+        makeready --tune also runs the read-only lanq-makeready-tune scan after a report (the same way, on ssh stdin; up to 150 s): what slows
+        the PC down as a build worker (power plan, PC-maker updaters, Defender exclusions and scan times, inotify, journald, ...), OK / INFO /
+        WARN / SKIP, never FAIL. The text adds a tune section (WARN and INFO items with advice and fix ids; --all a TUNE column); --json adds
+        lanqTune to the report (status Ok, TimedOut, Unreachable or Unusable; report; nextSteps). It never changes the exit code, and is not
+        taken with --setup or --add. Fixes are for the PC's owner at that PC (lanq-makeready-fix -Tune); lanq never sends or runs the fix script.
         init writes a commented starter machines.yml (default the per-user config file, or --config FILE) and never overwrites a file or writes through
         a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
@@ -739,8 +758,8 @@ public static partial class Cli
         --json: health prints one JSON array; run streams the job's output to stderr and prints one JSON object on stdout at the end;
         makeready prints the validated report (--all: one object with status, exitCode and machines); init prints one object (status,
         exitCode, path, message); wake prints one object (status, exitCode, machine, sent, awake, durationSeconds, message).
-        Next steps: every --json object (each health row, each makeready --all row; not the single makeready report) carries nextSteps, at
-        least one {action, reason, argv, command, safeToRunUnattended}; action is proceed, retry, wait, fix_code, fix_command, ask_developer,
+        Next steps: every --json object (each health row, each makeready --all row; not the single makeready report, which has them only
+        inside lanqTune with --tune) carries nextSteps, at least one {action, reason, argv, command, safeToRunUnattended}; action is proceed, retry, wait, fix_code, fix_command, ask_developer,
         run_doctor, run_health or none (more may be added: treat an unknown one as ask_developer). argv (the exact arguments) is there when a
         command is suggested; command is the same line for bash and PowerShell, left out when an argument cannot be quoted safely for both.
         A suggestion is only lanq run, health, doctor or makeready (never unlock, init, wake, --wake, --force or --yes), keeps --config, and
@@ -774,7 +793,7 @@ public static partial class Cli
         """;
 
     /// <summary>
-    /// lanq --version: this build's version (with its commit) and the embedded lanq-makeready scripts, read back from the binary, so a
+    /// lanq --version: this build's version (with its commit) and the embedded lanq-makeready scripts (scanner and tune), read back from the binary, so a
     /// packaging mistake (a missing resource in a trimmed build) shows up here and not on a worker.
     /// </summary>
     private static string VersionText()
@@ -782,7 +801,9 @@ public static partial class Cli
         var version = typeof(Cli).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
         return $"lanq {version}\n"
             + $"lanq-makeready {MakereadyVersion} (embedded: lanq-makeready.ps1 {MakereadyScript(MachineOs.Windows).Length} bytes, "
-            + $"lanq-makeready.sh {MakereadyScript(MachineOs.Linux).Length} bytes)";
+            + $"lanq-makeready.sh {MakereadyScript(MachineOs.Linux).Length} bytes)\n"
+            + $"lanq-makeready-tune {MakereadyVersion} (embedded: lanq-makeready-tune.ps1 {TuneScript(MachineOs.Windows).Length} bytes, "
+            + $"lanq-makeready-tune.sh {TuneScript(MachineOs.Linux).Length} bytes)";
     }
 
     public static Task<int> RunAsync(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken ct) => RunAsync(args, stdout, stderr, ct, null);

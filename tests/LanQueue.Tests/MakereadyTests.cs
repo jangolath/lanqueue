@@ -11,10 +11,14 @@ namespace LanQueue.Tests;
 /// <summary>lanq makeready: the embedded scripts, how they are sent, and how their (untrusted) report is read.</summary>
 public class MakereadyTests
 {
-    /// <summary>From SHA256SUMS of the lanq-makeready v0.4.1 GitHub release (build-provenance attested). Change only via scripts/sync-makeready.sh.</summary>
-    private const string Ps1Sha256 = "349783bf734ec9ee790905ded3e5ec7a2ba1cca0e5a47d511b9c06481c35cf88";
+    /// <summary>From SHA256SUMS of the lanq-makeready v0.5.0 GitHub release (build-provenance attested). Change only via scripts/sync-makeready.sh.</summary>
+    private const string Ps1Sha256 = "e1f36c073b4ae2417865ce32db70eaa9fa589cfc24d7f983af765f7801bd142b";
 
-    private const string ShSha256 = "ab58dda6da7990feca5e939e2e276a6daca3fba163ef10640733ac8dc42028a1";
+    private const string ShSha256 = "530356ee81fbd7c75004df0ca6c0f1cacc772f6db4189be1009c0dbb74e2a046";
+
+    private const string TunePs1Sha256 = "aa784d8fe9a20680dd807fba8ba8160acabfc09c89c2561ff95c3bbb6f106505";
+
+    private const string TuneShSha256 = "7d106886d472687f1a29415ac5e06cb734cd3658f38465f942ee76fb7cb38af5";
 
     private const char Esc = (char)27;
 
@@ -55,13 +59,16 @@ public class MakereadyTests
         return (code, o.ToString(), e.ToString(), ssh);
     }
 
-    /// <summary>Only the read-only scanner is built in (0.9.1): lanq-makeready-fix is the PC owner's, never embedded or sent.</summary>
+    /// <summary>
+    /// Only the read-only scripts are built in: the scanner (0.9.1) and the tune scan (0.12.0). lanq-makeready-fix is the PC owner's, never
+    /// embedded or sent.
+    /// </summary>
     [Fact]
-    public void OnlyTheTwoScannerScriptsAreEmbedded()
+    public void OnlyTheReadOnlyScannerAndTuneScriptsAreEmbedded()
     {
         var names = typeof(Cli).Assembly.GetManifestResourceNames();
         Assert.Equal(
-            ["lanq-makeready.ps1", "lanq-makeready.sh"],
+            ["lanq-makeready-tune.ps1", "lanq-makeready-tune.sh", "lanq-makeready.ps1", "lanq-makeready.sh"],
             names.Where(n => n.Contains("makeready", StringComparison.OrdinalIgnoreCase)).Order(StringComparer.Ordinal));
         Assert.DoesNotContain(names, n => n.Contains("fix", StringComparison.OrdinalIgnoreCase));
     }
@@ -71,6 +78,8 @@ public class MakereadyTests
     {
         Assert.Equal(Ps1Sha256, Convert.ToHexStringLower(SHA256.HashData(Cli.MakereadyScript(MachineOs.Windows))));
         Assert.Equal(ShSha256, Convert.ToHexStringLower(SHA256.HashData(Cli.MakereadyScript(MachineOs.Linux))));
+        Assert.Equal(TunePs1Sha256, Convert.ToHexStringLower(SHA256.HashData(Cli.TuneScript(MachineOs.Windows))));
+        Assert.Equal(TuneShSha256, Convert.ToHexStringLower(SHA256.HashData(Cli.TuneScript(MachineOs.Linux))));
     }
 
     [Fact]
@@ -86,10 +95,11 @@ public class MakereadyTests
         Assert.Equal(MakereadyReport.MaxChars, run.MaxOutputChars);
         Assert.Empty(ssh.Uploads);
 
+        // build-02 has allowed_hours "22:00-07:00": since 0.12.0 the scanner gets it as -Hours.
         (_, _, _, ssh) = await Run(Report(), ["build-02", "--force"]);
         run = Assert.Single(ssh.InputRuns);
         Assert.Equal(
-            "powershell -NoProfile -NonInteractive -Command \"& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact\"", run.Command);
+            "powershell -NoProfile -NonInteractive -Command \"& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact -Hours '22:00-07:00'\"", run.Command);
         Assert.Equal(Cli.MakereadyScript(MachineOs.Windows), run.Input);
     }
 
@@ -379,6 +389,24 @@ public sealed class OptInMakereadyFactAttribute : FactAttribute
 
 public class MakereadyLocalRunTests
 {
+    /// <summary>The tune scan the way lanq makeready --tune sends it, run locally: the script on stdin, its JSON alone on stdout, and it validates.</summary>
+    [OptInMakereadyFact]
+    public async Task TheEmbeddedTuneScriptRunsFromStdinAndItsReportValidates()
+    {
+        var windows = OperatingSystem.IsWindows();
+        var (exe, args) = windows
+            ? ("powershell.exe", new List<string> { "-NoProfile", "-NonInteractive", "-Command", "& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact -Hours '22:00-07:00'" })
+            : ("sh", new List<string> { "-s", "--", "--json", "-", "--redact", "--hours", "22:00-07:00" });
+        var os = windows ? MachineOs.Windows : MachineOs.Linux;
+        var r = await ProcessSshClient.ExecuteWithInput(exe, args, Cli.TuneScript(os), TuneReport.MaxChars, Cli.TuneTimeout, CancellationToken.None);
+
+        Assert.False(r.TimedOut);
+        Assert.Equal(0, r.ExitCode);
+        var report = TuneReport.Parse(r.Output).ForJson(os);
+        Assert.Equal("<redacted>", report.Host!.Hostname);
+        Assert.NotEmpty(report.Items!);
+    }
+
     /// <summary>The same invocation lanq sends over ssh, run locally: the script on stdin, the JSON report alone on stdout, and it parses.</summary>
     [OptInMakereadyFact]
     public async Task TheEmbeddedScriptRunsFromStdinAndItsReportValidates()

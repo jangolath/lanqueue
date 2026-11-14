@@ -77,6 +77,9 @@ public sealed partial class HoursWindow
 
     private static int DayIndex(string name) => Array.FindIndex(DayNames, d => string.Equals(d, name, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The times alone, normalised as HH:mm-HH:mm (no days, no spaces): what lanq passes to lanq-makeready as -Hours.</summary>
+    public string TimeText => _start.ToString("HH:mm", CultureInfo.InvariantCulture) + "-" + _end.ToString("HH:mm", CultureInfo.InvariantCulture);
+
     /// <summary>True for a window like "22:00-22:00", which would match a single minute; config validation refuses it.</summary>
     public bool IsSingleInstant => _start == _end;
 

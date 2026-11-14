@@ -13,9 +13,12 @@ namespace LanQueue;
 public static partial class Cli
 {
     /// <summary>The lanq-makeready release embedded in this build (see scripts/sync-makeready.sh).</summary>
-    internal const string MakereadyVersion = "0.4.1";
+    internal const string MakereadyVersion = "0.5.0";
 
     internal static readonly TimeSpan MakereadyTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>How long the tune scan (lanq makeready --tune) may take; the script itself stops probing after about 90 seconds.</summary>
+    internal static readonly TimeSpan TuneTimeout = TimeSpan.FromSeconds(150);
 
     internal const string WorkerUntouched = "lanq never changes a worker. Fixes are for the PC's owner to run on that PC.";
 
@@ -42,20 +45,104 @@ public static partial class Cli
     [GeneratedRegex(@"^/[\x20-\x7e-[""<>|?*;:\\]]{0,240}\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex LinuxToolDirRegex();
 
-    /// <summary>The embedded script, byte for byte as released (pinned by a test).</summary>
-    internal static byte[] MakereadyScript(MachineOs os)
+    // The values lanq puts on a worker's command line (-Hours, -WorkRoot): validated again right before use, and single-quoted.
+    [GeneratedRegex(@"^[A-Za-z0-9_./:-]{1,255}\z", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex RemoteArgRegex();
+
+    // lanq-makeready-tune's own work_root rules (0.5.0), stricter than lanq's: Windows refuses "C:/", "C://x" and '.' parts; sh caps at 255.
+    [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_.-][A-Za-z0-9_./-]*\z", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex TuneWindowsWorkRootRegex();
+
+    [GeneratedRegex(@"^/[A-Za-z0-9_./-]{0,254}\z", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex TuneLinuxWorkRootRegex();
+
+    [GeneratedRegex(@"(^|/)\.(/|\z)", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex DotPartRegex();
+
+    /// <summary>An embedded lanq-makeready file, byte for byte as released (pinned by a test).</summary>
+    internal static byte[] EmbeddedScript(string name)
     {
-        using var stream = typeof(Cli).Assembly.GetManifestResourceStream(os == MachineOs.Windows ? "lanq-makeready.ps1" : "lanq-makeready.sh")
-            ?? throw new InvalidOperationException("The embedded lanq-makeready script is missing from this build.");
+        using var stream = typeof(Cli).Assembly.GetManifestResourceStream(name)
+            ?? throw new InvalidOperationException($"The embedded {name} is missing from this build.");
         using var copy = new MemoryStream();
         stream.CopyTo(copy);
         return copy.ToArray();
     }
 
-    /// <summary>The script arrives on stdin and runs from memory; it prints only the JSON report (redacted) on stdout.</summary>
-    internal static string MakereadyCommand(MachineOs os) => os == MachineOs.Windows
-        ? "powershell -NoProfile -NonInteractive -Command \"& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact\""
-        : "sh -s -- --json - --redact";
+    /// <summary>The embedded scanner (lanq-makeready), byte for byte as released.</summary>
+    internal static byte[] MakereadyScript(MachineOs os) => EmbeddedScript(os == MachineOs.Windows ? "lanq-makeready.ps1" : "lanq-makeready.sh");
+
+    /// <summary>The embedded read-only tune scan (lanq-makeready-tune, 0.5.0+), byte for byte as released.</summary>
+    internal static byte[] TuneScript(MachineOs os) => EmbeddedScript(os == MachineOs.Windows ? "lanq-makeready-tune.ps1" : "lanq-makeready-tune.sh");
+
+    private const string StdinScriptBlock = "& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact";
+
+    /// <summary>
+    /// The script arrives on stdin and runs from memory; it prints only the JSON report (redacted) on stdout. <paramref name="hours"/> (0.12.0:
+    /// a configured machine's one allowed_hours window, see <see cref="ScanHours"/>) is passed as -Hours / --hours.
+    /// </summary>
+    internal static string MakereadyCommand(MachineOs os, string? hours = null) => StdinCommand(os, [("Hours", "hours", hours)]);
+
+    /// <summary>lanq makeready --tune: the tune script, the same way as the scanner, with -Hours and -WorkRoot when lanq passes them.</summary>
+    internal static string TuneCommand(MachineOs os, string? hours, string? workRoot) =>
+        StdinCommand(os, [("Hours", "hours", hours), ("WorkRoot", "work-root", workRoot)]);
+
+    private static string StdinCommand(MachineOs os, (string Ps, string Sh, string? Value)[] options)
+    {
+        var extra = new System.Text.StringBuilder();
+        foreach (var (ps, sh, value) in options)
+        {
+            if (value is null)
+            {
+                continue;
+            }
+
+            // Validated where it is chosen; checked once more here, so nothing else can ever reach a worker's command line.
+            if (!RemoteArgRegex().IsMatch(value))
+            {
+                throw new ArgumentException($"refusing to pass -{ps}: unexpected characters");
+            }
+
+            extra.Append(os == MachineOs.Windows ? $" -{ps} '{value}'" : $" --{sh} '{value}'");
+        }
+
+        return os == MachineOs.Windows
+            ? $"powershell -NoProfile -NonInteractive -Command \"{StdinScriptBlock}{extra}\""
+            : $"sh -s -- --json - --redact{extra}";
+    }
+
+    /// <summary>
+    /// The -Hours lanq passes for a configured machine (0.12.0): the HH:mm-HH:mm window when every allowed_hours entry has the same times (day
+    /// prefixes dropped), normalised from the parsed entry; null without allowed_hours, with different windows, or for an ad-hoc --ssh PC.
+    /// </summary>
+    internal static string? ScanHours(Machine m)
+    {
+        string? common = null;
+        foreach (var entry in m.AllowedHours ?? [])
+        {
+            if (!HoursWindow.TryParse(entry, out var w) || w.IsSingleInstant || (common is not null && common != w.TimeText))
+            {
+                return null;
+            }
+
+            common = w.TimeText;
+        }
+
+        return common is not null && HoursRegex().IsMatch(common) ? common : null;
+    }
+
+    /// <summary>
+    /// The -WorkRoot lanq passes to the tune scan for a configured machine: its work_root, only when it passes both lanq's rules (ConfigLoader)
+    /// and lanq-makeready-tune's stricter ones; else null (the tune scan then skips its work_root checks).
+    /// </summary>
+    internal static string? TuneWorkRoot(Machine m)
+    {
+        var w = m.WorkRoot;
+        var ok = m.Os == MachineOs.Windows
+            ? TuneWindowsWorkRootRegex().IsMatch(w) && !DotPartRegex().IsMatch(w)
+            : TuneLinuxWorkRootRegex().IsMatch(w);
+        return ok && !w.Contains("..", StringComparison.Ordinal) && RemoteArgRegex().IsMatch(w) ? w : null;
+    }
 
     /// <summary>
     /// lanq makeready &lt;machine&gt; | --ssh user@host --os windows|linux | --all: runs the read-only lanq-makeready check on a worker (or on
@@ -173,7 +260,11 @@ public static partial class Cli
     /// 70 unreachable or unusable report, 75 held), <paramref name="Message"/> the line it prints on stderr when there is no report, and
     /// <paramref name="Reason"/> the same without the machine's name (for the --all table).
     /// </summary>
-    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false, bool SetupWouldHelp = false);
+    private sealed record MakereadyScan(int Code, MakereadyReport? Report, string? Message, string? Reason, bool Unusable = false, bool SetupWouldHelp = false)
+    {
+        /// <summary>lanq makeready --tune: the tune scan's outcome (only after a report); null without --tune or without a report.</summary>
+        public MakereadyTuneJson? Tune { get; init; }
+    }
 
     /// <summary>
     /// Scans one machine. With <paramref name="policy"/> (a configured machine) and without <paramref name="force"/>, a health probe first:
@@ -206,7 +297,10 @@ public static partial class Cli
         SshResult r;
         try
         {
-            r = await ssh.RunWithInputAsync(machine, MakereadyCommand(machine.Os), MakereadyScript(machine.Os), MakereadyReport.MaxChars, MakereadyTimeout, ct)
+            // 0.12.0: a configured machine's job window goes to the scanner as -Hours (it then suggests that allowed_hours and compares
+            // Windows Update's active hours with it); an ad-hoc PC (no policy) gets none.
+            var hours = policy is null ? null : ScanHours(machine);
+            r = await ssh.RunWithInputAsync(machine, MakereadyCommand(machine.Os, hours), MakereadyScript(machine.Os), MakereadyReport.MaxChars, MakereadyTimeout, ct)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
@@ -298,13 +392,18 @@ public static partial class Cli
             return scan.Code;
         }
 
+        // --tune: only after a report; never changes the exit code (a failure is lanqTune.status).
+        var tune = p.Tune
+            ? await TuneAsync(machine, configured is not null, SuggestedCommand.Makeready(p.Target, p.ConfigPath, p.SshTarget, p.Os, p.KeyEnv, tune: true), ssh, ct)
+                .ConfigureAwait(false)
+            : null;
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ReportForJson(report), MakereadyJson.Default.MakereadyReportJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ReportForJson(report, tune), MakereadyJson.Default.MakereadyReportJson)).ConfigureAwait(false);
         }
         else
         {
-            foreach (var line in MakereadyText(report, name, configured, p.SshTarget, keyEnv: p.KeyEnv))
+            foreach (var line in MakereadyText(report, name, configured, p.SshTarget, keyEnv: p.KeyEnv).Concat(tune is null ? [] : TuneText(tune, machine.Os)))
             {
                 await stdout.WriteLineAsync(JobRunner.SafeLine(line)).ConfigureAwait(false);
             }
@@ -318,8 +417,8 @@ public static partial class Cli
         new() { Name = target, Os = os, Ssh = target, KeyEnv = keyEnv, WorkRoot = os == MachineOs.Windows ? "C:/lq" : "/srv/lq" };
 
     private const string MakereadyUsage =
-        "Usage: lanq makeready <machine> | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--setup | --add --name NAME [--yes]] "
-        + "| lanq makeready --all [--json] [--force]";
+        "Usage: lanq makeready <machine> [--tune] | lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--tune | --setup | --add --name NAME [--yes]] "
+        + "| lanq makeready --all [--json] [--force] [--tune]";
 
     /// <summary>How many machines lanq makeready --all scans at once.</summary>
     internal const int MakereadyParallelism = 4;
@@ -361,7 +460,15 @@ public static partial class Cli
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                return await ScanAsync(m, m.Name, config.Policy, p.Force, ssh, probe, ct).ConfigureAwait(false);
+                var scan = await ScanAsync(m, m.Name, config.Policy, p.Force, ssh, probe, ct).ConfigureAwait(false);
+                if (!p.Tune || scan.Report is null)
+                {
+                    return scan;
+                }
+
+                // --all --tune: in the same slot, right after the machine's own scan (at most 120 s + 150 s per machine).
+                var again = SuggestedCommand.Makeready(m.Name, p.ConfigPath, tune: true);
+                return scan with { Tune = await TuneAsync(m, configured: true, again, ssh, ct).ConfigureAwait(false) };
             }
             finally
             {
@@ -387,8 +494,8 @@ public static partial class Cli
         await stdout.WriteLineAsync(
             $"lanq makeready --all: {rows.Count} machine(s), read-only (lanq-makeready {MakereadyVersion}{(p.Force ? ", --force" : "")})").ConfigureAwait(false);
         await stdout.WriteLineAsync().ConfigureAwait(false);
-        await stdout.WriteLineAsync($"{"MACHINE".PadRight(nameWidth)}{"OS",-9}{"VERDICT",-13}TOP PROBLEM").ConfigureAwait(false);
-        foreach (var r in rows)
+        await stdout.WriteLineAsync($"{"MACHINE".PadRight(nameWidth)}{"OS",-9}{"VERDICT",-13}{(p.Tune ? $"{"TUNE",-16}" : "")}TOP PROBLEM").ConfigureAwait(false);
+        foreach (var (r, scan) in rows.Zip(scans))
         {
             var verdict = r.Verdict switch
             {
@@ -397,11 +504,17 @@ public static partial class Cli
                 _ => r.Verdict,
             };
             var problem = Truncate(r.Problem ?? "", MakereadyProblemWidth);
-            await stdout.WriteLineAsync(JobRunner.SafeLine($"{r.Machine.PadRight(nameWidth)}{r.Os,-9}{verdict,-13}{problem}").TrimEnd()).ConfigureAwait(false);
+            var tuneCell = p.Tune ? $"{TuneCell(scan.Tune),-16}" : "";
+            await stdout.WriteLineAsync(JobRunner.SafeLine($"{r.Machine.PadRight(nameWidth)}{r.Os,-9}{verdict,-13}{tuneCell}{problem}").TrimEnd()).ConfigureAwait(false);
         }
 
         await stdout.WriteLineAsync().ConfigureAwait(false);
         await stdout.WriteLineAsync("Details, advice and a suggested machines.yml entry for one machine: lanq makeready <machine>").ConfigureAwait(false);
+        if (p.Tune)
+        {
+            await stdout.WriteLineAsync("Tune items and their advice for one machine: lanq makeready <machine> --tune (TUNE: WARN and INFO counts)").ConfigureAwait(false);
+        }
+
         await stdout.WriteLineAsync(WorkerUntouched).ConfigureAwait(false);
         return code;
     }
@@ -478,7 +591,7 @@ public static partial class Cli
             ? JobRunner.SafeLine(string.IsNullOrWhiteSpace(detail) ? title ?? "?" : $"{title}: {detail}")
             : ready ? null : "no transfer mode works (worker_git and worker_archive are FAIL)";
         var verdictText = !ready ? "FAIL" : warnings > 0 ? "WARN" : "OK";
-        return new MakereadyRowJson(m.Name, os, verdictText, warnings, failures, scan.Code, problem, ReportForJson(report));
+        return new MakereadyRowJson(m.Name, os, verdictText, warnings, failures, scan.Code, problem, ReportForJson(report, scan.Tune));
     }
 
     /// <summary>The human report. Every string from the worker is sanitised by the caller, line by line; nothing from it is executed.</summary>
@@ -698,7 +811,8 @@ public static partial class Cli
     /// <see cref="SuggestedDotnetDir"/> accepts them, as the text and <c>--add</c> do. What was dropped is listed in lanqWithheld (absent
     /// when nothing was). The schema stays lanq-makeready/v1 and the report still has no nextSteps of lanq's.
     /// </summary>
-    internal static MakereadyReportJson ReportForJson(MakereadyReport r)
+    /// <param name="tune">lanq makeready --tune: the tune scan's outcome, written last as lanqTune (absent when null).</param>
+    internal static MakereadyReportJson ReportForJson(MakereadyReport r, MakereadyTuneJson? tune = null)
     {
         static string? S(string? v) => v is null ? null : JobRunner.SafeLine(v);
         static List<string>? L(List<string>? v) => v?.Select(x => JobRunner.SafeLine(x ?? "")).ToList();
@@ -742,7 +856,10 @@ public static partial class Cli
             r.Checks?.Select(c => c with { Id = S(c.Id), Title = S(c.Title), Status = S(c.Status), Detail = S(c.Detail), Advice = S(c.Advice) }).ToList(),
             L(r.Capabilities),
             suggestion,
-            withheld.Count > 0 ? withheld : null);
+            withheld.Count > 0 ? withheld : null)
+        {
+            LanqTune = tune,
+        };
     }
 
     internal const string RedactedDotnetComment =

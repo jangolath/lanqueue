@@ -76,5 +76,8 @@
     <!-- lanq-makeready (read-only readiness check), byte-identical to its verified release; updated only by scripts/sync-makeready.sh. -->
     <EmbeddedResource Include="Makeready/lanq-makeready.ps1" LogicalName="lanq-makeready.ps1" />
     <EmbeddedResource Include="Makeready/lanq-makeready.sh" LogicalName="lanq-makeready.sh" />
+    <!-- lanq-makeready-tune (read-only tune scan for lanq makeready with the tune option; 0.5.0+), from the same verified release. The fix script is never embedded. -->
+    <EmbeddedResource Include="Makeready/lanq-makeready-tune.ps1" LogicalName="lanq-makeready-tune.ps1" />
+    <EmbeddedResource Include="Makeready/lanq-makeready-tune.sh" LogicalName="lanq-makeready-tune.sh" />
   </ItemGroup>
 </Project>
