@@ -2,3 +2,4 @@
 
 # The embedded lanq-makeready scripts must stay byte-identical to the verified release (their SHA-256 is pinned by a test).
 src/LanQueue/Makeready/lanq-makeready.* -text
+src/LanQueue/Makeready/lanq-makeready-tune.* -text

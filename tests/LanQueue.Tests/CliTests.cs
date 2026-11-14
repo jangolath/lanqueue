@@ -48,6 +48,9 @@ public class CliTests
     [InlineData("lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json]")]
     [InlineData("lanq makeready --ssh user@host --os windows|linux --setup [--key-env VAR]")]
     [InlineData("lanq makeready --ssh user@host --os windows|linux --add --name NAME [--key-env VAR] [--yes] [--config FILE] [--json]")]
+    [InlineData("lanq makeready <machine> [--json] [--force] [--tune] [--config FILE]")]
+    [InlineData("lanq makeready --all [--json] [--force] [--tune] [--config FILE]")]
+    [InlineData("makeready --tune also runs the read-only lanq-makeready-tune scan")]
     [InlineData("--setup prints that PC's full one-time setup and connects to nothing")]
     [InlineData("--add --name NAME scans the PC and, only when it is READY, adds it to your machines.yml")]
     [InlineData("lanq unlock <machine>")]
@@ -140,12 +143,16 @@ public class CliTests
         Assert.Equal(0, code);
         Assert.Equal("", e.ToString());
         var lines = o.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        Assert.Equal(2, lines.Length);
+        Assert.Equal(3, lines.Length);
         Assert.Matches(@"^lanq \d+\.\d+\.\d+", lines[0]);
         Assert.Equal(
             $"lanq-makeready {Cli.MakereadyVersion} (embedded: lanq-makeready.ps1 {Cli.MakereadyScript(Config.MachineOs.Windows).Length} bytes, "
             + $"lanq-makeready.sh {Cli.MakereadyScript(Config.MachineOs.Linux).Length} bytes)",
             lines[1]);
+        Assert.Equal(
+            $"lanq-makeready-tune {Cli.MakereadyVersion} (embedded: lanq-makeready-tune.ps1 {Cli.TuneScript(Config.MachineOs.Windows).Length} bytes, "
+            + $"lanq-makeready-tune.sh {Cli.TuneScript(Config.MachineOs.Linux).Length} bytes)",
+            lines[2]);
     }
 
     [Fact]

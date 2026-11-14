@@ -1,0 +1,10 @@
+exit=70
+--- commands
+
+--- stdout
+{"status":"InfraError","exitCode":70,"message":"delta: unreachable: ssh: connect to host 10.20.30.14 port 22: No route to host","nextSteps":[{"action":"run_doctor","reason":"check this computer\u0027s ssh setup and known_hosts","command":"lanq doctor --json","argv":["lanq","doctor","--json"],"safeToRunUnattended":true},{"action":"ask_developer","reason":"delta: unreachable: ssh: connect to host 10.20.30.14 port 22: No route to host","safeToRunUnattended":false}]}
+
+--- stderr
+delta: unreachable: ssh: connect to host 10.20.30.14 port 22: No route to host
+Next: check this computer's ssh setup and known_hosts: lanq doctor --json
+Next: delta: unreachable: ssh: connect to host 10.20.30.14 port 22: No route to host

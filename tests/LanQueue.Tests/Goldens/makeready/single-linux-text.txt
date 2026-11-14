@@ -1,0 +1,37 @@
+exit=0
+--- commands
+alpha: sh -s -- --json - --redact
+--- stdout
+lanq makeready alpha (lanq-makeready 0.1.0, read-only; host Ubuntu 24.04 x64)
+
+Verdicts
+  worker_git      OK
+  worker_archive  OK
+  dotnet10        OK
+  docker          SKIP
+  overnight       WARN
+
+Checks to look at
+  [WARN] Pending reboot: a restart is pending
+         advice: Restart the PC when convenient.
+
+Capabilities (machines.yml vs detected and working)
+  detected but not configured: java
+  configured but not detected: node
+  configured, not checked by lanq-makeready: none
+
+Suggested machines.yml entry (confirm every value):
+machines:
+  - name: "alpha"
+    os: linux
+    ssh: "build@10.20.30.11"
+    work_root: "/srv/lanq"
+    capabilities: [dotnet, java, linux]
+    max_jobs: 1
+    transfer: git
+    allowed_hours: "00:00-07:00"
+
+Ready: at least one transfer mode works.
+lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
+
+--- stderr

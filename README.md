@@ -113,7 +113,7 @@ Scoop remembers the URL an app was installed from and reads the manifest from it
 `scoop status`, so because that URL always points at the latest release, `scoop update lanq` moves to new versions.
 `scoop search` does not find `lanq` (it is in no bucket), and `scoop update` needs to reach GitHub. To stay on one
 version, install from that release's URL instead, for example
-`https://github.com/jangolath/lanqueue/releases/download/v0.11.0/lanq.json`. Scoop checks each zip against the hash in
+`https://github.com/jangolath/lanqueue/releases/download/v0.12.0/lanq.json`. Scoop checks each zip against the hash in
 the manifest; the manifest itself is covered by `SHA256SUMS` and the release's attestation. Release candidates
 (tags such as `v0.5.0-rc.1`) are published as GitHub prereleases, which `releases/latest` never points at, so the
 `latest` URL never installs one.
@@ -150,10 +150,10 @@ release workflow's OIDC identity, logged in the public Sigstore transparency log
 download is intact; `gh attestation verify` also proves it was built from this repository by the release workflow:
 
 ```bash
-gh release download v0.11.0 --repo jangolath/lanqueue
+gh release download v0.12.0 --repo jangolath/lanqueue
 sha256sum --check SHA256SUMS
 for f in *.zip *.tar.gz *.nupkg lanq.json SHA256SUMS; do gh attestation verify "$f" --repo jangolath/lanqueue; done
-dotnet tool install --global --add-source . LanQueue --version 0.11.0    # the attested package, if you want the tool
+dotnet tool install --global --add-source . LanQueue --version 0.12.0    # the attested package, if you want the tool
 ```
 
 From 0.4.0 the `.nupkg` is attested; from 0.5.0 every asset is. The copy on nuget.org carries nuget.org's own
@@ -235,14 +235,14 @@ waking anything, and the message starts `No eligible machine, and no machine can
 | `lanq run --shards auto --target-minutes M ... -- CMD {shard}/{shards}` | Picks N from earlier runs of the same command so each shard takes about M minutes (1 to 1440), never more than the free slots; see [docs/SHARDING.md](docs/SHARDING.md#choosing-n-from-history---target-minutes). |
 | `lanq stats [--json] [--target-minutes M]` | Summarises your local job log: totals, per machine (median and p90 of completed jobs, speed factor), per command (runs, results, the work and per-shard overhead) and, since 0.10.0, per plan job (per plan file and job name; one run per plan run), and the size of the job logs. `--target-minutes M` adds the shards M would need. |
 | `lanq doctor [--remote [--force]] [--json]` | Checks your own setup without any network; `--remote` also checks each worker over ssh. `--json` prints one object with every check and its fix. |
-| `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--key-env VAR] [--json] [--force]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. `--key-env VAR` scans with the key file whose path is in `VAR`. |
+| `lanq makeready <machine>` or `lanq makeready --ssh user@host --os windows\|linux [--key-env VAR] [--json] [--force] [--tune]` | Runs the read-only [lanq-makeready](https://github.com/jangolath/lanq-makeready) check on a worker and suggests a `machines.yml` entry. `--key-env VAR` scans with the key file whose path is in `VAR`. `--tune` adds the read-only tune scan (what slows the PC down as a worker). |
 | `lanq makeready --ssh user@host --os windows\|linux --setup [--key-env VAR]` | Prints the PC's full one-time setup (build user, your public key, work folder, firewall, password logins off, the fingerprint check) and connects to nothing. |
 | `lanq makeready --ssh user@host --os windows\|linux --add --name NAME [--key-env VAR] [--yes] [--json]` | Scans the PC and, only when it is READY, adds it to your `machines.yml` (it shows the lines and asks first; `--yes` without a terminal). |
-| `lanq makeready --all [--json] [--force]` | The same check on every configured machine, four at a time, as one summary table. |
+| `lanq makeready --all [--json] [--force] [--tune]` | The same check on every configured machine, four at a time, as one summary table (`--tune`: a TUNE column). |
 | `lanq init [--json]` | Writes a commented starter `machines.yml` to the per-user config file (or to `--config FILE` / `$LANQ_CONFIG`), never into the current folder; never overwrites a file. |
 | `lanq unlock <machine> [--all --yes]` | Removes slot files a crashed `lanq` left behind. |
 | `lanq wake <machine> [--wait] [--json]` | Sends a Wake-on-LAN magic packet to a machine with a `wake:` setting, even outside its `allowed_hours`; `--wait` waits for ssh. |
-| `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready version. |
+| `lanq --version` | Prints the version (with its commit) and the embedded lanq-makeready scripts: the scanner, and the tune scan (one line each). |
 
 Every command takes `--config FILE`. An option a command does not use is an error, not silently ignored.
 
@@ -307,12 +307,16 @@ The check names and every field are in [docs/JSON.md](docs/JSON.md#lanq-doctor--
 
 Runs [lanq-makeready](https://github.com/jangolath/lanq-makeready) on a worker: a read-only check of SSH, git/tar,
 .NET 10, Docker and overnight readiness (sleep, pending reboots, update restarts). The script is built into `lanq`
-(v0.4.1, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner: lanq-makeready's fix
-script is never built in or sent), sent on ssh **stdin** and run from memory with
+(v0.5.0, byte-identical to that release, whose SHA-256 a test pins; only the read-only scanner and the read-only tune
+scan: lanq-makeready's fix script is never built in or sent), sent on ssh **stdin** and run from memory with
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
 - `lanq makeready build-01` for a configured machine. It respects the machine's `PAUSE` file and `allowed_hours`
-  (exit `75`); `--force` scans anyway.
+  (exit `75`); `--force` scans anyway. When every `allowed_hours` entry is the same every-day `HH:mm-HH:mm` window
+  (no days named), lanq passes it to the script as `-Hours` (0.12.0): the suggested entry then carries that
+  `allowed_hours`, and on Windows the `updates.activehours` check compares Windows Update's active hours with it (it can
+  `WARN`). Entries that name days (`Mon-Fri 18:00-23:00`), different windows, or none pass nothing, as before, so the
+  suggested `allowed_hours` is never wider than yours.
 - `lanq makeready --ssh user@old-pc.lan --os windows` for a PC that is not in `machines.yml` yet, once key-based
   SSH works and its host key is in your `known_hosts` (same key-only, strict-host-key ssh options as every other call;
   your agent or default key is used). `--key-env VAR` uses the key file whose path is in `VAR` instead, as `key_env:`
@@ -341,13 +345,43 @@ sanitised before display, and nothing in it is ever run. Exit codes: `0` worker-
 `1` not ready, `2` bad arguments, `70` ssh failed or the report was unusable, `75` machine paused or outside its hours,
 `130` Ctrl+C.
 
+#### Tuning: --tune
+
+`lanq makeready build-01 --tune` (0.12.0; also with `--ssh ... --os ...` and `--all`) runs, after the check, the
+read-only **lanq-makeready-tune** scan the same way (on ssh stdin, from memory, up to 150 s): what slows the PC down as
+a build worker or keeps it busy at night. Windows: the processor power plan, USB selective suspend, PC-maker updaters
+(startup entries, services, scheduled tasks), SysMain, Search indexing of the work folder, Delivery Optimization, update
+reboots, visual effects, Defender exclusions and scan times, another antivirus, the page file, disk health and fullness,
+driver age, plain-text autologon, maintenance times, cache sizes, `DOTNET_*` machine variables, OneDrive and the work
+folder, WSL memory. Linux: the CPU governor, swappiness, inotify limits, the journal size, unused services, unattended
+reboots, the package cache, TRIM, SMART, thermal throttling, disk fullness. Each item is `OK`, `INFO`, `WARN` or `SKIP`,
+never `FAIL`: tuning never changes whether the PC is worker-ready, and the exit code stays the check's. A configured
+machine's window goes as `-Hours` (the times every `allowed_hours` entry shares, days left out: the tune scan only
+compares schedules with them) and its `work_root` as `-WorkRoot` (only when the tune script accepts it as written); a
+`--ssh` PC gets neither. Not with `--setup` or `--add`.
+
+The text adds a tune section after the report: the counts, each `WARN` and `INFO` item with its advice and, when
+lanq-makeready's fix script can change it, its fix id (`SKIP` items only as a count), then *Its owner can preview the
+tune fixes at that PC: lanq-makeready-fix.ps1 -Tune -WhatIf; local and interactive only. lanq never runs it.*
+(`sudo sh lanq-makeready-fix.sh --tune --dry-run` on Linux). `--all --tune` adds a `TUNE` column (`2 WARN 1 INFO`,
+`timed out`, `unreachable`, `unusable`, or `-` for a machine with no report); held and unreachable machines are not
+tuned. Each machine takes up to 120 s for the check plus 150 s for the tune scan, four at a time, with no overall limit.
+
+`--json` adds `lanqTune` as the report's last key (also in each `--all` row's `report`): `status` (`Ok`, `TimedOut`,
+`Unreachable` or `Unusable`), `error` (when not `Ok`), `report` (the validated `lanq-makeready-tune/v1` report) and its
+own `nextSteps`. The tune report is untrusted input like the check's: at most 256 KB and 64 items, parsed without
+reflection, checked (schema, ids, statuses, summary counts), every string sanitised and cut to length. `fixId` is kept
+only when it is the one lanq's own table expects for that item, and `security` only for the items lanq knows are
+security relevant. `advice` and `detail` are text for the PC's owner: nothing in them is ever run, and lanq never sends
+or runs the fix script. The fields are in [docs/JSON.md](docs/JSON.md#lanqtune).
+
 `lanq makeready --all` runs the same check on every machine in the config, four at a time, with the same rules (a
 paused machine or one outside its `allowed_hours` is not scanned unless `--force`; the script goes on ssh stdin), and
 prints one table:
 
 ```text
 $ lanq makeready --all
-lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.4.1)
+lanq makeready --all: 4 machine(s), read-only (lanq-makeready 0.5.0)
 
 MACHINE    OS       VERDICT      TOP PROBLEM
 micro-01   linux    WARN 1       Pending reboot: a restart is pending
@@ -579,8 +613,8 @@ object with the totals, `machines`, `commands` (each with its `timing`), `planJo
 `argv` is the exact command and is authoritative; `command` is the same as one line for bash and PowerShell, left out
 when an argument cannot be written safely for both. A suggestion never does more than the command that produced it,
 and only `safeToRunUnattended: true` steps are for a script or agent to run by itself. The one exception is the single
-`lanq makeready <machine> --json` report, which stays the lanq-makeready script's own report with no `nextSteps` (its
-error objects have them). For people, the same steps are printed as `Next: ...` lines on stderr (`[lanq] Next: ...`
+`lanq makeready <machine> --json` report, which stays the lanq-makeready script's own report with no top-level
+`nextSteps` (its error objects have them; with `--tune`, the tune steps are inside `lanqTune`). For people, the same steps are printed as `Next: ...` lines on stderr (`[lanq] Next: ...`
 inside `lanq run`), before the status line, which stays last. The full contract is in
 [docs/JSON.md](docs/JSON.md#nextsteps).
 
@@ -883,6 +917,13 @@ lanq run --needs rust --shards 4 -- cargo nextest run --partition slice:{shard}/
 [docs/SHARDING.md](docs/SHARDING.md) has per-ecosystem recipes (.NET, Node, Python, Go, Rust), a sizing table for
 `max_jobs` and `min_free_mem_gb`, and a worked plan for 2 dev boxes and 4 micro PCs; setting up the pool itself is in
 [docs/TEAM-QUICKSTART.md](docs/TEAM-QUICKSTART.md).
+
+**Parallel worktrees.** Several developers or AI agents can work on one PC at once, each in its own `git worktree`,
+while every build, test run and format check goes to the pool: lanq ships each worktree's HEAD plus its uncommitted
+changes with no setup, so the dev PC only edits files and runs git. [docs/PARALLEL.md](docs/PARALLEL.md) covers the
+worktree layout, allowlisting checkers such as `dotnet format` up front, counting `max_jobs` slots against agents,
+running the full plan only after targeted tests pass, a local Docker worker, what sharding buys when compile time
+dominates, and a short rule set for agents.
 
 ## Routing jobs
 
@@ -1222,7 +1263,8 @@ repository. (A `.lanq/` folder in the repository is excluded from the snapshot.)
 
 **Using lanq with AI agents.** [AGENTS.md](AGENTS.md) is the short, tool-agnostic rule set an agent reads;
 [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md) covers setup, instruction-file snippets and a failure playbook; and
-[docs/JSON.md](docs/JSON.md) is the `--json` contract (every field, status and exit code).
+[docs/JSON.md](docs/JSON.md) is the `--json` contract (every field, status and exit code). Running several agents at
+once, one worktree each, on one quiet dev PC: [docs/PARALLEL.md](docs/PARALLEL.md).
 
 Ready-to-copy assets live in [docs/agents/](docs/agents/):
 
@@ -1383,7 +1425,9 @@ Each default below is enforced in code and covered by a unit test.
   to a release whose SHA-256 a test pins (updated only through `scripts/sync-makeready.sh`, which checks the release's
   `SHA256SUMS` and its build-provenance attestation). The script goes to the worker on ssh stdin and runs from memory.
   Its report is untrusted input: capped at 1 MB, parsed by a source-generated deserializer, checked against the
-  `lanq-makeready/v1` schema, sanitised before display and never executed.
+  `lanq-makeready/v1` schema, sanitised before display and never executed. The `--tune` scan (0.12.0) is read-only
+  too and goes the same way; its report is capped at 256 KB and 64 items, checked against `lanq-makeready-tune/v1`,
+  sanitised, and its fix ids and security flags are lanq's own. The fix script is never built in, sent or run.
 - **Fetched files are data from an untrusted worker.** `lanq run --fetch` never runs, opens or extracts what it
   fetches (there is no archive: each file comes as a header, base64 lines and a SHA-256). The worker script sends
   only regular files whose real path is inside the job folder and never follows a link; `lanq` then checks everything

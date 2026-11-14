@@ -1,0 +1,51 @@
+exit=1
+--- commands
+bravo: powershell -NoProfile -NonInteractive -Command "& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact"
+--- stdout
+lanq makeready bravo (lanq-makeready 0.2.0, read-only; host Windows 11 Pro build 26200 x64)
+
+Verdicts
+  worker_git      FAIL
+  worker_archive  FAIL
+  dotnet10        OK
+  docker          OK
+  overnight       WARN
+
+VERDICT: NOT READY (1 blocker)
+Next steps (blockers first; nothing here is run for you):
+ 1. [MUST FIX] OpenSSH Server: not installed
+    do (needs admin: elevated PowerShell): Install OpenSSH Server yourself (elevated PowerShell): Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0   then: Start-Service sshd ; Set-Service -Name sshd -StartupType Automatic
+ 2. [should fix] SSH keys: user is an administrator; administrators_authorized_keys not found
+    do (no admin needed): Put the orchestrator public key in the build user authorized_keys (for an Administrators member: C:\ProgramData\ssh\administrators_authorized_keys). A dedicated non-admin build user is simpler and safer. To make one (elevated): New-LocalUser build ; Add-LocalGroupMember -SID S-1-5-32-545 -Member build ; then log on once as build (so C:\Users\build exists) BEFORE creating C:\Users\build\.ssh\authorized_keys, or sshd reads keys from the wrong profile folder.
+ 3. [should fix] git: git version 2.48.1.windows.1, core.longpaths not enabled
+    do (needs admin: elevated PowerShell): Optional: git config --system core.longpaths true (elevated), and keep work_root short, for example C:/lq.
+ 4. [should fix] Pending reboot: a restart is pending
+    do (no admin needed): A restart is pending; the PC may reboot during a job. Restart at a time you choose: Start > Power > Update and restart (or Restart).
+ 5. [should fix] Wake-on-LAN: wired Ethernet (<mac>): Fast Startup is on (a shut-down PC often will not wake)
+    do (needs admin: elevated PowerShell): Fast Startup is on: a PC shut down this way is really hibernated and often ignores the magic packet. Control Panel > Power Options > Choose what the power buttons do > Change settings that are currently unavailable > untick "Turn on fast startup". Waking from sleep usually works either way.
+ 6. [should fix] Startup items: 31 items, e.g. Updater, Sync, Chat, Fan control, Games
+    do (no admin needed): Many startup items slow boot and use RAM. Review them yourself in Task Manager > Startup apps. This tool never disables anything.
+Suited for: heavy: full suites and large builds + container builds
+
+Capabilities (machines.yml vs detected and working)
+  detected but not configured: node, java, docker, git
+  configured but not detected: none
+  configured, not checked by lanq-makeready: none
+
+Suggested machines.yml entry (confirm every value):
+machines:
+  - name: "bravo"
+    os: windows
+    ssh: "build@10.20.30.12"
+    work_root: "C:/lanq"
+    capabilities: [dotnet, node, java, docker, git, windows]
+    max_jobs: 8
+    min_free_mem_gb: 2   # LanQueue starts no new job while less memory than this is free
+    transfer: git
+
+May be fixable at that PC (lanq-makeready-fix: git.longpaths): its owner can run lanq-makeready-fix.ps1 -WhatIf there to see what it can do, local and interactive only (see lanq-makeready's README). lanq never runs it.
+
+Not ready yet: fix the MUST FIX steps above on that PC, then run lanq makeready again.
+lanq never changes a worker. Fixes are for the PC's owner to run on that PC.
+
+--- stderr

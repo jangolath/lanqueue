@@ -3,7 +3,7 @@
   Release-candidate smoke on real workers (RELEASING.md step 1b). Windows PowerShell 5.1 and PowerShell 7.
 
 .DESCRIPTION
-  smoke-workers.ps1 -Run <release dry-run id> -Branch <release branch> -Config <machines.smoke.yml> [-AllowSkip] [-Keep]
+  smoke-workers.ps1 -Run <release dry-run id> -Branch <release branch> -Config <machines.smoke.yml> [-AllowSkip] [-Keep] [-Tune]
 
   1. The binary: -Run must be a successful workflow_dispatch run of the release workflow on -Branch (never the default
      branch), whose headSha is that branch's head on origin. Its native-win-x64 artifact is downloaded (gh run download)
@@ -21,7 +21,9 @@
      that leaves a job no machine is NoCapacity 75 with a rerun --only), the 0.11 test results when this binary has them
      (--results junit counts a fixed file and names its failure; no file is noTests with ask_developer), and no leftover
      slots. Every job runs with --timeout 5; every lanq call is
-     stopped after 15 minutes.
+     stopped after 15 minutes. Only with -Tune (optional, not part of the release-candidate gate): lanq makeready <machine>
+     --tune --json on one machine of each OS must keep the scan's exit code (0 or 1) and add lanqTune with status Ok and a
+     lanq-makeready-tune/v1 report (0.12.0+; N/A before).
   4. Prints a PASS/FAIL/SKIP/N/A table. N/A: the smoke config has no machine of that kind (it never fails). SKIP: the
      scenario could run but did not (a machine down); it fails the smoke unless -AllowSkip. A configured machine that is
      not reachable, or health that fails, is a FAIL. Exit 0 only when every scenario that applies passed, 1 otherwise,
@@ -39,6 +41,8 @@ param(
     [string]$Branch,
     [switch]$AllowSkip,
     [switch]$Keep,
+    # Also runs scenario 11, lanq makeready --tune (optional; not part of the release-candidate gate).
+    [switch]$Tune,
     # Defines the functions and returns without running anything (tests).
     [switch]$LoadOnly
 )
@@ -845,6 +849,30 @@ switch ($Mode) {
             }
             if (@($j.nextSteps | Where-Object { $_.action -eq 'ask_developer' }).Count -eq 0) { throw 'no ask_developer next step' }
             'noTests, ask_developer, still Completed 0'
+        }
+    }
+
+    # 11. Only with -Tune (0.12.0+): lanq makeready <machine> --tune --json runs the read-only scanner and tune scan on one machine of each
+    #     OS. The exit code stays the scan's (0 ready, 1 not ready); lanqTune must be Ok with a lanq-makeready-tune/v1 report. Probed
+    #     without any network first: lanq makeready --tune --add is refused by 0.12.0 with its own message, by older binaries as unknown.
+    if ($Tune) {
+        $probe11 = Lanq @('makeready', '--ssh', 'probe@example.invalid', '--os', 'linux', '--add', '--name', 'probe', '--tune', '--json')
+        if ($probe11.Stdout -match 'Unknown or incomplete option') {
+            Add-Result '11 makeready --tune' 'N/A' 'this binary has no makeready --tune (before 0.12.0)'
+        } else {
+            foreach ($os in 'linux', 'windows') {
+                $m = $pick[$os]
+                OnMachine "11 makeready --tune ($os)" $m "$os machine" {
+                    $r = Lanq @('makeready', $m, '--json', '--tune')
+                    if ($r.TimedOut) { throw 'lanq makeready --tune did not finish' }
+                    if ($r.Code -ne 0 -and $r.Code -ne 1) { throw "exit $($r.Code) (expected the scan's 0 or 1)" }
+                    $j = $r.Stdout | ConvertFrom-Json
+                    if (-not $j.lanqTune) { throw 'no lanqTune in the report' }
+                    if ($j.lanqTune.status -ne 'Ok') { throw "lanqTune.status $($j.lanqTune.status): $($j.lanqTune.error)" }
+                    if ($j.lanqTune.report.schema -ne 'lanq-makeready-tune/v1') { throw "lanqTune.report.schema $($j.lanqTune.report.schema)" }
+                    "exit $($r.Code), $(@($j.lanqTune.report.items).Count) tune item(s)"
+                }
+            }
         }
     }
 

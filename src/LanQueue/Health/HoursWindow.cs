@@ -44,7 +44,7 @@ public sealed partial class HoursWindow
             return false;
         }
 
-        window = new HoursWindow(days, s, e);
+        window = new HoursWindow(days, s, e) { HasDays = match.Groups["days"].Success };
         return true;
     }
 
@@ -76,6 +76,12 @@ public sealed partial class HoursWindow
     }
 
     private static int DayIndex(string name) => Array.FindIndex(DayNames, d => string.Equals(d, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The times alone, normalised as HH:mm-HH:mm (no days, no spaces): what lanq passes to lanq-makeready as -Hours.</summary>
+    public string TimeText => _start.ToString("HH:mm", CultureInfo.InvariantCulture) + "-" + _end.ToString("HH:mm", CultureInfo.InvariantCulture);
+
+    /// <summary>True when the entry names days ("Mon-Fri 18:00-23:00"); false for every day ("18:00-23:00").</summary>
+    public bool HasDays { get; private init; }
 
     /// <summary>True for a window like "22:00-22:00", which would match a single minute; config validation refuses it.</summary>
     public bool IsSingleInstant => _start == _end;

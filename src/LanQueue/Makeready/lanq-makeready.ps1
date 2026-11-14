@@ -20,7 +20,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param([string]$Json, [string]$Out, [switch]$Redact, [string]$Hours, [switch]$Quiet, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
-$ToolVersion = '0.4.1'
+$ToolVersion = '0.5.0'
 
 #region ADVICE
 # The ONE table of advice text. Nothing here is ever executed by this script.
@@ -63,7 +63,7 @@ $Advice = @{
   'updates.hours'= 'Windows Update may restart the PC inside your job window. Widen Active hours (Settings > Windows Update > Advanced options) to cover it.'
   'startup.many' = 'Many startup items slow boot and use RAM. Review them yourself in Task Manager > Startup apps. This tool never disables anything.'
   'temp.big'     = 'Large temp/cache folders. Disk Cleanup or Storage Sense can reclaim space; review before deleting. This tool never deletes anything.'
-  'defender.rtp' = 'Real-time scanning slows builds. Options: a Dev Drive (Windows 11, performance mode) or a scoped exclusion for ONLY the work folder. Both lower protection a little; your decision.'
+  'defender.rtp' = 'Real-time scanning slows builds. Options: a Dev Drive (Windows 11, performance mode) or a scoped exclusion for only the work folder and the NuGet package cache (%USERPROFILE%\.nuget\packages). Both lower protection a little; your decision.'
   'drivers.bad'  = 'Devices report driver problems. Check Windows Update > Optional updates, or the PC maker site. Never use a generic driver updater on a headless worker.'
 }
 # Advice that needs an elevated (administrator) prompt to act on.
