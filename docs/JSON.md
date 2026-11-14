@@ -735,8 +735,8 @@ for the tune scan are inside `lanqTune`). The report has no `status` key. When t
 `lanq makeready <machine> --tune --json` (also `--ssh ... --tune` and `--all --tune`; 0.12.0) runs the read-only
 lanq-makeready-tune scan after a report and adds its outcome as `lanqTune`, the report's last key (in `--all`, inside
 each row's `report`; a held or unreachable machine has no report, so no `lanqTune`). It never changes the exit code or
-any other key: without `--tune` the output is exactly what 0.11.0 printed (apart from the scanner's `-Hours`, see the
-[README](../README.md#lanq-makeready)).
+any other key: without `--tune` the output is exactly what 0.11.0 printed (apart from the scanner's `-Hours` for a
+machine whose `allowed_hours` is one every-day window, see the [README](../README.md#lanq-makeready)).
 
 ```json
 "lanqTune":{"status":"Ok","report":{"schema":"lanq-makeready-tune/v1","tool":{"name":"lanq-makeready-tune","version":"0.5.0"},
@@ -750,7 +750,7 @@ any other key: without `--tune` the output is exactly what 0.11.0 printed (apart
 | Key | Type | Notes |
 | --- | --- | --- |
 | `status` | string | `Ok` (a valid report), `TimedOut` (no answer within 150 s), `Unreachable` (ssh failed) or `Unusable` (the output was not a valid tune report, or the script refused its arguments). Values may be added: treat an unknown one like `Unusable`. |
-| `error` | string | Conditional: why, when `status` is not `Ok` (lanq's words; nothing the worker sent is echoed). |
+| `error` | string | Conditional: why, when `status` is not `Ok`: lanq's own message, which can quote one line of ssh's stderr, sanitised and capped (the quoted line at 256 characters, the whole at 1024). An unusable report's contents are never quoted. |
 | `report` | object | Conditional: the validated tune report, only when `status` is `Ok`. |
 | `report.schema` | string | Always `lanq-makeready-tune/v1`. |
 | `report.tool`, `report.generatedAt`, `report.host` | | As in the scanner's report (`host.os` is `windows` or the Linux distribution). |

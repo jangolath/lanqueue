@@ -32,12 +32,13 @@
 
 ### Behaviour changes
 
-- **The scanner gets `-Hours`.** For a configured machine whose `allowed_hours` entries all have the same
-  `HH:mm-HH:mm` window (days dropped), `lanq makeready` (and `--all`) now passes that window to lanq-makeready as
-  `-Hours` / `--hours`. The suggested `machines.yml` entry then carries that `allowed_hours`, and on Windows the
+- **The scanner gets `-Hours`.** For a configured machine whose `allowed_hours` entries are all the same every-day
+  `HH:mm-HH:mm` window (no entry names days), `lanq makeready` (and `--all`) now passes that window to lanq-makeready
+  as `-Hours` / `--hours`. The suggested `machines.yml` entry then carries that `allowed_hours`, and on Windows the
   `updates.activehours` check compares Windows Update's active hours with the window instead of reporting `SKIP`
-  (it can now `WARN`, which can turn `OK` into `WARN 1` in `--all`). Without `allowed_hours`, with different windows,
-  or for a `--ssh` PC, nothing is passed and the output is as before.
+  (it can now `WARN`, which can turn `OK` into `WARN 1` in `--all`). Entries that name days, different windows, no
+  `allowed_hours`, or a `--ssh` PC pass nothing and the output is as before, so the suggested `allowed_hours` is never
+  wider than the configured one. (The `--tune` scan gets the shared times with the days dropped.)
 
 ### Security
 
@@ -47,7 +48,9 @@
   detail and advice 1024, host 128, arch 32). A refusal never echoes the worker's output. `fixId` comes from lanq's own
   table (a test keeps it equal to the scripts' fix ids) and only when the worker agrees; `security` is the worker's flag
   and lanq's own per-OS set. `-Hours` and `-WorkRoot` are validated and single-quoted before they reach a worker's
-  command line. A worker that sends its own `lanqTune` is ignored. See [SECURITY.md](SECURITY.md).
+  command line. A worker that sends its own `lanqTune` is ignored. Duplicate item ids are refused, and
+  `summary.seconds` outside 0..3600 is left out. `lanqTune.error` and the check's own ssh and unusable-report errors
+  quote at most one sanitised line of ssh's or the worker's stderr, cut to 256 characters (the whole message to 1024). See [SECURITY.md](SECURITY.md).
 
 ### For coding agents
 
@@ -67,6 +70,7 @@
   worktrees" block.
 - `lanq makeready --tune` in the README (a "Tuning: --tune" section, the command table and the `--version` row),
   docs/JSON.md (`lanqTune`, a jq tip, the nextSteps table), SECURITY.md, AGENTS.md (a hard rule), docs/AGENTS-GUIDE.md,
+  the lanq skill, both instruction-file snippets (`docs/agents/AGENTS.md-snippet.md`, `docs/agents/CLAUDE.md-snippet.md`),
   `llms.txt`, RELEASING.md (four embedded scripts) and `lanq --help`.
 
 ## 0.11.0 (2026-11-14)

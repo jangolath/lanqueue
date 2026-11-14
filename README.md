@@ -312,10 +312,11 @@ scan: lanq-makeready's fix script is never built in or sent), sent on ssh **stdi
 `-Redact` / `--redact`: nothing is written to the worker's disk, and nothing on it is changed.
 
 - `lanq makeready build-01` for a configured machine. It respects the machine's `PAUSE` file and `allowed_hours`
-  (exit `75`); `--force` scans anyway. When every `allowed_hours` entry has the same `HH:mm-HH:mm` window (days left
-  out), lanq passes it to the script as `-Hours` (0.12.0): the suggested entry then carries that `allowed_hours`, and on
-  Windows the `updates.activehours` check compares Windows Update's active hours with it (it can `WARN`). Different
-  windows, or none, pass nothing, as before.
+  (exit `75`); `--force` scans anyway. When every `allowed_hours` entry is the same every-day `HH:mm-HH:mm` window
+  (no days named), lanq passes it to the script as `-Hours` (0.12.0): the suggested entry then carries that
+  `allowed_hours`, and on Windows the `updates.activehours` check compares Windows Update's active hours with it (it can
+  `WARN`). Entries that name days (`Mon-Fri 18:00-23:00`), different windows, or none pass nothing, as before, so the
+  suggested `allowed_hours` is never wider than yours.
 - `lanq makeready --ssh user@old-pc.lan --os windows` for a PC that is not in `machines.yml` yet, once key-based
   SSH works and its host key is in your `known_hosts` (same key-only, strict-host-key ssh options as every other call;
   your agent or default key is used). `--key-env VAR` uses the key file whose path is in `VAR` instead, as `key_env:`
@@ -355,8 +356,9 @@ driver age, plain-text autologon, maintenance times, cache sizes, `DOTNET_*` mac
 folder, WSL memory. Linux: the CPU governor, swappiness, inotify limits, the journal size, unused services, unattended
 reboots, the package cache, TRIM, SMART, thermal throttling, disk fullness. Each item is `OK`, `INFO`, `WARN` or `SKIP`,
 never `FAIL`: tuning never changes whether the PC is worker-ready, and the exit code stays the check's. A configured
-machine's window goes as `-Hours` (as above) and its `work_root` as `-WorkRoot` (only when the tune script accepts it as
-written); a `--ssh` PC gets neither. Not with `--setup` or `--add`.
+machine's window goes as `-Hours` (the times every `allowed_hours` entry shares, days left out: the tune scan only
+compares schedules with them) and its `work_root` as `-WorkRoot` (only when the tune script accepts it as written); a
+`--ssh` PC gets neither. Not with `--setup` or `--add`.
 
 The text adds a tune section after the report: the counts, each `WARN` and `INFO` item with its advice and, when
 lanq-makeready's fix script can change it, its fix id (`SKIP` items only as a count), then *Its owner can preview the
