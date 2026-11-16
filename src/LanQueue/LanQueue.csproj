@@ -34,7 +34,7 @@
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
     <!-- Generates the YAML StaticContext at compile time (no reflection), so the same code path works in the tool and the NativeAOT binary. -->
     <PackageReference Include="Vecc.YamlDotNet.Analyzers.StaticGenerator" Version="18.1.0" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.403" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="11.0.100" PrivateAssets="all" />
     <None Include="PACKAGE.md" Pack="true" PackagePath="\" />
     <None Include="../../assets/lanqueue-icon.png" Pack="true" PackagePath="icon.png" />
   </ItemGroup>
