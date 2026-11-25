@@ -227,7 +227,8 @@ added; judge an unknown one by `permanent`.
 | `busy` | no | Every live slot is taken. For an `--exclusive` job, any live slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). Stale slots do not count; when there are some, the reason says so: "busy (slots 3/4, 1 stale: reclaimed by the next claim)". Stale slots a claim of this run could not reclaim count as busy for the rest of the run: "busy (slots 2/2, 1 stale, not reclaimable)". |
 | `avoided` | no | `--shards` only: an earlier attempt of the shard lost the connection there, and it may still be running. |
 | `held` | no | Any other hold. |
-| `fallback_refused` | yes | This computer's fallback entry (0.13.0): lanq runs elevated or as root, or its `work_root` and the repository overlap. |
+| `fallback_refused` | yes | This computer's fallback entry (0.13.0): lanq runs elevated or as root. |
+| `fallback_work_root` | yes | This computer's fallback entry (0.13.0): its `work_root` is inside the repository being run (its top folder, links followed), or holds it. |
 
 ### With --fetch (conditional)
 
@@ -1035,12 +1036,15 @@ All are additions; a field is left out when it does not apply.
 | `lanq health --needs` rows, dry-run `machines` | `needGb` | The job's memory need on that machine: the larger of `--mem` and its job size. |
 | run, each shard, plan job row | `fallback` | `true` when it ran on this computer's fallback entry, not on the pool. |
 | run, shard set, plan (top level) | `fallbackJobs` | How many jobs (shards) ran on this computer. Above 0: not pool evidence; say so. |
-| run, each shard, single plan job | `post` | The `post:` step: `{exitCode, timedOut, seconds}`. Its exit code is a warning only; `status` and the exit code stay the job's. |
+| run, each shard, single plan job | `post` | The `post:` step: `{exitCode, timedOut, seconds}`, plus `cancelled: true` (Ctrl+C, `plan_timeout` or `--fail-fast` ended the step, exit 130) or `skipped: true` (the machine's allowed hours end too soon). Its exit code is a warning only; `status`, the exit code, the fetch and the results stay the job's, even when the step was cancelled. `timedOut` is true only when the step was stopped at its limit, not when it exited 124 itself. |
+| `lanq run --dry-run` | `wouldFallBack` | NoCapacity only: this computer's fallback entry, when `lanq run` would go there instead of ending NOT RUN. |
+| plan dry run jobs | `wouldFallBack`, `post` | `wouldFallBack` as above, per job; `post`: the job's `post:` step as its words. A plain `post:` also rides in `runArgv` as `--post "..."`; a list with words `--post` cannot carry (spaces) shows only in `post`. |
 | `lanq stats` machines | `thisComputer` | `true` for this computer's fallback entry. |
 
-A NoCapacity result may carry two `ask_developer` steps about the fallback: one with `lanq run ... --fallback on` (this
-computer could run the job; only the developer decides), or one pointing at docs/WORKERS.md "Using this PC as a
-fallback" (none is configured). A run with `fallbackJobs` above 0 carries an `ask_developer` step with the pool-only
+A NoCapacity result may carry an `ask_developer` step about the fallback: one with `lanq run ... --fallback on` (this
+computer could run the job; only the developer decides), one pointing at docs/WORKERS.md "Using this PC as a
+fallback" (none is configured), or one saying why the configured fallback refused (lanq runs elevated or as root: run
+it from a terminal without those rights; its `work_root` overlaps the repository: give it a `work_root` of its own). A run with `fallbackJobs` above 0 carries an `ask_developer` step with the pool-only
 rerun (`--fallback off --wait-slot 1800`). Neither is ever `safeToRunUnattended`.
 
 ### lanq prune --json

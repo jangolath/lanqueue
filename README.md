@@ -1168,7 +1168,9 @@ not that the same tests did. Read both logs when it matters.
   the JSON `waited.budget` says which budget ended it.
 - **This PC as a last resort, off by default.** A machines.yml entry with `fallback: true` and `local: true` describes
   the computer you run lanq on; `policy.fallback: on|ask` or `lanq run --fallback on|ask` lets a job the pool cannot
-  take run there, labelled in every output. See [docs/WORKERS.md](docs/WORKERS.md#using-this-pc-as-a-fallback-0130).
+  take run there, labelled in every output. The job runs as you: only your shell's variables are kept out, your ssh
+  agent, credential managers and keyring stay reachable to it. See
+  [docs/WORKERS.md](docs/WORKERS.md#using-this-pc-as-a-fallback-0130).
 - **Hygiene and post: steps.** `hygiene: [dotnet]` keeps parallel .NET jobs from sharing MSBuild nodes; lanq.yml
   `post:` (or `--post`) runs one more allowlisted command after a job, its exit code a warning only.
 - **`lanq prune`** lists (and with `--yes` removes) what crashed or interrupted jobs left on a worker.

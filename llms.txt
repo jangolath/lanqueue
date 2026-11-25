@@ -37,7 +37,7 @@ Since 0.11.0 `--results trx:PATTERN` / `junit:PATTERN` (lanq.yml `results:`) add
 ## 0.13.0
 - Memory: machines.yml job_mem_gb (per machine or policy); a job needs max(--mem, job_mem_gb); slots keep min_free_mem_gb free.
 - Waits: lanq run --wait-eligible S / --wait-slot S (also with --plan); NoCapacity JSON `waited.budget` names the one that ran out. NoCapacity is NOT RUN.
-- Fallback: a machines.yml entry with fallback: true + local: true is this PC, used only when a job would end NoCapacity and policy.fallback / --fallback is on or ask (default off). Agents never pass --fallback on|ask. `fallbackJobs` > 0 = not pool evidence.
+- Fallback: a machines.yml entry with fallback: true + local: true is this PC, used only when a job would end NoCapacity and policy.fallback / --fallback is on or ask (default off). Agents never pass --fallback on|ask. `fallbackJobs` > 0 = not pool evidence. Dry run `wouldFallBack` = the run would use the PC: ask the developer first.
 - hygiene: [dotnet|dotnet-lean] per machine; lanq never runs dotnet build-server shutdown.
 - post: (lanq.yml) / --post: a step after the job, exit code a warning only.
 - lanq prune <machine>|--all lists worker leftovers; --yes removes (developer only).

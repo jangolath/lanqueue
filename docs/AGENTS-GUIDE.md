@@ -271,5 +271,8 @@ More parsing examples (shards, `--fetch`, `makeready --all`, `lanq stats`) are i
 - The fallback: a developer may let jobs the pool cannot take run on their own PC (`policy.fallback`, `--fallback`).
   Never pass `--fallback on|ask` yourself. Read `fallbackJobs`: above 0 means part of the run happened on the PC, not on
   the pool: report "not pool evidence" and the suggested pool rerun to the developer.
-- `post`: a step after the job; its exit code never changes `status`. Report a non-zero `post.exitCode` as a warning.
+- `post`: a step after the job; its exit code never changes `status`. Report a non-zero `post.exitCode` as a warning,
+  and `post.cancelled` or `post.skipped` as "the post step did not finish"; the job's own `status` stands.
+- `wouldFallBack` in a dry run means the real run would run on the developer's PC instead of ending NOT RUN: tell the
+  developer before running it; never treat that as pool evidence.
 - `lanq prune <machine> --json` (no `--yes`) lists leftovers on a worker; removing them (`--yes`) is the developer's call.
