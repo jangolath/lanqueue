@@ -34,8 +34,10 @@
   when no pool machine can ever take it. With no wait flag given, a run that may fall back first waits 120 s for a pool
   slot. `ask` prompts only at a terminal (never with `--json`, `CI`, `TERM=dumb`, `LANQ_NONINTERACTIVE` or a coding
   agent); its question says that a yes also covers the remaining jobs of the run, each still only after its own wait.
+  Before each question lanq discards what was typed at the terminal and not yet read, so typeahead is never an answer.
   Where the fallback cannot act (`ask` with no terminal, lanq elevated or root, a `work_root` that overlaps the
-  repository) the run behaves exactly as `off`: no 120 s wait, and a job no pool machine can take ends at once; a
+  repository, also through a link, a subst drive, an 8.3 short name or a volume mount point on Windows) the run
+  behaves exactly as `off`: no 120 s wait, and a job no pool machine can take ends at once; a
   refusal is said once at the start (`fallback_refused`, `fallback_work_root`). The local runner starts the same scripts
   a worker gets, in the fallback's `work_root`, with an environment built from a short allowlist, in a job object that
   ends with lanq on Windows. The allowlist only keeps your shell's variables (`SSH_AUTH_SOCK`, tokens, `MSBuild*`, an
@@ -52,15 +54,18 @@
   builds 10-40% slower). An explicit `env:` and a job's `--env` win. On Linux, cleanup (and the stop before a fetch, and a
   stale slot's reclaim) now also stops every process of the build user carrying exactly `LANQ_JOB=<this job>`, rechecked
   before each signal. It judges each process by its own command line: an MSBuild node only when it runs with
-  `nodeReuse:false`; the MSBuild server and the compiler server never. `lanq doctor` warns about a `dotnet` machine
+  `nodeReuse:false`; the MSBuild server, the compiler server and the Razor build server of older SDKs never.
+  `lanq doctor` warns about a `dotnet` machine
   with `max_jobs` above 1 and no `hygiene:`, and `doctor --remote` about a Windows machine whose cleanup has no job
   object. lanq never runs `dotnet build-server shutdown`.
 - **`post:` step.** lanq.yml `post:` (a list or a plain string, like `command:`) or `lanq run --post "CMD"` runs one more
   allowlisted command after the job: after its fetch, before its cleanup, in the same slot, with a 5-minute limit. It
   runs after Completed, Failed and TimedOut (the job is stopped first), never after Cancelled, WindowClosed, a lost
   connection or a plan timeout. Its exit code is a warning only (`[lanq] post: exit N (warning only)`, JSON
-  `post: {exitCode, timedOut, seconds}`, plus `cancelled` or `skipped` when true). A cancel during the step never
-  changes the job's own result; the step never runs past the machine's allowed hours; `--log-tail` ends where its
+  `post: {exitCode, timedOut, seconds}`, plus `cancelled` or `skipped` when true; `timedOut` also when a step that
+  ignored TERM was killed at its limit). A cancel during the step never changes the job's own result, and a step that
+  already ended is never called cancelled; the step never runs past the machine's allowed hours; `--log-tail` ends
+  where its
   output begins. In a plan dry run, `runArgv` carries a plain `post:` as `--post` and each job lists `post`. It acts
   with the account's full reach: to stop build servers, use `hygiene:`.
 - **`lanq prune <machine>|--all`** lists (and with `--yes` removes) leftovers of jobs no lanq runs any more: old

@@ -363,8 +363,9 @@ a sibling job that was using it can fail (`MSB4166: child node exited prematurel
 user that carries exactly `LANQ_JOB=<this job>` (a server that left the job's process group included). It judges each
 process by its own command line, never by the machine's config: an MSBuild node goes only when it was started with
 `nodeReuse:false` (as `hygiene:` makes it, unless a machine `env:`, a job's `--env` or the repository turns reuse back
-on); the MSBuild server (`nodemode:8`) and the compiler server (`VBCSCompiler`) are always spared, since a sibling may
-use them and they end on their own idle timeout. lanq never runs `dotnet build-server shutdown`: it would stop every
+on); the MSBuild server (`nodemode:8`), the compiler server (`VBCSCompiler`) and the Razor build server of older SDKs
+(`rzc.dll server`) are always spared, since a sibling may use them and they end on their own idle timeout. lanq never
+runs `dotnet build-server shutdown`: it would stop every
 build server of the account, a sibling slot's included. On Windows, cleanup relies on the job object; when PowerShell
 there cannot load lanq's helper (constrained language), `lanq doctor --remote` warns `leftover processes possible (no
 job object)`.
@@ -430,7 +431,9 @@ machines:
   or a build that passes on the pool can fail here and look like a code failure.
 - lanq refuses to use it when it runs elevated or as root (`fallback_refused`; next step: run lanq from a terminal
   without those rights), or when `work_root` and the repository overlap (`fallback_work_root`; the repository is its top
-  folder, links followed). Either way the run then acts as `off`.
+  folder, links followed; on Windows also subst drives, 8.3 short names and volume mount points, by every name Windows
+  knows the folder by). Linux bind mounts are not followed: do not bind-mount the repository under `work_root`. Either
+  way the run then acts as `off`.
 - Results say so: `[lanq] running on this computer (fallback: no pool slot)` (or `no pool machine can take it`), the
   status line `(N of M jobs on this computer, fallback)`, JSON `fallback` and `fallbackJobs`, jobs.jsonl `fallback`,
   `lanq stats` "(this computer)". Such a run is not pool evidence: rerun on the pool to confirm. A baseline verdict where
