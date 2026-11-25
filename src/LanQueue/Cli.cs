@@ -125,6 +125,24 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --fail-fast: with --shards the first shard that does not complete cancels the rest (also in <see cref="Shards"/>); with --plan the first job.</summary>
     public bool FailFast { get; init; }
 
+    /// <summary>lanq run --wait-eligible S (0.13.0): seconds a job may wait while no machine can take this kind of job; null when not given.</summary>
+    public int? WaitEligibleSeconds { get; init; }
+
+    /// <summary>lanq run --wait-slot S (0.13.0): seconds a job may wait while a machine could take it but its slots are full; null when not given.</summary>
+    public int? WaitSlotSeconds { get; init; }
+
+    /// <summary>True when --wait-eligible or --wait-slot was given (then <see cref="WaitSeconds"/> is the larger of the two; --wait is refused with them).</summary>
+    public bool SplitWait => WaitEligibleSeconds is not null || WaitSlotSeconds is not null;
+
+    /// <summary>The eligible-wait budget in seconds: --wait-eligible (0 when only --wait-slot was given), else --wait.</summary>
+    public int EligibleSeconds => SplitWait ? WaitEligibleSeconds ?? 0 : WaitSeconds;
+
+    /// <summary>The slot-wait budget in seconds: --wait-slot (0 when only --wait-eligible was given), else --wait.</summary>
+    public int SlotSeconds => SplitWait ? WaitSlotSeconds ?? 0 : WaitSeconds;
+
+    /// <summary>Both wait budgets (<see cref="Scheduling.WaitBudgets"/>).</summary>
+    public Scheduling.WaitBudgets Budgets => new(TimeSpan.FromSeconds(EligibleSeconds), TimeSpan.FromSeconds(SlotSeconds));
+
     /// <summary>
     /// lanq run --plan --plan-timeout M (lanq.yml plan_timeout: M; the command line wins): the whole plan's limit in minutes, 1 to 10080, from
     /// after the snapshot to the last baseline (0.10.0). Null without it.
@@ -164,7 +182,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
     /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
     internal const string PlanTakes =
-        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
+        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --wait-eligible, --wait-slot, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -180,7 +198,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results",
+            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results", "--wait-eligible", "--wait-slot",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -205,6 +223,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var needs = new List<string>();
         var dir = ".";
         var wait = 0;
+        int? waitEligible = null;
+        int? waitSlot = null;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
@@ -266,7 +286,13 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     waitForSsh = true;
                     break;
                 case "--wait" when i + 1 < own.Length:
-                    wait = int.Parse(own[++i], CultureInfo.InvariantCulture);
+                    wait = WaitValue("--wait", own[++i]);
+                    break;
+                case "--wait-eligible" when i + 1 < own.Length:
+                    waitEligible = WaitValue("--wait-eligible", own[++i]);
+                    break;
+                case "--wait-slot" when i + 1 < own.Length:
+                    waitSlot = WaitValue("--wait-slot", own[++i]);
                     break;
                 case "--timeout" when i + 1 < own.Length:
                     timeout = int.Parse(own[++i], CultureInfo.InvariantCulture);
@@ -492,8 +518,21 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take a command after --; only lanq run does.");
         }
 
+        // 0.13.0: --wait sets both budgets; the split flags set one each. Together the meaning would be ambiguous.
+        if (command == "run" && seen.Contains("--wait") && (waitEligible is not null || waitSlot is not null))
+        {
+            throw new ArgumentException("--wait sets both wait budgets; give either --wait, or --wait-eligible and/or --wait-slot, not both.");
+        }
+
+        if (waitEligible is not null || waitSlot is not null)
+        {
+            wait = Math.Max(waitEligible ?? 0, waitSlot ?? 0);
+        }
+
         return new ParsedArgs(command, config, needs, dir, wait, argv)
         {
+            WaitEligibleSeconds = waitEligible,
+            WaitSlotSeconds = waitSlot,
             TimeoutMinutes = timeout,
             MemGb = mem,
             Json = json,
@@ -603,6 +642,15 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         }
     }
 
+    /// <summary>The longest wait budget (seconds): one week.</summary>
+    internal const int MaxWaitSeconds = 604800;
+
+    /// <summary>--wait, --wait-eligible, --wait-slot: whole seconds from 0 to one week (0.13.0 adds the range check; before, any int was taken).</summary>
+    internal static int WaitValue(string option, string text) =>
+        int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds) && seconds is >= 0 and <= MaxWaitSeconds
+            ? seconds
+            : throw new ArgumentException($"{option} must be a whole number of seconds from 0 to {MaxWaitSeconds} (one week), for example {option} 600.");
+
     /// <summary>--plan-timeout (and lanq.yml plan_timeout:): whole minutes from 1 to 10080 (one week), as --timeout.</summary>
     internal static int ParsePlanTimeout(string text) =>
         int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var minutes) && minutes is >= 1 and <= 10080
@@ -649,6 +697,7 @@ public static partial class Cli
           lanq run ... [--env NAME=VALUE ...] -- dotnet test
           lanq run ... --exclusive [--shards N|auto] -- dotnet test
           lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
+          lanq run ... [--wait-eligible 3600] [--wait-slot 14400] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq run --plan ... [--on big-01,build-01] [--size light,medium | --min-size heavy] [--plan-timeout M]
@@ -667,7 +716,10 @@ public static partial class Cli
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory); lanq init writes there too.
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
-        --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
+        --wait is in seconds (how long to wait for a free machine, 0 to 604800); --timeout is in minutes (how long the job may run, default 240).
+        --wait-eligible S and --wait-slot S split --wait in two (also with --plan; not together with --wait): S seconds while no machine can
+        take this kind of job (held, asleep, unreachable, short of memory), and S seconds while one can but its slots are full. Both count
+        only while the run (or plan) holds no slot; NoCapacity JSON then says which ran out (waited.budget: eligible or slot).
         --mem is in GB: only machines reporting at least that much available memory take the job.
         --min-size light|medium|heavy (that class or larger) or --size C[,C] (one of these classes) routes by machine size: a machine's size:
         in machines.yml when it has one, else its probed class (under 6 GB light; 16 GB or more with 4 cores heavy; else medium). A machine of
@@ -1013,6 +1065,7 @@ public static partial class Cli
                     {
                         Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
+                        Waited = result.Status == JobStatus.NoCapacity ? WaitedJson.Of(result.Waited) : null,
                         NextSteps = next,
                         Env = EnvNames(p.Env),
                         Exclusive = Flag(p.Exclusive),
@@ -1071,6 +1124,7 @@ public static partial class Cli
     internal static JobRequest RequestOf(ParsedArgs p, string repoDir, FetchRequest? fetch) =>
         new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
         {
+            Budgets = p.SplitWait ? p.Budgets : null,
             NoWake = p.NoWake,
             On = p.On,
             Size = p.Size,

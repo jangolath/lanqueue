@@ -119,10 +119,7 @@ internal sealed class SuggestedCommand
         }
 
         var set = new List<(string, string)>();
-        if (waitSeconds is { } w && w > p.WaitSeconds)
-        {
-            set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
-        }
+        RaiseWait(p, waitSeconds, set);
 
         if (timeoutMinutes is { } t && t > p.TimeoutMinutes)
         {
@@ -134,9 +131,58 @@ internal sealed class SuggestedCommand
             set.Add(("--shard-retries", r.ToString(CultureInfo.InvariantCulture)));
         }
 
-        // The original could not wake a machine with --wait 0; a longer wait must not start doing so.
-        var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        // The original could not wake a machine with no eligible-wait budget (--wait 0); a longer wait must not start doing so.
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
         return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add, dropDryRun ? ["--dry-run"] : null)], safe: true);
+    }
+
+    /// <summary>
+    /// Raises the wait to at least <paramref name="waitSeconds"/>: --wait for a run that used it (or none), and with --wait-eligible /
+    /// --wait-slot (0.13.0) each of those instead, so a suggestion never combines --wait with them (which is refused).
+    /// </summary>
+    private static void RaiseWait(ParsedArgs p, int? waitSeconds, List<(string, string)> set)
+    {
+        if (waitSeconds is not { } w)
+        {
+            return;
+        }
+
+        if (!p.SplitWait)
+        {
+            if (w > p.WaitSeconds)
+            {
+                set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            return;
+        }
+
+        if (w > p.EligibleSeconds)
+        {
+            set.Add(("--wait-eligible", w.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        if (w > p.SlotSeconds)
+        {
+            set.Add(("--wait-slot", w.ToString(CultureInfo.InvariantCulture)));
+        }
+    }
+
+    /// <summary>
+    /// The same lanq run with one wait budget raised (0.13.0): --wait-slot or --wait-eligible set to <paramref name="seconds"/>; null when
+    /// it is not above the current budget or the run is not lanq run. Never adds --wait. Safe: it only waits longer.
+    /// </summary>
+    public static SuggestedCommand? RerunWithBudget(ParsedArgs p, Scheduling.WaitKind budget, int seconds)
+    {
+        var current = budget == Scheduling.WaitKind.Slot ? p.SlotSeconds : p.EligibleSeconds;
+        if (p.Command != "run" || seconds <= current)
+        {
+            return null;
+        }
+
+        var option = budget == Scheduling.WaitKind.Slot ? "--wait-slot" : "--wait-eligible";
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : []; // as Rerun: a longer wait must not start waking machines
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, [(option, seconds.ToString(CultureInfo.InvariantCulture))], add)], safe: true);
     }
 
     /// <summary>
@@ -157,12 +203,9 @@ internal sealed class SuggestedCommand
         }
 
         var set = new List<(string, string)> { ("--only", string.Join(',', only)) };
-        if (waitSeconds is { } w && w > p.WaitSeconds)
-        {
-            set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
-        }
+        RaiseWait(p, waitSeconds, set);
 
-        var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
         return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: safe);
     }
 
@@ -351,12 +394,16 @@ internal static class NextSteps
     {
         /// <summary>lanq run --baseline: the rerun at the base commit after the job failed, or null.</summary>
         public BaselineResult? Baseline { get; init; }
+
+        /// <summary>NoCapacity after waiting (0.13.0): the wait budget that ran out, or null.</summary>
+        public Scheduling.WaitKind? WaitedBudget { get; init; }
     }
 
     internal static RunOutcome Outcome(JobResult r) => new(
         r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath)
     {
         Baseline = r.Baseline,
+        WaitedBudget = r.Waited?.Budget,
     };
 
     /// <summary>
@@ -388,7 +435,9 @@ internal static class NextSteps
             case nameof(JobStatus.Rejected):
                 return Rejected(p, o.RejectKind, o.Message);
             case nameof(JobStatus.NoCapacity):
-                return NoCapacity(p, o.Retryable ?? true, o.Excluded ?? [], health);
+                return p.SplitWait && (o.Retryable ?? true) && o.WaitedBudget is { } budget
+                    ? ForNoCapacityWait(p, budget, health)
+                    : NoCapacity(p, o.Retryable ?? true, o.Excluded ?? [], health);
             case nameof(JobStatus.InfraError):
                 return Infra(p, o, health);
             case nameof(JobStatus.TimedOut):
@@ -669,6 +718,28 @@ internal static class NextSteps
         [Step(NextAction.FixCommand, Policy.JobEnv.IsDeniedMessage(message)
             ? "this variable can never be set by a job; drop it or ask the developer: " + message
             : "fix the command line: " + message)];
+
+    /// <summary>
+    /// NoCapacity after a run with --wait-eligible / --wait-slot used up a budget (0.13.0 B2). Slot: the pool can take the job, its slots
+    /// were full: the same run with a larger --wait-slot. Eligible: nothing could take it: see how each machine is judged first, then a
+    /// larger --wait-eligible. The raised budget is double the old one, at least <see cref="SuggestedCommand.WaitSeconds"/>, at most a week.
+    /// </summary>
+    public static List<NextStepJson> ForNoCapacityWait(ParsedArgs p, Scheduling.WaitKind budget, SuggestedCommand? health = null)
+    {
+        health ??= HealthFor(p);
+        var used = budget == Scheduling.WaitKind.Slot ? p.SlotSeconds : p.EligibleSeconds;
+        var raised = (int)Math.Min(ParsedArgs.MaxWaitSeconds, Math.Max(SuggestedCommand.WaitSeconds, 2L * used));
+        var rerun = SuggestedCommand.RerunWithBudget(p, budget, raised);
+        var option = budget == Scheduling.WaitKind.Slot ? "--wait-slot" : "--wait-eligible";
+        var wait = rerun is null
+            ? Step(NextAction.Wait, string.Create(CultureInfo.InvariantCulture, $"the {option} budget ({used} s) ran out; try again later"))
+            : Step(NextAction.Wait, string.Create(
+                CultureInfo.InvariantCulture,
+                $"the {option} budget ({used} s) ran out{(budget == Scheduling.WaitKind.Slot ? " while machines that can take the job were full" : "")}; run again with {option} {raised}"), rerun);
+        return budget == Scheduling.WaitKind.Slot
+            ? [wait, Step(NextAction.RunHealth, "see how each machine is judged for this job", health)]
+            : [Step(NextAction.RunHealth, "no machine could take this kind of job while it waited (held, asleep, unreachable or short of memory); see how each is judged", health), wait];
+    }
 
     private static List<NextStepJson> NoCapacity(ParsedArgs p, bool retryable, IReadOnlyList<ExcludedMachine> excluded, SuggestedCommand? health)
     {

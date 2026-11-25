@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using LanQueue.Config;
 using LanQueue.Payload;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 
 namespace LanQueue.Jobs;
@@ -44,6 +45,21 @@ public sealed class PlanProgress(string holders = "this plan's other jobs")
             lock (_gate)
             {
                 return _holding > 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(_idleSince);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="Stopwatch"/> timestamp since which no job of the plan has held a slot (the plan's start or the last release), or null
+    /// while one does (0.13.0: the wait clocks count from it).
+    /// </summary>
+    public long? IdleSince
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _holding > 0 ? null : _idleSince;
             }
         }
     }
@@ -302,6 +318,9 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
     /// <summary>NoCapacity only: see <see cref="JobResult.Excluded"/>.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
+
     public RejectKind? RejectKind { get; init; }
 
     public InfraKind? InfraKind { get; init; }
@@ -326,6 +345,9 @@ public sealed record PlanRunResult(string Status, int ExitCode, string Message, 
 
     /// <summary>NoCapacity only: from the deciding job.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
 
     public RejectKind? RejectKind { get; init; }
 
@@ -920,6 +942,7 @@ public sealed partial class JobRunner
                     Sharded = r,
                     Retryable = r.Retryable,
                     Excluded = r.Excluded,
+                    Waited = r.Waited,
                     RejectKind = r.RejectKind,
                     InfraKind = r.InfraKind,
                     MayStillRun = r.Shards.Any(s => s.MayStillRun),
@@ -937,6 +960,7 @@ public sealed partial class JobRunner
                 Single = one,
                 Retryable = one.Status == JobStatus.NoCapacity ? one.Retryable ?? true : null,
                 Excluded = one.Status == JobStatus.NoCapacity ? one.Excluded ?? [] : null,
+                Waited = one.Status == JobStatus.NoCapacity ? one.Waited : null,
                 RejectKind = one.RejectKind,
                 InfraKind = one.InfraKind,
                 MayStillRun = one.MayStillRun && !one.CleanedUp,
@@ -1000,6 +1024,7 @@ public sealed partial class JobRunner
             Decided = worst.Name,
             Retryable = noCapacity ? worst.Retryable ?? true : null,
             Excluded = noCapacity ? worst.Excluded ?? [] : null,
+            Waited = noCapacity ? worst.Waited : null,
             RejectKind = worst.RejectKind,
             InfraKind = worst.InfraKind,
         };

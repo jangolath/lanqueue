@@ -153,6 +153,10 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
     /// <summary>Always present: the full path of the job's local log (every line lanq printed for the job), or null when no job started.</summary>
     public string? LogPath { get; init; }
 
@@ -290,6 +294,10 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
     /// <summary>--shards auto --target-minutes only: how N was picked from earlier runs (left out otherwise).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ShardTimingJson? ShardTiming { get; init; }
@@ -344,6 +352,18 @@ internal sealed record ShardTimingJson(
 /// </param>
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
+
+/// <summary>
+/// NoCapacity after waiting (0.13.0 B2): idle seconds charged to waiting for a machine that can take this kind of job (eligibleSeconds) and
+/// for a free slot (slotSeconds), and the budget that ran out: "eligible" (--wait-eligible) or "slot" (--wait-slot). With --wait both
+/// budgets are that value.
+/// </summary>
+internal sealed record WaitedJson(int EligibleSeconds, int SlotSeconds, string Budget)
+{
+    internal static WaitedJson? Of(Scheduling.WaitedInfo? w) => w is null
+        ? null
+        : new((int)Math.Round(w.Eligible.TotalSeconds), (int)Math.Round(w.Slot.TotalSeconds), w.Budget == Scheduling.WaitKind.Slot ? "slot" : "eligible");
+}
 
 /// <summary>
 /// The one object <c>lanq run --dry-run --json</c> prints on stdout: what lanq run would do now. Every field is always present (null where it
@@ -439,6 +459,10 @@ internal sealed record PlanFileRunJson(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
     /// <summary>The plan file's static warnings (also printed on stderr).</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
 
@@ -485,6 +509,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>NoCapacity only.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
 
     /// <summary>A single job with fetch: in lanq.yml only, as in <see cref="RunJson.Fetched"/> (a sharded job has them per shard).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

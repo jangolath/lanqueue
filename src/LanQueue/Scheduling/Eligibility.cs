@@ -170,6 +170,9 @@ public sealed record Assessment(Machine Machine, MachineHealth Health, Exclusion
     /// <summary>The slots this machine may run at once for the job: max_jobs, or fewer when a job size caps it by total memory (<see cref="Scheduler.SlotCap"/>).</summary>
     public int SlotCap { get; init; } = int.MaxValue;
 
+    /// <summary>The free memory this machine keeps for the job (<see cref="Scheduler.FloorGb"/>): its min_free_mem_gb, else the policy's.</summary>
+    public double FloorGb { get; init; }
+
     public bool Eligible => Reason == Exclusion.None;
 
     /// <summary>The reason as the snake_case code lanq prints in JSON, or null when eligible.</summary>

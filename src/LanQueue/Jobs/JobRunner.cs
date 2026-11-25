@@ -87,6 +87,15 @@ public sealed record JobRequest(
     /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
     public bool NoWake { get; init; }
 
+    /// <summary>
+    /// lanq run --wait-eligible / --wait-slot (0.13.0 B2): the two wait budgets; null when neither was given, so <see cref="Wait"/> (--wait)
+    /// is both (<see cref="WaitBudgets"/>), with exactly the 0.12 timeline.
+    /// </summary>
+    public WaitBudgets? Budgets { get; init; }
+
+    /// <summary>The wait budgets in effect: <see cref="Budgets"/>, else <see cref="Wait"/> for both.</summary>
+    public WaitBudgets EffectiveBudgets => Budgets ?? new WaitBudgets(Wait, Wait);
+
     /// <summary>lanq run --shards: this job is shard <see cref="ShardInfo.Index"/> of <see cref="ShardInfo.Count"/> (LANQ_SHARD, LANQ_SHARDS), or null.</summary>
     public ShardInfo? Shard { get; init; }
 
@@ -211,6 +220,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
 
     /// <summary>NoCapacity only: every machine that did not take the job and why, in config order. Null for every other status.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
 
     /// <summary>The full path of the job's local log (see <see cref="JobLog.LogPathFor"/>), set once the job held a slot and the log was created; null otherwise.</summary>
     public string? LogPath { get; init; }
@@ -776,13 +788,17 @@ public sealed partial class JobRunner(
         var say = Say(req);
         var relooked = 0L;
         var preferLooks = 0;
+        var waitClock = new WaitClock();
+        var waitingSince = Stopwatch.GetTimestamp();
+        var sshFailed = new HashSet<string>(StringComparer.Ordinal);
         while (true)
         {
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
-            // Never longer than what is left of --wait (with --wait 0, not at all: any machine that can take it now).
-            var waitLeft = req.Wait - deadline.Elapsed;
+            sshFailed.Clear();
+            // Never longer than what is left of the slot-wait budget (with 0, not at all: any machine that can take it now).
+            var waitLeft = req.EffectiveBudgets.Slot - deadline.Elapsed;
             var holdForPreferred = prefer is not null && preferLooks < PreferRounds && waitLeft > TimeSpan.Zero
                 && assessed.FirstOrDefault(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal)) is { } preferred
                 && (preferred.Eligible || preferred.Reason == Exclusion.Busy);
@@ -804,6 +820,13 @@ public sealed partial class JobRunner(
                     result = await TryOnMachine(
                         jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, MachineLines(req, a.Machine.Name), ct,
                         slotCap: a.SlotCap,
+                        onNoSlot: overSsh =>
+                        {
+                            if (overSsh)
+                            {
+                                sshFailed.Add(a.Machine.Name);
+                            }
+                        },
                         onSlot: () =>
                         {
                             held = true;
@@ -846,14 +869,14 @@ public sealed partial class JobRunner(
 
             // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
             // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
-            if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
+            if (ranked.Count == 0 && req.EffectiveBudgets.Eligible > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
             {
                 await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false);
             }
 
-            if (WaitedOut(req, deadline, round, relooked))
+            if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(assessed, sshFailed), round, relooked) is { } budget)
             {
-                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
+                return WaitedNoCapacity(NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), req, waitClock, budget);
             }
 
             if (Relook(req.Progress, round, relooked) is > 0 and var release)
@@ -872,13 +895,45 @@ public sealed partial class JobRunner(
     internal const int PreferRounds = 2;
 
     /// <summary>
-    /// Whether a job still waiting for a slot has used up --wait: from its own start, or in a plan (<see cref="JobRequest.Progress"/>) only
-    /// while no job of the plan holds a slot (a job waits behind its siblings even with --wait 0), and only when no slot of the plan was given
-    /// back since the look at the machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before
-    /// its sibling gave it back looks again instead of ending NoCapacity next to a free slot.
+    /// Whether a job still waiting for a slot has used up its wait budgets (0.13.0 B2, <see cref="WaitClock"/>): this look in state
+    /// <paramref name="state"/> is charged on idle clocks that count from <paramref name="ownSince"/> (the job's start, or a sharded run's last
+    /// slot change) or, in a plan (<see cref="JobRequest.Progress"/>), only while no job of the plan holds a slot, from the last time one was
+    /// given back (a job waits behind its siblings even with --wait 0). Not while a slot of the plan was given back since the look at the
+    /// machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before its sibling gave it back
+    /// looks again instead of ending NoCapacity next to a free slot. Returns the budget that ran out, or null.
     /// </summary>
-    private static bool WaitedOut(JobRequest req, Stopwatch own, long round, long relooked) =>
-        req.Progress is { } plan ? !plan.AnyHolding && plan.IdleFor >= req.Wait && Relook(plan, round, relooked) == 0 : own.Elapsed >= req.Wait;
+    private static WaitKind? WaitedOut(JobRequest req, WaitClock clock, long ownSince, WaitKind state, long round, long relooked)
+    {
+        var since = ownSince;
+        if (req.Progress is { } plan)
+        {
+            if (plan.IdleSince is not { } idle)
+            {
+                return null; // a job of the plan holds a slot: this job waits behind it, whatever its budgets
+            }
+
+            since = idle;
+        }
+
+        clock.Look(Stopwatch.GetElapsedTime(0, Stopwatch.GetTimestamp()), Stopwatch.GetElapsedTime(0, since), state);
+        return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(req.EffectiveBudgets);
+    }
+
+    /// <summary>
+    /// A NoCapacity result after waiting, with <see cref="JobResult.Waited"/> (top-level JSON waited). With --wait-eligible / --wait-slot the
+    /// message also says which budget ran out; with --wait (both budgets) the message stays as before.
+    /// </summary>
+    private static JobResult WaitedNoCapacity(JobResult none, JobRequest req, WaitClock clock, WaitKind budget) => none with
+    {
+        Waited = new WaitedInfo(clock.Eligible, clock.Slot, budget),
+        Message = req.Budgets is null ? none.Message : none.Message + " " + WaitedNote(clock, budget, req.EffectiveBudgets),
+    };
+
+    /// <summary>"Waited 30 s for a machine that can take this kind of job and 0 s for a free slot; --wait-eligible 30 ran out."</summary>
+    internal static string WaitedNote(WaitClock clock, WaitKind budget, WaitBudgets budgets) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"Waited {clock.Eligible.TotalSeconds:0} s for a machine that can take this kind of job and {clock.Slot.TotalSeconds:0} s for a free slot; "
+        + $"{(budget == WaitKind.Slot ? "--wait-slot" : "--wait-eligible")} {budgets.Of(budget).TotalSeconds:0} ran out.");
 
     /// <summary>
     /// The plan's slot release a job must look again for (<see cref="PlanProgress.ReleaseSince"/>): one given back after this look began
@@ -1099,7 +1154,7 @@ public sealed partial class JobRunner(
     /// <param name="onRunning">Called just before the job's command starts on the machine (after upload and prepare).</param>
     private async Task<JobResult?> TryOnMachine(
         string jobId, JobRequest req, PreparedPayload prepared, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, Action<string> emit, CancellationToken ct,
-        Action? onSlot = null, Action? onRunning = null, int? slotCap = null)
+        Action? onSlot = null, Action? onRunning = null, int? slotCap = null, Action<bool>? onNoSlot = null)
     {
         var (payload, archive) = (prepared.Payload, prepared.Archive);
         string? archivePath = null;
@@ -1161,6 +1216,7 @@ public sealed partial class JobRunner(
             }
 
             NoteStuckSlots(machine, acquire.Output, emit);
+            onNoSlot?.Invoke(!acquire.Ok); // 0.13.0 B2: a claim that failed over ssh is an eligible wait, a full machine a slot wait
             return null;
         }
 

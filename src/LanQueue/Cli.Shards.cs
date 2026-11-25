@@ -173,6 +173,7 @@ public static partial class Cli
     {
         Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
         Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+        Waited = result.Status == nameof(JobStatus.NoCapacity) ? WaitedJson.Of(result.Waited) : null,
         ShardTiming = TimingJson(result.Timing),
         NextSteps = nextSteps ?? [],
         Results = ResultsJsonOf(MergedResults(result)),

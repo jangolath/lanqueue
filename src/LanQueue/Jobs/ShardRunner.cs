@@ -62,6 +62,9 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
     /// <summary>NoCapacity only: see <see cref="JobResult.Excluded"/>.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
+
     /// <summary>The full path of the local log of the shard's last attempt that got a slot (see <see cref="JobResult.LogPath"/>), or null.</summary>
     public string? LogPath { get; init; }
 
@@ -86,6 +89,9 @@ public sealed record ShardRunResult(string Status, int ExitCode, int Count, IRea
 
     /// <summary>NoCapacity only: every machine that took none of the waiting shards and why. Null otherwise.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
 
     /// <summary>Rejected only: why (the whole run's refusal, or the shard that decided the status). Null otherwise.</summary>
     public RejectKind? RejectKind { get; init; }
@@ -324,6 +330,7 @@ public sealed partial class JobRunner
         {
             Retryable = noCapacity ? worst.Retryable ?? true : null,
             Excluded = noCapacity ? worst.Excluded ?? [] : null,
+            Waited = noCapacity ? worst.Waited : null,
             RejectKind = worst.RejectKind,
             InfraKind = worst.InfraKind,
         };
@@ -437,7 +444,8 @@ public sealed partial class JobRunner
 
         // --wait: how long no shard of this run has held a slot. Restarted only by an attempt that really got one, so attempts that keep
         // failing to claim a slot (the probe said free, the machine said full) cannot hold the run open for ever.
-        var idle = Stopwatch.StartNew();
+        var idleSince = Stopwatch.GetTimestamp();
+        var waitClock = new WaitClock();
         var round = RoundStart();
         var relooked = 0L;
         var backoff = false;
@@ -505,6 +513,7 @@ public sealed partial class JobRunner
                 {
                     Retryable = none.Retryable,
                     Excluded = none.Excluded,
+                    Waited = none.Waited,
                 };
             }
 
@@ -570,7 +579,7 @@ public sealed partial class JobRunner
                         // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish).
                         EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()));
                     }
-                    else if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
+                    else if (launched == 0 && template.EffectiveBudgets.Eligible > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
                     {
                         await WakeBestSleeperAsync(candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
                     }
@@ -579,11 +588,12 @@ public sealed partial class JobRunner
                 backoff = false;
                 if (running.Values.Any(r => r.Holding))
                 {
-                    idle.Restart();
+                    idleSince = Stopwatch.GetTimestamp();
                 }
-                else if (pending.Count > 0 && running.Count == 0 && WaitedOut(template, idle, round, relooked))
+                else if (pending.Count > 0 && running.Count == 0
+                    && WaitedOut(template, waitClock, idleSince, Scheduler.WaitKindOf(lastAssessed), round, relooked) is { } budget)
                 {
-                    EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()));
+                    EndWaiting(WaitedNoCapacity(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()), template, waitClock, budget));
                     break;
                 }
                 else if (pending.Count > 0 && running.Count == 0 && launched == 0 && Relook(plan, round, relooked) is > 0 and var release)
@@ -635,7 +645,7 @@ public sealed partial class JobRunner
                     var a = await task.ConfigureAwait(false);
                     if (a.HadSlot)
                     {
-                        idle.Restart();
+                        idleSince = Stopwatch.GetTimestamp();
                     }
 
                     if (Settle(a, options, pending, Emit, lastAssessed, name) && options.FailFast && !stop.IsCancellationRequested)
@@ -741,6 +751,7 @@ public sealed partial class JobRunner
             Results = r.Results,
             Retryable = r.Retryable,
             Excluded = r.Excluded,
+            Waited = r.Waited,
             LogPath = r.LogPath ?? LogIfCreated(a),
             RejectKind = r.RejectKind,
             InfraKind = r.InfraKind,

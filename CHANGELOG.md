@@ -15,9 +15,18 @@
   jobs at once, and the slot claim enforces that cap, so parallel lanq runs cannot overcommit it. A machine that does
   not report memory keeps slots-only placement unless the job gave `--mem` itself.
 - `lanq health --needs ... --json` rows have `needGb` (the job's need on that machine) when a need applies.
+- **Two wait budgets.** `lanq run --wait-eligible S` (while no machine can take this kind of job: held, outside hours,
+  asleep, unreachable, short of memory) and `--wait-slot S` (while a machine can take it but its slots are full, or its
+  memory is held by running lanq jobs), in seconds from 0 to 604800, also with `--plan`. `--wait S` still sets both and
+  keeps its 0.12 timeline exactly; giving `--wait` with either new flag is refused (exit 2). Both are idle clocks, as
+  `--wait` was: they count only while the run or plan holds no slot. A NoCapacity result after waiting has a new
+  top-level `waited: {eligibleSeconds, slotSeconds, budget}` (run, shard set, plan and plan job rows), and with the new
+  flags its message and next step name the budget that ran out (a larger `--wait-slot`, or `lanq health` first and
+  then a larger `--wait-eligible`). A NoCapacity job is NOT RUN, never a pass.
 
 ### Changed
 
+- `--wait` is now range-checked: a negative, fractional or non-numeric value, or one above a week, is refused (exit 2).
 - **The free-memory floor is kept free when slots are counted.** With `--mem` (or a job size), a machine's job slots are
   now (free memory - `min_free_mem_gb`) / need instead of free memory / need, so a machine may take one copy fewer than
   in 0.12 (for example 12.5 GB free, a 2 GB floor and `--mem 4`: two copies, not three). A machine whose total memory

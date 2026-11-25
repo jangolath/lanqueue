@@ -267,7 +267,7 @@ public static partial class Cli
             request = new FetchRequest(job.Args.Fetch, root, new FetchLimits(job.Args.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total), anchor);
         }
 
-        return RequestOf(job.Args, repoDir, request) with { Wait = TimeSpan.FromSeconds(p.WaitSeconds), NoWake = p.NoWake };
+        return RequestOf(job.Args, repoDir, request) with { Wait = TimeSpan.FromSeconds(p.WaitSeconds), Budgets = p.SplitWait ? p.Budgets : null, NoWake = p.NoWake };
     }
 
     /// <summary>
@@ -407,6 +407,7 @@ public static partial class Cli
         {
             Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
             Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+            Waited = result.Status == nameof(JobStatus.NoCapacity) ? WaitedJson.Of(result.Waited) : null,
             Warnings = [.. warnings.Select(JobRunner.SafeLine)],
         };
 
@@ -433,6 +434,7 @@ public static partial class Cli
             LogTail = j.Sharded is null && logTail is { } n ? j.LogPath is null ? [] : JobLog.Tail(j.LogPath, n) : null,
             Retryable = noCapacity ? j.Retryable ?? true : null,
             Excluded = noCapacity ? ExcludedJsons(j.Excluded) : null,
+            Waited = noCapacity ? WaitedJson.Of(j.Waited) : null,
             Fetched = single?.Fetched,
             FetchSkipped = single?.FetchSkipped,
             FetchSkippedMore = single?.FetchSkippedMore,
