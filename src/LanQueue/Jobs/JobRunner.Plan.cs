@@ -161,7 +161,8 @@ public sealed partial class JobRunner
     private JobPlan NoneNow(string id, JobRequest req, JobNeeds needs, IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobPlan plan)
     {
         var none = NoCapacity(id, [.. plan.Assessed], "");
-        var wake = !plan.Never && req.Wait > TimeSpan.Zero && !req.NoWake ? WouldWake(candidates, needs, probes) : null;
+        // As the real run: the wake gate uses the eligible budget (p1 review L2).
+        var wake = !plan.Never && req.EffectiveBudgets.Eligible > TimeSpan.Zero && !req.NoWake ? WouldWake(candidates, needs, probes) : null;
         return plan with { Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable, WouldWake = wake };
     }
 

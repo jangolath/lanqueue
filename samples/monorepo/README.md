@@ -65,13 +65,16 @@ Tag workers `dotnet` plus `windows` or `linux`, and `node` for the web jobs (`do
 | `web-types` | `tsc --noEmit`. |
 
 Every job declares `mem: 2` (GB), so memory-aware placement can be tried by giving a worker a small free-memory floor
-or a larger per-job size.
+or a larger per-job size. An explicit `mem:` needs a worker that reports its memory: one that does not (`lanq health`
+shows `mem ?`) is ruled out for every sample job as `mem_unknown`. Remove `mem: 2` from `defaults:` in your copy to try
+the sample on such a worker.
 
 Extras (`lanq.extras.yml`), one at a time with `--only`:
 
 - `hang`: ends TimedOut after 3 minutes.
 - `zero-tests`: a filter that matches no test; lanq warns that no tests ran.
-- `docker`: needs a worker tagged `docker` with a working Docker engine.
+- `docker`: needs a worker tagged `docker` with a working Docker engine and access to Docker Hub: besides the pinned
+  nginx image, Testcontainers pulls its own reaper image (Ryuk), which is not pinned.
 
 ## Run it locally
 

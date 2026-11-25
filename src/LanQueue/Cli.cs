@@ -143,6 +143,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>Both wait budgets (<see cref="Scheduling.WaitBudgets"/>).</summary>
     public Scheduling.WaitBudgets Budgets => new(TimeSpan.FromSeconds(EligibleSeconds), TimeSpan.FromSeconds(SlotSeconds));
 
+    /// <summary>True when --wait asked for more than a week (as 0.12 allowed): lanq waits a week and says so (p1 review L1).</summary>
+    public bool WaitClamped { get; init; }
+
     /// <summary>True when --wait, --wait-eligible or --wait-slot was given (0.13.0 B3: without any, a run that may fall back waits 120 s for a slot first).</summary>
     public bool WaitGiven { get; init; }
 
@@ -235,6 +238,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         int? waitEligible = null;
         int? waitSlot = null;
         FallbackMode? fallback = null;
+        var waitClamped = false;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
@@ -296,7 +300,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     waitForSsh = true;
                     break;
                 case "--wait" when i + 1 < own.Length:
-                    wait = WaitValue("--wait", own[++i]);
+                    (wait, waitClamped) = PlainWaitValue(own[++i]);
                     break;
                 case "--wait-eligible" when i + 1 < own.Length:
                     waitEligible = WaitValue("--wait-eligible", own[++i]);
@@ -553,6 +557,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitEligibleSeconds = waitEligible,
             WaitSlotSeconds = waitSlot,
             WaitGiven = seen.Contains("--wait") || waitEligible is not null || waitSlot is not null,
+            WaitClamped = waitClamped,
             Fallback = fallback,
             TimeoutMinutes = timeout,
             MemGb = mem,
@@ -671,6 +676,17 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds) && seconds is >= 0 and <= MaxWaitSeconds
             ? seconds
             : throw new ArgumentException($"{option} must be a whole number of seconds from 0 to {MaxWaitSeconds} (one week), for example {option} 600.");
+
+    /// <summary>
+    /// --wait: whole seconds from 0 (negative or non-numeric is refused, 0.13.0). Above one week it is taken as one week, as 0.12 took any
+    /// number ("wait for ever" scripts keep working): the second value says it was clamped, for a note on stderr (p1 review L1).
+    /// </summary>
+    internal static (int Seconds, bool Clamped) PlainWaitValue(string text) =>
+        text.Length > 0 && text.All(char.IsAsciiDigit)
+            ? text.TrimStart('0').Length <= 9 && int.Parse(text, CultureInfo.InvariantCulture) <= MaxWaitSeconds
+                ? (int.Parse(text, CultureInfo.InvariantCulture), false)
+                : (MaxWaitSeconds, true)
+            : throw new ArgumentException($"--wait must be a whole number of seconds from 0 (at most {MaxWaitSeconds}, one week, is used), for example --wait 600.");
 
     /// <summary>--plan-timeout (and lanq.yml plan_timeout:): whole minutes from 1 to 10080 (one week), as --timeout.</summary>
     internal static int ParsePlanTimeout(string text) =>
@@ -910,6 +926,11 @@ public static partial class Cli
             }
 
             return 2;
+        }
+
+        if (p.WaitClamped && p.Command == "run")
+        {
+            await stderr.WriteLineAsync(string.Create(CultureInfo.InvariantCulture, $"[lanq] note: --wait above one week waits one week ({ParsedArgs.MaxWaitSeconds} s)")).ConfigureAwait(false);
         }
 
         if (p.Command is "--version" or "version")
@@ -1443,7 +1464,7 @@ public static partial class Cli
 
         foreach (var (i, (m, h)) in machines.Zip(results).Index())
         {
-            var line = HealthLine(m, h);
+            var line = HealthLine(m, h, Scheduler.SlotCap(m, h, new JobNeeds([], null, false) { Policy = config.Policy }));
             await stdout.WriteLineAsync(assessed is null ? line : line + "  -> " + Verdict(assessed[i])).ConfigureAwait(false);
         }
 
@@ -1455,11 +1476,12 @@ public static partial class Cli
     }
 
     /// <summary>One machine's lanq health line (also printed by lanq makeready --add for the machine it added).</summary>
-    internal static string HealthLine(Machine m, MachineHealth h)
+    /// <param name="cap">The slots a job size lets the machine run at once (<see cref="Scheduler.SlotCap"/>, p1 review L5); null = max_jobs.</param>
+    internal static string HealthLine(Machine m, MachineHealth h, int? cap = null)
     {
         var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
         var detail = h.Reachable
-            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}{StaleText(h)}")
+            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {(cap is { } c && c < m.MaxJobs ? Math.Max(0, c - h.SlotsLive) : FreeSlots(m, h))}/{m.MaxJobs}{(cap is { } k && k < m.MaxJobs ? $" (capped at {k} by job_mem_gb)" : "")}{StaleText(h)}")
                 + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                 + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores) + DeclaredSizeNote(m, h)
             : h.Error ?? "";

@@ -446,7 +446,12 @@ internal sealed record PlanJson(string Status, int ExitCode)
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
 /// <param name="FreeSlots">max_jobs minus the slots in use.</param>
 /// <param name="JobSlots">How many copies of the job (shards) it could take now; for an --exclusive job the slots it would take (max_jobs); 0 when not eligible.</param>
-internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots);
+internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots)
+{
+    /// <summary>0.13.0 B1 (p1 review L5): the job's memory need on this machine (max of --mem and the job size), or absent when none applies.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? NeedGb { get; init; }
+}
 
 /// <summary>--shards --dry-run: the shards one machine would take at the start.</summary>
 internal sealed record PlacementJson(string Machine, IReadOnlyList<int> Shards);

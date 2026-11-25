@@ -321,8 +321,28 @@ public static partial class RemoteScripts
     /// </param>
     public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout, int? maxSlots = null)
     {
-        var max = Math.Clamp(maxSlots ?? m.MaxJobs, 1, Math.Max(1, m.MaxJobs)).ToString(CultureInfo.InvariantCulture);
+        var cap = Math.Clamp(maxSlots ?? m.MaxJobs, 1, Math.Max(1, m.MaxJobs));
+        var max = cap.ToString(CultureInfo.InvariantCulture);
         var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
+        var grace = StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture);
+        var capped = cap < m.MaxJobs;
+
+        // p1 review M4: a capped claim also counts every live slot file (any number, held by a run without the cap or above it) once it
+        // holds its own; more than the cap and it gives its slot back (SLOT=FULL). Two racing capped claims may both back off; one wins later.
+        var windowsCapCheck = !capped ? "" : $$"""
+            $c=0;foreach($h in (gci "$root/locks" -Filter slot-* -EA 0)){if($h.Name -notmatch '^slot-0*[0-9]+\z'){continue};try{$x=$IOFile::ReadAllText($h.FullName) -split "`n"}catch [IO.FileNotFoundException]{continue}catch{$c++;continue};if(!($x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$x[1].Trim()+{{grace}}))){$c++} }
+            if($c -gt {{max}}){try{$IOFile::Delete($f)}catch{};'SLOT=FULL';exit 0}
+            """;
+        var linuxCapCheck = !capped ? "" : $$"""
+            c=0
+            for sf in "$R"/locks/slot-*; do
+              case "${sf##*/}" in slot-|slot-*[!0-9]*) continue ;; esac
+              [ -f "$sf" ] || continue
+              if d=$(deadline_of "$(cat "$sf" 2>/dev/null)") && [ "$now" -gt $((d + {{grace}})) ]; then continue; fi
+              c=$((c+1))
+            done
+            if [ "$c" -gt {{max}} ]; then rm -f "$f"; echo "SLOT=FULL"; exit 0; fi
+            """;
         return m.Os == MachineOs.Windows
             ? $$"""
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
@@ -335,6 +355,7 @@ public static partial class RemoteScripts
                   try {
                     $fs=$IOFile::Open($f,'CreateNew','Write','None')
                     $b=[Text.Encoding]::UTF8.GetBytes({{ShellQuote.PowerShell(jobId)}}+"`n"+$deadline+"`n");$fs.Write($b,0,$b.Length);$fs.Close()
+                    {{windowsCapCheck}}
                     "SLOT=$i";exit 0
                   }catch [IO.IOException]{}
                 }
@@ -350,7 +371,10 @@ public static partial class RemoteScripts
                 while [ "$i" -le {{max}} ]; do
                   f="$R/locks/slot-$i"
                   reclaim "$f"
-                  if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then echo "SLOT=$i"; exit 0; fi
+                  if ( set -C; printf '%s\n%s\n' {{ShellQuote.Posix(jobId)}} "$D" > "$f" ) 2>/dev/null; then
+                    {{linuxCapCheck}}
+                    echo "SLOT=$i"; exit 0
+                  fi
                   i=$((i+1))
                 done
                 echo "SLOT=FULL"

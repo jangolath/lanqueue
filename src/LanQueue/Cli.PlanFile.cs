@@ -641,7 +641,7 @@ public static partial class Cli
             ShardTiming = TimingJson(x.Second.Timing),
             ExpectedMinutes = expected(x.First) is { } s ? Math.Round(s / 60, 1) : null,
             Machines = [.. x.Second.Assessed.Select(a => new PlanMachineJson(
-                JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } w ? JobRunner.SafeLine(w) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, x.First.Args.Exclusive)))],
+                JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } w ? JobRunner.SafeLine(w) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, x.First.Args.Exclusive)) { NeedGb = a.NeedGb })],
             Retryable = x.Second.Retryable,
             Env = EnvNames(x.First.Args.Env),
             Exclusive = Flag(x.First.Args.Exclusive),

@@ -20,6 +20,12 @@ public sealed record WaitBudgets(TimeSpan Eligible, TimeSpan Slot)
     /// <summary>The larger budget: no job waits longer than this in all.</summary>
     public TimeSpan Longest => Eligible > Slot ? Eligible : Slot;
 
+    /// <summary>
+    /// True for --wait W (both budgets W, or none given): the total idle time is capped at the larger budget too, so a run whose states
+    /// alternate ends exactly when 0.12 did. Split budgets (--wait-eligible / --wait-slot) each end on their own clock only (p1 review M1).
+    /// </summary>
+    public bool Legacy { get; init; }
+
     /// <summary>The budget of one state.</summary>
     public TimeSpan Of(WaitKind kind) => kind == WaitKind.Slot ? Slot : Eligible;
 }
@@ -28,7 +34,7 @@ public sealed record WaitBudgets(TimeSpan Eligible, TimeSpan Slot)
 /// The two wait clocks of one waiting job (0.13.0 B2). Both are idle clocks, as --wait always was: they count only from
 /// <c>since</c> (the job's start, or the last time its run or plan held or gave back a slot), and restart whenever that moves. Each
 /// interval between two looks is charged to the state seen at its start (an interval that begins at a restart goes to the state seen at its
-/// end). The job ends NoCapacity when the clock of the current state has used its budget, or when both together have used the larger budget,
+/// end). The job ends NoCapacity when the clock of the current state has used its budget, or, for plain --wait only (WaitBudgets.Legacy), when both together have used the larger budget,
 /// so --wait W (both budgets W) ends exactly when 0.12 did: once W of idle time has passed. Not thread-safe: one per waiting job or shard set.
 /// </summary>
 public sealed class WaitClock
@@ -87,7 +93,7 @@ public sealed class WaitClock
         }
 
         var own = kind == WaitKind.Slot ? Slot : Eligible;
-        return own >= budgets.Of(kind) || Eligible + Slot >= budgets.Longest ? kind : null;
+        return own >= budgets.Of(kind) || (budgets.Legacy && Eligible + Slot >= budgets.Longest) ? kind : null;
     }
 }
 

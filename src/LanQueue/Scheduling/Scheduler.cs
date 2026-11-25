@@ -193,7 +193,8 @@ public static class Scheduler
     /// What a job that no machine took at this look is waiting for (0.13.0 B2, see <see cref="WaitKind"/>): a slot wait when some machine
     /// could take it but is busy, when an eligible machine's claim lost the race (its slot was taken first; not when the claim failed over
     /// ssh: <paramref name="claimFailedOverSsh"/>), or when a reachable machine running lanq jobs is short of memory (a LowMemory hold or
-    /// mem_below_request) while its total less its floor covers the need: memory a finishing job gives back. Otherwise an eligible wait.
+    /// mem_below_request) while its total less its floor covers the need, or is held for load or memory pressure: what a finishing job gives
+    /// back. Otherwise an eligible wait.
     /// </summary>
     public static WaitKind WaitKindOf(IReadOnlyList<Assessment> assessed, IReadOnlySet<string>? claimFailedOverSsh = null)
     {
@@ -205,6 +206,9 @@ public static class Scheduler
                 Exclusion.None => claimFailedOverSsh is null || !claimFailedOverSsh.Contains(a.Machine.Name),
                 Exclusion.LowMemory or Exclusion.MemBelowRequest => a.Health.Reachable && a.Health.SlotsLive > 0
                     && (a.NeedGb is not { } need || (a.Health.MemTotalGb is { } total && Mb(total) - Mb(a.FloorGb) >= Mb(need))),
+
+                // p1 review H1 (owner decision): load or memory pressure on a machine running lanq jobs is load a finishing job gives back.
+                Exclusion.Load or Exclusion.MemoryPressure => a.Health.Reachable && a.Health.SlotsLive > 0,
                 _ => false,
             };
             if (slot)

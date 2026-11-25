@@ -94,7 +94,7 @@ public sealed record JobRequest(
     public WaitBudgets? Budgets { get; init; }
 
     /// <summary>The wait budgets in effect: <see cref="Budgets"/>, else <see cref="Wait"/> for both.</summary>
-    public WaitBudgets EffectiveBudgets => Budgets ?? new WaitBudgets(Wait, Wait);
+    public WaitBudgets EffectiveBudgets => Budgets ?? new WaitBudgets(Wait, Wait) { Legacy = true };
 
     /// <summary>lanq run --shards: this job is shard <see cref="ShardInfo.Index"/> of <see cref="ShardInfo.Count"/> (LANQ_SHARD, LANQ_SHARDS), or null.</summary>
     public ShardInfo? Shard { get; init; }
@@ -1197,7 +1197,7 @@ public sealed partial class JobRunner(
             assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
             if (probe.Waker!.AnyPending)
             {
-                emit($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
+                emit($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within the wait budget)");
                 return;
             }
         }
@@ -1240,6 +1240,7 @@ public sealed partial class JobRunner(
                 }
 
                 archive.Failure = message;
+                onNoSlot?.Invoke(true); // p1 review L3: a failure that repeats is not a slot wait
                 return null;
             }
         }
@@ -1274,7 +1275,8 @@ public sealed partial class JobRunner(
             }
 
             NoteStuckSlots(machine, acquire.Output, emit);
-            onNoSlot?.Invoke(!acquire.Ok); // 0.13.0 B2: a claim that failed over ssh is an eligible wait, a full machine a slot wait
+            // 0.13.0 B2: a claim that failed over ssh, or whose reply was unreadable (p1 review L3), is an eligible wait; a clean FULL a slot wait.
+            onNoSlot?.Invoke(!acquire.Ok || !IsCleanFull(acquire.Output));
             return null;
         }
 

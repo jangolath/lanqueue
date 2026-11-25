@@ -207,6 +207,18 @@ internal sealed class SuggestedCommand
         return Make(["lanq", .. CommandLine.Edit(p.Raw, [("--fallback", "off"), (wait.Item1, wait.Item2.ToString(CultureInfo.InvariantCulture))])], safe: false);
     }
 
+    /// <summary>The user's own lanq run --plan again with --only and one raised wait budget (p1 review M3); safe, as <see cref="RerunPlan"/>.</summary>
+    public static SuggestedCommand? RerunPlanWithBudget(ParsedArgs p, IReadOnlyCollection<string> only, string option, int seconds)
+    {
+        if (p.Command != "run" || !p.Plan || only.Count == 0)
+        {
+            return null;
+        }
+
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, [("--only", string.Join(',', only)), (option, seconds.ToString(CultureInfo.InvariantCulture))], add)], safe: true);
+    }
+
     /// <summary>
     /// The user's own lanq run --plan again for some of its jobs: <see cref="ParsedArgs.Raw"/> with --only set to <paramref name="only"/> (the
     /// jobs that did not complete; --only only ever narrows, and every job named was in the run). <paramref name="waitSeconds"/> only raises
@@ -543,7 +555,10 @@ internal static class NextSteps
 
         var o = new RunOutcome(
             r.Status, r.ExitCode, r.Message, r.RejectKind, r.InfraKind, false, null, r.Retryable, r.Excluded,
-            r.Shards.FirstOrDefault(s => s.Status != nameof(JobStatus.Completed) && s.LogPath is not null)?.LogPath);
+            r.Shards.FirstOrDefault(s => s.Status != nameof(JobStatus.Completed) && s.LogPath is not null)?.LogPath)
+        {
+            WaitedBudget = r.Waited?.Budget, // p1 review M3: the budget that actually ran out
+        };
         return ForRun(p, o);
     }
 
@@ -598,6 +613,8 @@ internal static class NextSteps
                         + EnvConflictAdvice(r.Excluded ?? [], plan: true)),
                     Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health),
                 ];
+            case nameof(JobStatus.NoCapacity) when p.SplitWait && r.Waited is { } waited:
+                return PlanBudgetSteps(p, waited.Budget, r.Decided, again, health);
             case nameof(JobStatus.NoCapacity):
                 return [PlanWaitStep(p, $"no machine could take job '{r.Decided}' now; machines may free up", again), Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health)];
             case nameof(JobStatus.InfraError):
@@ -731,6 +748,23 @@ internal static class NextSteps
 
     private static string ExcludedText(IReadOnlyList<ExcludedMachine>? excluded) =>
         excluded is { Count: > 0 } x ? string.Join("; ", x.Select(e => $"{e.Machine}: {e.Why}")) : "no machine can take it";
+
+    /// <summary>
+    /// p1 review M3: a plan that used --wait-eligible / --wait-slot ran out of the budget <paramref name="budget"/>: as
+    /// <see cref="ForNoCapacityWait"/>, with the plan rerun for <paramref name="only"/> and that budget raised.
+    /// </summary>
+    private static List<NextStepJson> PlanBudgetSteps(ParsedArgs p, Scheduling.WaitKind budget, string? decided, IReadOnlyCollection<string> only, SuggestedCommand? health)
+    {
+        var used = budget == Scheduling.WaitKind.Slot ? p.SlotSeconds : p.EligibleSeconds;
+        var raised = (int)Math.Min(ParsedArgs.MaxWaitSeconds, Math.Max(SuggestedCommand.WaitSeconds, 2L * used));
+        var option = budget == Scheduling.WaitKind.Slot ? "--wait-slot" : "--wait-eligible";
+        var rerun = SuggestedCommand.RerunPlanWithBudget(p, only, option, raised);
+        var wait = rerun is null
+            ? Step(NextAction.Wait, string.Create(CultureInfo.InvariantCulture, $"job '{decided}': the {option} budget ({used} s) ran out; try again later"))
+            : Step(NextAction.Wait, string.Create(CultureInfo.InvariantCulture, $"job '{decided}': the {option} budget ({used} s) ran out; run the jobs again with {option} {raised}"), rerun);
+        var look = Step(NextAction.RunHealth, $"see how each machine is judged for job '{decided}'", health);
+        return budget == Scheduling.WaitKind.Slot ? [wait, look] : [look, wait];
+    }
 
     /// <summary>A plan's wait step: the same plan for <paramref name="only"/> with --wait 120 when it waited less (and --no-wake when it could not wake), else no command.</summary>
     private static NextStepJson PlanWaitStep(ParsedArgs p, string why, IReadOnlyCollection<string> only) =>

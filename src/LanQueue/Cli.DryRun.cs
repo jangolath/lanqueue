@@ -150,11 +150,13 @@ public static partial class Cli
 
         if (plan.WouldWake is { } sleeper)
         {
-            Line(string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits for it within --wait {p.WaitSeconds})"));
+            Line(string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits for it within {(p.SplitWait ? "--wait-eligible " + p.EligibleSeconds : "--wait " + p.WaitSeconds)})"));
         }
 
         Line(plan.Never
             ? "No machine can ever take this job as configured: lanq run would end with exit 75 at once (waiting will not help)."
+            : p.SplitWait
+                ? string.Create(CultureInfo.InvariantCulture, $"With --wait-eligible {p.EligibleSeconds} --wait-slot {p.SlotSeconds}, lanq run would wait up to {p.EligibleSeconds} s while no machine can take this kind of job and up to {p.SlotSeconds} s while capable machines are full, then end with exit 75.")
             : p.WaitSeconds == 0
                 ? "With --wait 0, lanq run would end with exit 75 at once if nothing were free."
                 : string.Create(CultureInfo.InvariantCulture, $"With --wait {p.WaitSeconds}, lanq run would wait up to {p.WaitSeconds} s if nothing were free, then end with exit 75."));
@@ -225,7 +227,7 @@ public static partial class Cli
         ShardTiming = TimingJson(plan.Timing),
         Placement = plan.Placement?.Select(x => new PlacementJson(JobRunner.SafeLine(x.Machine.Name), x.Shards)).ToList(),
         Machines = [.. plan.Assessed.Select(a => new PlanMachineJson(
-            JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, exclusive)))],
+            JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, exclusive)) { NeedGb = a.NeedGb })],
         WouldWake = plan.WouldWake is { } w ? JobRunner.SafeLine(w) : null,
         Retryable = plan.Retryable,
         LogTail = logTail is null ? null : [],

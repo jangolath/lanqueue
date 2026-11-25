@@ -376,6 +376,25 @@ public sealed partial class JobRunner
         return Scheduler.Assess(raw, needs, avoid);
     }
 
+    /// <summary>
+    /// What the waiting shards wait for (p1 review M2): judged avoid-aware (<see cref="AssessForWaiting"/>: a machine every waiting shard must
+    /// avoid is not a slot wait), with the engaged fallback, and with the claims that failed over ssh in the latest round as an eligible wait.
+    /// </summary>
+    private static WaitKind WaitKindOfShards(
+        IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobNeeds needs, IReadOnlyCollection<ShardState> pending, Assessment? engaged, HashSet<string> sshFailed)
+    {
+        var judged = AssessForWaiting(candidates.Zip(probes), needs, pending);
+        if (engaged is not null)
+        {
+            judged.Add(engaged);
+        }
+
+        lock (sshFailed)
+        {
+            return Scheduler.WaitKindOf(judged, new HashSet<string>(sshFailed, StringComparer.Ordinal));
+        }
+    }
+
     private sealed class ShardState(ShardInfo shard)
     {
         public ShardInfo Shard => shard;
@@ -466,6 +485,10 @@ public sealed partial class JobRunner
 
         // The latest probe, raw and judged for this job, for choosing another machine for a re-run by the same rules as placement.
         MachineHealth[] lastProbes = [];
+        Assessment? lastEngaged = null;
+
+        // p1 review M2: the machines whose claim failed over ssh in the latest launch round (an eligible wait, not a lost race).
+        var sshFailed = new HashSet<string>(StringComparer.Ordinal);
         List<Assessment> lastAssessed = [];
 
         Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot, int? slotCap = null)
@@ -487,7 +510,17 @@ public sealed partial class JobRunner
                             slot.Hold();
                         },
                         slot.Start,
-                        slotCap).ConfigureAwait(false);
+                        slotCap,
+                        overSsh =>
+                        {
+                            if (overSsh)
+                            {
+                                lock (sshFailed)
+                                {
+                                    sshFailed.Add(machine.Name);
+                                }
+                            }
+                        }).ConfigureAwait(false);
                     return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding, jobId);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
@@ -602,6 +635,15 @@ public sealed partial class JobRunner
                         }
                     }
 
+                    if (deal.Count > 0)
+                    {
+                        lock (sshFailed)
+                        {
+                            sshFailed.Clear(); // a new round of claims: only its failures count from here
+                        }
+                    }
+
+                    lastEngaged = engaged;
                     foreach (var (st, at) in deal)
                     {
                         pending.Remove(st);
@@ -635,7 +677,7 @@ public sealed partial class JobRunner
                     idleSince = Stopwatch.GetTimestamp();
                 }
                 else if (pending.Count > 0 && running.Count == 0
-                    && WaitedOut(template, waitClock, idleSince, Scheduler.WaitKindOf(lastAssessed), round, relooked) is { } budget)
+                    && WaitedOut(template, waitClock, idleSince, WaitKindOfShards(candidates, lastProbes, needs, pending, lastEngaged, sshFailed), round, relooked) is { } budget)
                 {
                     var waited = await FallbackGateAsync(
                         template, needs, budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now", line => Emit(lead + line), stop.Token).ConfigureAwait(false);

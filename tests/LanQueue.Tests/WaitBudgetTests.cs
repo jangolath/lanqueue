@@ -54,6 +54,17 @@ public sealed class WaitBudgetTests
     }
 
     [Fact]
+    public void LoadOrPressureFromRunningLanqJobsIsASlotWait()
+    {
+        // p1 review H1 (owner decision): held for load or memory pressure while lanq jobs run there: a finishing job gives it back.
+        Assert.Equal(WaitKind.Slot, Kind((Box("a", maxJobs: 4), Up("a", slots: 2, hold: "load 0.95", kind: HoldKind.Load))));
+        Assert.Equal(WaitKind.Slot, Kind((Box("a", maxJobs: 4), Up("a", slots: 1, hold: "memory pressure", kind: HoldKind.MemoryPressure))));
+        // No lanq job there: someone else's work holds it, an eligible wait.
+        Assert.Equal(WaitKind.Eligible, Kind((Box("a", maxJobs: 4), Up("a", slots: 0, hold: "load 0.95", kind: HoldKind.Load))));
+        Assert.Equal(WaitKind.Eligible, Kind((Box("a", maxJobs: 4), Up("a", slots: 0, hold: "memory pressure", kind: HoldKind.MemoryPressure))));
+    }
+
+    [Fact]
     public void AnEligibleMachineWhoseClaimLostTheRaceIsASlotWaitButAnSshFailureIsNot()
     {
         Assert.Equal(WaitKind.Slot, Kind(Needs, new HashSet<string>(), (Box("a"), Up("a"))));
@@ -66,7 +77,7 @@ public sealed class WaitBudgetTests
     public void BothBudgetsEqualIsThe012Timeline()
     {
         // 0.12: NoCapacity once idle time >= --wait, whatever the machines said. States alternate here; the end is still at 600 s.
-        var budgets = new WaitBudgets(S(600), S(600));
+        var budgets = new WaitBudgets(S(600), S(600)) { Legacy = true };
         var clock = new WaitClock();
         var t = 0.0;
         WaitKind? spent = null;
@@ -141,9 +152,25 @@ public sealed class WaitBudgetTests
     }
 
     [Fact]
-    public void TheTotalNeverExceedsTheLargerBudget()
+    public void SplitBudgetsEachEndOnTheirOwnClock()
     {
-        var budgets = new WaitBudgets(S(60), S(90));
+        // p1 review M1: --wait-eligible 3600 --wait-slot 14400; 3000 s held, then busy: the slot budget gets its full 14400 s.
+        var budgets = new WaitBudgets(S(3600), S(14400));
+        var clock = new WaitClock();
+        clock.Look(S(0), S(0), WaitKind.Eligible);
+        clock.Look(S(3000), S(0), WaitKind.Slot);
+        clock.Look(S(3000 + 11400), S(0), WaitKind.Slot);
+        Assert.Null(clock.SpentOut(budgets));
+        clock.Look(S(3000 + 14400), S(0), WaitKind.Slot);
+        Assert.Equal(WaitKind.Slot, clock.SpentOut(budgets));
+        Assert.Equal((S(3000), S(14400)), (clock.Eligible, clock.Slot));
+    }
+
+    [Fact]
+    public void ThePlainWaitTotalNeverExceedsItsBudget()
+    {
+        // --wait W only (both budgets W): the total caps, so alternating states never wait longer than 0.12 did.
+        var budgets = new WaitBudgets(S(60), S(90)) { Legacy = true };
         var clock = new WaitClock();
         var t = 0;
         var kinds = new[] { WaitKind.Slot, WaitKind.Slot, WaitKind.Eligible, WaitKind.Eligible, WaitKind.Eligible, WaitKind.Slot, WaitKind.Slot, WaitKind.Slot };
@@ -179,13 +206,50 @@ public sealed class WaitBudgetTests
     [Theory]
     [InlineData("--wait", "-1")]
     [InlineData("--wait", "abc")]
-    [InlineData("--wait", "604801")]
     [InlineData("--wait", "1.5")]
     [InlineData("--wait-eligible", "-5")]
     [InlineData("--wait-slot", "x")]
     [InlineData("--wait-slot", "604801")]
     public void BadWaitValuesAreArgumentErrors(string option, string value) =>
         Assert.Throws<ArgumentException>(() => ParsedArgs.Parse(["run", "--needs", "dotnet", option, value, "--", "dotnet", "test"]));
+
+    [Theory]
+    [InlineData("604801")]
+    [InlineData("1000000")]
+    [InlineData("99999999999999999999")]
+    public void PlainWaitAboveAWeekWaitsAWeekAsBefore(string value)
+    {
+        // p1 review L1: 0.12 took any --wait; a "wait for ever" script keeps working, clamped to one week with a note.
+        var p = ParsedArgs.Parse(["run", "--wait", value, "--", "dotnet", "test"]);
+        Assert.Equal((ParsedArgs.MaxWaitSeconds, true), (p.WaitSeconds, p.WaitClamped));
+        Assert.False(ParsedArgs.Parse(["run", "--wait", "600", "--", "dotnet", "test"]).WaitClamped);
+    }
+
+    [Fact]
+    public void ShardSetNextStepsNameTheBudgetThatRanOut()
+    {
+        // p1 review M3: a shard set that ran out of its eligible budget is told to look at health, then raise --wait-eligible.
+        var p = ParsedArgs.Parse(["run", "--json", "--shards", "2", "--wait-eligible", "30", "--wait-slot", "600", "--needs", "dotnet", "--", "dotnet", "test"]);
+        var shard = new ShardResult(1, nameof(JobStatus.NoCapacity), 75, null, null, TimeSpan.Zero, 0, "x") { Retryable = true, Excluded = [], Waited = new WaitedInfo(S(30), S(0), WaitKind.Eligible) };
+        var r = JobRunner.Aggregate(2, [shard, shard with { Index = 2 }], false);
+        var steps = NextSteps.ForShards(p, r);
+        Assert.Equal("run_health", steps[0].Action);
+        Assert.Contains("--wait-eligible", steps[1].Argv!);
+        Assert.Contains("120", steps[1].Argv!);
+    }
+
+    [Fact]
+    public void PlanNextStepsNameTheBudgetThatRanOut()
+    {
+        var p = ParsedArgs.Parse(["run", "--plan", "--json", "--wait-eligible", "30", "--wait-slot", "600"]);
+        var job = new PlanJobOutcome("unit", nameof(JobStatus.NoCapacity), 75, "x", []) { Retryable = true, Excluded = [], Waited = new WaitedInfo(S(30), S(0), WaitKind.Eligible) };
+        var r = new PlanRunResult(nameof(JobStatus.NoCapacity), 75, "x", [job]) { Decided = "unit", Retryable = true, Excluded = [], Waited = job.Waited };
+        var steps = NextSteps.ForPlanFile(p, r, new Dictionary<string, ParsedArgs>());
+        Assert.Equal("run_health", steps[0].Action);
+        Assert.Equal("wait", steps[1].Action);
+        Assert.Contains("the --wait-eligible budget (30 s) ran out", steps[1].Reason, StringComparison.Ordinal);
+        Assert.Equal(["lanq", "run", "--plan", "--json", "--wait-eligible", "120", "--wait-slot", "600", "--only", "unit"], steps[1].Argv);
+    }
 
     [Fact]
     public void WaitAndASplitBudgetTogetherAreRefused()
