@@ -427,6 +427,10 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>The sleeping machine lanq run would wake (with --wait above 0 and without --no-wake, when no awake machine can take the job), or null.</summary>
     public string? WouldWake { get; init; }
 
+    /// <summary>NoCapacity only (0.13.0): this computer's fallback entry when lanq run would go there instead of ending NOT RUN. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WouldFallBack { get; init; }
+
     /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>; else null.</summary>
     public bool? Retryable { get; init; }
 
@@ -670,6 +674,14 @@ internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> Aft
     /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Exclusive { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0): this computer's fallback entry when lanq run would go there instead of ending NOT RUN. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WouldFallBack { get; init; }
+
+    /// <summary>post: in lanq.yml only (0.13.0): the job's post step as its words (runArgv carries it as --post too). Absent when there is none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Post { get; init; }
 }
 
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>

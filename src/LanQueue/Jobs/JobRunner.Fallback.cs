@@ -27,14 +27,19 @@ public sealed class TerminalPrompt : IFallbackPrompt
     private readonly TextWriter error;
     private readonly TimeSpan timeout;
 
-    /// <summary>Starts the reader at once, so that lines typed before the first prompt are read, and discarded, too.</summary>
+    /// <summary>
+    /// The reader starts only at the first prompt (review A-L13): a run that never asks never reads the developer's typeahead. Lines typed
+    /// before a prompt are then read during a short settle time and discarded.
+    /// </summary>
     public TerminalPrompt(TextReader input, TextWriter error, TimeSpan timeout)
     {
         this.input = input;
         this.error = error;
         this.timeout = timeout;
-        StartReader();
     }
+
+    /// <summary>How long the first prompt lets lines already typed reach the queue, so they are discarded and never taken as the answer.</summary>
+    internal static readonly TimeSpan Settle = TimeSpan.FromMilliseconds(150);
 
     /// <summary>How long a prompt waits for y or n.</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(120);
@@ -42,11 +47,12 @@ public sealed class TerminalPrompt : IFallbackPrompt
     private readonly BlockingCollection<string?> _lines = [];
     private int _started;
 
-    private void StartReader()
+    /// <summary>Starts the one reader thread; true when this call started it.</summary>
+    private bool StartReader()
     {
         if (Interlocked.Exchange(ref _started, 1) != 0)
         {
-            return;
+            return false;
         }
 
         var reader = new Thread(() =>
@@ -71,11 +77,16 @@ public sealed class TerminalPrompt : IFallbackPrompt
             Name = "lanq fallback prompt",
         };
         reader.Start();
+        return true;
     }
 
     public async Task<bool?> AskAsync(string question, CancellationToken ct)
     {
-        StartReader();
+        if (StartReader())
+        {
+            await Task.Delay(Settle, ct).ConfigureAwait(false);
+        }
+
         while (_lines.TryTake(out var early))
         {
             if (early is null)

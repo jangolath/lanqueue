@@ -515,7 +515,10 @@ public static partial class PlanFileLoader
             var word = Scalar(fallbackNode, "fallback");
             if (word is not ("off" or "false"))
             {
-                throw Error($"fallback: {(word is "on" or "ask" or "true" ? word : "...")} is refused: a repository never chooses to run on your PC; use --fallback on. lanq.yml may only say fallback: off.");
+                // Another spelling (Off, no) is most likely meant as off: say the one form lanq.yml takes, not a refusal of a choice (review A-L15).
+                throw Error(word is "on" or "ask" or "true"
+                    ? $"fallback: {word} is refused: a repository never chooses to run on your PC; use --fallback on. lanq.yml may only say fallback: off."
+                    : "fallback: lanq.yml may only say fallback: off (lower case) or fallback: false.");
             }
 
             args.AddRange(["--fallback", "off"]);
@@ -582,6 +585,26 @@ public static partial class PlanFileLoader
             args.AddRange(["--env", envName + "=" + envValue]);
         }
 
+        // post: (0.13.0) is --post: the same list-or-plain-string form as command:, without {shard} (the step runs once per shard as written).
+        // When every word is plain, the run line carries it as --post "<words>" (review B-L1: runArgv reruns the job with its post step); a
+        // list with words --post cannot carry (spaces, quotes, backslashes) is set on the parsed job only, and the dry run's post array shows it.
+        List<string>? post = null;
+        var postOnLine = false;
+        if (values.TryGetValue("post", out var postNode))
+        {
+            post = Command(postNode, m => Error("post" + m[m.IndexOf(':', StringComparison.Ordinal)..]));
+            if (post.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)))
+            {
+                throw Error("post: cannot use {shard} or {shards}: the step runs once per shard as written.");
+            }
+
+            postOnLine = PostFitsTheLine(post);
+            if (postOnLine)
+            {
+                args.AddRange(["--post", string.Join(' ', post)]);
+            }
+        }
+
         args.Add("--");
         args.AddRange(command);
 
@@ -602,19 +625,25 @@ public static partial class PlanFileLoader
             throw Error($"{key} (line {values[key].Start.Line}): {PlanFetch.RaiseRefused}");
         }
 
-        // post: (0.13.0) is --post: the same list-or-plain-string form as command:, without {shard} (the step runs once per shard as written).
-        if (values.TryGetValue("post", out var postNode))
+        if (post is not null && !postOnLine)
         {
-            var post = Command(postNode, m => Error("post" + m[m.IndexOf(':', StringComparison.Ordinal)..]));
-            if (post.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)))
-            {
-                throw Error("post: cannot use {shard} or {shards}: the step runs once per shard as written.");
-            }
-
             parsed = parsed with { Post = post };
         }
 
         return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed);
+    }
+
+    /// <summary>True when --post "<words joined by spaces>" gives back exactly these words (none has a space or a character --post refuses).</summary>
+    private static bool PostFitsTheLine(List<string> post)
+    {
+        try
+        {
+            return !post.Any(a => a.Contains(' ', StringComparison.Ordinal) || a.Length == 0) && ParsedArgs.ParsePost(string.Join(' ', post)).SequenceEqual(post);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

@@ -644,6 +644,8 @@ public static partial class Cli
             Machines = [.. x.Second.Assessed.Select(a => new PlanMachineJson(
                 JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } w ? JobRunner.SafeLine(w) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, x.First.Args.Exclusive)) { NeedGb = a.NeedGb })],
             Retryable = x.Second.Retryable,
+            WouldFallBack = x.Second.WouldFallBack is { } fb ? JobRunner.SafeLine(fb) : null,
+            Post = x.First.Args.Post is { } post ? [.. post.Select(JobRunner.SafeLine)] : null,
             Env = EnvNames(x.First.Args.Env),
             Exclusive = Flag(x.First.Args.Exclusive),
         })],

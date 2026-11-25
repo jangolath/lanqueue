@@ -21,21 +21,32 @@ public sealed class LocalProcessClient : ISshClient
 {
     private readonly Func<IDictionary> _environment;
     private readonly bool _windows;
+    private readonly Action<string> _warn;
+    private int _warnedJobObject;
 
     /// <param name="environment">lanq's own environment (tests pass their own); null reads the process environment.</param>
     /// <param name="windows">Whether this computer runs Windows; null asks the OS.</param>
-    public LocalProcessClient(Func<IDictionary>? environment = null, bool? windows = null)
+    /// <param name="warn">Where the one-time warning goes when a child could not join lanq's job object; null writes to stderr.</param>
+    public LocalProcessClient(Func<IDictionary>? environment = null, bool? windows = null, Action<string>? warn = null)
     {
         _environment = environment ?? Environment.GetEnvironmentVariables;
         _windows = windows ?? OperatingSystem.IsWindows();
+        _warn = warn ?? (line => Console.Error.WriteLine(line));
     }
+
+    /// <summary>
+    /// Windows PowerShell by its full path under the system folder (review A-L11): a bare "powershell.exe" is searched in lanq's current folder
+    /// (the repository) before System32, so a repository could plant its own.
+    /// </summary>
+    internal static string WindowsPowerShellPath() =>
+        Path.Combine(OperatingSystem.IsWindows() ? Environment.SystemDirectory : @"C:\Windows\System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 
     /// <summary>Windows: the variables a local child keeps (names compared ignoring case; a trailing * is a prefix).</summary>
     internal static readonly string[] WindowsAllowed =
     [
         "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "PATH", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA",
         "LOCALAPPDATA", "ProgramData", "ProgramFiles*", "CommonProgramFiles*", "USERNAME", "USERDOMAIN", "COMPUTERNAME", "NUMBER_OF_PROCESSORS",
-        "PROCESSOR_*", "OS",
+        "PROCESSOR_*", "OS", "ProgramW6432", "CommonProgramW6432", "ALLUSERSPROFILE", "PUBLIC",
     ];
 
     /// <summary>Linux: the variables a local child keeps (exact names; a trailing * is a prefix).</summary>
@@ -84,7 +95,7 @@ public sealed class LocalProcessClient : ISshClient
             throw new ArgumentException("The local runner only runs lanq's own PowerShell command lines.", nameof(remoteCommand));
         }
 
-        return ("powershell.exe", [.. words.Skip(1)]);
+        return (WindowsPowerShellPath(), [.. words.Skip(1)]);
     }
 
     /// <summary>
@@ -130,7 +141,12 @@ public sealed class LocalProcessClient : ISshClient
         return words;
     }
 
-    private ProcessHooks Hooks() => new(
+    /// <summary>
+    /// How every local child starts: the allowlisted environment; the machine's work_root as its current folder (never lanq's own, the
+    /// repository; the system temp folder until the work_root exists); no console of its own, so Ctrl+C at lanq's terminal and a tool that
+    /// opens CONOUT$ never reach the developer's terminal (review A-L12; lanq's cancel path stops the child); on Windows, lanq's job object.
+    /// </summary>
+    internal ProcessHooks Hooks(Machine machine) => new(
         psi =>
         {
             psi.Environment.Clear();
@@ -138,32 +154,35 @@ public sealed class LocalProcessClient : ISshClient
             {
                 psi.Environment[name] = value;
             }
+
+            psi.WorkingDirectory = Directory.Exists(machine.WorkRoot) ? Path.GetFullPath(machine.WorkRoot) : Path.GetTempPath();
+            psi.CreateNoWindow = true;
         },
         proc =>
         {
-            if (_windows && OperatingSystem.IsWindows())
+            if (_windows && OperatingSystem.IsWindows() && !LocalJobObject.Assign(proc) && Interlocked.Exchange(ref _warnedJobObject, 1) == 0)
             {
-                LocalJobObject.Assign(proc);
+                _warn("[lanq] warning: a fallback process could not join lanq's job object, so it may outlive lanq if lanq is killed (best effort; the job's own cleanup still runs)");
             }
         });
 
     public Task<SshResult> RunAsync(Machine machine, string remoteCommand, Action<string>? onLine, TimeSpan timeout, CancellationToken ct)
     {
         var (exe, args) = CommandOf(remoteCommand);
-        return ProcessSshClient.Execute(exe, args, onLine, timeout, ct, hooks: Hooks());
+        return ProcessSshClient.Execute(exe, args, onLine, timeout, ct, hooks: Hooks(machine));
     }
 
     public Task<SshResult> RunWithInputAsync(Machine machine, string remoteCommand, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct)
     {
         var (exe, args) = CommandOf(remoteCommand);
-        return ProcessSshClient.ExecuteWithInput(exe, args, input, maxOutputChars, timeout, ct, Hooks());
+        return ProcessSshClient.ExecuteWithInput(exe, args, input, maxOutputChars, timeout, ct, Hooks(machine));
     }
 
     public Task<SshResult> RunSplitAsync(
         Machine machine, string remoteCommand, ReadOnlyMemory<byte>? input, Action<string> onStdout, Action<string> onStderr, TimeSpan timeout, CancellationToken ct)
     {
         var (exe, args) = CommandOf(remoteCommand);
-        return ProcessSshClient.Execute(exe, args, onStdout, timeout, ct, input, onStderr, Hooks());
+        return ProcessSshClient.Execute(exe, args, onStdout, timeout, ct, input, onStderr, Hooks(machine));
     }
 
     /// <summary>The "upload": a copy into work_root/incoming (the folder the claim script made), never anywhere outside the machine's work_root.</summary>
@@ -233,13 +252,11 @@ internal static class LocalJobObject
 {
     private static readonly Lazy<IntPtr> Job = new(Create);
 
-    public static void Assign(Process proc)
+    /// <summary>Puts the child in lanq's job object; false when that failed (the job object could not be made, or the child could not join).</summary>
+    public static bool Assign(Process proc)
     {
         var job = Job.Value;
-        if (job != IntPtr.Zero)
-        {
-            _ = AssignProcessToJobObject(job, proc.Handle); // best effort: a child that cannot join still runs, as on a worker
-        }
+        return job != IntPtr.Zero && AssignProcessToJobObject(job, proc.Handle); // best effort: a child that cannot join still runs, as on a worker
     }
 
     private static IntPtr Create()

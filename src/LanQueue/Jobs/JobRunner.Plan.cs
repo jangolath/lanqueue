@@ -19,8 +19,17 @@ public sealed partial class JobRunner
     /// It cannot foresee an archive that fails to build or a slot taken between the probe and the start; with --shards auto it plans from
     /// the one probe that picked N (a real run probes again before placing).
     /// </summary>
-    public async Task<JobPlan> PlanAsync(JobRequest req, ShardOptions? shards, CancellationToken ct) =>
-        shards is null ? await PlanOneAsync(NewId(), req, ct).ConfigureAwait(false) : await PlanShardsAsync(NewId(), req, shards, ct).ConfigureAwait(false);
+    public async Task<JobPlan> PlanAsync(JobRequest req, ShardOptions? shards, CancellationToken ct)
+    {
+        var plan = shards is null ? await PlanOneAsync(NewId(), req, ct).ConfigureAwait(false) : await PlanShardsAsync(NewId(), req, shards, ct).ConfigureAwait(false);
+        return plan.Status == nameof(JobStatus.NoCapacity) ? plan with { WouldFallBack = WouldFallBack(req) } : plan;
+    }
+
+    /// <summary>
+    /// The dry run's view of the fallback (review A-L4): this computer's entry when, at the point the job would end NoCapacity, lanq run would go
+    /// there instead (the fallback can act and fits the job by the config; its own probe and slots are not looked at), else null.
+    /// </summary>
+    internal string? WouldFallBack(JobRequest req) => FallbackCouldTake(req) ? config.Fallback!.Name : null;
 
     private async Task<JobPlan> PlanOneAsync(string id, JobRequest req, CancellationToken ct)
     {

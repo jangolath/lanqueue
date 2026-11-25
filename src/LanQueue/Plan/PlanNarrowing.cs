@@ -156,5 +156,10 @@ public static class PlanNarrowing
     }
 
     /// <summary>The job with <paramref name="args"/> as its run line, parsed again by the CLI's own parser so the arguments match the line exactly.</summary>
-    internal static PlanJob Reparsed(PlanJob job, List<string> args) => job with { RunArgs = args, Args = ParsedArgs.Parse([.. args]) };
+    /// <remarks>A post: list that the run line cannot carry (<see cref="PlanJob.Args"/> only) is kept.</remarks>
+    internal static PlanJob Reparsed(PlanJob job, List<string> args)
+    {
+        var parsed = ParsedArgs.Parse([.. args]);
+        return job with { RunArgs = args, Args = parsed.Post is null && job.Args.Post is { } post ? parsed with { Post = post } : parsed };
+    }
 }

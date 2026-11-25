@@ -33,6 +33,9 @@ public sealed record PlanJobDry(string Name, string Start, string Status, string
 
     /// <summary>NoCapacity only: false when the job can never run as configured.</summary>
     public bool? Retryable { get; init; }
+
+    /// <summary>NoCapacity only: this computer's fallback entry when lanq run would go there instead (<see cref="JobPlan.WouldFallBack"/>); else null.</summary>
+    public string? WouldFallBack { get; init; }
 }
 
 /// <summary>What lanq run --plan would do now (lanq run --plan --dry-run).</summary>
@@ -63,6 +66,15 @@ public sealed partial class JobRunner
     /// target_minutes), creates no log and wakes nothing.
     /// </summary>
     public async Task<PlanDryResult> PlanFileDryAsync(IReadOnlyList<PlanJobSpec> ordered, CancellationToken ct)
+    {
+        var dry = await PlanFileDryCoreAsync(ordered, ct).ConfigureAwait(false);
+        return dry.Jobs.Count != ordered.Count ? dry : dry with
+        {
+            Jobs = [.. dry.Jobs.Zip(ordered).Select(x => x.First.Status == nameof(JobStatus.NoCapacity) ? x.First with { WouldFallBack = WouldFallBack(x.Second.Request) } : x.First)],
+        };
+    }
+
+    private async Task<PlanDryResult> PlanFileDryCoreAsync(IReadOnlyList<PlanJobSpec> ordered, CancellationToken ct)
     {
         if (PrecheckPlan(ordered) is { } ended)
         {

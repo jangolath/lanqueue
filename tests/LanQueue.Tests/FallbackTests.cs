@@ -192,6 +192,12 @@ public sealed class FallbackTests : IDisposable
             var ex = Assert.ThrowsAny<Exception>(() => LoadPlan($"version: 1\njobs:\n  unit: {{ command: dotnet test, fallback: {word} }}\n"));
             Assert.Contains("a repository never chooses to run on your PC; use --fallback on", ex.Message, StringComparison.Ordinal);
         }
+
+        foreach (var word in new[] { "Off", "no" })
+        {
+            var ex = Assert.ThrowsAny<Exception>(() => LoadPlan($"version: 1\njobs:\n  unit: {{ command: dotnet test, fallback: {word} }}\n"));
+            Assert.Contains("lanq.yml may only say fallback: off (lower case) or fallback: false", ex.Message, StringComparison.Ordinal); // A-L15
+        }
     }
 
     [Fact]
@@ -592,6 +598,33 @@ public sealed class FallbackTests : IDisposable
         Assert.DoesNotContain(ssh.Calls, c => c.Machine == "dev-pc");
     }
 
+    [Fact]
+    public async Task TheDryRunSaysWhenTheRunWouldFallBack()
+    {
+        // A-L4: with the fallback on and no capable pool machine, the dry run names this computer instead of only "exit 75 at once"; with it
+        // off (or refused) it does not.
+        var on = await Runner(Config("fallback: on"), Pool()).PlanAsync(Req(), null, CancellationToken.None);
+        Assert.Equal(nameof(JobStatus.NoCapacity), on.Status);
+        Assert.Equal("dev-pc", on.WouldFallBack);
+        Assert.Null((await Runner(Config(), Pool()).PlanAsync(Req(), null, CancellationToken.None)).WouldFallBack);
+        Assert.Null((await Runner(Config("fallback: on"), Pool(), elevated: true).PlanAsync(Req(), null, CancellationToken.None)).WouldFallBack);
+        var json = JsonSerializer.Serialize(Cli.PlanJsonOf(new JobPlan("NoCapacity", 75, "") { WouldFallBack = "dev-pc" }, null), LanqJson.Default.PlanJson);
+        Assert.Contains("\"wouldFallBack\":\"dev-pc\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("wouldFallBack", JsonSerializer.Serialize(Cli.PlanJsonOf(new JobPlan("NoCapacity", 75, ""), null), LanqJson.Default.PlanJson), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TimingHistoryLeavesOutFallbackRuns()
+    {
+        // A-L9: this computer's durations are not pool timing (--shards auto --target-minutes).
+        var now = DateTimeOffset.UtcNow;
+        JobRecord Rec(string id, string machine, double seconds, bool fallback) =>
+            new(id, machine, "dotnet test", now.AddHours(-1), seconds, 0, "Completed") { Key = "k", Dir = ".", RunSeconds = seconds, Fallback = fallback ? true : null };
+        var records = new List<JobRecord> { Rec("a", "build-01", 100, false), Rec("b", "dev-pc", 900, true) };
+        var history = JobHistory.From(records, "k", ".", now, LanQueue.Scheduling.ShardTiming.Speeds(records, now));
+        Assert.Single(history.Runs);
+    }
+
     private static Hashtable Env(params (string Name, string Value)[] vars)
     {
         var env = new Hashtable();
@@ -624,6 +657,8 @@ public sealed class FallbackTests : IDisposable
 
         public void Type(string? line) => _lines.Add(line);
 
+        public int Pending => _lines.Count;
+
         public override string? ReadLine() => _lines.Take();
     }
 
@@ -635,6 +670,7 @@ public sealed class FallbackTests : IDisposable
         var prompt = new TerminalPrompt(input, err, TimeSpan.FromSeconds(3));
         input.Type("y"); // typed before any prompt: never taken as an answer
         await Task.Delay(200);
+        Assert.Equal(1, input.Pending); // A-L13: nothing is read before the first prompt
         Assert.Null(await prompt.AskAsync("q1", CancellationToken.None)); // no answer in time
         var second = prompt.AskAsync("q2", CancellationToken.None);
         await Task.Delay(300);
@@ -715,6 +751,38 @@ public sealed class FallbackTests : IDisposable
         Assert.Null(LocalProcessClient.WindowsWords("powershell -Command \"unbalanced"));
         Assert.Null(LocalProcessClient.WindowsWords("powershell a\"b"));
         Assert.Throws<ArgumentException>(() => new LocalProcessClient(windows: true).CommandOf("cmd /c del x"));
+    }
+
+    [Fact]
+    public void LocalChildrenStartFromTheSystemFolderAndTheWorkRootNeverTheRepository()
+    {
+        // A-L11: Windows PowerShell by its full System32 path (a bare name is searched in the current folder, the repository, first); the
+        // current folder is the work_root; A-L12: no console of its own.
+        var (exe, _) = new LocalProcessClient(windows: true).CommandOf("powershell -NoProfile -EncodedCommand QQ==");
+        Assert.EndsWith(Path.Combine("WindowsPowerShell", "v1.0", "powershell.exe"), exe, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("System32", exe, StringComparison.OrdinalIgnoreCase);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(Path.IsPathFullyQualified(exe));
+            Assert.True(File.Exists(exe));
+        }
+
+        var m = Config().Fallback!;
+        var psi = new System.Diagnostics.ProcessStartInfo("x");
+        new LocalProcessClient().Hooks(m).Configure!(psi);
+        Assert.Equal(Path.GetFullPath(_work), psi.WorkingDirectory);
+        Assert.True(psi.CreateNoWindow);
+        Assert.DoesNotContain("SSH_AUTH_SOCK", psi.Environment.Keys);
+    }
+
+    [Fact]
+    public void TheWindowsAllowlistKeepsTheHarmlessSystemNames()
+    {
+        // A-L14: system-wide names a worker's login environment has too; proxies, JAVA_HOME and DOTNET_ROOT stay out (set them in env:).
+        var env = LocalProcessClient.ChildEnvironment(
+            Env(("ProgramW6432", "pf"), ("CommonProgramW6432", "pfc"), ("ALLUSERSPROFILE", "pd"), ("PUBLIC", "pub"), ("HTTPS_PROXY", "http://u:p@proxy")),
+            windows: true);
+        Assert.Equal(["ALLUSERSPROFILE", "CommonProgramW6432", "PUBLIC", "ProgramW6432"], env.Keys.Order(StringComparer.Ordinal));
     }
 
     [Fact]

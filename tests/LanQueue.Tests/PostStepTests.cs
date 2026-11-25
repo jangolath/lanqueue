@@ -49,6 +49,15 @@ public sealed class PostStepTests : IDisposable
             """);
         Assert.Equal(["dotnet", "build-server", "status"], plan.Jobs[0].Args.Post);
         Assert.Equal(["dotnet", "my tool", "--x"], plan.Jobs[1].Args.Post);
+
+        // B-L1: the run line carries a plain post as --post (a rerun from runArgv keeps it); a list --post cannot carry stays on the job only,
+        // and survives a re-parse of the run line (narrowing).
+        var run = plan.Jobs[0].RunArgs.ToList();
+        Assert.Equal(["--post", "dotnet build-server status"], run.Skip(run.IndexOf("--post")).Take(2));
+        Assert.True(run.IndexOf("--post") < run.IndexOf("--"));
+        Assert.Equal(["dotnet", "build-server", "status"], ParsedArgs.Parse([.. run]).Post);
+        Assert.DoesNotContain("--post", plan.Jobs[1].RunArgs);
+        Assert.Equal(["dotnet", "my tool", "--x"], PlanNarrowing.Reparsed(plan.Jobs[1], [.. plan.Jobs[1].RunArgs]).Args.Post);
         var ex = Assert.ThrowsAny<Exception>(() => PlanFileLoader.Parse("version: 1\njobs:\n  unit: { command: dotnet test, post: [echo, \"{shard}\"] }\n"));
         Assert.Contains("post: cannot use {shard}", ex.Message, StringComparison.Ordinal);
     }

@@ -298,7 +298,7 @@ public static class ShardTiming
         var since = now.AddDays(-JobHistory.HistoryDays);
         return records
             .Where(r => r.Key is not null && r.Machine is not null && r.Status == nameof(JobStatus.Completed) && r.RunSeconds >= MinSpeedRunSeconds
-                && r.StartedUtc >= since)
+                && r.StartedUtc >= since && r.Fallback != true)
             .GroupBy(r => (r.Key, r.Dir))
             .SelectMany(g =>
             {

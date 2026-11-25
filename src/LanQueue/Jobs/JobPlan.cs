@@ -57,6 +57,12 @@ public sealed record JobPlan(string Status, int ExitCode, string Message)
     /// <summary>The sleeping machine lanq run would wake (only with --wait above 0, without --no-wake, when no awake machine can take the job), or null.</summary>
     public string? WouldWake { get; init; }
 
+    /// <summary>
+    /// NoCapacity only (0.13.0 B3, review A-L4): this computer's fallback entry, when lanq run would go there instead of ending NOT RUN (the
+    /// policy or --fallback is on, or ask with a terminal to ask at, and the fallback fits the job by the config); else null.
+    /// </summary>
+    public string? WouldFallBack { get; init; }
+
     /// <summary>NoCapacity only: as <see cref="JobResult.Retryable"/>; null otherwise.</summary>
     public bool? Retryable { get; init; }
 
