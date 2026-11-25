@@ -17,6 +17,8 @@ public sealed class HygieneTests : IDisposable
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-hygiene-" + Guid.NewGuid().ToString("N"));
 
+    private int _scripts; // each stand-in's own script folder (see Marked)
+
     public HygieneTests() => Directory.CreateDirectory(_root);
 
     public void Dispose() => TestTree.Delete(_root);
@@ -114,11 +116,17 @@ public sealed class HygieneTests : IDisposable
         Assert.DoesNotContain("build-server", RemoteScripts.Cleanup(Load("    hygiene: [dotnet-lean]").Machines[0], _j1, "1"), StringComparison.Ordinal);
     }
 
-    /// <summary>Starts a detached loop whose command line is <paramref name="name"/> and its args, and whose environment carries the marker.</summary>
+    /// <summary>
+    /// Starts a detached loop whose command line is <paramref name="name"/> and its args, and whose environment carries the marker. Each
+    /// stand-in gets its own script file in its own folder: rewriting a script another sh is still reading can leave that sh an empty file,
+    /// so it exits at once (a spared stand-in then looks stopped). Returns once the sh has started, so the sweep sees its real command line.
+    /// </summary>
     private Process Marked(string jobId, string name, params string[] args)
     {
-        var script = Path.Combine(_root, name);
-        File.WriteAllText(script, "while :; do sleep 1; done\n"); // the sh lives on when a sweep stops one of its sleeps (they carry the marker too)
+        var dir = Path.Combine(_root, "s" + Interlocked.Increment(ref _scripts));
+        Directory.CreateDirectory(dir);
+        var script = Path.Combine(dir, name);
+        File.WriteAllText(script, "while :; do sleep 1; done\n");// the sh lives on when a sweep stops one of its sleeps (they carry the marker too)
         var psi = new ProcessStartInfo("setsid") { UseShellExecute = false };
         foreach (var a in (string[])["sh", script, .. args.Length == 0 ? ["x"] : args])
         {
@@ -126,7 +134,37 @@ public sealed class HygieneTests : IDisposable
         }
 
         psi.Environment["LANQ_JOB"] = jobId;
-        return Process.Start(psi)!;
+        var p = Process.Start(psi)!;
+        var started = Stopwatch.StartNew();
+        while (!CommandLine(p.Id).StartsWith("sh\0" + script + "\0", StringComparison.Ordinal))
+        {
+            Assert.False(p.HasExited, "the stand-in " + name + " exited before it started");
+            if (started.ElapsedMilliseconds >= 10_000)
+            {
+                p.Kill(entireProcessTree: true);
+                Assert.Fail("the stand-in " + name + " did not start");
+            }
+
+            Thread.Sleep(20);
+        }
+
+        return p;
+    }
+
+    private static string CommandLine(int pid)
+    {
+        try
+        {
+            return File.ReadAllText("/proc/" + pid + "/cmdline");
+        }
+        catch (IOException)
+        {
+            return "";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "";
+        }
     }
 
     [LinuxFact]
@@ -143,14 +181,12 @@ public sealed class HygieneTests : IDisposable
         var server = Marked(id, "MSBuild.dll", "/nodemode:8", "/nodeReuse:false");
         var compiler = Marked(id, "VBCSCompiler.dll", "-pipename:x");
         var razor = Marked(id, "rzc.dll", "server", "-p", "x"); // final review L7: shared like the compiler server
-        Directory.CreateDirectory(Path.Combine(_root, "once"));
-        var razorOnce = Marked(id, Path.Combine("once", "rzc.dll"), "generate", "-s", "x"); // a one-off Razor compile is the job's own (its own script file)
+        var razorOnce = Marked(id, "rzc.dll", "generate", "-s", "x"); // a one-off Razor compile is the job's own
         var other = Marked(id + "x", "other.sh"); // a marker that only starts with the id: not this job
         var again = (Process?)null;
         Process[] spared = [reusable, unknown, server, compiler, razor, other];
         try
         {
-            Thread.Sleep(300);
             var (code, output) = Shells.Run("linux", RemoteScripts.LinuxSweepFunction + "\nsweep_marked " + id);
             Assert.True(code == 0, output);
             Assert.True(leftover.WaitForExit(5000));
@@ -165,7 +201,6 @@ public sealed class HygieneTests : IDisposable
             File.WriteAllText(fake, "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -*z*) exit 2 ;; esac; done\nif [ -x /usr/bin/grep ]; then exec /usr/bin/grep \"$@\"; fi\nexec /bin/grep \"$@\"\n");
             File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             again = Marked(id, "leftover2.sh");
-            Thread.Sleep(300);
             (code, output) = Shells.Run("linux", "PATH=" + bin + ":$PATH\n" + RemoteScripts.LinuxSweepFunction + "\nsweep_marked " + id);
             Assert.True(code == 0, output);
             Assert.True(again.WaitForExit(5000));
