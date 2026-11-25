@@ -81,11 +81,7 @@ public static partial class Cli
         {
             machines = config.Machines;
         }
-        else if (config.Fallback is { } fb && string.Equals(fb.Name, p.Target, StringComparison.Ordinal))
-        {
-            machines = [fb];
-        }
-        else if (FindMachine(config, p.Target, "prune", stderr) is { } m)
+        else if (FindMachine(config, p.Target, "prune", stderr, fallback: true) is { } m)
         {
             machines = [m];
         }

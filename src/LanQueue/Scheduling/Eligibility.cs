@@ -165,6 +165,9 @@ public enum Exclusion
     /// inside the repository (or holds it). Permanent.
     /// </summary>
     FallbackRefused,
+
+    /// <summary>0.13.0 B3 (review A-L8): this computer's fallback entry has a work_root inside the repository being run, or one that holds it. Permanent.</summary>
+    FallbackWorkRoot,
 }
 
 /// <summary>One machine judged for one job.</summary>
@@ -220,12 +223,13 @@ public static class Eligibility
         Exclusion.Busy => "busy",
         Exclusion.Avoided => "avoided",
         Exclusion.FallbackRefused => "fallback_refused",
+        Exclusion.FallbackWorkRoot => "fallback_work_root",
         _ => "held",
     };
 
     /// <summary>True for the reasons waiting can never cure: the config (capabilities, size:, Windows, env:) or the machine itself (its RAM, its size, its tools).</summary>
     public static bool IsPermanent(Exclusion reason) =>
-        reason is Exclusion.FallbackRefused or Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
+        reason is Exclusion.FallbackRefused or Exclusion.FallbackWorkRoot or Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
             or Exclusion.MemExceedsTotal or Exclusion.MemUnknown
             or Exclusion.SizeUnknown or Exclusion.ToolMissing;
 

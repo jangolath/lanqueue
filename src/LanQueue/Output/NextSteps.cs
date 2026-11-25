@@ -435,6 +435,14 @@ internal static class NextSteps
         {
             steps.Add(Step(NextAction.AskDeveloper, "no pool machine took the job; the developer may let this computer run such a job as a last resort (docs/WORKERS.md, \"Using this PC as a fallback\")"));
         }
+        else if (hint == Jobs.FallbackHint.Elevated)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "this computer's fallback entry could run the job, but lanq runs elevated (administrator) or as root; the developer may run lanq from a terminal without those rights"));
+        }
+        else if (hint == Jobs.FallbackHint.WorkRoot)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "this computer's fallback entry could run the job, but its work_root is inside the repository (or holds it); the developer may give it a work_root of its own in machines.yml"));
+        }
 
         if (onFallback > 0)
         {

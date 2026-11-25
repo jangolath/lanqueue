@@ -479,7 +479,7 @@ public sealed partial class JobRunner
 
         // --wait: how long no shard of this run has held a slot. Restarted only by an attempt that really got one, so attempts that keep
         // failing to claim a slot (the probe said free, the machine said full) cannot hold the run open for ever.
-        var idleSince = Stopwatch.GetTimestamp();
+        var idleSince = Timestamp();
         var waitClock = new WaitClock();
         var round = RoundStart();
         var relooked = 0L;
@@ -489,6 +489,9 @@ public sealed partial class JobRunner
         // The latest probe, raw and judged for this job, for choosing another machine for a re-run by the same rules as placement.
         MachineHealth[] lastProbes = [];
         Assessment? lastEngaged = null;
+
+        // 0.13.0 B3 (A-M1): true once this shard set reached its own NoCapacity point and fell back.
+        var fellBack = false;
 
         // p1 review M2: the machines whose claim failed over ssh in the latest launch round (an eligible wait, not a lost race).
         var sshFailed = new HashSet<string>(StringComparer.Ordinal);
@@ -606,12 +609,12 @@ public sealed partial class JobRunner
                         assessed, MemNeeds(template), m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
 
-                    // 0.13.0 B3 (M2): once this run fell back, shards the pool cannot take now may use this computer's own slots (max_jobs and
-                    // memory there, so many shards never pile onto the PC), always after every free pool slot.
+                    // 0.13.0 B3 (M2): once this shard set fell back (at its own NoCapacity point, A-M1), shards the pool cannot take now may use
+                    // this computer's own slots (max_jobs and memory there, so many shards never pile onto the PC), always after every free pool slot.
                     Assessment? engaged;
                     try
                     {
-                        engaged = await EngagedFallbackAsync(template, needs, stop.Token).ConfigureAwait(false);
+                        engaged = await EngagedFallbackAsync(template, needs, fellBack, stop.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (stop.IsCancellationRequested)
                     {
@@ -660,9 +663,10 @@ public sealed partial class JobRunner
                     {
                         // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish),
                         // unless this computer's fallback may take them (0.13.0 B3): then look again with it as the last candidate.
-                        var never = await FallbackGateAsync(template, needs, "no pool machine can take it", line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                        var never = await FallbackGateAsync(template, needs, "no pool machine can take it", fellBack, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
                         if (never.Go)
                         {
+                            (fellBack, template) = (true, template with { FallbackWhy = "no pool machine can take it" });
                             continue;
                         }
 
@@ -677,15 +681,16 @@ public sealed partial class JobRunner
                 backoff = false;
                 if (running.Values.Any(r => r.Holding))
                 {
-                    idleSince = Stopwatch.GetTimestamp();
+                    idleSince = Timestamp();
                 }
                 else if (pending.Count > 0 && running.Count == 0
                     && WaitedOut(template, waitClock, idleSince, WaitKindOfShards(candidates, lastProbes, needs, pending, lastEngaged, sshFailed), round, relooked) is { } budget)
                 {
-                    var waited = await FallbackGateAsync(
-                        template, needs, budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now", line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                    var why = budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now";
+                    var waited = await FallbackGateAsync(template, needs, why, fellBack, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
                     if (waited.Go)
                     {
+                        (fellBack, template) = (true, template with { FallbackWhy = why });
                         continue;
                     }
 
@@ -741,7 +746,7 @@ public sealed partial class JobRunner
                     var a = await task.ConfigureAwait(false);
                     if (a.HadSlot)
                     {
-                        idleSince = Stopwatch.GetTimestamp();
+                        idleSince = Timestamp();
                     }
 
                     if (Settle(a, options, pending, Emit, lastAssessed, name) && options.FailFast && !stop.IsCancellationRequested)

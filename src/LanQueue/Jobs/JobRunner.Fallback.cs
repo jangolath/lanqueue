@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using LanQueue.Config;
 using LanQueue.Health;
+using LanQueue.Plan;
 using LanQueue.Policy;
 using LanQueue.Scheduling;
 using LanQueue.Ssh;
@@ -172,45 +173,126 @@ public sealed partial class JobRunner
     /// <summary>Whether lanq runs elevated or as root (the fallback then refuses); tests replace it.</summary>
     public Func<bool> Elevated { get; init; } = LocalProcessClient.IsElevated;
 
-    // One runner is one lanq run (a single job, a shard set or a plan): once one unit of it fell back, its other units may use the fallback's
-    // slot like any slot (M2), while the pool's machines stay ahead of it. A prompt that got no answer is not repeated in the run (M7).
-    private volatile bool _fallbackEngaged;
+    // One runner is one lanq run (a single job, a shard set or a plan). A yes at the ask prompt covers the remaining jobs of the run (the prompt
+    // says so), but each job (a single job, a shard set, a plan job, a baseline rerun) still falls back only at its own NoCapacity point, after
+    // its own wait budgets (review A-M1): the fallback is a candidate only for a unit that reached that point. A prompt that got no answer is
+    // not repeated in the run (M7): later jobs then act as off.
+    private volatile bool _fallbackConsented;
     private volatile bool _notAsking;
+    private int _fallbackWarned;
     private readonly SemaphoreSlim _askGate = new(1, 1);
 
     /// <summary>The policy for this job (0.13.0 B3): off without a fallback entry, for a lanq.yml fallback: off job or with --on; else --fallback, else policy.fallback.</summary>
     internal FallbackMode FallbackModeOf(JobRequest req) =>
         config.Fallback is null || req.FallbackOff || req.On is not null ? FallbackMode.Off : req.Fallback ?? config.Policy.Fallback;
 
-    /// <summary>The wait budgets a job waits under: its own, but with a fallback in play and no wait flag given, at least 120 s for a slot (M1).</summary>
+    /// <summary>
+    /// The policy as it can really act (review A-M2): ask that cannot prompt here (no terminal, --json, CI, an agent) or that got no answer
+    /// earlier in this run, and on or ask that the fallback refuses (lanq elevated, work_root inside the repository), act exactly as off: no
+    /// 120 s floor, and a job no pool machine can ever take ends at once from the config.
+    /// </summary>
+    internal FallbackMode EffectiveFallbackModeOf(JobRequest req)
+    {
+        var mode = FallbackModeOf(req);
+        if (mode == FallbackMode.Off)
+        {
+            return mode;
+        }
+
+        if (mode == FallbackMode.Ask && !_fallbackConsented && (Prompt is null || _notAsking))
+        {
+            return FallbackMode.Off;
+        }
+
+        return FallbackRefusal(config.Fallback!, req) is null ? mode : FallbackMode.Off;
+    }
+
+    /// <summary>The wait budgets a job waits under: its own, but with a fallback that can really act and no wait flag given, at least 120 s for a slot (M1).</summary>
     internal WaitBudgets BudgetsOf(JobRequest req)
     {
         var budgets = req.EffectiveBudgets;
-        return FallbackModeOf(req) != FallbackMode.Off && !req.WaitGiven && budgets.Slot < FallbackSlotFloor ? budgets with { Slot = FallbackSlotFloor } : budgets;
+        return EffectiveFallbackModeOf(req) != FallbackMode.Off && !req.WaitGiven && budgets.Slot < FallbackSlotFloor ? budgets with { Slot = FallbackSlotFloor } : budgets;
     }
 
     /// <summary>
     /// True when the fallback could ever take the job as far as the config says (its capabilities, a declared size:, the job's --env), with the
-    /// policy not off: then the job is not ended before any probe even when no pool machine could ever take it (<see cref="NeverByConfig"/>).
+    /// policy able to act (<see cref="EffectiveFallbackModeOf"/>): then the job is not ended before any probe even when no pool machine could
+    /// ever take it (<see cref="NeverByConfig"/>).
     /// </summary>
     private bool FallbackCouldTake(JobRequest req) =>
-        FallbackModeOf(req) != FallbackMode.Off && config.Fallback is { } fb && FallbackFits(fb, req);
+        EffectiveFallbackModeOf(req) != FallbackMode.Off && config.Fallback is { } fb && FallbackFits(fb, req);
 
     /// <summary>The config-only checks of the fallback for a job: capabilities, a declared size:, the job's --env.</summary>
     private static bool FallbackFits(Machine fb, JobRequest req) =>
         Eligibility.Missing(fb, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(fb, req.Size) is null
         && EnvExclusion(fb, req.Env, req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok) is null;
 
-    /// <summary>The hint a NoCapacity decided before any probe carries (<see cref="Precheck"/>): the same as the gate's off answer.</summary>
-    private FallbackVerdict PrecheckFallbackHint(JobRequest req) =>
-        req.FallbackOff || req.On is not null ? FallbackVerdict.None
-        : config.Fallback is not { } fb ? FallbackVerdict.None with { Hint = FallbackHint.SetUp }
-        : FallbackFits(fb, req) ? new FallbackVerdict(false, null, $" This computer ({fb.Name}) could run it: lanq run --fallback on ...", FallbackHint.TurnOn)
-        : FallbackVerdict.None;
+    /// <summary>
+    /// One stderr line per run, at the job's start, when the developer asked for the fallback but it cannot act (review A-L7, A-M2, A-L8):
+    /// --fallback on|ask with no usable fallback entry in machines.yml, or on/ask while the fallback refuses (lanq elevated, its work_root inside
+    /// the repository).
+    /// </summary>
+    private void WarnFallbackOnce(JobRequest req)
+    {
+        string? line = null;
+        if (config.Fallback is null && req.Fallback is FallbackMode.On or FallbackMode.Ask && !req.FallbackOff && req.On is null)
+        {
+            line = $"[lanq] --fallback {(req.Fallback == FallbackMode.On ? "on" : "ask")}: machines.yml has no usable fallback entry (local: true, fallback: true, this computer's os); the job uses the pool only";
+        }
+        else if (config.Fallback is { } fb && FallbackModeOf(req) is var mode && mode != FallbackMode.Off && FallbackRefusal(fb, req) is { } refused)
+        {
+            line = $"[lanq] fallback: {(mode == FallbackMode.Ask ? "ask" : "on")}, but {refused.Why}; it will not be used";
+        }
 
-    /// <summary>The fallback judged as a candidate after the pool (only once this run engaged it), or null.</summary>
-    private async Task<Assessment?> EngagedFallbackAsync(JobRequest req, JobNeeds needs, CancellationToken ct) =>
-        _fallbackEngaged && FallbackModeOf(req) != FallbackMode.Off && config.Fallback is { } fb
+        if (line is not null && Interlocked.Exchange(ref _fallbackWarned, 1) == 0)
+        {
+            Say(req)(line);
+        }
+    }
+
+    /// <summary>The hint a NoCapacity decided before any probe carries (<see cref="Precheck"/>): the same as the gate's off answer.</summary>
+    private FallbackVerdict PrecheckFallbackHint(JobRequest req)
+    {
+        if (req.FallbackOff || req.On is not null)
+        {
+            return FallbackVerdict.None;
+        }
+
+        if (config.Fallback is not { } fb)
+        {
+            return FallbackVerdict.None with { Hint = FallbackHint.SetUp };
+        }
+
+        if (!FallbackFits(fb, req))
+        {
+            return FallbackVerdict.None;
+        }
+
+        // Never suggest --fallback on when the fallback would only refuse (review A-M2): say what to change instead, and with the policy on or
+        // ask name the fallback's own reason next to the pool's machines.
+        var mode = FallbackModeOf(req);
+        if (FallbackRefusal(fb, req) is { } refused)
+        {
+            return mode == FallbackMode.Off
+                ? new FallbackVerdict(false, null, $" This computer ({fb.Name}) could run it, but {refused.Why}.", HintOf(refused.Reason))
+                : new FallbackVerdict(false, RefusedRow(fb, refused), "", HintOf(refused.Reason));
+        }
+
+        if (mode == FallbackMode.Ask)
+        {
+            // Here ask acts as off (EffectiveFallbackModeOf): no terminal to ask at, or no answer earlier in this run.
+            return new FallbackVerdict(
+                false, null, _notAsking ? " fallback: ask got no answer earlier in this run, so it acted as off." : $" fallback: ask needs a terminal ({NoAskReason ?? "no terminal"}), so it acted as off.", FallbackHint.TurnOn);
+        }
+
+        return new FallbackVerdict(false, null, $" This computer ({fb.Name}) could run it: lanq run --fallback on ...", FallbackHint.TurnOn);
+    }
+
+    private static FallbackHint HintOf(Exclusion refused) => refused == Exclusion.FallbackWorkRoot ? FallbackHint.WorkRoot : FallbackHint.Elevated;
+
+    /// <summary>The fallback judged as a candidate after the pool, only for a unit that reached its own NoCapacity point and fell back (A-M1), or null.</summary>
+    private async Task<Assessment?> EngagedFallbackAsync(JobRequest req, JobNeeds needs, bool unitFellBack, CancellationToken ct) =>
+        unitFellBack && FallbackModeOf(req) != FallbackMode.Off && config.Fallback is { } fb
             ? await AssessFallbackAsync(fb, req, needs, ct).ConfigureAwait(false)
             : null;
 
@@ -219,7 +301,7 @@ public sealed partial class JobRunner
     {
         if (FallbackRefusal(fb, req) is { } refused)
         {
-            return new Assessment(fb, Unprobed(fb), Exclusion.FallbackRefused, refused, true, 0, 0);
+            return RefusedRow(fb, refused);
         }
 
         var health = CountStuckStale(await ProbeSharedAsync(fb, ct).ConfigureAwait(false));
@@ -227,44 +309,115 @@ public sealed partial class JobRunner
         return Scheduler.Assess([(fb, health)], own)[0];
     }
 
+    private static Assessment RefusedRow(Machine fb, (Exclusion Reason, string Why) refused) =>
+        new(fb, Unprobed(fb), refused.Reason, refused.Why, true, 0, 0);
+
     /// <summary>
-    /// Why the fallback may never run this job here: lanq runs elevated or as root (the job would inherit those rights), or the fallback's
-    /// work_root is inside the repository or holds it (cleanup deletes under work_root/jobs). Null when neither.
+    /// Why the fallback may never run this job here: lanq runs elevated or as root (the job would inherit those rights;
+    /// <see cref="Exclusion.FallbackRefused"/>), or the fallback's work_root is inside the repository or holds it (cleanup deletes under
+    /// work_root/jobs; <see cref="Exclusion.FallbackWorkRoot"/>). The repository is its top folder, not the current one (review A-M3), and
+    /// links on either path are followed. Null when neither.
     /// </summary>
-    private string? FallbackRefusal(Machine fb, JobRequest req)
+    private (Exclusion Reason, string Why)? FallbackRefusal(Machine fb, JobRequest req) =>
+        _refusals.GetOrAdd(req.RepoDir, (_, args) => args.Self.Refusal(args.fb, args.req), (Self: this, fb, req));
+
+    // FallbackRefusal is asked at every look (the wait budgets depend on it): judged once per repository folder in a run.
+    private readonly ConcurrentDictionary<string, (Exclusion Reason, string Why)?> _refusals = new(StringComparer.Ordinal);
+
+    private (Exclusion Reason, string Why)? Refusal(Machine fb, JobRequest req)
     {
         if (Elevated())
         {
-            return "lanq runs elevated (administrator) or as root; the fallback never hands those rights to a job";
+            return (Exclusion.FallbackRefused, "lanq runs elevated (administrator) or as root; the fallback never hands those rights to a job");
         }
 
-        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        string Full(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p)) + Path.DirectorySeparatorChar;
-        var root = Full(fb.WorkRoot);
-        var repo = Full(req.RepoDir);
-        return root.StartsWith(repo, comparison) || repo.StartsWith(root, comparison)
-            ? "its work_root is inside the repository being run (or holds it); give the fallback a work_root of its own"
+        return WorkRootOverlaps(fb.WorkRoot, PlanFileLoader.RepositoryTop(req.RepoDir) ?? req.RepoDir)
+            ? (Exclusion.FallbackWorkRoot, "its work_root is inside the repository being run (or holds it); give the fallback a work_root of its own")
             : null;
+    }
+
+    /// <summary>True when <paramref name="workRoot"/> is <paramref name="repo"/>, inside it, or holds it, after following links on both paths.</summary>
+    internal static bool WorkRootOverlaps(string workRoot, string repo)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        string Full(string p) => Path.TrimEndingDirectorySeparator(Resolved(Path.GetFullPath(p))) + Path.DirectorySeparatorChar;
+        var root = Full(workRoot);
+        var top = Full(repo);
+        return root.StartsWith(top, comparison) || top.StartsWith(root, comparison);
+    }
+
+    /// <summary>The full path with every existing link on it (a symlink or junction on any folder) followed; a part that does not exist yet is kept as written.</summary>
+    internal static string Resolved(string full)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(full) ?? "";
+            var current = root;
+            var parts = full[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+            for (var i = 0; i < parts.Length; i++)
+            {
+                current = Path.Combine(current, parts[i]);
+                var info = new DirectoryInfo(current);
+                if (!info.Exists)
+                {
+                    return Path.Combine([current, .. parts[(i + 1)..]]);
+                }
+
+                if (info.LinkTarget is not null && info.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+                {
+                    current = Path.GetFullPath(target.FullName);
+                }
+            }
+
+            return current;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return full;
+        }
     }
 
     /// <summary>
     /// The moment a job (or the waiting shards of a run) would end NoCapacity (0.13.0 B3): after its wait budgets, or at once when every pool
     /// machine is ruled out for good. Off: no fallback, and the result carries the hint for the next steps. On: the fallback is judged like a
-    /// worker; eligible, it is engaged (the caller looks again with it as the last candidate). Ask: the same, after a yes at the terminal.
+    /// worker; eligible, it is engaged for this unit (the caller looks again with it as the last candidate). Ask: the same, after a yes at the
+    /// terminal; that yes covers the remaining jobs of the run, each again only at its own NoCapacity point (review A-M1).
     /// </summary>
-    /// <param name="why">Why the pool could not take the job, for the prompt ("no pool slot", "no pool machine can take it").</param>
-    private async Task<FallbackVerdict> FallbackGateAsync(JobRequest req, JobNeeds needs, string why, Action<string> say, CancellationToken ct)
+    /// <param name="why">Why the pool could not take the job, for the prompt and the label ("no pool slot", "no pool machine can take it").</param>
+    /// <param name="unitFellBack">True when this unit fell back already: the fallback was a candidate in this very look and could not take it either.</param>
+    private async Task<FallbackVerdict> FallbackGateAsync(JobRequest req, JobNeeds needs, string why, bool unitFellBack, Action<string> say, CancellationToken ct)
     {
         if (config.Fallback is not { } fb)
         {
             return PrecheckFallbackHint(req);
         }
 
-        var mode = FallbackModeOf(req);
-        if (_fallbackEngaged || mode == FallbackMode.Off)
+        if (unitFellBack)
         {
-            // Engaged already: the fallback was a candidate in this very look, and it could not take the job either.
-            return _fallbackEngaged ? FallbackVerdict.None : PrecheckFallbackHint(req);
+            return FallbackVerdict.None;
+        }
+
+        var mode = FallbackModeOf(req);
+        if (mode == FallbackMode.Off)
+        {
+            return PrecheckFallbackHint(req);
+        }
+
+        if (FallbackRefusal(fb, req) is { } refused)
+        {
+            return new FallbackVerdict(false, RefusedRow(fb, refused), "", HintOf(refused.Reason));
+        }
+
+        if (mode == FallbackMode.Ask && !_fallbackConsented && Prompt is null)
+        {
+            // ask acts as off here (review A-M2): the fallback is not even probed.
+            say($"[lanq] fallback: ask needs a terminal ({NoAskReason ?? "no terminal"}); behaving as off");
+            return new FallbackVerdict(false, null, $" fallback: ask needs a terminal ({NoAskReason ?? "no terminal"}), so it acted as off.", FallbackHint.TurnOn);
+        }
+
+        if (mode == FallbackMode.Ask && !_fallbackConsented && _notAsking)
+        {
+            return new FallbackVerdict(false, null, " fallback: ask got no answer earlier in this run, so it acted as off.", FallbackHint.TurnOn);
         }
 
         var judged = await AssessFallbackAsync(fb, req, needs, ct).ConfigureAwait(false);
@@ -275,37 +428,31 @@ public sealed partial class JobRunner
 
         if (mode == FallbackMode.Ask && !await AskAsync(req, fb, why, say, ct).ConfigureAwait(false))
         {
-            return new FallbackVerdict(false, null, Prompt is null ? $" fallback: ask needs a terminal ({NoAskReason ?? "no terminal"}), so it acted as off." : " fallback: not run on this computer (no yes at the prompt).", FallbackHint.TurnOn);
+            return new FallbackVerdict(false, null, " fallback: not run on this computer (no yes at the prompt).", FallbackHint.TurnOn);
         }
 
-        _fallbackEngaged = true;
         return new FallbackVerdict(true, null, "", null);
     }
 
+    /// <summary>The ask prompt. A yes covers the remaining jobs of this run (the question says so), each only at its own NoCapacity point.</summary>
     private async Task<bool> AskAsync(JobRequest req, Machine fb, string why, Action<string> say, CancellationToken ct)
     {
-        if (Prompt is null)
-        {
-            say($"[lanq] fallback: ask needs a terminal ({NoAskReason ?? "no terminal"}); behaving as off");
-            return false;
-        }
-
         await _askGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_fallbackEngaged)
+            if (_fallbackConsented)
             {
-                return true; // a sibling's prompt got a yes while this one waited: the run uses the fallback already
+                return true; // a yes earlier in this run (or a sibling's, while this one waited) covers this job, which reached its own NoCapacity point
             }
 
-            if (_notAsking)
+            if (_notAsking || Prompt is null)
             {
                 return false;
             }
 
             // Never the command's arguments, env values or paths: only the job's name and the pool's reason.
             var job = req.Label ?? req.PlanJob ?? (req.Shard is { } s ? "shard " + s : "the job");
-            var answer = await Prompt.AskAsync(SafeLine($"[lanq] no pool slot for {job} ({why}); run it on this computer ({fb.Name})? [y/N]"), ct).ConfigureAwait(false);
+            var answer = await Prompt.AskAsync(SafeLine(AskQuestion(job, why, fb.Name)), ct).ConfigureAwait(false);
             if (answer is null)
             {
                 _notAsking = true;
@@ -313,6 +460,7 @@ public sealed partial class JobRunner
                 return false;
             }
 
+            _fallbackConsented = answer.Value;
             return answer.Value;
         }
         finally
@@ -320,6 +468,10 @@ public sealed partial class JobRunner
             _askGate.Release();
         }
     }
+
+    /// <summary>The ask question: why the pool could not take the job, and that a yes covers the remaining jobs of the run, each only after its own wait.</summary>
+    internal static string AskQuestion(string job, string why, string fallback) =>
+        $"[lanq] {job}: {why}. Run it on this computer ({fallback})? A yes also covers the remaining jobs in this run, each only after its own wait runs out. [y/N]";
 
     /// <summary>A NoCapacity result with the fallback's verdict: its row next to the pool's machines, its note, and its hint.</summary>
     private static JobResult WithFallback(JobResult none, FallbackVerdict v)

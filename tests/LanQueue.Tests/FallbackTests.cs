@@ -320,7 +320,7 @@ public sealed class FallbackTests : IDisposable
         Assert.Equal(JobStatus.Completed, r.Status);
         Assert.Equal("dev-pc", r.Machine);
         Assert.True(r.Fallback);
-        Assert.Contains("[lanq] running on this computer (fallback: no pool slot)", _output);
+        Assert.Contains("[lanq] running on this computer (fallback: no pool machine can take it)", _output); // A-L5: the real reason
         var rec = Assert.Single(new JobLog(Path.Combine(_dir, ".lanq")).ReadAll());
         Assert.True(rec.Fallback);
         Assert.Equal("[lanq] Completed (1 of 1 job on this computer, fallback): x", Cli.StatusLine(r with { Message = "x" }));
@@ -371,7 +371,39 @@ public sealed class FallbackTests : IDisposable
         config.Fallback!.WorkRoot = Path.Combine(_dir, "lq").Replace('\\', '/');
         var r = await Runner(config, Pool()).RunAsync(Req(), CancellationToken.None);
         Assert.Equal(JobStatus.NoCapacity, r.Status);
-        Assert.Contains(r.Excluded!, e => e.Machine == "dev-pc" && e.Reason == "fallback_refused" && e.Why.Contains("inside the repository", StringComparison.Ordinal));
+        Assert.Contains(r.Excluded!, e => e.Machine == "dev-pc" && e.Reason == "fallback_work_root" && e.Why.Contains("inside the repository", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AWorkRootAtTheRepositoryTopIsRefusedFromASubfolder()
+    {
+        // A-M3: lanq runs from a subfolder of the repository; the work_root is beside it, inside the repository top: still refused.
+        var sub = Path.Combine(_dir, "tests", "unit");
+        Directory.CreateDirectory(sub);
+        var config = Config("fallback: on");
+        config.Fallback!.WorkRoot = Path.Combine(_dir, ".lq").Replace('\\', '/');
+        var r = await Runner(config, Pool()).RunAsync(Req() with { RepoDir = sub }, CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Contains(r.Excluded!, e => e.Machine == "dev-pc" && e.Reason == "fallback_work_root");
+        Assert.Equal(FallbackHint.WorkRoot, r.FallbackHint);
+    }
+
+    [Fact]
+    public void AWorkRootReachedThroughALinkIsInsideTheRepository()
+    {
+        // A-M3: a work_root whose path goes through a link into the repository is inside it.
+        var link = Path.Combine(_work, "into-repo");
+        try
+        {
+            Directory.CreateSymbolicLink(link, _dir);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // no right to make links here (Windows without developer mode): the CI Linux runner covers it
+        }
+
+        Assert.True(JobRunner.WorkRootOverlaps(Path.Combine(link, "lq"), _dir));
+        Assert.False(JobRunner.WorkRootOverlaps(Path.Combine(_work, "other"), _dir));
     }
 
     [Fact]
@@ -414,7 +446,7 @@ public sealed class FallbackTests : IDisposable
         var r = await Runner(Config("fallback: ask"), Pool(), prompt).RunAsync(Req("dotnet", "test", "--filter", "Secret=1"), CancellationToken.None);
         Assert.True(r.Fallback);
         var q = Assert.Single(prompt.Questions);
-        Assert.Equal("[lanq] no pool slot for the job (no pool machine can take it); run it on this computer (dev-pc)? [y/N]", q);
+        Assert.Equal("[lanq] the job: no pool machine can take it. Run it on this computer (dev-pc)? A yes also covers the remaining jobs in this run, each only after its own wait runs out. [y/N]", q);
     }
 
     [Fact]
@@ -428,6 +460,136 @@ public sealed class FallbackTests : IDisposable
         Assert.Equal(JobStatus.NoCapacity, second.Status);
         Assert.Single(prompt.Questions);
         Assert.Contains("[lanq] ask: no answer; not asking again in this run", _output);
+    }
+
+    // ---- consent scope and acting as off (review A-M1, A-M2, A-L7, A-L8) ----
+
+    /// <summary>A runner on a fake clock: every 15 s pause moves it on at once, so a whole wait budget runs through the real loop.</summary>
+    private JobRunner TimedRunner(FleetConfig config, FakeSsh ssh, Func<long> now, Action<TimeSpan> advance, IFallbackPrompt? prompt = null, bool elevated = false) =>
+        new(config, ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "tmp"),
+            _output.Add, delay: (d, _) =>
+            {
+                advance(d);
+                return Task.CompletedTask;
+            })
+        {
+            Prompt = prompt,
+            NoAskReason = prompt is null ? "no terminal" : null,
+            Elevated = () => elevated,
+            Timestamp = now,
+        };
+
+    [Fact]
+    public async Task AYesCoversTheRunButEachJobFallsBackOnlyAfterItsOwnWait()
+    {
+        // A-M1: the pool's only capable machine stays busy. Job 1 waits its 60 s, the developer says yes, it runs here. Job 2 of the same run
+        // is not asked again, but it too waits its own 60 s before this computer is tried: the yes never cuts another job's wait short.
+        var config = Config("fallback: ask");
+        config.Machines[0].Capabilities = ["dotnet"];
+        long now = 0;
+        var claims = new List<long>();
+        var pool = Pool(poolBusy: true);
+        var ssh = new FakeSsh
+        {
+            Handler = (m, cmd) =>
+            {
+                if (m.Local && Text(m, cmd).Contains("SLOT=", StringComparison.Ordinal))
+                {
+                    claims.Add(now);
+                }
+
+                return pool.Handler(m, cmd);
+            },
+        };
+        var prompt = new ScriptedPrompt(true);
+        var runner = TimedRunner(config, ssh, () => now, d => now += (long)(d.TotalSeconds * System.Diagnostics.Stopwatch.Frequency), prompt);
+        var budgets = new LanQueue.Scheduling.WaitBudgets(TimeSpan.Zero, TimeSpan.FromSeconds(60));
+        var first = await runner.RunAsync(Req() with { WaitGiven = true, Budgets = budgets }, CancellationToken.None);
+        Assert.True(first.Fallback);
+        var secondStart = now;
+        var second = await runner.RunAsync(Req() with { WaitGiven = true, Budgets = budgets }, CancellationToken.None);
+        Assert.True(second.Fallback);
+        Assert.Single(prompt.Questions); // the yes covered job 2: not asked again
+        Assert.Contains("remaining jobs in this run", prompt.Questions[0], StringComparison.Ordinal);
+        Assert.Equal(2, claims.Count);
+        Assert.True(claims[0] >= 60 * System.Diagnostics.Stopwatch.Frequency, "job 1 fell back before its own wait ran out");
+        Assert.True(claims[1] - secondStart >= 60 * System.Diagnostics.Stopwatch.Frequency, "job 2 fell back before its own wait ran out");
+    }
+
+    [Fact]
+    public async Task AskThatCannotPromptActsExactlyAsOff()
+    {
+        // A-M2: ask with no terminal: no 120 s floor (the busy pool ends at the first look, as with off), and a job only this computer could
+        // take ends from the config before any probe, never probing the pool or this computer.
+        var runner = Runner(Config("fallback: ask"), new FakeSsh());
+        Assert.Equal(TimeSpan.Zero, runner.BudgetsOf(Req()).Slot);
+        Assert.Equal(FallbackMode.Off, runner.EffectiveFallbackModeOf(Req()));
+
+        var ssh = Pool();
+        var r = await Runner(Config("fallback: ask"), ssh).RunAsync(Req(), CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Empty(ssh.Calls);
+        Assert.Equal(FallbackHint.TurnOn, r.FallbackHint);
+
+        var config = Config("fallback: ask");
+        config.Machines[0].Capabilities = ["dotnet"];
+        var busy = Pool(poolBusy: true);
+        var waited = await Runner(config, busy).RunAsync(Req(), CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, waited.Status);
+        Assert.True(waited.Waited!.Slot + waited.Waited.Eligible < TimeSpan.FromSeconds(15), "ask acting as off waited for a slot");
+        Assert.Contains("fallback: ask needs a terminal (no terminal), so it acted as off", waited.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(busy.Calls, c => c.Machine == "dev-pc");
+    }
+
+    [Fact]
+    public async Task ARefusedFallbackActsAsOffAndSaysSoOnceAtTheStart()
+    {
+        // A-M2, A-L8: lanq runs elevated with fallback on: no floor, the config-only NoCapacity at once, one line at the start, and the next
+        // step says to run lanq without those rights (never --fallback on, which would only be refused again).
+        var runner = Runner(Config("fallback: on"), Pool(), elevated: true);
+        Assert.Equal(TimeSpan.Zero, runner.BudgetsOf(Req()).Slot);
+        var ssh = Pool();
+        runner = Runner(Config("fallback: on"), ssh, elevated: true);
+        var r = await runner.RunAsync(Req(), CancellationToken.None);
+        await runner.RunAsync(Req(), CancellationToken.None);
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.Empty(ssh.Calls);
+        Assert.Equal(FallbackHint.Elevated, r.FallbackHint);
+        Assert.Single(_output, l => l.Contains("fallback: on, but lanq runs elevated", StringComparison.Ordinal) && l.EndsWith("it will not be used", StringComparison.Ordinal));
+        var step = Assert.Single(NextSteps.WithFallback(ParsedArgs.Parse(["run", "--", "dotnet", "test"]), [], FallbackHint.Elevated, 0, 1));
+        Assert.Contains("without those rights", step.Reason, StringComparison.Ordinal);
+        Assert.Null(step.Argv);
+    }
+
+    [Fact]
+    public async Task FallbackOnWithNoFallbackEntrySaysSo()
+    {
+        // A-L7: --fallback on typed, but machines.yml has no usable fallback entry: one line says so, and the job uses the pool only.
+        var config = ConfigLoader.Parse(Yaml(fallbackOs: OtherOs));
+        Assert.Null(config.Fallback);
+        await Runner(config, Pool()).RunAsync(Req() with { Fallback = FallbackMode.On }, CancellationToken.None);
+        Assert.Contains(_output, l => l.StartsWith("[lanq] --fallback on: machines.yml has no usable fallback entry", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task UnlockAndHealthCanNameTheFallback()
+    {
+        // A-M4: a stuck fallback slot has a tool (lanq unlock dev-pc), and lanq health --on dev-pc probes this computer by name; a plain
+        // health never touches it, and run still refuses --on dev-pc (OnNamingTheFallbackIsRefused).
+        var ssh = new FakeSsh { Handler = (m, cmd) => Text(m, cmd).Contains("REMOVED", StringComparison.Ordinal) ? new SshResult(0, "REMOVED=slot-1 crashed-job\n") : new SshResult(0, Healthy()) };
+        var (o, e) = (new StringWriter(), new StringWriter());
+        var code = await Cli.Unlock(ParsedArgs.Parse(["unlock", "dev-pc"]), Config(), ssh, o, e, CancellationToken.None);
+        Assert.Equal(0, code);
+        Assert.Contains(ssh.Calls, c => c.Machine == "dev-pc");
+
+        ssh.Calls.Clear();
+        code = await Cli.Health(Config(), new HealthProbe(ssh, TimeProvider.System), new StringWriter(), new StringWriter(), CancellationToken.None, on: ["dev-pc"]);
+        Assert.NotEqual(2, code);
+        Assert.Equal(["dev-pc"], ssh.Calls.Select(c => c.Machine).Distinct());
+
+        ssh.Calls.Clear();
+        await Cli.Health(Config(), new HealthProbe(ssh, TimeProvider.System), new StringWriter(), new StringWriter(), CancellationToken.None);
+        Assert.DoesNotContain(ssh.Calls, c => c.Machine == "dev-pc");
     }
 
     private static Hashtable Env(params (string Name, string Value)[] vars)

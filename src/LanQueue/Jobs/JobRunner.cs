@@ -199,6 +199,9 @@ public sealed record JobRequest(
     /// </summary>
     public bool WaitGiven { get; init; }
 
+    /// <summary>Set once the job fell back (0.13.0 B3): why the pool could not take it, for the "running on this computer" line (review A-L5).</summary>
+    public string? FallbackWhy { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -294,6 +297,12 @@ public enum FallbackHint
 
     /// <summary>No fallback entry is configured: WORKERS.md "Using this PC as a fallback" says how.</summary>
     SetUp,
+
+    /// <summary>The fallback could take the job, but lanq runs elevated or as root: run lanq from a terminal without those rights (review A-L8).</summary>
+    Elevated,
+
+    /// <summary>The fallback could take the job, but its work_root is inside the repository (or holds it): give it a work_root of its own.</summary>
+    WorkRoot,
 }
 
 /// <summary>One machine that did not take a job: its name, the reason code (missing_capability, busy, ...), the reason for people, and whether waiting can never help.</summary>
@@ -428,6 +437,8 @@ public sealed partial class JobRunner(
         {
             return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!) { RejectKind = Jobs.RejectKind.WindowsArgs };
         }
+
+        WarnFallbackOnce(req);
 
         // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable),
         // unless this computer's fallback may take it (0.13.0 B3: then the job goes on to that point; see Dispatch).
@@ -860,15 +871,17 @@ public sealed partial class JobRunner(
         var relooked = 0L;
         var preferLooks = 0;
         var waitClock = new WaitClock();
-        var waitingSince = Stopwatch.GetTimestamp();
+        var waitingSince = Timestamp();
         var sshFailed = new HashSet<string>(StringComparer.Ordinal);
+        var fellBack = false;
         while (true)
         {
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
-            // 0.13.0 B3 (M2): once this run fell back, this computer is a candidate too, always after every pool machine.
-            var engaged = await EngagedFallbackAsync(req, needs, ct).ConfigureAwait(false);
+            // 0.13.0 B3: once this job reached its own NoCapacity point and fell back (A-M1), this computer is a candidate too, always after every
+            // pool machine.
+            var engaged = await EngagedFallbackAsync(req, needs, fellBack, ct).ConfigureAwait(false);
             var judged = engaged is null ? assessed : [.. assessed, engaged];
             if (engaged is { Eligible: true })
             {
@@ -943,9 +956,10 @@ public sealed partial class JobRunner(
             // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now (or fall back).
             if (judged.All(a => a.Permanent))
             {
-                var never = await FallbackGateAsync(req, needs, "no pool machine can take it", say, ct).ConfigureAwait(false);
+                var never = await FallbackGateAsync(req, needs, "no pool machine can take it", fellBack, say, ct).ConfigureAwait(false);
                 if (never.Go)
                 {
+                    (fellBack, req) = (true, req with { FallbackWhy = "no pool machine can take it" });
                     continue;
                 }
 
@@ -961,9 +975,11 @@ public sealed partial class JobRunner(
 
             if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(judged, sshFailed), round, relooked) is { } budget)
             {
-                var waited = await FallbackGateAsync(req, needs, budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now", say, ct).ConfigureAwait(false);
+                var why = budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now";
+                var waited = await FallbackGateAsync(req, needs, why, fellBack, say, ct).ConfigureAwait(false);
                 if (waited.Go)
                 {
+                    (fellBack, req) = (true, req with { FallbackWhy = why });
                     continue;
                 }
 
@@ -981,6 +997,12 @@ public sealed partial class JobRunner(
             await PauseAsync(req, ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// The monotonic clock the wait budgets are charged on (<see cref="Stopwatch.GetTimestamp"/>); tests replace it, with a delay that moves it,
+    /// to run a whole --wait timeline through the runner.
+    /// </summary>
+    internal Func<long> Timestamp { get; init; } = Stopwatch.GetTimestamp;
 
     /// <summary>How many looks a baseline rerun waits for the machine the job failed on (busy there) before it takes another machine.</summary>
     internal const int PreferRounds = 2;
@@ -1006,7 +1028,7 @@ public sealed partial class JobRunner(
             since = idle;
         }
 
-        clock.Look(Stopwatch.GetElapsedTime(0, Stopwatch.GetTimestamp()), Stopwatch.GetElapsedTime(0, since), state);
+        clock.Look(Stopwatch.GetElapsedTime(0, Timestamp()), Stopwatch.GetElapsedTime(0, since), state);
         return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(BudgetsOf(req));
     }
 
@@ -1318,7 +1340,7 @@ public sealed partial class JobRunner(
         onSlot?.Invoke();
         if (machine.Local)
         {
-            emit("[lanq] running on this computer (fallback: no pool slot)");
+            emit($"[lanq] running on this computer (fallback: {req.FallbackWhy ?? "no pool slot"})");
         }
 
         emit(slot.Contains(',', StringComparison.Ordinal)

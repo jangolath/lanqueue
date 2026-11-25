@@ -29,15 +29,20 @@ public static partial class Cli
         return report;
     }
 
-    /// <summary>Finds a configured machine by name, or explains (exit 2) which names exist.</summary>
-    internal static Machine? FindMachine(FleetConfig config, string? name, string command, TextWriter stderr)
+    /// <summary>
+    /// Finds a configured machine by name, or explains (exit 2) which names exist. With <paramref name="fallback"/> this computer's fallback
+    /// entry is found too, by its exact name (lanq unlock and prune: a stuck fallback slot needs a tool too, review A-M4).
+    /// </summary>
+    internal static Machine? FindMachine(FleetConfig config, string? name, string command, TextWriter stderr, bool fallback = false)
     {
-        var m = config.Machines.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.Ordinal));
+        var m = config.Machines.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.Ordinal))
+            ?? (fallback && config.Fallback is { } fb && string.Equals(fb.Name, name, StringComparison.Ordinal) ? fb : null);
         if (m is null)
         {
             stderr.WriteLine(
                 (name is null ? $"lanq {command} needs a machine name." : $"No machine named '{JobRunner.SafeLine(name)}' in the config.")
-                + " Configured: " + string.Join(", ", config.Machines.Select(x => x.Name)));
+                + " Configured: " + string.Join(", ", config.Machines.Select(x => x.Name))
+                + (fallback && config.Fallback is { } named ? $" (and this computer's fallback, {named.Name})" : ""));
         }
 
         return m;
@@ -49,7 +54,7 @@ public static partial class Cli
     /// </summary>
     internal static async Task<int> Unlock(ParsedArgs p, FleetConfig config, ISshClient ssh, TextWriter stdout, TextWriter stderr, CancellationToken ct)
     {
-        if (FindMachine(config, p.Target, "unlock", stderr) is not { } m)
+        if (FindMachine(config, p.Target, "unlock", stderr, fallback: true) is not { } m)
         {
             return 2;
         }

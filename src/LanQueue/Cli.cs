@@ -1480,12 +1480,19 @@ public static partial class Cli
             return code;
         }
 
-        if (Pinning.Resolve(config, on).Error is { } unknown)
+        // --on may name this computer's fallback entry (review A-M4): health probes it then, by name only; run still refuses that name.
+        var named = on is not null && config.Fallback is { } fb && on.Any(n => string.Equals(n, fb.Name, StringComparison.OrdinalIgnoreCase)) ? fb : null;
+        var poolOn = named is null ? on : [.. on!.Where(n => !string.Equals(n, named.Name, StringComparison.OrdinalIgnoreCase))];
+        if (Pinning.Resolve(config, poolOn).Error is { } unknown)
         {
             return await Error("Rejected", 2, unknown, NextSteps.ArgumentsError(unknown)).ConfigureAwait(false);
         }
 
-        var machines = Pinning.Candidates(config, on);
+        var machines = Pinning.Candidates(config, poolOn);
+        if (named is not null)
+        {
+            machines = [.. machines, named];
+        }
 
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
