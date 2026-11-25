@@ -326,10 +326,100 @@ makes the machine busy (`lanq health` shows `(1 stale: reclaimed by the next cla
 `lanq unlock <name>` clears expired slots at once; `lanq unlock <name> --all --yes` clears every slot (including ones
 left by a lanq before 0.4) when you are sure nothing is running there.
 
+## Memory per job (`job_mem_gb`, 0.13.0)
+
+A job that does not say how much memory it needs reserves nothing: only `max_jobs` limits a machine. Give a machine
+`job_mem_gb: N` (or the pool `policy.job_mem_gb: N`): about how much memory one job uses there. A job's need on that
+machine is the larger of its `--mem` (lanq.yml `mem:`) and `N`; the machine keeps its `min_free_mem_gb` free, and it
+runs at most (total memory - floor) / `N` jobs at once, a cap the slot claim enforces for every lanq run. `lanq doctor
+--remote` shows the arithmetic next to `max_jobs`. A "16 GB" machine reports about 15.9 GB, so a `job_mem_gb` close to
+total minus floor rules every job out there (`mem_exceeds_total`).
+
+## Hygiene for .NET workers (`hygiene:`, 0.13.0)
+
+```yaml
+    hygiene: [dotnet]        # or [dotnet-lean]
+```
+
+- `dotnet`: `MSBUILDDISABLENODEREUSE=1`, `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1` for the machine's jobs.
+- `dotnet-lean`: the same plus `UseSharedCompilation=false`.
+
+Trade-off: node reuse off costs a few seconds per build (new MSBuild nodes each time). `dotnet-lean` makes every build
+start the compiler cold: expect builds 10-40% slower on large solutions, in exchange for no resident compiler server.
+Choose `dotnet-lean` only on machines where memory, not CPU, is the limit. A repository's own
+`<UseSharedCompilation>true</UseSharedCompilation>` wins over the environment, so `dotnet-lean` is best effort.
+
+Why it matters with `max_jobs` above 1: reusable MSBuild nodes and the compiler server are shared by every build of the
+same account. When the job that started one ends, its cleanup (the Windows job object, the Linux sweep) stops it, and
+a sibling job that was using it can fail (`MSB4166: child node exited prematurely`). `lanq doctor` warns about a
+`dotnet` machine with `max_jobs` above 1 and no `hygiene:`. On Linux, cleanup also stops every process of the build
+user that carries exactly `LANQ_JOB=<this job>` (a server that left the job's process group included), but it skips
+MSBuild nodes unless `hygiene:` is set and the compiler server unless it is `dotnet-lean`. lanq never runs `dotnet
+build-server shutdown`: it would stop every build server of the account, a sibling slot's included.
+
+## Using this PC as a fallback (0.13.0)
+
+Off by default. Describe this computer as one entry with `fallback: true` and `local: true` (instead of `ssh:`), then
+choose a policy:
+
+```yaml
+policy:
+  fallback: off            # off (default) | on | ask
+machines:
+  - name: dev-pc
+    os: windows            # must be this computer's OS; otherwise only the fallback is off here
+    local: true
+    fallback: true
+    work_root: C:/lq-fallback
+    capabilities: [dotnet, windows]
+    max_jobs: 1
+```
+
+- It is never an ordinary worker: no placement, `--shards auto` or `lanq health` without its name sees it. It is used
+  only where a job would otherwise end NoCapacity (after the wait budgets, or at once when no pool machine can ever
+  take the job). With `on` or `ask` and no wait flag given, a run waits 120 s for a pool slot first.
+- `lanq run --fallback off|on|ask` overrides the policy for one run (also with `--plan`). A lanq.yml job's
+  `fallback: off` wins over both; lanq.yml may not say `on` or `ask` (a repository never chooses to run on your PC).
+  `--on <worker>` never falls back; `--on dev-pc` is refused.
+- `ask` prompts `run it on this computer (dev-pc)? [y/N]` only when stdin and stderr are a terminal and there is no
+  `--json`, `CI`, `TERM=dumb`, `LANQ_NONINTERACTIVE` or coding agent; elsewhere it acts as `off` and says so. A yes
+  holds for the rest of that run; a prompt with no answer in 120 s is a no, and the run asks no more.
+- Once a run fell back, its other shards and plan jobs may use this computer's slots too (`max_jobs`, memory), always
+  after every free pool slot; another lanq run that finds those slots busy ends NOT RUN.
+- It runs the same scripts a worker gets, without sshd, with an environment built from a short allowlist (none of your
+  `SSH_AUTH_SOCK`, tokens, `MSBuild*` or `LANQ_JOB` reach the job), in a job object that ends with lanq on Windows. On
+  Linux Ctrl+C stops the wrapper and cleanup stops the job; if the terminal is closed, the slot goes stale as on a worker.
+- It still runs repository code under your account (your home folder, browser profile, keys on disk): that is why it is
+  off by default. lanq refuses to use it when it runs elevated or as root, or when `work_root` and the repository overlap.
+- Results say so: `[lanq] running on this computer (fallback: no pool slot)`, the status line `(N of M jobs on this
+  computer, fallback)`, JSON `fallback` and `fallbackJobs`, jobs.jsonl `fallback`, `lanq stats` "(this computer)". Such a
+  run is not pool evidence: rerun on the pool to confirm.
+
+## The `post:` step (0.13.0)
+
+lanq.yml `post: [dotnet, build-server, status]` (or `lanq run --post "dotnet build-server status"`) runs one more
+allowlisted command after the job: after its fetch, before its cleanup, in the same slot and folder, with its own pid
+file and a 5-minute limit. It runs after Completed, Failed and TimedOut; its exit code is a warning only. A hook acts
+with the account's full reach on the worker. To stop build servers, use `hygiene:` instead: a hook that stops them
+stops a sibling slot's too.
+
+## Cleaning up leftovers (`lanq prune`, 0.13.0)
+
+A crashed orchestrator or a dropped connection can leave `jobs/<id>`, `incoming/<id>.*` and pid files behind, and
+repository caches grow. `lanq prune build-01` (or `--all`) lists what it would remove, per kind with sizes; add `--yes`
+to remove it. It removes only entries named like lanq's job ids, older than `--older-than` (default `2d`), never one a
+slot file (live or stale: `lanq unlock` decides) or a running process names. `--caches` adds repository caches unused
+for 30 days (or `--older-than`, if larger); every cache step runs only while no slot is in use, holding every slot.
+It refuses a `work_root` at a drive or filesystem root or your home folder, one without `locks/`, and one whose `jobs`,
+`incoming`, `locks` or `repos` is a link, and it removes a link as a link without following it. A paused machine or
+one outside its hours is skipped unless `--force`.
+
 ## For AI agents reading this
 
 - You may **use** workers through `lanq run --needs <capabilities> -- <allowlisted command>`; see
   `docs/agents/`.
 - You must **not** set up workers, edit `machines.yml`, change allowlists, install software on workers, or handle
-  SSH keys: that is the developer's job. Do not run `lanq makeready` or `lanq unlock` unless the developer asks. If a job fails because a worker lacks a tool, report which capability is
+  SSH keys: that is the developer's job. Do not run `lanq makeready` or `lanq unlock` unless the developer asks.
+  `lanq prune` without `--yes` only lists and is fine to run; never add `--yes`, `--force` or `--fallback on|ask`
+  unless the developer said so. If a job fails because a worker lacks a tool, report which capability is
   missing instead of trying to fix the worker.

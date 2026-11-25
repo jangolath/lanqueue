@@ -910,3 +910,14 @@ rather than pinning shard membership. Shards on one machine run at the same time
 use fixed ports or fixed paths outside the worktree collide; give such suites `max_jobs: 1` machines or a capability tag.
 A failure that comes and goes is flaky whether sharded or not: re-run that shard's tests locally, do not raise
 `--shard-retries` (it only covers lost machines).
+
+## Sizing shards by memory (0.13.0)
+
+On a pool whose machines differ in RAM, give each machine `job_mem_gb:` (about what one shard of your suite uses
+there; more cores run more test hosts, so it is a machine fact). A shard then needs the larger of its `--mem` and that
+size, each machine keeps its `min_free_mem_gb` free, and no machine runs more than (total - floor) / `job_mem_gb`
+shards at once, whatever `max_jobs` says. `--shards auto` counts the same slots. `lanq doctor --remote` shows how many
+jobs each machine's memory covers.
+
+The repository's `samples/monorepo/` is a worked example: three unit shards and two integration shards over the
+shipped `scripts/lanq/dotnet-test-shard.*` scripts (see its README).

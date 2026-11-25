@@ -155,3 +155,4 @@
   in a loop. Keep `--no-wake` unless the developer allowed waking machines.
 - Never shard a command that is not idempotent or that writes shared state (deploy, migrate a shared database,
   publish, push).
+- lanq 0.13.0: `NoCapacity` is NOT RUN, never a pass. Never pass `--fallback on|ask`, `--post` or `lanq prune --yes` unless the developer said so; `lanq prune <machine> --json` without `--yes` only lists. A result with `fallbackJobs` above 0 ran on the developer's PC: report it as not pool evidence.

@@ -24,9 +24,54 @@
   flags its message and next step name the budget that ran out (a larger `--wait-slot`, or `lanq health` first and
   then a larger `--wait-eligible`). A NoCapacity job is NOT RUN, never a pass.
 
+- **This computer as an explicit fallback (off by default).** A machines.yml entry with `fallback: true` and
+  `local: true` (instead of `ssh:`) describes the PC you run lanq on. It is never an ordinary worker: it is used only
+  where a job would otherwise end NoCapacity, and only when `policy.fallback: on` (or `ask`), or `lanq run --fallback
+  on|ask`, allows it. `--fallback off` and a lanq.yml job's `fallback: off` forbid it; lanq.yml may not say `on` or
+  `ask`. With no wait flag given, a run that may fall back first waits 120 s for a pool slot. `ask` prompts only at a
+  terminal (never with `--json`, `CI`, `TERM=dumb`, `LANQ_NONINTERACTIVE` or a coding agent) and acts as `off`
+  elsewhere. The local runner starts the same scripts a worker gets, with an environment built from a short allowlist
+  (no `SSH_AUTH_SOCK`, tokens, `MSBuild*` or `LANQ_JOB` of yours reach the job), in a job object that ends with lanq on
+  Windows. It refuses to run when lanq is elevated or root. Results say so: stderr `[lanq] running on this computer`,
+  the status line `(N of M jobs on this computer, fallback)`, JSON `fallback: true` and top-level `fallbackJobs`,
+  jobs.jsonl `fallback: true`, `lanq stats` "(this computer)", and an `ask_developer` next step: such a run is not pool
+  evidence. With the fallback off, a NoCapacity whose job this computer could run suggests `--fallback on`
+  (`ask_developer`, never run by an agent). `--on <the fallback>` is refused; `--on` never falls back.
+- **`hygiene: [dotnet]` / `[dotnet-lean]`** per machine: `dotnet` sets `MSBUILDDISABLENODEREUSE=1`,
+  `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` for the machine's jobs (MSBuild nodes end with each build, so
+  parallel jobs never share one); `dotnet-lean` also sets `UseSharedCompilation=false` (no resident compiler server;
+  builds 10-40% slower). An explicit `env:` and a job's `--env` win. On Linux, cleanup (and the stop before a fetch, and a
+  stale slot's reclaim) now also stops every process of the build user carrying exactly `LANQ_JOB=<this job>`, rechecked
+  before each signal, but never an MSBuild node or the compiler server unless the profile makes them private. `lanq
+  doctor` warns about a `dotnet` machine with `max_jobs` above 1 and no `hygiene:`. lanq never runs
+  `dotnet build-server shutdown`.
+- **`post:` step.** lanq.yml `post:` (a list or a plain string, like `command:`) or `lanq run --post "CMD"` runs one more
+  allowlisted command after the job: after its fetch, before its cleanup, in the same slot, with a 5-minute limit. It
+  runs after Completed, Failed and TimedOut (the job is stopped first), never after Cancelled, WindowClosed, a lost
+  connection or a plan timeout. Its exit code is a warning only (`[lanq] post: exit N (warning only)`, JSON
+  `post: {exitCode, timedOut, seconds}`). It acts with the account's full reach: to stop build servers, use `hygiene:`.
+- **`lanq prune <machine>|--all`** lists (and with `--yes` removes) leftovers of jobs no lanq runs any more: old
+  `jobs/<id>`, `incoming/<id>.*`, dead pid files and lanq's own temporary files, older than `--older-than` (default
+  2d), never one a slot or a running process names. `--caches` adds repository caches unused for 30 days; cache steps
+  run only while no slot is in use. It stays inside `work_root` and never follows a link.
+- `lanq doctor --remote` reports, for a machine with a job size, how many jobs its memory covers next to `max_jobs`
+  (WARN two or more above it, or when not even one fits).
+- `lanq run --dry-run --json` machines carry `needGb`; `lanq health` shows a slot cap a job size sets.
+- The sample's CI job runs on pull requests that touch the sample, on main and weekly.
+
 ### Changed
 
-- `--wait` is now range-checked: a negative, fractional or non-numeric value, or one above a week, is refused (exit 2).
+- `--wait` is now range-checked: a negative, fractional or non-numeric value is refused (exit 2). A value above a week is
+  taken as a week, with a note on stderr (0.12 accepted any number).
+- **Load from lanq's own jobs is a slot wait.** A machine held for load or memory pressure while lanq jobs run there
+  counts as waiting for a slot (`--wait-slot`), not for an eligible machine.
+- With `--wait-eligible`/`--wait-slot`, each budget ends on its own clock; only plain `--wait` also caps the total.
+- Shard sets end on the eligible budget when claims fail over ssh, like a single job; their and plans' next steps name
+  the budget that ran out.
+- A capped claim (a job size) counts every live slot, so a run without the cap cannot push a machine over it.
+- Cleanup in git mode removes the job folder with the `\\?\` form of `rd /s /q` (paths over MAX_PATH), as archive mode did.
+- **New keys need lanq 0.13.0:** `job_mem_gb`, `hygiene`, `fallback`, `local`, `policy.fallback` in machines.yml;
+  `fallback` and `post` in lanq.yml. An older lanq refuses a file that uses them ("unknown key").
 - **The free-memory floor is kept free when slots are counted.** With `--mem` (or a job size), a machine's job slots are
   now (free memory - `min_free_mem_gb`) / need instead of free memory / need, so a machine may take one copy fewer than
   in 0.12 (for example 12.5 GB free, a 2 GB floor and `--mem 4`: two copies, not three). A machine whose total memory

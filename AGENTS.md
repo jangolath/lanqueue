@@ -36,6 +36,10 @@ Ask the developer first: `lanq wake`, `lanq health --wake`, `lanq run` without `
 (also `--all`; `--tune` only when the developer asks for it), `lanq unlock`. They act on someone else's PC. (lanq's release smoke, `scripts/smoke-workers.ps1`, runs
 `lanq unlock` on its smoke machines; it too runs only when the developer asks.)
 
+Since 0.13.0 you may also run `lanq run` with `--wait-eligible S` / `--wait-slot S`, and `lanq prune <machine> --json`
+or `lanq prune --all --json` without `--yes` (it only lists). Never pass `--fallback on` or `--fallback ask`, `--post`,
+or `lanq prune --yes`/`--force` unless the developer said so.
+
 For the developer only, never you: `lanq makeready --setup` and `--add`, any `--yes`, `lanq init`, editing
 `machines.yml` or `lanq.yml`, `ssh` to a worker yourself.
 
@@ -150,6 +154,12 @@ When several agents work on one PC at once (see [docs/PARALLEL.md](docs/PARALLEL
   `lanq.yml` or the allowlists yourself.
 
 ## Hard rules
+
+- `NoCapacity` (75) is NOT RUN, never a pass. A result with `fallbackJobs` above 0 (or `fallback: true`) ran on the
+  developer's own PC, not on the pool: it is not pool evidence; say so in your report. A step suggesting
+  `--fallback on` is `ask_developer`: only the developer decides to use their PC.
+- A `post` object is information only (its exit code is a warning). Never add a `post:` step, or `--post`, to make a
+  run look green, and never use one to stop build servers (that is `hygiene:` in machines.yml, the developer's).
 
 - Do not edit `machines.yml`, the allowlists (`policy.allowed_commands`, `policy.allowed_directories`,
   `policy.allowed_env`), `known_hosts` or any SSH key or agent setting. The developer owns them. Never edit `lanq.yml`

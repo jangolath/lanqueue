@@ -82,3 +82,18 @@ Extras (`lanq.extras.yml`), one at a time with `--only`:
 dotnet test samples/monorepo/Sample.slnx -c Release
 cd samples/monorepo/web && npm ci && npm test && npm run typecheck
 ```
+
+## For contributors
+
+Use this sample for any change that touches placement, waits, sharding, memory, cleanup or the worker scripts:
+
+1. Allow the commands this README lists in your `machines.yml` (`policy.allowed_commands`).
+2. `lanq run --plan --plan-file samples/monorepo/lanq.yml --dry-run --json` (or `lanq.linux.yml`) to see where each job
+   would go, then the same without `--dry-run`.
+3. Try the 0.13.0 features against it: `job_mem_gb` on a small worker (it shows `mem_exceeds_total` while the plan
+   completes elsewhere), `--wait-eligible 30 --wait-slot 600` with every worker paused (NoCapacity naming `eligible`),
+   `hygiene: [dotnet]` (no leftover MSBuild processes after cleanup), `lanq prune <worker>` (lists, never removes without
+   `--yes`) and, if you set one up, the fallback entry with `--fallback off` (NOT RUN, with the suggestion) and
+   `--fallback on` (runs here, labelled).
+4. Report the plan's wall time and the per-job durations from `lanq stats --json` in your pull request when the change
+   could affect them.

@@ -540,3 +540,14 @@ picks the folder fetched files go to. If a plan job is refused for an `env:` nam
 Machine names are per person: `big-01` in your `machines.yml` may not exist in a colleague's. In a shared `lanq.yml`
 prefer `needs:` and `size:` / `min_size:`, which travel. `on:` is for a plan only you use; an unknown name refuses the
 plan (exit 2) with your configured names.
+
+## Waits, the fallback and post: (0.13.0)
+
+- `--wait-eligible S` and `--wait-slot S` work with `--plan` as with a single run: plan-level budgets, idle clocks that
+  count only while no job of the plan holds a slot. `--wait S` sets both.
+- `fallback: off` (per job or in `defaults:`) keeps a job off the developer's PC whatever `--fallback` or
+  `policy.fallback` say (for example a Docker job). `on` and `ask` are refused: only the developer chooses to use their
+  PC, with `lanq run --plan --fallback on`.
+- `post:` (a list or a plain string, like `command:`) runs one more allowlisted command after the job, its fetch done,
+  before its cleanup (see docs/WORKERS.md). It runs once per shard, as written (`{shard}` is refused). `--post` is
+  refused with `--plan`: the plan's `post:` keys own it.

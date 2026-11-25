@@ -227,6 +227,7 @@ added; judge an unknown one by `permanent`.
 | `busy` | no | Every live slot is taken. For an `--exclusive` job, any live slot in use ("busy (slots 1/4; --exclusive needs all 4 free)"). Stale slots do not count; when there are some, the reason says so: "busy (slots 3/4, 1 stale: reclaimed by the next claim)". Stale slots a claim of this run could not reclaim count as busy for the rest of the run: "busy (slots 2/2, 1 stale, not reclaimable)". |
 | `avoided` | no | `--shards` only: an earlier attempt of the shard lost the connection there, and it may still be running. |
 | `held` | no | Any other hold. |
+| `fallback_refused` | yes | This computer's fallback entry (0.13.0): lanq runs elevated or as root, or its `work_root` and the repository overlap. |
 
 ### With --fetch (conditional)
 
@@ -1023,6 +1024,37 @@ stats then prints the message on stderr and exits 70 too.
 `run`, `run --dry-run`, `init`, `makeready --add`, `doctor` and `stats` never print this shape: their errors use their
 own object with the same `status`, `exitCode` and `nextSteps` (and `null`, zeros or empty lists where there is no
 value).
+
+## 0.13.0 fields
+
+All are additions; a field is left out when it does not apply.
+
+| Where | Field | Meaning |
+| --- | --- | --- |
+| run, shard set, plan, plan job rows | `waited` | NoCapacity after waiting: `{eligibleSeconds, slotSeconds, budget}`, `budget` is `eligible` or `slot` (the budget that ran out). |
+| `lanq health --needs` rows, dry-run `machines` | `needGb` | The job's memory need on that machine: the larger of `--mem` and its job size. |
+| run, each shard, plan job row | `fallback` | `true` when it ran on this computer's fallback entry, not on the pool. |
+| run, shard set, plan (top level) | `fallbackJobs` | How many jobs (shards) ran on this computer. Above 0: not pool evidence; say so. |
+| run, each shard, single plan job | `post` | The `post:` step: `{exitCode, timedOut, seconds}`. Its exit code is a warning only; `status` and the exit code stay the job's. |
+| `lanq stats` machines | `thisComputer` | `true` for this computer's fallback entry. |
+
+A NoCapacity result may carry two `ask_developer` steps about the fallback: one with `lanq run ... --fallback on` (this
+computer could run the job; only the developer decides), or one pointing at docs/WORKERS.md "Using this PC as a
+fallback" (none is configured). A run with `fallbackJobs` above 0 carries an `ask_developer` step with the pool-only
+rerun (`--fallback off --wait-slot 1800`). Neither is ever `safeToRunUnattended`.
+
+### lanq prune --json
+
+```json
+{"status":"Listed","exitCode":0,"machines":[{"name":"build-01","wouldRemove":[{"kind":"job","name":"20261101-101010-0a0b0c","bytes":8192}],
+ "skipped":[{"name":"20261101-101010-222222","why":"live"}]}],"nextSteps":[...]}
+```
+
+`status`: `Listed` (no `--yes`), `Completed`, `Incomplete` (exit 1: `failed` lists what could not be removed),
+`InfraError` (70), `Held` (75: every selected machine paused or outside its hours) or `Rejected` (2). Each machine has
+`wouldRemove` (without `--yes`) or `removed`, entries `{kind, name, bytes}` with `kind` `job`, `incoming`, `pidfile`,
+`leftover` or `cache`; `skipped` (`why`: `live`, a slot or a running process names it; `busy`, slots are in use so
+caches were left alone); `failed`; and `note` when nothing was done there (unreachable, held, refused).
 
 ## nextSteps
 

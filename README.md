@@ -1158,6 +1158,23 @@ further back it reads `(merge-base with origin/main)`.
 The verdict is per job (or shard), not per test: a `preexisting` verdict means the same command failed at the base,
 not that the same tests did. Read both logs when it matters.
 
+## Memory, waiting, this PC and cleanup (0.13.0)
+
+- **Memory per job.** `job_mem_gb:` on a machine (or `policy.job_mem_gb:`) says about how much one job uses there. A
+  job then needs the larger of its `--mem` and that size, the machine keeps its `min_free_mem_gb` free, and it never
+  runs more jobs than its memory covers (`lanq doctor --remote` shows the arithmetic).
+- **Two wait budgets.** `--wait-eligible S` waits while no machine can take this kind of job; `--wait-slot S` waits
+  while capable machines are busy. `--wait S` still sets both. A job that runs out is NOT RUN (`NoCapacity`, 75), and
+  the JSON `waited.budget` says which budget ended it.
+- **This PC as a last resort, off by default.** A machines.yml entry with `fallback: true` and `local: true` describes
+  the computer you run lanq on; `policy.fallback: on|ask` or `lanq run --fallback on|ask` lets a job the pool cannot
+  take run there, labelled in every output. See [docs/WORKERS.md](docs/WORKERS.md#using-this-pc-as-a-fallback-0130).
+- **Hygiene and post: steps.** `hygiene: [dotnet]` keeps parallel .NET jobs from sharing MSBuild nodes; lanq.yml
+  `post:` (or `--post`) runs one more allowlisted command after a job, its exit code a warning only.
+- **`lanq prune`** lists (and with `--yes` removes) what crashed or interrupted jobs left on a worker.
+- **Try it:** `samples/monorepo/` is a small .NET + React repository with ready plans for your pool
+  (`lanq run --plan --plan-file samples/monorepo/lanq.yml`).
+
 ## Keeping your keys safe
 
 `lanq` never stores or sends your key; it only calls `ssh` and `scp`. The aim is that a synced folder, a stolen
@@ -1485,7 +1502,7 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   is reclaimed by the next claim that passes it (its job is killed first if it is somehow still running); until then
   it does not count as in use (see [Stale slots](#exclusive-jobs---exclusive)). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
-- No persistent queue: `--wait` polls every 15 seconds.
+- No persistent queue: `--wait` (or `--wait-eligible` / `--wait-slot`) polls every 15 seconds.
 - Plan files (`lanq run --plan`) pass nothing between jobs: each job runs in its own throw-away folder, maybe on
   another machine, and `after:` only orders jobs (a test job builds what it needs itself).
 - A plan's fetches have no plan-wide total: at worst a plan writes the number of fetching jobs times the per-job limit
