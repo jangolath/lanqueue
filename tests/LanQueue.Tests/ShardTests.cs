@@ -183,6 +183,9 @@ internal sealed class Countdown(int target)
 
 public sealed class ShardTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+
     private const int TestTimeout = 60_000;
 
     internal const string PoolYaml = """
@@ -262,20 +265,20 @@ public sealed class ShardTests : IDisposable
     [Fact]
     public void TheShardEnvironmentSitsNextToLanqJobOnBothSystems()
     {
-        var linux = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npx", "jest"], null, new ShardInfo(3, 8));
-        Assert.Contains("'LANQ_JOB=j1' 'LANQ_SHARD=3' 'LANQ_SHARDS=8' ", linux, StringComparison.Ordinal);
-        Assert.DoesNotContain("LANQ_SHARD", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npx", "jest"]), StringComparison.Ordinal);
+        var linux = RemoteScripts.Execute(T.Linux(), _j1, ".", ["npx", "jest"], null, new ShardInfo(3, 8));
+        Assert.Contains("'LANQ_JOB=" + _j1 + "' 'LANQ_SHARD=3' 'LANQ_SHARDS=8' ", linux, StringComparison.Ordinal);
+        Assert.DoesNotContain("LANQ_SHARD", RemoteScripts.Execute(T.Linux(), _j1, ".", ["npx", "jest"]), StringComparison.Ordinal);
 
-        var windows = RemoteScripts.Execute(T.Windows(), "j1", ".", ["npx", "jest"], null, new ShardInfo(3, 8));
-        var job = windows.IndexOf("$env:LANQ_JOB = 'j1'", StringComparison.Ordinal);
+        var windows = RemoteScripts.Execute(T.Windows(), _j1, ".", ["npx", "jest"], null, new ShardInfo(3, 8));
+        var job = windows.IndexOf("$env:LANQ_JOB = '" + _j1 + "'", StringComparison.Ordinal);
         Assert.True(job > 0);
         Assert.True(windows.IndexOf("$env:LANQ_SHARD = '3'", StringComparison.Ordinal) > job);
         Assert.Contains("$env:LANQ_SHARDS = '8'", windows, StringComparison.Ordinal);
-        Assert.DoesNotContain("LANQ_SHARD", RemoteScripts.Execute(T.Windows(), "j1", ".", ["npx", "jest"]), StringComparison.Ordinal);
+        Assert.DoesNotContain("LANQ_SHARD", RemoteScripts.Execute(T.Windows(), _j1, ".", ["npx", "jest"]), StringComparison.Ordinal);
 
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1", ".", ["npx"], null, new ShardInfo(5, 4)));
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Windows(), "j1", ".", ["npx"], null, new ShardInfo(65, 65)));
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1", ".", ["npx"], null, new ShardInfo(0, 4)));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), _j1, ".", ["npx"], null, new ShardInfo(5, 4)));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Windows(), _j1, ".", ["npx"], null, new ShardInfo(65, 65)));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), _j1, ".", ["npx"], null, new ShardInfo(0, 4)));
     }
 
     /// <summary>The largest shard environment still leaves the Windows job and prepare scripts under the 7200-character guard.</summary>
@@ -297,11 +300,11 @@ public sealed class ShardTests : IDisposable
     public void ARealShJobSeesItsShard()
     {
         var root = Path.Combine(_dir, "worker");
-        Directory.CreateDirectory(Path.Combine(root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(root, "locks"));
         var m = T.Linux();
         m.WorkRoot = root;
-        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["sh", "-c", "printf '%s/%s' \"$LANQ_SHARD\" \"$LANQ_SHARDS\""], null, new ShardInfo(2, 5))));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, _j1, ".", ["sh", "-c", "printf '%s/%s' \"$LANQ_SHARD\" \"$LANQ_SHARDS\""], null, new ShardInfo(2, 5))));
         Assert.Equal("2/5", output);
     }
 
@@ -310,11 +313,11 @@ public sealed class ShardTests : IDisposable
     public void ARealPowerShellJobSeesItsShard()
     {
         var root = Path.Combine(_dir, "worker").Replace('\\', '/');
-        Directory.CreateDirectory(Path.Combine(root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(root, "locks"));
         var m = T.Windows();
         m.WorkRoot = root;
-        var script = RemoteScripts.Execute(m, "j1", ".", ["hostname"], null, new ShardInfo(2, 5))
+        var script = RemoteScripts.Execute(m, _j1, ".", ["hostname"], null, new ShardInfo(2, 5))
             .Replace("& 'hostname'", "[Console]::Out.Write($env:LANQ_SHARD + '/' + $env:LANQ_SHARDS)", StringComparison.Ordinal);
         var file = Path.Combine(_dir, "shard.ps1");
         File.WriteAllText(file, "\ufeff" + script);

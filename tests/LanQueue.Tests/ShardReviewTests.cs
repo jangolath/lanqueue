@@ -80,7 +80,6 @@ internal sealed class OverlapPayloads : IPayloadBuilder
 }
 
 /// <summary>Fixes from the shard-0.5.1 review: overlapping builds, --wait, --mem per shard, safe retries, stray exceptions, Ctrl+C after the end.</summary>
-[Collection(nameof(RealJobScripts))]
 public sealed class ShardReviewTests : IDisposable
 {
     private const int TestTimeout = 60_000;

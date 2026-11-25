@@ -11,7 +11,6 @@ namespace LanQueue.Tests;
 /// Phase 1 review M2, M4 and M5: the wait budgets and the memory cap through the real runner paths (a single job, a shard set and a plan),
 /// not only at the WaitClock and script-builder level.
 /// </summary>
-[Collection(nameof(RealJobScripts))]
 public sealed class WaitRunTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "lanq-waitrun-" + Guid.NewGuid().ToString("N"));
@@ -139,6 +138,41 @@ public sealed class WaitRunTests : IDisposable
             new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(home, "state")), home, _dir, o, e, CancellationToken.None, (_, _) => Task.CompletedTask));
         Assert.Equal(75, code);
         Assert.Contains("\"waited\":{\"eligibleSeconds\":0,\"slotSeconds\":0,\"budget\":\"eligible\"}", o.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PlainWait600ThroughTheRunnerEndsWhere012Did(bool shards)
+    {
+        // p1 L2 / review A-L2: the --wait 600 timeline through Dispatch and ShardRunner on a fake clock. The pool flips between paused
+        // (eligible wait) and full (slot wait) on every look; --wait 600 still ends at 600 s of idle time in all, as 0.12 did, and waited
+        // splits the 600 s between the two states.
+        long now = 0;
+        var looks = 0;
+        var ssh = new FakeSsh
+        {
+            Handler = (_, cmd) => cmd.Contains("disk_free_gb", StringComparison.Ordinal)
+                ? new SshResult(0, Interlocked.Increment(ref looks) % 2 == 1 ? Probe(paused: true) : Probe().Replace("slots_used=0", "slots_used=4", StringComparison.Ordinal))
+                : new SshResult(0, ""),
+        };
+        var runner = new JobRunner(
+            ConfigLoader.Parse(Fleet), ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, TimeProvider.System), new JobLog(Path.Combine(_dir, ".lanq")),
+            Path.Combine(_dir, "tmp"), _ => { }, delay: (d, _) =>
+            {
+                Interlocked.Add(ref now, (long)(d.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+                return Task.CompletedTask;
+            })
+        {
+            Timestamp = () => Interlocked.Read(ref now),
+        };
+        var req = new JobRequest(["dotnet"], ["dotnet", "test"], ".", _dir, TimeSpan.FromSeconds(600)) { WaitGiven = true };
+        var waited = shards
+            ? (await Guarded(runner.RunShardsAsync(req, new ShardOptions(2), CancellationToken.None))).Waited!
+            : (await Guarded(runner.RunAsync(req, CancellationToken.None))).Waited!;
+        Assert.Equal(TimeSpan.FromSeconds(600), waited.Eligible + waited.Slot);
+        Assert.True(waited.Eligible > TimeSpan.Zero && waited.Slot > TimeSpan.Zero, "both states were charged");
+        Assert.Equal(600, System.Diagnostics.Stopwatch.GetElapsedTime(0, now).TotalSeconds, 0.001);
     }
 
     [Fact]

@@ -7,6 +7,9 @@ namespace LanQueue.Tests;
 /// <summary>Per-machine env: and path_prepend: reach the job process only, validated at load and quoted safely in both shells.</summary>
 public sealed class JobEnvironmentTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+
     private const char NL = (char)10;
 
     /// <summary>Tries to break out of the quoting in sh and PowerShell; it must arrive in the job as exactly these characters.</summary>
@@ -16,7 +19,7 @@ public sealed class JobEnvironmentTests : IDisposable
 
     public JobEnvironmentTests()
     {
-        Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(_root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(_root, "locks"));
     }
 
@@ -145,7 +148,7 @@ public sealed class JobEnvironmentTests : IDisposable
     public void TheJobMarkerComesAfterTheMachinesEnvOnLinux()
     {
         var m = WithEnv(T.Linux(), ("FOO", "1"));
-        Assert.Contains("env 'FOO=1' 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+        Assert.Contains("env 'FOO=1' 'LANQ_JOB=" + _j1 + "' /bin/sh -c", RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -260,13 +263,13 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var m = WithEnv(T.Linux(), ("NODE_OPTIONS", "--max-old-space-size=2048"));
         m.PathPrepend.AddRange(["/home/u/.nvm/bin", "/opt/x"]);
-        var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
-        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'LANQ_JOB=j1' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
+        var s = RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]);
+        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'LANQ_JOB=" + _j1 + "' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
     public void LinuxJobWithoutEnvGetsOnlyTheJobMarker() =>
-        Assert.Contains(" env 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+        Assert.Contains(" env 'LANQ_JOB=" + _j1 + "' /bin/sh -c", RemoteScripts.Execute(T.Linux(), _j1, ".", ["npm", "test"]), StringComparison.Ordinal);
 
     [Fact]
     public void AnUnsafeJobIdNeverReachesTheEnvironment() =>
@@ -275,7 +278,7 @@ public sealed class JobEnvironmentTests : IDisposable
     [Fact]
     public void LinuxHostileValueIsOneSingleQuotedWord()
     {
-        var s = RemoteScripts.Execute(WithEnv(T.Linux(), ("FOO", Hostile)), "j1", ".", ["npm", "test"]);
+        var s = RemoteScripts.Execute(WithEnv(T.Linux(), ("FOO", Hostile)), _j1, ".", ["npm", "test"]);
         Assert.Contains("'FOO=a'\\''; touch PWNED; echo '\\''b $(touch PWNED2)", s, StringComparison.Ordinal);
     }
 
@@ -284,7 +287,7 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var m = WithEnv(T.Windows(), ("NODE_OPTIONS", "--max-old-space-size=2048"), ("Q", "it\u2019s"));
         m.PathPrepend.AddRange(["C:/Users/b/.cargo/bin", "D:\\tools"]);
-        var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
+        var s = RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]);
         Assert.Contains("$env:NODE_OPTIONS = '--max-old-space-size=2048'", s, StringComparison.Ordinal);
         Assert.Contains("$env:Q = 'it\u2019\u2019s'", s, StringComparison.Ordinal);
         Assert.Contains("$env:Path = 'C:\\Users\\b\\.cargo\\bin;D:\\tools' + $(if ($env:Path) { ';' + $env:Path } else { '' })", s, StringComparison.Ordinal);
@@ -303,9 +306,9 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("FOO", Hostile));
         m.WorkRoot = _root;
         m.PathPrepend.Add(bin);
-        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["lanq-test-tool"])));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, _j1, ".", ["lanq-test-tool"])));
         Assert.Equal(Hostile + "|", output);
-        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", _j1)));
     }
 
     /// <summary>Runs the generated Windows script in a real Windows PowerShell: same guarantees.</summary>
@@ -318,7 +321,7 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Windows(), ("FOO", Hostile + " \u2018x\u2019 \u201A \u201B"));
         m.WorkRoot = _root;
         m.PathPrepend.Add(bin.Replace('\\', '/'));
-        var script = RemoteScripts.Execute(m, "j1", ".", ["lanqtesttool"])
+        var script = RemoteScripts.Execute(m, _j1, ".", ["lanqtesttool"])
             .Replace("& 'lanqtesttool'", "& 'lanqtesttool'; [Console]::Out.Write(($env:FOO -ceq " + LanQueue.Policy.ShellQuote.PowerShell(m.Env["FOO"]) + "))", StringComparison.Ordinal);
         var file = Path.Combine(Path.GetTempPath(), "lanq-env-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(file, "\ufeff" + script);
@@ -326,7 +329,7 @@ public sealed class JobEnvironmentTests : IDisposable
         {
             var output = T.JobOutput(WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file));
             Assert.Equal("found" + Environment.NewLine + "True", output);
-            Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
+            Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", _j1)));
         }
         finally
         {

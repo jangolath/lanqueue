@@ -17,6 +17,11 @@ namespace LanQueue.Tests;
 /// </summary>
 public sealed class BaselineReviewTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+    private readonly string _j2 = T.NewJobId();
+    private readonly string _j3 = T.NewJobId();
+
     private const int TestTimeout = 60_000;
 
     private const string Solo = """
@@ -370,9 +375,9 @@ public sealed class BaselineReviewTests : IDisposable
             return worker.Run(RemoteScripts.Prepare(worker.Machine, job, repoId, payloadId));
         }
 
-        var p1 = await git.BuildAsync("j1", repo.Dir, repo.Out, PayloadKinds.Bundle, ct);
+        var p1 = await git.BuildAsync(_j1, repo.Dir, repo.Out, PayloadKinds.Bundle, ct);
         Assert.Equal(c2, p1.Sha);
-        var r1 = Prepare("j1", "j1", p1.RepoId!, await git.BuildBundleAsync("j1", repo.Dir, repo.Out, p1.Sha, null, ct));
+        var r1 = Prepare(_j1, _j1, p1.RepoId!, await git.BuildBundleAsync(_j1, repo.Dir, repo.Out, p1.Sha, null, ct));
         Assert.True(r1.Code == 0, r1.Output);
         Assert.Equal(c2, CacheBase(p1.RepoId!));
 
@@ -380,17 +385,17 @@ public sealed class BaselineReviewTests : IDisposable
         var basePayload = await git.BuildCommitAsync("b1", repo.Dir, repo.Out, c1, PayloadKinds.Bundle, ct);
         var rerunBundle = await git.BuildBundleAsync("b1", repo.Dir, repo.Out, c1, c2, ct);
         Assert.Equal(c2, rerunBundle.Base);
-        var r2 = Prepare("j2", "b1", basePayload.RepoId!, rerunBundle);
+        var r2 = Prepare(_j2, "b1", basePayload.RepoId!, rerunBundle);
         Assert.True(r2.Code == 0, r2.Output);
         Assert.Equal(c2, CacheBase(p1.RepoId!));
-        Assert.Equal(c1, repo.Git("-C", Path.Combine(worker.Root, "jobs", "j2"), "rev-parse", "HEAD").Trim());
+        Assert.Equal(c1, repo.Git("-C", Path.Combine(worker.Root, "jobs", _j2), "rev-parse", "HEAD").Trim());
 
         // The next run: incremental on c2, verified by the cache, and the base moves forward.
         var c3 = repo.Commit("c3.txt", "three", "c3");
-        var p3 = await git.BuildAsync("j3", repo.Dir, repo.Out, PayloadKinds.Bundle, ct);
-        var next = await git.BuildBundleAsync("j3", repo.Dir, repo.Out, p3.Sha, c2, ct);
+        var p3 = await git.BuildAsync(_j3, repo.Dir, repo.Out, PayloadKinds.Bundle, ct);
+        var next = await git.BuildBundleAsync(_j3, repo.Dir, repo.Out, p3.Sha, c2, ct);
         Assert.Equal(c2, next.Base);
-        var r3 = Prepare("j3", "j3", p3.RepoId!, next);
+        var r3 = Prepare(_j3, _j3, p3.RepoId!, next);
         Assert.True(r3.Code == 0, r3.Output);
         Assert.Equal(c3, CacheBase(p1.RepoId!));
     }

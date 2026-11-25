@@ -11,7 +11,6 @@ namespace LanQueue.Tests;
 /// Runs the real slot-claim and unlock scripts against prepared slot files: each case once in sh ("linux") and once in PowerShell
 /// ("windows"); a shell this machine does not have is reported as skipped, never silently passed.
 /// </summary>
-[Collection(nameof(RealJobScripts))]
 public sealed class StaleSlotTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-slots-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');

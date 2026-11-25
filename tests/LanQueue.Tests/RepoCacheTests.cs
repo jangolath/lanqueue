@@ -7,6 +7,10 @@ namespace LanQueue.Tests;
 
 public sealed class RepoCacheTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+    private readonly string _j2 = T.NewJobId();
+
     private const string Job = "20260101-120000-aaaaaa";
 
     private readonly TempRepo _repo = new();
@@ -28,7 +32,7 @@ public sealed class RepoCacheTests : IDisposable
         _repo.Git("checkout", "-q", "main");
         _repo.Git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--allow-unrelated-histories", "-m", "join", "other");
 
-        var p = await new GitPayloadBuilder().BuildAsync("j1", _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
+        var p = await new GitPayloadBuilder().BuildAsync(_j1, _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
 
         var expected = string.CompareOrdinal(firstRoot, otherRoot) < 0 ? firstRoot : otherRoot;
         Assert.Equal(expected[..16], p.RepoId);
@@ -37,10 +41,10 @@ public sealed class RepoCacheTests : IDisposable
     [Fact]
     public async Task RepoIdIsStableAcrossCommitsAndOverlays()
     {
-        var first = await new GitPayloadBuilder().BuildAsync("j1", _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
+        var first = await new GitPayloadBuilder().BuildAsync(_j1, _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
         _repo.Commit("c.txt", "three", "more");
         File.WriteAllText(Path.Combine(_repo.Dir, "dirty.txt"), "x");
-        var second = await new GitPayloadBuilder().BuildAsync("j2", _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
+        var second = await new GitPayloadBuilder().BuildAsync(_j2, _repo.Dir, _repo.Out, PayloadKinds.Bundle, CancellationToken.None);
         Assert.NotNull(first.RepoId);
         Assert.Equal(first.RepoId, second.RepoId);
     }
