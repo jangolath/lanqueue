@@ -690,6 +690,37 @@ internal sealed record ErrorJson(string Status, int ExitCode, string Message)
 
 /// <summary>The one object <c>lanq wake --json</c> prints when a packet was sent: Sent (0), Awake (0, with --wait) or NoAnswer (1, with --wait). Failures use <see cref="ErrorJson"/>.</summary>
 /// <param name="Awake">Null without --wait (not checked).</param>
+/// <summary>lanq prune --json (0.13.0 D2): status Listed (no --yes), Completed, Incomplete, InfraError, Held or Rejected; one row per machine.</summary>
+internal sealed record PruneJson(string Status, int ExitCode, IReadOnlyList<PruneMachineJson> Machines)
+{
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>One machine of lanq prune: what it would remove (list only) or removed, what it kept and why, what could not be removed.</summary>
+internal sealed record PruneMachineJson(string Name)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PruneEntryJson>? WouldRemove { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PruneEntryJson>? Removed { get; init; }
+
+    public IReadOnlyList<PruneSkipJson> Skipped { get; init; } = [];
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PruneEntryJson>? Failed { get; init; }
+
+    /// <summary>Why nothing was done there (unreachable, held, refused), or null.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Note { get; init; }
+}
+
+/// <summary>One prunable entry: kind job, incoming, pidfile, leftover or cache; its name (an id, a file or a cache folder); its size.</summary>
+internal sealed record PruneEntryJson(string Kind, string Name, long Bytes);
+
+/// <summary>An entry prune kept: its name, and why (live: a slot or a running process names it; busy: slots in use, caches left alone).</summary>
+internal sealed record PruneSkipJson(string Name, string Why);
+
 internal sealed record WakeJson(string Status, int ExitCode, string Machine, bool Sent, bool? Awake, double DurationSeconds, string Message)
 {
     /// <summary>What to do next (see <see cref="NextStepJson"/>): Sent suggests lanq health, never another wake.</summary>
@@ -812,6 +843,7 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(ResultsTotalJson))]
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
+[JsonSerializable(typeof(PruneJson))]
 [JsonSerializable(typeof(InitJson))]
 [JsonSerializable(typeof(PlanJson))]
 [JsonSerializable(typeof(PlanFileRunJson))]

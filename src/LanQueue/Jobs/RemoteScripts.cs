@@ -1161,7 +1161,7 @@ public static partial class RemoteScripts
             if (Test-Path -LiteralPath $pf) { KillRecorded $pf $true }
             $pp = "$root/locks/post-$id.pid"; if (Test-Path -LiteralPath $pp) { KillRecorded $pp $true }
             {{(repoId is null ? "" : WindowsCacheCleanupBefore(repoId))}}
-            if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
+            if (Test-Path -LiteralPath "$root/jobs/$id") { $full = [IO.Path]::GetFullPath(("$root/jobs/$id").Replace('/','\')); cmd /c rd /s /q "\\?\$full" 2>$null | Out-Null }
             {{(repoId is null ? "" : WindowsCacheCleanupAfter)}}
             Remove-Item -Force -ErrorAction SilentlyContinue "$root/incoming/$id.bundle"
             {{WindowsSlotRemoval(slot)}}

@@ -149,6 +149,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// </summary>
     public IReadOnlyList<string>? Post { get; init; }
 
+    /// <summary>lanq prune --older-than Nh|Nd (0.13.0 D2) in seconds, or null for the default (2 days).</summary>
+    public long? OlderThanSeconds { get; init; }
+
+    /// <summary>lanq prune --caches (0.13.0 D2): also old, unused repository caches.</summary>
+    public bool Caches { get; init; }
+
     /// <summary>True when --wait asked for more than a week (as 0.12 allowed): lanq waits a week and says so (p1 review L1).</summary>
     public bool WaitClamped { get; init; }
 
@@ -220,6 +226,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
+        ["prune"] = ["--all", "--older-than", "--caches", "--yes", "--force", "--json"],
         ["doctor"] = ["--remote", "--force", "--json"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes", "--tune"],
         ["init"] = ["--json"],
@@ -229,7 +236,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
-    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready", "wake" };
+    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready", "wake", "prune" };
 
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
@@ -246,6 +253,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         FallbackMode? fallback = null;
         var waitClamped = false;
         IReadOnlyList<string>? post = null;
+        long? olderThan = null;
+        var cachesFlag = false;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
@@ -314,6 +323,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--wait-slot" when i + 1 < own.Length:
                     waitSlot = WaitValue("--wait-slot", own[++i]);
+                    break;
+                case "--older-than" when i + 1 < own.Length:
+                    olderThan = Cli.ParseAge(own[++i]);
+                    break;
+                case "--caches":
+                    cachesFlag = true;
                     break;
                 case "--post" when i + 1 < own.Length:
                     post = ParsePost(own[++i]);
@@ -569,6 +584,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitGiven = seen.Contains("--wait") || waitEligible is not null || waitSlot is not null,
             WaitClamped = waitClamped,
             Post = post,
+            OlderThanSeconds = olderThan,
+            Caches = cachesFlag,
             Fallback = fallback,
             TimeoutMinutes = timeout,
             MemGb = mem,
@@ -768,12 +785,14 @@ public static partial class Cli
           lanq run ... --exclusive [--shards N|auto] -- dotnet test
           lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
           lanq run ... [--wait-eligible 3600] [--wait-slot 14400] -- dotnet test
+          lanq run ... [--fallback off|on|ask] [--post "CMD"] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq run --plan ... [--on big-01,build-01] [--size light,medium | --min-size heavy] [--plan-timeout M]
           lanq run --plan ... [--fetch-dir DIR] [--fetch-max 1G] [--fetch-max-files 2000]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
+          lanq prune <machine>|--all [--older-than 2d] [--caches] [--yes] [--force] [--json] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--tune] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json] [--tune]
@@ -946,7 +965,7 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" or "prune" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && (own.Contains("--plan") || own.Contains("--plan-file"))
@@ -984,7 +1003,7 @@ public static partial class Cli
             return await Stats(p, log, StatsKeepDays(p, loadConfig), stdout, stderr, ct).ConfigureAwait(false);
         }
 
-        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake"))
+        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake" or "prune"))
         {
             // Help that was asked for goes to stdout; usage after a mistake goes to stderr, so stdout stays clean for scripts.
             var asked = p.Command is "help" or "--help" or "-h";
@@ -1043,6 +1062,12 @@ public static partial class Cli
         if (p.Command == "unlock")
         {
             return await Unlock(p, config, ssh, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
+        if (p.Command == "prune")
+        {
+            // No waker: prune never wakes a machine; a sleeping one is unreachable (70) and left alone.
+            return await Prune(p, config, ssh, new HealthProbe(ssh, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         var waker = new WakeService(new UdpMagicPacketSender(), TimeProvider.System);
