@@ -224,10 +224,11 @@ public static partial class Cli
                 await gate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    if (!p.Force)
+                    // Like makeready: a family PC's PAUSE file and allowed hours are respected; the probe is the only call made then.
+                    // With --force the probe is made only for the job-size check (B4), on a machine that has a job size.
+                    var h = !p.Force || (m.JobMemGb ?? config.Policy.JobMemGb) is not null ? await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false) : null;
+                    if (!p.Force && h is not null)
                     {
-                        // Like makeready: a family PC's PAUSE file and allowed hours are respected; the probe is the only call made then.
-                        var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
                         if (h.HoldKind is HoldKind.Paused or HoldKind.OutsideHours)
                         {
                             return
@@ -243,7 +244,13 @@ public static partial class Cli
                         }
                     }
 
-                    return await RemoteMachineChecks(m, ssh, doctorScript ?? (x => RemoteScripts.Doctor(x, DoctorCheckSeconds)), ct).ConfigureAwait(false);
+                    var checks = await RemoteMachineChecks(m, ssh, doctorScript ?? (x => RemoteScripts.Doctor(x, DoctorCheckSeconds)), ct).ConfigureAwait(false);
+                    if (h is { Reachable: true } && MemoryFitCheck(m, h, config.Policy) is { } fit)
+                    {
+                        checks.Add(fit);
+                    }
+
+                    return checks;
                 }
                 finally
                 {
@@ -427,6 +434,35 @@ public static partial class Cli
                 $"max_jobs {m.MaxJobs} and no hygiene: parallel .NET jobs share MSBuild nodes and the compiler server; a finishing job can break a sibling's build",
                 "add hygiene: [dotnet] to this machine in machines.yml (node reuse off costs a few seconds per build; docs/WORKERS.md)")
             : null;
+
+    /// <summary>
+    /// 0.13.0 B4: for a machine with a job size (its job_mem_gb or the policy's), how many jobs its total memory less its floor covers, next to
+    /// max_jobs: OK when max_jobs fits, WARN when max_jobs exceeds it by 2 or more (lanq already caps the slots at that number; the fix names
+    /// the key, doctor never edits the file), WARN when not even one job fits (every job is mem_exceeds_total there, review L4), OK with a note
+    /// when the machine reports no memory (the size cannot be checked there, review M6). Null without a job size.
+    /// </summary>
+    internal static DoctorCheck? MemoryFitCheck(Machine m, MachineHealth h, PolicyConfig policy)
+    {
+        if ((m.JobMemGb ?? policy.JobMemGb) is not { } size)
+        {
+            return null;
+        }
+
+        DoctorCheck Check(string level, string detail, string? fix = null) => new("remote", m.Name, "job_mem", level, detail, fix);
+        var floor = m.MinFreeMemGb ?? policy.MinFreeMemGb;
+        if (h.MemTotalGb is not { } total)
+        {
+            return Check("ok", string.Create(CultureInfo.InvariantCulture, $"job_mem_gb {size:0.#} cannot be checked on {m.Name} (no memory report); its slots are max_jobs only"));
+        }
+
+        var fits = Math.Max(0, (int)Math.Floor(((total - floor) / size) + 1e-9));
+        var text = string.Create(CultureInfo.InvariantCulture, $"max_jobs {m.MaxJobs}, and {total:0.#} GB total - {floor:0.#} GB floor covers {fits} job{(fits == 1 ? "" : "s")} of {size:0.#} GB");
+        return fits == 0
+            ? Check("warn", text + ": every job is mem_exceeds_total here", $"lower job_mem_gb or min_free_mem_gb for {m.Name} in machines.yml (doctor never edits the file)")
+            : m.MaxJobs - fits >= 2
+                ? Check("warn", text + string.Create(CultureInfo.InvariantCulture, $" (lanq caps it at {fits})"), string.Create(CultureInfo.InvariantCulture, $"set max_jobs: {fits} for {m.Name} in machines.yml (doctor never edits the file)"))
+                : Check("ok", text);
+    }
 
     /// <summary>Expands a leading ~ the way ssh does; a path with other ssh tokens (%d, %u) is skipped.</summary>
     private static string? ExpandHome(string file, DoctorHost host)
