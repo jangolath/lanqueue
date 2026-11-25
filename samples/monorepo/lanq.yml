@@ -1,0 +1,40 @@
+# The sample monorepo's default plan, for Windows workers (tag them windows). Linux workers: lanq.linux.yml. Opt-in
+# jobs (hang, zero tests, Docker): lanq.extras.yml. Run it from the lanqueue repository top:
+#   lanq run --plan --plan-file samples/monorepo/lanq.yml --json --no-wake
+# lanq.yml has no conditions, so a plan cannot pick the .ps1 or the .sh shard script by OS: each plan file names one
+# and asks for that OS. Your machines.yml must allow these commands and folders (see README.md):
+#   allowed_commands: "dotnet build", "dotnet test", "npm run",
+#     "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/dotnet-test-shard.ps1"
+#   allowed_directories: ".", "samples/monorepo/web"
+version: 1
+defaults:
+  needs: [dotnet, windows]
+  timeout: 15
+  mem: 2
+jobs:
+  build:
+    command: [dotnet, build, samples/monorepo/Sample.slnx, -c, Release]
+  unit:
+    after: [build]
+    shards: 3
+    command: [powershell, -NoProfile, -ExecutionPolicy, Bypass, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, samples/monorepo/tests/Sample.UnitTests/Sample.UnitTests.csproj]
+    results: { format: trx, path: "samples/monorepo/tests/Sample.UnitTests/TestResults/*.trx" }
+  integration:
+    after: [build]
+    shards: 2
+    command: [powershell, -NoProfile, -ExecutionPolicy, Bypass, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, samples/monorepo/tests/Sample.IntegrationTests/Sample.IntegrationTests.csproj]
+    results: { format: trx, path: "samples/monorepo/tests/Sample.IntegrationTests/TestResults/*.trx" }
+  serial-tail:
+    after: [integration]
+    exclusive: true
+    command: [dotnet, test, samples/monorepo/tests/Sample.SerialTests/Sample.SerialTests.csproj, -c, Release]
+  web-test:
+    needs: [node]
+    dir: samples/monorepo/web
+    shards: 2
+    command: [npm, run, test:shard, --, "--shard={shard}/{shards}"]
+    results: { format: junit, path: "test-results/*.xml" }
+  web-types:
+    needs: [node]
+    dir: samples/monorepo/web
+    command: [npm, run, typecheck:ci]

@@ -1,0 +1,40 @@
+# The sample monorepo's default plan, for Linux workers (tag them linux). Windows workers: lanq.yml. Opt-in
+# jobs (hang, zero tests, Docker): lanq.extras.yml. Run it from the lanqueue repository top:
+#   lanq run --plan --plan-file samples/monorepo/lanq.linux.yml --json --no-wake
+# lanq.yml has no conditions, so a plan cannot pick the .ps1 or the .sh shard script by OS: each plan file names one
+# and asks for that OS. Your machines.yml must allow these commands and folders (see README.md):
+#   allowed_commands: "dotnet build", "dotnet test", "npm run",
+#     "sh scripts/lanq/dotnet-test-shard.sh"
+#   allowed_directories: ".", "samples/monorepo/web"
+version: 1
+defaults:
+  needs: [dotnet, linux]
+  timeout: 15
+  mem: 2
+jobs:
+  build:
+    command: [dotnet, build, samples/monorepo/Sample.slnx, -c, Release]
+  unit:
+    after: [build]
+    shards: 3
+    command: [sh, scripts/lanq/dotnet-test-shard.sh, samples/monorepo/tests/Sample.UnitTests/Sample.UnitTests.csproj]
+    results: { format: trx, path: "samples/monorepo/tests/Sample.UnitTests/TestResults/*.trx" }
+  integration:
+    after: [build]
+    shards: 2
+    command: [sh, scripts/lanq/dotnet-test-shard.sh, samples/monorepo/tests/Sample.IntegrationTests/Sample.IntegrationTests.csproj]
+    results: { format: trx, path: "samples/monorepo/tests/Sample.IntegrationTests/TestResults/*.trx" }
+  serial-tail:
+    after: [integration]
+    exclusive: true
+    command: [dotnet, test, samples/monorepo/tests/Sample.SerialTests/Sample.SerialTests.csproj, -c, Release]
+  web-test:
+    needs: [node]
+    dir: samples/monorepo/web
+    shards: 2
+    command: [npm, run, test:shard, --, "--shard={shard}/{shards}"]
+    results: { format: junit, path: "test-results/*.xml" }
+  web-types:
+    needs: [node]
+    dir: samples/monorepo/web
+    command: [npm, run, typecheck:ci]
