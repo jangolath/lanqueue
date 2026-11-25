@@ -200,7 +200,7 @@ public static partial class RemoteScripts
         stop_job() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
           kill_recorded "$R/locks/job-$1.pid" "$R/jobs/$1" "$1"
-          sweep_marked "$1" 0 0
+          sweep_marked "$1"
         }
         """ + "\n" + LinuxKillRecordedFunction + "\n" + LinuxSweepFunction;
 
@@ -511,6 +511,7 @@ public static partial class RemoteScripts
                 {{JobEnvironmentPowerShell(m)}}
                 $ErrorActionPreference = 'Continue'
                 {{WindowsHelperLoad(ShellQuote.PowerShell(WindowsHelperPath(m)))}}
+                if ($LqW) { 'jobobject=ok' } elseif (-not (Test-Path -LiteralPath $LqH)) { 'jobobject=unknown' } else { 'jobobject=none' }
                 function Cap([string]$n, [string]$code) {
                   $si = New-Object System.Diagnostics.ProcessStartInfo ((Get-Process -Id $PID).Path)
                   $si.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$global:LASTEXITCODE = 0; try { ' + $code + ' } catch { Write-Output "$_"; exit 1 }; exit $LASTEXITCODE'))
@@ -802,7 +803,7 @@ public static partial class RemoteScripts
                   $jo=if($LqW){LqJob $pf $cp.Handle}
                   Add-Content -LiteralPath $pf @($cp.Id,$cp.StartTime.ToUniversalTime().Ticks)
                   if($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})){$cp.WaitForExit();$code=$cp.ExitCode}
-                  else{$code=124;LqKill $cp.Id;if($jo){[void]$LqW::TerminateJobObject($jo,124)} }
+                  else{$code=124;{{(pidKind == "post" ? $"[Console]::Out.WriteLine({ShellQuote.PowerShell(LimitMarker(jobId, nonce))});" : "")}}LqKill $cp.Id;if($jo){[void]$LqW::TerminateJobObject($jo,124)} }
                 }finally{Remove-Item -Force -EA 0 -LiteralPath $pf}
                 [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce))}} + $code)
                 exit $code
@@ -811,6 +812,11 @@ public static partial class RemoteScripts
 
         // The job runs in the background so its pid (with setsid: its session and process group; with timeout alone: timeout's own group)
         // is known here and recorded for cleanup; stdin is handed through on fd 3 since a background command would otherwise get /dev/null.
+        // The post: step says when timeout stopped it at its limit (exit 124 after the whole limit), so a step that exits 124 itself is not
+        // reported as timed out (review B-L3).
+        var postLimitLine = pidKind == "post" && limit is { } postLimit
+            ? $"; if [ \"$rc\" = 124 ] && [ -n \"$T\" ] && [ $(( $(date +%s) - t0 )) -ge {WholeSeconds(postLimit)} ]; then printf '%s\\n' {ShellQuote.Posix(LimitMarker(jobId, nonce))}; fi"
+            : "";
         return $$"""
             cd -P {{ShellQuote.Posix(dir)}} || exit 126
             case "$(pwd -P)/" in "$(cd -P {{ShellQuote.Posix(worktree)}} && pwd -P)"/*) ;; *) exit 126 ;; esac
@@ -818,13 +824,13 @@ public static partial class RemoteScripts
             S=; if command -v setsid >/dev/null 2>&1; then S="setsid -w"; fi
             T={{(limit is { } l ? $"; if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 {WholeSeconds(l)}\"; fi" : "")}}
             {{(m.Priority == JobPriority.Low ? LinuxLowPriority : "")}}
-            exec 3<&0
+            exec 3<&0{{(pidKind == "post" ? "; t0=$(date +%s)" : "")}}
             $S $T {{(m.Priority == JobPriority.Low ? "$N $I " : "")}}{{JobEnvironmentPosix(m, jobId, shard, planJob, env)}}/bin/sh -c 'exec "$@"' sh {{string.Join(' ', argv.Select(ShellQuote.Posix))}} <&3 3<&- &
             j=$!
             printf '%s\n%s\n%s\n' "$j" "$(sed -n 's/.*) //p' "/proc/$j/stat" 2>/dev/null | cut -d' ' -f20)" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" > "$P"
             wait "$j"
             rc=$?
-            rm -f "$P"
+            rm -f "$P"{{postLimitLine}}
             printf '%s%s\n' {{ShellQuote.Posix(ExitMarker(jobId, nonce))}} "$rc"
             exit $rc
             """;
@@ -894,6 +900,12 @@ public static partial class RemoteScripts
     /// is over, can, when it is the final output line (<see cref="JobRunner.ReadExitMarker"/>). It decides only that; any other code is ssh's.
     /// </summary>
     internal static string ExitMarker(string jobId, string? nonce = null) => "LANQ_EXIT=" + SafeJobId(jobId) + ":" + NonceField(nonce);
+
+    /// <summary>
+    /// The post: step wrapper's line when the worker stopped the step at its own limit (0.13.0, review B-L3): <c>LANQ_LIMIT=&lt;job id&gt;:&lt;nonce&gt;:</c>.
+    /// A step that itself exits 124 prints no such line, so it is not reported as timed out.
+    /// </summary>
+    internal static string LimitMarker(string jobId, string? nonce = null) => "LANQ_LIMIT=" + SafeJobId(jobId) + ":" + NonceField(nonce);
 
     /// <summary>
     /// The line the Windows job wrapper prints instead of starting a job given &amp; or | whose program does not resolve to a native .exe:
@@ -1054,30 +1066,40 @@ public static partial class RemoteScripts
         + "\n" + "kill_recorded \"$R/locks/post-$ID.pid\" \"$R/jobs/$ID\" \"$ID\"";
 
     /// <summary>
-    /// 0.13.0 D1: <c>sweep_marked JOBID NODES LEAN</c>, the Linux leftover sweep after <c>kill_recorded</c>. It stops (TERM, 2 s, KILL) every
-    /// process of this uid whose environment holds exactly LANQ_JOB=JOBID: the job's own descendants, also those that left its process group
-    /// (a server that called setsid). It records each one's start time at the scan and checks start time, the exact marker and the Uid again
-    /// before every signal (review M12), so a pid reused meanwhile is never signalled. Shared processes are skipped (review H3): an MSBuild
-    /// node (MSBuild.dll or .exe with /nodemode:) unless NODES is 1 (node reuse off: hygiene), and the compiler server (VBCSCompiler) unless
-    /// LEAN is 1 (hygiene: [dotnet-lean]); a sibling slot may be using them. Without /proc it does nothing.
+    /// 0.13.0 D1: <c>sweep_marked JOBID</c>, the Linux leftover sweep after <c>kill_recorded</c>. It stops (TERM, 2 s, KILL) every process of
+    /// this uid whose environment holds exactly LANQ_JOB=JOBID: the job's own descendants, also those that left its process group (a server
+    /// that called setsid). It records each one's start time at the scan and checks start time, the exact marker and the Uid again before every
+    /// signal (review M12), so a pid reused meanwhile is never signalled. Shared processes are judged per process, from their own command line,
+    /// never from the machine's config (review B-M2; H3): an MSBuild node (MSBuild.dll or .exe with nodemode:) is the job's own only when its
+    /// command line says nodeReuse:false; the MSBuild server (nodemode:8) and the compiler server (VBCSCompiler) are always spared, since a
+    /// sibling slot may be using them and they end on their own idle timeout. The scan is one <c>grep -z</c> over every environ file where
+    /// grep has -z (NUL-delimited exact lines, review B-L5), else a loop. Without /proc it does nothing.
     /// </summary>
     internal const string LinuxSweepFunction = """
+        sweep_env() {
+          if [ "$swz" = 1 ]; then grep -qzxF "LANQ_JOB=$2" "/proc/$1/environ" 2>/dev/null; else { tr '\000' '\n' < "/proc/$1/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$2"; fi
+        }
         sweep_alive() {
           [ "$(sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20)" = "$2" ] || return 1
-          { tr '\000' '\n' < "/proc/$1/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3" || return 1
+          sweep_env "$1" "$3" || return 1
           [ "$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status" 2>/dev/null)" = "$(id -u)" ]
         }
         sweep_marked() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
           [ -d /proc/self ] || return 0
+          swz=0; printf 'a\000' | grep -qzxF a 2>/dev/null && swz=1
+          if [ "$swz" = 1 ]; then swf=$(grep -lzxF "LANQ_JOB=$1" /proc/[0-9]*/environ 2>/dev/null); else swf=$(for sd in /proc/[0-9]*; do sweep_env "${sd#/proc/}" "$1" && echo "$sd/environ"; done); fi
           sl=
-          for sd in /proc/[0-9]*; do
+          for sd in $swf; do
+            sd=${sd%/environ}
             sp=${sd#/proc/}
             [ "$sp" = "$$" ] && continue
-            { tr '\000' '\n' < "$sd/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$1" || continue
             sc=$(tr '\000' ' ' < "$sd/cmdline" 2>/dev/null)
-            if [ "$2" != 1 ]; then case "$sc" in *MSBuild.dll*nodemode:*|*MSBuild.exe*nodemode:*) continue ;; esac; fi
-            if [ "$3" != 1 ]; then case "$sc" in *VBCSCompiler*) continue ;; esac; fi
+            case "$sc" in
+              *VBCSCompiler*|*MSBuild.dll*nodemode:8*|*MSBuild.exe*nodemode:8*) continue ;;
+              *MSBuild.dll*nodemode:*|*MSBuild.exe*nodemode:*)
+                case "$sc" in *[nN][oO][dD][eE][rR][eE][uU][sS][eE]:[fF][aA][lL][sS][eE]*) ;; *) continue ;; esac ;;
+            esac
             sst=$(sed -n 's/.*) //p' "$sd/stat" 2>/dev/null | cut -d' ' -f20)
             [ -n "$sst" ] && sweep_alive "$sp" "$sst" "$1" && sl="$sl $sp:$sst"
           done
@@ -1089,9 +1111,8 @@ public static partial class RemoteScripts
         }
         """;
 
-    /// <summary>The sweep for one machine's job (needs $ID): its hygiene decides which shared .NET processes are private (<see cref="LinuxSweepFunction"/>).</summary>
-    internal static string LinuxSweepJob(Machine m) =>
-        LinuxSweepFunction + "\n" + $"sweep_marked \"$ID\" {(Hygiene.NodesPrivate(m) ? 1 : 0)} {(Hygiene.CompilerServerPrivate(m) ? 1 : 0)}";
+    /// <summary>The sweep for one job (needs $ID); which shared .NET processes it spares is decided per process (<see cref="LinuxSweepFunction"/>).</summary>
+    internal const string LinuxSweepJob = LinuxSweepFunction + "\n" + "sweep_marked \"$ID\"";
 
     /// <summary>
     /// Stops a job lanq gave up on (timed out, or its machine's hours ended) before its files are fetched. The worker enforces the same limit
@@ -1112,7 +1133,7 @@ public static partial class RemoteScripts
             {{StopJobMarker}}
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
-            {{LinuxSweepJob(m)}}
+            {{LinuxSweepJob}}
             sleep 1
             exit 0
             """;
@@ -1147,7 +1168,7 @@ public static partial class RemoteScripts
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
-            {{LinuxSweepJob(m)}}
+            {{LinuxSweepJob}}
             rm -rf "$R/jobs/$ID"
             {{LinuxSlotRemoval(slot, "rm -f \"$R/incoming/$ID.tar.gz\" \"$R/incoming/$ID.list\"")}}
             exit 0
@@ -1170,7 +1191,7 @@ public static partial class RemoteScripts
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
-            {{LinuxSweepJob(m)}}
+            {{LinuxSweepJob}}
             {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
             {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}

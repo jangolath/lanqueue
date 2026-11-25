@@ -445,7 +445,7 @@ public static partial class Cli
             j.Sharded?.Count,
             shards)
         {
-            LogTail = j.Sharded is null && logTail is { } n ? j.LogPath is null ? [] : JobLog.Tail(j.LogPath, n) : null,
+            LogTail = j.Sharded is null && logTail is { } n ? j.LogPath is null ? [] : JobLog.Tail(j.LogPath, n, j.Single?.Post?.LogFrom) : null,
             Retryable = noCapacity ? j.Retryable ?? true : null,
             Excluded = noCapacity ? ExcludedJsons(j.Excluded) : null,
             Waited = noCapacity ? WaitedJson.Of(j.Waited) : null,

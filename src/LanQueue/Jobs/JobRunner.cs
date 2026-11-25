@@ -287,7 +287,17 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
 }
 
 /// <summary>The post: step's outcome (0.13.0): its exit code (124 when stopped at the limit), whether it was stopped, and how long it ran.</summary>
-public sealed record PostResult(int ExitCode, bool TimedOut, double Seconds);
+public sealed record PostResult(int ExitCode, bool TimedOut, double Seconds)
+{
+    /// <summary>Ctrl+C, plan_timeout or --fail-fast ended the step before it ended (exit 130); the job's own result stands (review B-M1).</summary>
+    public bool Cancelled { get; init; }
+
+    /// <summary>The step was not started: the machine's allowed hours (plus grace) end too soon (review B-L2).</summary>
+    public bool Skipped { get; init; }
+
+    /// <summary>Where the step's lines begin in the job's log (bytes), so --log-tail ends at the job's own output (review B-L4); null when unknown.</summary>
+    public long? LogFrom { get; init; }
+}
 
 /// <summary>0.13.0 B3: the fallback suggestion a NoCapacity result carries (see <see cref="JobResult.FallbackHint"/>).</summary>
 public enum FallbackHint
@@ -1352,6 +1362,15 @@ public sealed partial class JobRunner(
         StartedLogPath = Path.GetFullPath(logPath);
         var logGate = new object();
         var logOpen = true;
+        long MarkLog()
+        {
+            lock (logGate)
+            {
+                logFile.Flush();
+                return logFile.BaseStream.Position;
+            }
+        }
+
         void OnLine(string line)
         {
             line = SafeLine(line);
@@ -1375,7 +1394,7 @@ public sealed partial class JobRunner(
             {
                 try
                 {
-                    result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
+                    result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning, MarkLog).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (req.PlanTimeout is { Expired: true } planTimeout)
                 {
@@ -1435,7 +1454,7 @@ public sealed partial class JobRunner(
 
     private async Task<JobResult> Transfer(
         string jobId, JobRequest req, PreparedPayload prepared, string? archivePath, Machine machine, DateTimeOffset? windowEnds, Action<string> onLine, CancellationToken ct,
-        Action? onRunning = null)
+        Action? onRunning = null, Func<long>? markLog = null)
     {
         string executeCommand;
         try
@@ -1444,7 +1463,7 @@ public sealed partial class JobRunner(
             executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob, env: req.Env));
             if (req.Post is { } postArgv)
             {
-                _ = RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, postArgv, null)); // the post: step too must fit (Windows command length)
+                _ = RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, postArgv, null, PostLimit)); // the post: step too must fit (Windows command length)
             }
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
@@ -1647,61 +1666,117 @@ public sealed partial class JobRunner(
         }
 
         // post: (0.13.0, review H1) after the fetch, so it cannot rewrite fetched evidence, and before the caller's cleanup, in the same slot.
-        return post ? result with { Post = await RunPostAsync(jobId, req, machine, onLine, ct).ConfigureAwait(false) } : result;
+        return post ? result with { Post = await RunPostAsync(jobId, req, machine, windowEnds, grace, onLine, markLog, ct).ConfigureAwait(false) } : result;
     }
 
     /// <summary>How long a post: step may run (on the worker and here); it fits inside the slot lease's transfer allowance.</summary>
     internal static readonly TimeSpan PostLimit = TimeSpan.FromMinutes(5);
 
-    /// <summary>The post: step's script: the job wrapper itself with its own pid file (locks/post-ID.pid) and the 5-minute limit.</summary>
-    private static string PostScript(Machine machine, string jobId, JobRequest req, IReadOnlyList<string> post, string? nonce) =>
-        RemoteScripts.Execute(machine, jobId, req.Directory, post, PostLimit, req.Shard, req.PlanJob, nonce, req.Env, pidKind: "post");
+    /// <summary>Tests only: one post: step on its own (<see cref="RunPostAsync"/>), with a given window end.</summary>
+    internal Task<PostResult> PostForTestAsync(string jobId, JobRequest req, Machine machine, DateTimeOffset? windowEnds, TimeSpan grace, Action<string> onLine) =>
+        RunPostAsync(jobId, req, machine, windowEnds, grace, onLine, null, CancellationToken.None);
+
+    /// <summary>A post: step with less than this left of the machine's allowed hours plus grace is skipped, not started (review B-L2).</summary>
+    internal static readonly TimeSpan PostMinimum = TimeSpan.FromSeconds(30);
+
+    /// <summary>The post: step's script: the job wrapper itself with its own pid file (locks/post-ID.pid) and its limit.</summary>
+    private static string PostScript(Machine machine, string jobId, JobRequest req, IReadOnlyList<string> post, string? nonce, TimeSpan limit) =>
+        RemoteScripts.Execute(machine, jobId, req.Directory, post, limit, req.Shard, req.PlanJob, nonce, req.Env, pidKind: "post");
 
     /// <summary>
     /// Runs the post: step in the job's folder with the job's environment, on its own connection, under its own job object or process group
-    /// and pid file; never throws for its outcome. Its exit code is a warning only ("[lanq] post: exit N (warning only)"). Ctrl+C stops it
-    /// (the cancellation propagates; the cleanup kills what the pid file names).
+    /// and pid file; never throws for its outcome, and never for a cancel either (review B-M1): Ctrl+C, plan_timeout or --fail-fast during the
+    /// step end only the step (cancelled: true); the job's own status, exit code, fetch and results stand, and the caller's cleanup kills what
+    /// the pid file names. Its exit code is a warning only ("[lanq] post: exit N (warning only)"). The step ends at the wrapper's exit marker
+    /// even when a process it left behind still holds the output open (review B-L3), and it never runs past the machine's allowed hours plus
+    /// grace (B-L2). <paramref name="markLog"/> notes where its lines start in the job's log, so --log-tail shows the job's own end (B-L4).
     /// </summary>
-    private async Task<PostResult> RunPostAsync(string jobId, JobRequest req, Machine machine, Action<string> onLine, CancellationToken ct)
+    private async Task<PostResult> RunPostAsync(
+        string jobId, JobRequest req, Machine machine, DateTimeOffset? windowEnds, TimeSpan grace, Action<string> onLine, Func<long>? markLog, CancellationToken ct)
     {
         var post = req.Post!;
+        var logFrom = markLog?.Invoke();
+        var limit = PostLimit;
+        if (windowEnds is { } end)
+        {
+            var left = end + grace - clock.GetUtcNow();
+            if (left < PostMinimum)
+            {
+                onLine($"[lanq] post: skipped: {machine.Name}'s allowed hours (plus grace) end before the step could run");
+                return new PostResult(0, false, 0) { Skipped = true, LogFrom = logFrom };
+            }
+
+            limit = left < limit ? left : limit;
+        }
+
         var nonce = RemoteScripts.NewMarkerNonce();
         onLine("[lanq] post: " + string.Join(' ', post));
         var started = clock.GetTimestamp();
-        string? held = null;
+        int? marked = null;
+        var limitHit = false;
+        var limitMarker = RemoteScripts.LimitMarker(jobId, nonce);
+        var gate = new object();
+        using var done = CancellationTokenSource.CreateLinkedTokenSource(ct);
         void OnPostLine(string line)
         {
-            if (held is not null)
+            lock (gate)
             {
-                onLine(held);
+                if (marked is not null)
+                {
+                    return; // after the wrapper's exit marker: a process the step left behind, not the step
+                }
+
+                if (line.TrimEnd('\r').EndsWith(limitMarker, StringComparison.Ordinal))
+                {
+                    limitHit = true; // the worker stopped the step at its own limit
+                    return;
+                }
+
+                if (ReadExitMarker(line, jobId, nonce) is not { Code: { } code } exit)
+                {
+                    onLine(line);
+                    return;
+                }
+
+                if (exit.Before.Length > 0)
+                {
+                    onLine(exit.Before);
+                }
+
+                marked = code;
             }
 
-            held = line;
+            done.Cancel(); // the step is over: stop reading, even if something it started still holds the output open
         }
 
-        var run = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, post, nonce)), OnPostLine, PostLimit + WorkerDeadlineMargin, ct).ConfigureAwait(false);
+        SshResult? run = null;
+        try
+        {
+            run = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, post, nonce, limit)), OnPostLine, limit + WorkerDeadlineMargin, done.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (marked is not null && !ct.IsCancellationRequested)
+        {
+            // stopped reading at the exit marker
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            var cut = Math.Round(clock.GetElapsedTime(started).TotalSeconds, 2);
+            onLine("[lanq] post: cancelled before it ended (the job's own result stands)");
+            return new PostResult(130, false, cut) { Cancelled = true, LogFrom = logFrom };
+        }
+
         var seconds = Math.Round(clock.GetElapsedTime(started).TotalSeconds, 2);
-        int? marked = null;
-        if (held is { } last)
+        var exitCode = marked ?? run?.ExitCode ?? 1;
+        // Timed out: the worker said it stopped the step at its limit, or this side gave up waiting (no marker by the limit plus margin). A
+        // step that itself exits 124 is not called timed out.
+        var timedOut = limitHit || (marked is null && run is { TimedOut: true });
+        if (exitCode != 0)
         {
-            var (before, code) = ReadExitMarker(last, jobId, nonce);
-            marked = code;
-            if (before.Length > 0)
-            {
-                onLine(before);
-            }
+            onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq] post: exit {exitCode}{(timedOut ? $" (stopped after {ProcessSshClient.Describe(limit)})" : "")} (warning only)"));
         }
 
-        var exit = marked ?? run.ExitCode;
-        var timedOut = run.TimedOut || exit == ProcessSshClient.TimedOutExitCode;
-        if (exit != 0)
-        {
-            onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq] post: exit {exit}{(timedOut ? " (stopped after 5 min)" : "")} (warning only)"));
-        }
-
-        return new PostResult(exit, timedOut, seconds);
+        return new PostResult(exitCode, timedOut, seconds) { LogFrom = logFrom };
     }
-
     /// <summary>
     /// --results (0.11.0): counts the fetched results files (never throws) and prints, after the fetch summary, the reader's warnings, one
     /// "[lanq] results:" line and up to 10 failed names. Null without --results.
@@ -2215,7 +2290,7 @@ public sealed partial class JobRunner(
         }
     }
 
-    private static string NewId() =>
+    internal static string NewId() =>
         DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..6];
 
     private static void TryDelete(string? path)

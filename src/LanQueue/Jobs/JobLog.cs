@@ -215,9 +215,10 @@ public sealed class JobLog(string folder, Action<string>? warn = null)
     /// The last <paramref name="lines"/> lines of a job log (lanq run --log-tail), read backwards from the end in blocks and never more than
     /// <see cref="TailMaxBytes"/>, so a huge log costs no more than a small one; when the bound cuts a line, that partial line is left out and
     /// fewer lines come back. Each line is cut to <see cref="TailMaxLineChars"/> and sanitised again (it may be read back by an agent or a
-    /// terminal). A missing or unreadable log gives an empty list.
+    /// terminal). A missing or unreadable log gives an empty list. <paramref name="end"/>: read as if the log ended there (where a post: step's
+    /// lines begin, so the tail shows the job's own end; 0.13.0 review B-L4).
     /// </summary>
-    public static IReadOnlyList<string> Tail(string path, int lines)
+    public static IReadOnlyList<string> Tail(string path, int lines, long? end = null)
     {
         if (lines < 1)
         {
@@ -229,7 +230,7 @@ public sealed class JobLog(string folder, Action<string>? warn = null)
         try
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var length = fs.Length;
+            var length = end is { } cut ? Math.Min(fs.Length, Math.Max(0, cut)) : fs.Length;
             var start = Math.Max(0, length - TailMaxBytes);
             buffer = new byte[length - start];
             const int Block = 16 * 1024;

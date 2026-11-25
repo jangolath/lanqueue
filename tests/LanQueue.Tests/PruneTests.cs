@@ -76,10 +76,12 @@ public sealed class PruneTests : IDisposable
         var wf = RemoteScripts.Prune(windows, PrunePhase.Files, 3600, true);
         Assert.Contains("[IO.Directory]::Delete($p, $false)", wf, StringComparison.Ordinal);
         Assert.Contains("cmd /c rd /s /q \"\\\\?\\$p\"", wf, StringComparison.Ordinal);
-        Assert.Contains("REFUSED work_root is a drive root or the home folder", wf, StringComparison.Ordinal);
+        Assert.Contains("REFUSED work_root is a drive root, a share root or the home folder", wf, StringComparison.Ordinal);
+        Assert.Contains(@"$x -match '^\\\\[^\\]+\\[^\\]+\z'", wf, StringComparison.Ordinal); // B-L7: \\server\share too
+        Assert.Contains("[IO.Path]::Combine($wi.Parent.FullName, @($wi.Target)[0])", wf, StringComparison.Ordinal); // a relative link target
         // The cache phase names only ids of lanq's shape; anything else given is dropped.
         var lc = RemoteScripts.Prune(linux, PrunePhase.Caches, 3600, true, prunedIds: [OldId, "x;rm -rf /"]);
-        Assert.Contains("for id in " + OldId + "; do", lc, StringComparison.Ordinal);
+        Assert.Contains("PIDS=\"" + OldId + "\"", lc, StringComparison.Ordinal);
         Assert.DoesNotContain("rm -rf /", lc, StringComparison.Ordinal);
         Assert.Contains("worktree prune", RemoteScripts.Prune(windows, PrunePhase.Caches, 3600, true), StringComparison.Ordinal);
     }
@@ -176,6 +178,88 @@ public sealed class PruneTests : IDisposable
         var (_, linked) = Run(RemoteScripts.Prune(Here, PrunePhase.Files, 0, remove: true));
         Assert.Contains("REFUSED jobs is a link", linked, StringComparison.Ordinal);
         Assert.True(File.Exists(Outside + "/keep.txt"));
+    }
+
+    [Fact]
+    public void ARelativeLinkWorkRootIsResolvedFromItsOwnFolder()
+    {
+        // B-L7: work_root is a link with a relative target ("real", next to it). The script works through the link and resolves the target
+        // against the link's own folder, never the session's current folder.
+        Directory.CreateDirectory(_root + "/real/locks");
+        Directory.CreateDirectory(_root + "/real/jobs/" + OldId);
+        Age(_root + "/real/jobs/" + OldId);
+        var link = _root + "/wr";
+        if (OperatingSystem.IsWindows())
+        {
+            if (Shells.Exec("cmd", ["/c", "mklink", "/D", link.Replace('/', '\\'), "real"]).Code != 0)
+            {
+                return; // no right to make a directory symlink here (not elevated, no developer mode): the Windows CI runner covers it
+            }
+        }
+        else
+        {
+            Directory.CreateSymbolicLink(link, "real");
+        }
+
+        var (code, listed) = Run(RemoteScripts.Prune(Here, PrunePhase.Files, 3600, remove: false));
+        Assert.True(code == 0, listed);
+        Assert.DoesNotContain("REFUSED", listed, StringComparison.Ordinal);
+        Assert.Contains("WOULD job " + OldId + " ", listed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheRealCachesPhaseWorksOnARealBareRepository()
+    {
+        // B-L10 (and B-L8): a real cache whose only worktree belongs to an old job, and a fresh cache. The listing names the old cache as one
+        // that would go (its worktree belongs to a job the same listing names); --yes removes the job, prunes the worktree, deletes
+        // refs/lanq/<id> and the old cache, and keeps the fresh one.
+        string Git(string dir, params string[] args)
+        {
+            var (c, o) = Shells.Exec("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", .. args]);
+            Assert.True(c == 0, string.Join(' ', args) + ": " + o);
+            return o;
+        }
+
+        var src = _root + "/src";
+        Directory.CreateDirectory(src);
+        Git(src, "init", "-q");
+        File.WriteAllText(src + "/a.txt", "a");
+        Git(src, "add", "a.txt");
+        Git(src, "commit", "-q", "-m", "a");
+        Directory.CreateDirectory(Work + "/locks");
+        Directory.CreateDirectory(Work + "/jobs");
+        const string Old = "0123456789abcdef.git";
+        const string Fresh = "fedcba9876543210.git";
+        foreach (var c in new[] { Old, Fresh })
+        {
+            Git(_root, "clone", "-q", "--bare", src, Work + "/repos/" + c);
+        }
+
+        var cache = Work + "/repos/" + Old;
+        Git(cache, "worktree", "add", "-q", "--detach", Work + "/jobs/" + OldId, "HEAD");
+        Git(cache, "update-ref", "refs/lanq/" + OldId, "HEAD");
+        Age(Work + "/jobs/" + OldId);
+        foreach (var f in new[] { "packed-refs", "FETCH_HEAD" })
+        {
+            File.WriteAllText(cache + "/" + f, File.Exists(cache + "/" + f) ? File.ReadAllText(cache + "/" + f) : "");
+            File.SetLastWriteTimeUtc(cache + "/" + f, DateTime.UtcNow.AddDays(-40));
+        }
+
+        var (code, listed) = Run(RemoteScripts.Prune(Here, PrunePhase.Caches, 3600, false, caches: true, cacheAgeSeconds: 86400, prunedIds: [OldId]));
+        Assert.True(code == 0, listed);
+        Assert.Contains("WOULD cache " + Old, listed, StringComparison.Ordinal);
+        Assert.DoesNotContain(Fresh, listed, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(cache)); // a listing removes nothing
+
+        var (code2, files) = Run(RemoteScripts.Prune(Here, PrunePhase.Files, 3600, remove: true));
+        Assert.True(code2 == 0, files);
+        Assert.False(Directory.Exists(Work + "/jobs/" + OldId));
+        var (code3, removed) = Run(RemoteScripts.Prune(Here, PrunePhase.Caches, 3600, true, caches: true, cacheAgeSeconds: 86400, prunedIds: [OldId]));
+        Assert.True(code3 == 0, removed);
+        Assert.Contains("REMOVED cache " + Old, removed, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(cache));
+        Assert.True(Directory.Exists(Work + "/repos/" + Fresh));
+        Assert.DoesNotContain(Fresh, removed, StringComparison.Ordinal);
     }
 
     // ---- the command ----

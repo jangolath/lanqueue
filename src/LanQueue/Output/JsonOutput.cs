@@ -372,7 +372,19 @@ internal sealed record ExcludedJson(string Machine, string Reason, string Why, b
 /// <summary>The post: step of a job (0.13.0): its exit code is a warning only; timedOut when it was stopped at its 5-minute limit.</summary>
 internal sealed record PostJson(int ExitCode, bool TimedOut, double Seconds)
 {
-    internal static PostJson? Of(Jobs.PostResult? p) => p is null ? null : new PostJson(p.ExitCode, p.TimedOut, p.Seconds);
+    /// <summary>True when Ctrl+C, plan_timeout or --fail-fast ended the step (exit 130); the job's own status stands. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Cancelled { get; init; }
+
+    /// <summary>True when the step was not started: the machine's allowed hours (plus grace) end too soon. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Skipped { get; init; }
+
+    internal static PostJson? Of(Jobs.PostResult? p) => p is null ? null : new PostJson(p.ExitCode, p.TimedOut, p.Seconds)
+    {
+        Cancelled = p.Cancelled ? true : null,
+        Skipped = p.Skipped ? true : null,
+    };
 }
 
 /// <summary>

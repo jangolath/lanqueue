@@ -39,13 +39,4 @@ public static class Hygiene
 
         return [.. vars.Where(v => !m.Env.Keys.Contains(v.Name, StringComparer.OrdinalIgnoreCase))];
     }
-
-    /// <summary>
-    /// True when the machine's MSBuild nodes are private to one job (node reuse off: any hygiene profile), so the Linux leftover sweep may stop
-    /// a node that carries the job's marker. Without it a node may be serving a sibling slot (review H3).
-    /// </summary>
-    public static bool NodesPrivate(Machine m) => m.Hygiene is { Count: > 0 };
-
-    /// <summary>True when no compiler server runs at all (dotnet-lean), so one that carries the job's marker is a leftover the sweep may stop.</summary>
-    public static bool CompilerServerPrivate(Machine m) => m.Hygiene?.Contains(DotnetLean, StringComparer.Ordinal) == true;
 }

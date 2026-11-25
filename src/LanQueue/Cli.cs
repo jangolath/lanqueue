@@ -1188,7 +1188,8 @@ public static partial class Cli
                         ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
                     },
                     result.LogPath,
-                    p.LogTail),
+                    p.LogTail,
+                    result.Post?.LogFrom),
                 fetch is not null,
                 result.Fetch) with
             {
@@ -1305,10 +1306,11 @@ public static partial class Cli
     /// logPath (always; null when no job started) and, with --log-tail N, logTail: the log's last N lines (<see cref="JobLog.Tail"/>), empty when
     /// no job started.
     /// </summary>
-    internal static RunJson WithLog(RunJson json, string? logPath, int? tail) => json with
+    /// <param name="end">Where a post: step's lines begin in the log (<see cref="PostResult.LogFrom"/>): the tail ends there; null for the whole log.</param>
+    internal static RunJson WithLog(RunJson json, string? logPath, int? tail, long? end = null) => json with
     {
         LogPath = logPath is null ? null : JobRunner.SafeLine(logPath),
-        LogTail = tail is { } n ? logPath is null ? [] : JobLog.Tail(logPath, n) : null,
+        LogTail = tail is { } n ? logPath is null ? [] : JobLog.Tail(logPath, n, end) : null,
     };
 
     /// <summary>

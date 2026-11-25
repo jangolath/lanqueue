@@ -170,7 +170,8 @@ public static partial class Cli
             var pruned = report.Entries.Where(e => e.Kind == "job").Select(e => e.Name).ToList();
             if (!p.Yes)
             {
-                ParsePrune((await Run(RemoteScripts.Prune(m, PrunePhase.Caches, age, false, p.Caches, cacheAge)).ConfigureAwait(false)).Output, report);
+                // The listing counts a cache whose only worktrees belong to jobs it lists (or are gone) as one that would go (review B-L8).
+                ParsePrune((await Run(RemoteScripts.Prune(m, PrunePhase.Caches, age, false, p.Caches, cacheAge, pruned)).ConfigureAwait(false)).Output, report);
             }
             else
             {

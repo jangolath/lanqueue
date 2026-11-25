@@ -50,10 +50,12 @@ public static partial class RemoteScripts
                 $now = [DateTime]::UtcNow; $age = {{age}}; $do = {{(remove ? "$true" : "$false")}}
                 $RP = [IO.FileAttributes]::ReparsePoint
                 try { $wi = Get-Item -LiteralPath {{ShellQuote.PowerShell(m.WorkRoot)}} -Force -ErrorAction Stop } catch { 'REFUSED work_root does not exist'; exit 0 }
-                $r = $wi.FullName
-                if (($wi.Attributes -band $RP) -and $wi.Target) { $r = @($wi.Target)[0] }
-                $full = [IO.Path]::GetFullPath($r).TrimEnd('\', '/')
-                if ($full -match '^[A-Za-z]:\z' -or ($env:USERPROFILE -and $full -ieq $env:USERPROFILE.TrimEnd('\'))) { 'REFUSED work_root is a drive root or the home folder'; exit 0 }
+                $full = $wi.FullName.TrimEnd('\', '/')
+                $res = $full
+                if (($wi.Attributes -band $RP) -and $wi.Target) { $res = [IO.Path]::GetFullPath([IO.Path]::Combine($wi.Parent.FullName, @($wi.Target)[0])).TrimEnd('\', '/') }
+                foreach ($x in $full, $res) {
+                  if ($x -match '^[A-Za-z]:\z' -or $x -match '^\\\\[^\\]+\\[^\\]+\z' -or ($env:USERPROFILE -and $x -ieq $env:USERPROFILE.TrimEnd('\'))) { 'REFUSED work_root is a drive root, a share root or the home folder'; exit 0 }
+                }
                 foreach ($d in 'jobs', 'incoming', 'locks', 'repos') {
                   $p = Join-Path $full $d
                   if (Test-Path -LiteralPath $p) { $i = Get-Item -LiteralPath $p -Force; if ($i.Attributes -band $RP) { "REFUSED $d is a link"; exit 0 }; if (-not $i.PSIsContainer) { "REFUSED $d is not a folder"; exit 0 } }
@@ -111,11 +113,24 @@ public static partial class RemoteScripts
                     $cage = {{cage}}; $caches = {{(caches ? "$true" : "$false")}}
                     function Q { $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = 'NUL'; & git {{GitHardeningWindows}} @args 2>$null }
                     if (-not (Test-Path -LiteralPath "$full\repos")) { exit 0 }
+                    $pids = @({{string.Join(", ", ids.Select(ShellQuote.PowerShell))}})
+                    function WtAlive($c) {
+                      foreach ($g in @(Get-ChildItem -LiteralPath (Join-Path $c 'worktrees') -Directory -Force -EA 0)) {
+                        $f = Join-Path $g.FullName 'gitdir'
+                        if (-not (Test-Path -LiteralPath $f)) { return $true }
+                        $d = [string](Get-Content -LiteralPath $f -TotalCount 1 -EA 0) -replace '[\\/]\.git\s*$', ''
+                        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+                        if ($pids -ccontains (Split-Path -Leaf $d)) { continue }
+                        return $true
+                      }
+                      $false
+                    }
                     foreach ($c in @(Get-ChildItem -LiteralPath "$full\repos" -Directory -Force -EA 0)) {
                       if ($c.Name -cnotmatch '^[0-9a-f]{16}\.git\z' -or ($c.Attributes -band $RP)) { continue }
-                      if ($do) { Q -C $c.FullName worktree prune; foreach ($id in @({{string.Join(", ", ids.Select(ShellQuote.PowerShell))}})) { Q -C $c.FullName update-ref -d "refs/lanq/$id" } }
+                      if ($do) { Q -C $c.FullName worktree prune; foreach ($id in $pids) { Q -C $c.FullName update-ref -d "refs/lanq/$id" } }
                       if (-not $caches) { continue }
-                      if (@(Get-ChildItem -LiteralPath (Join-Path $c.FullName 'worktrees') -Force -EA 0).Count -gt 0) { continue }
+                      if ($do) { if (@(Get-ChildItem -LiteralPath (Join-Path $c.FullName 'worktrees') -Force -EA 0).Count -gt 0) { continue } }
+                      elseif (WtAlive $c.FullName) { continue }
                       $newest = [DateTime]::MinValue
                       foreach ($n in 'FETCH_HEAD', 'refs\lanq\base', 'packed-refs') { $f = Join-Path $c.FullName $n; if (Test-Path -LiteralPath $f) { $t = (Get-Item -LiteralPath $f -Force).LastWriteTimeUtc; if ($t -gt $newest) { $newest = $t } } }
                       if (($now - $newest).TotalSeconds -ge $cage) { Act cache $c.Name $c }
@@ -197,16 +212,28 @@ public static partial class RemoteScripts
                 CAGE={{cage}}; CACHES={{(caches ? "1" : "0")}}
                 {{LinuxGitFunction}}
                 [ -d "$RR/repos" ] || exit 0
+                PIDS="{{string.Join(' ', ids)}}"
+                wt_alive() {
+                  for g in "$1"/worktrees/*; do
+                    [ -e "$g" ] || continue
+                    [ -f "$g/gitdir" ] || return 0
+                    d=$(sed -n 1p "$g/gitdir" 2>/dev/null); d=${d%/.git}
+                    [ -n "$d" ] && [ -d "$d" ] || continue
+                    case " $PIDS " in *" ${d##*/} "*) continue ;; esac
+                    return 0
+                  done
+                  return 1
+                }
                 for c in "$RR"/repos/*.git; do
                   [ -d "$c" ] && [ ! -L "$c" ] || continue
                   n=${c##*/}
                   printf '%s\n' "${n%.git}" | grep -qxE '[0-9a-f]{16}' || continue
                   if [ "$DO" = 1 ]; then
                     G -C "$c" worktree prune 2>/dev/null
-                    for id in {{string.Join(' ', ids)}}; do G -C "$c" update-ref -d "refs/lanq/$id" 2>/dev/null; done
+                    for id in $PIDS; do G -C "$c" update-ref -d "refs/lanq/$id" 2>/dev/null; done
                   fi
                   [ "$CACHES" = 1 ] || continue
-                  [ -n "$(ls -A "$c/worktrees" 2>/dev/null)" ] && continue
+                  if [ "$DO" = 1 ]; then [ -n "$(ls -A "$c/worktrees" 2>/dev/null)" ] && continue; else wt_alive "$c" && continue; fi
                   newest=0
                   for f in "$c/FETCH_HEAD" "$c/refs/lanq/base" "$c/packed-refs"; do
                     mt=$(stat -c %Y "$f" 2>/dev/null) || continue

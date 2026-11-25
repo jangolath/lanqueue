@@ -184,6 +184,12 @@ internal static class T
     public const string RepoId = "0123456789abcdef";
 
     /// <summary>
+    /// A fresh job id in production's shape (review B-L6). Tests that run real job wrappers and real cleanups use one per test: since 0.13.0 D1
+    /// a cleanup stops every process of this uid that carries LANQ_JOB=its id, so a shared id such as "j1" could stop a parallel test's job.
+    /// </summary>
+    public static string NewJobId() => Jobs.JobRunner.NewId();
+
+    /// <summary>
     /// The exit marker a job wrapper command prints (RemoteScripts.ExitMarker with the run's nonce: "LANQ_EXIT=id:nonce:"), read from the
     /// command (an encoded Windows command is decoded first), so a fake worker can answer as the wrapper would. Throws when there is none.
     /// </summary>
@@ -191,6 +197,9 @@ internal static class T
 
     /// <summary>The same for the Windows wrapper's refusal line (RemoteScripts.WindowsArgsMarker: "LANQ_WINARGS=id:nonce:").</summary>
     public static string WindowsArgsMarkerOf(string command) => MarkerOf(command, "LANQ_WINARGS");
+
+    /// <summary>The same for the post: wrapper's limit line (RemoteScripts.LimitMarker: "LANQ_LIMIT=id:nonce:").</summary>
+    public static string LimitMarkerOf(string command) => MarkerOf(command, "LANQ_LIMIT");
 
     private static string MarkerOf(string command, string name)
     {
@@ -202,7 +211,18 @@ internal static class T
     }
 
     /// <summary>A real job wrapper's output without its final exit marker (RemoteScripts.ExitMarker), for tests that compare the job's own output.</summary>
-    public static string JobOutput(string output, string jobId = "j1") => JobRunner.ReadExitMarker(output.TrimEnd((char)13, (char)10), jobId).Before;
+    /// <remarks>Any job's marker (tests use a fresh id per test, <see cref="NewJobId"/>), unless <paramref name="jobId"/> names one.</remarks>
+    public static string JobOutput(string output, string? jobId = null)
+    {
+        var text = output.TrimEnd((char)13, (char)10);
+        if (jobId is not null)
+        {
+            return JobRunner.ReadExitMarker(text, jobId).Before;
+        }
+
+        var m = System.Text.RegularExpressions.Regex.Match(text, "LANQ_EXIT=([A-Za-z0-9_-]+):(?:[0-9a-f]{16}:)?-?[0-9]{1,10}\\z", System.Text.RegularExpressions.RegexOptions.None, TimeSpan.FromSeconds(5));
+        return m.Success ? JobRunner.ReadExitMarker(text, m.Groups[1].Value).Before : text;
+    }
 
     /// <summary>The repository root (the folder holding LanQueue.slnx).</summary>
     public static readonly string RepoRoot = FindRepoRoot();
@@ -469,11 +489,3 @@ internal static class Recorded
         }
     }
 }
-
-/// <summary>
-/// The test classes that run real job wrappers (each job carries LANQ_JOB=its id) and real cleanups, which since 0.13.0 D1 stop every process
-/// of this uid carrying that marker. Their tests reuse ids such as "j1", so they never run in parallel with one another (in production every
-/// job id is unique).
-/// </summary>
-[CollectionDefinition(nameof(RealJobScripts), DisableParallelization = true)]
-public sealed class RealJobScripts;

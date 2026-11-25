@@ -169,7 +169,8 @@ public static partial class Cli
                     Results = ResultsJsonOf(s.Results),
                 },
                 s.LogPath,
-                logTail),
+                logTail,
+                s.Post?.LogFrom),
             fetch,
             s.Fetch))])
     {

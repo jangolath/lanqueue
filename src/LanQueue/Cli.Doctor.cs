@@ -412,12 +412,39 @@ public static partial class Cli
             lines.Add(hygiene);
         }
 
+        if (WorkRootWarning(m) is { } broad)
+        {
+            lines.Add(broad);
+        }
+
         if (m.Wake is { } wake)
         {
             const string Note = "Wake-on-LAN must also be enabled in the BIOS/UEFI and the network card driver, and usually only works on wired Ethernet (docs/WORKERS.md)";
             lines.Add(Check("wake", "ok", $"wake: magic packet to {wake.Broadcast}:{wake.Port} for {wake.Mac}, waits up to {wake.WaitSeconds} s. {Note}"));
         }
         return lines;
+    }
+
+    /// <summary>
+    /// 0.13.0 D2 (design review M11, review B-L9): a work_root that is a filesystem or drive root, a share root or a home folder (/, C:/,
+    /// /root, /home/NAME, C:/Users/NAME, ~) mixes lanq's folders with the account's own files. lanq prune refuses such a work_root; doctor says
+    /// so for every machine. Null otherwise.
+    /// </summary>
+    internal static DoctorCheck? WorkRootWarning(Machine m)
+    {
+        var root = m.WorkRoot.Replace('\\', '/').TrimEnd('/');
+        var broad = root.Length == 0 || root == "~"
+            || System.Text.RegularExpressions.Regex.IsMatch(
+                root, "^(?:[A-Za-z]:|//[^/]+/[^/]+|/root|/home/[^/]+|/Users/[^/]+|[A-Za-z]:/Users/[^/]+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+        return broad
+            ? new DoctorCheck(
+                "machine",
+                m.Name,
+                "work_root_scope",
+                "warn",
+                $"work_root {m.WorkRoot} is a filesystem or drive root, a share root or a home folder: lanq's jobs/, repos/ and locks/ would sit among the account's own files, and lanq prune refuses it",
+                "give this machine a work_root of its own, such as /srv/lanq or C:/lanq, in machines.yml")
+            : null;
     }
 
     /// <summary>
@@ -551,6 +578,17 @@ public static partial class Cli
                 $"git older than 2.32: global config not isolated (git {git} ignores GIT_CONFIG_GLOBAL, so a filter or "
                     + "attributes file in the ssh user's ~/.gitconfig can still run during a job's checkout; update git on that machine)",
                 "update git on that machine to 2.32 or later"));
+        }
+
+        // 0.13.0 D1 (review B-L9): without lanq's native helper (PowerShell refused to load it, ConstrainedLanguage) Windows cleanup has no job
+        // object and stops only the recorded processes and their tree, so a process that left the tree can outlive its job.
+        if (m.Os == MachineOs.Windows && values.GetValueOrDefault("jobobject") == "none")
+        {
+            lines.Add(Check(
+                "job_object",
+                "warn",
+                "leftover processes possible (no job object): PowerShell on this machine did not load lanq's native helper, so cleanup stops only the processes it recorded and their children",
+                "let the ssh user's PowerShell run in FullLanguage mode (no AppLocker or WDAC constrained language for it); docs/WORKERS.md"));
         }
 
         if (m.Os == MachineOs.Windows && await WmiDenied(m, ssh, ct).ConfigureAwait(false) is { } why)
