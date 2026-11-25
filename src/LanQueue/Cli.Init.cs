@@ -47,6 +47,7 @@ public static partial class Cli
             capabilities: [dotnet, linux]
             max_jobs: 1                # 1 under 6 GB of RAM, 2 under 12 GB; lanq makeready suggests it
             transfer: git              # git (default) needs git on the worker; archive needs only tar
+            # hygiene: [dotnet]        # lanq 0.13.0+: MSBuild node reuse off, so parallel .NET jobs never share nodes (a few seconds per build); use it with max_jobs above 1
 
           # A Windows 10/11 micro PC with 4 GB of RAM: one job at a time, a memory floor and a capped .NET heap.
           # - name: micro-win-01

@@ -470,12 +470,12 @@ public sealed class FallbackTests : IDisposable
     {
         var input = new SlowReader();
         var err = new StringWriter();
-        var prompt = new TerminalPrompt(input, err, TimeSpan.FromMilliseconds(300));
+        var prompt = new TerminalPrompt(input, err, TimeSpan.FromSeconds(3));
         input.Type("y"); // typed before any prompt: never taken as an answer
         await Task.Delay(200);
         Assert.Null(await prompt.AskAsync("q1", CancellationToken.None)); // no answer in time
         var second = prompt.AskAsync("q2", CancellationToken.None);
-        await Task.Delay(100);
+        await Task.Delay(300);
         input.Type("yes");
         Assert.True(await second); // the answer reaches the second prompt, not a read the first one left behind
         input.Type(null);

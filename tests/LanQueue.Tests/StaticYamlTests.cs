@@ -45,6 +45,7 @@ public sealed class StaticYamlTests
             allowed_hours: "22:00-07:00"
             transfer: archive
             size: Heavy
+            hygiene: [dotnet-lean]
             wake:
               mac: "aa:bb:cc:dd:ee:01"
               broadcast: 10.20.30.255
@@ -92,6 +93,7 @@ public sealed class StaticYamlTests
         Assert.Equal(3, lin.MaxJobs);
         Assert.Equal(2, lin.MinFreeMemGb);
         Assert.Equal(4.5, lin.JobMemGb);
+        Assert.Equal(["dotnet-lean"], lin.Hygiene!);
         Assert.Equal("--max-old-space-size=2048", lin.Env["NODE_OPTIONS"]);
         Assert.Equal("1", lin.Env["DOTNET_GCConserveMemory"]);
         Assert.Equal(["/home/build/.nvm/versions/node/v22/bin"], lin.PathPrepend);

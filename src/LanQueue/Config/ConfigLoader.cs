@@ -135,7 +135,7 @@ public static partial class ConfigLoader
     /// <summary>Keys that may be given with no value (YAML null), by their path: they mean "not set".</summary>
     private static readonly HashSet<string> NullableKeys = new(StringComparer.Ordinal)
     {
-        "machines[].allowed_hours", "machines[].key_env", "machines[].min_free_mem_gb", "machines[].job_mem_gb", "policy.job_mem_gb",
+        "machines[].allowed_hours", "machines[].key_env", "machines[].hygiene", "machines[].min_free_mem_gb", "machines[].job_mem_gb", "policy.job_mem_gb",
     };
 
     private static bool IsNull(YamlNode node) => YamlShape.IsNull(node);
@@ -308,6 +308,11 @@ public static partial class ConfigLoader
             if (m.MinFreeMemGb is { } minMem && (!double.IsFinite(minMem) || minMem < 0))
             {
                 throw new ConfigException($"Machine '{m.Name}': min_free_mem_gb must be >= 0.");
+            }
+
+            if (m.Hygiene is { } hygiene && (hygiene.Any(w => !Hygiene.Words.Contains(w, StringComparer.Ordinal)) || hygiene.Distinct(StringComparer.Ordinal).Count() != hygiene.Count))
+            {
+                throw new ConfigException($"Machine '{m.Name}': hygiene must list profiles from: {string.Join(", ", Hygiene.Words)} (each once), for example hygiene: [dotnet].");
             }
 
             ValidateJobEnvironment(m);

@@ -196,6 +196,18 @@ public static partial class Cli
                 "nothing to change if that is intended (the deny list always wins); list exact names in policy.allowed_env to make it plain")).ConfigureAwait(false);
         }
         await say(LogsCheck(host, config.Policy.KeepLogsDays)).ConfigureAwait(false);
+        if (config.FallbackProblem is { } fallbackProblem)
+        {
+            await say(DoctorCheck.Local("fallback", "warn", fallbackProblem, "give the fallback entry this computer's os, or use a machines.yml without it here")).ConfigureAwait(false);
+        }
+        else if (config.Fallback is { } fallback)
+        {
+            await say(DoctorCheck.Local(
+                "fallback",
+                "ok",
+                $"fallback: {fallback.Name} (this computer), policy.fallback {config.Policy.Fallback.ToString().ToLowerInvariant()}; used only when the pool cannot take a job")).ConfigureAwait(false);
+        }
+
         foreach (var m in config.Machines)
         {
             foreach (var check in await LocalMachineChecks(m, host).ConfigureAwait(false))
@@ -388,6 +400,10 @@ public static partial class Cli
         }
 
         lines.Add(Check("work_root", "ok", $"work_root {m.WorkRoot} ({(m.Os == MachineOs.Windows ? "windows" : "linux")}, transfer: {m.Transfer.ToString().ToLowerInvariant()})"));
+        if (HygieneWarning(m) is { } hygiene)
+        {
+            lines.Add(hygiene);
+        }
 
         if (m.Wake is { } wake)
         {
@@ -396,6 +412,21 @@ public static partial class Cli
         }
         return lines;
     }
+
+    /// <summary>
+    /// 0.13.0 D1 (review H3, owner decision: a WARN only, no automatic profile): a .NET machine that runs several jobs at once without hygiene:
+    /// shares MSBuild nodes and the compiler server between its slots, so a finishing job can take down a sibling's build. Null otherwise.
+    /// </summary>
+    internal static DoctorCheck? HygieneWarning(Machine m) =>
+        m.Capabilities.Contains("dotnet", StringComparer.OrdinalIgnoreCase) && m.MaxJobs > 1 && m.Hygiene is not { Count: > 0 }
+            ? new DoctorCheck(
+                "machine",
+                m.Name,
+                "hygiene",
+                "warn",
+                $"max_jobs {m.MaxJobs} and no hygiene: parallel .NET jobs share MSBuild nodes and the compiler server; a finishing job can break a sibling's build",
+                "add hygiene: [dotnet] to this machine in machines.yml (node reuse off costs a few seconds per build; docs/WORKERS.md)")
+            : null;
 
     /// <summary>Expands a leading ~ the way ssh does; a path with other ssh tokens (%d, %u) is skipped.</summary>
     private static string? ExpandHome(string file, DoctorHost host)

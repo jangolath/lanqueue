@@ -200,8 +200,9 @@ public static partial class RemoteScripts
         stop_job() {
           case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
           kill_recorded "$R/locks/job-$1.pid" "$R/jobs/$1" "$1"
+          sweep_marked "$1" 0 0
         }
-        """ + "\n" + LinuxKillRecordedFunction;
+        """ + "\n" + LinuxKillRecordedFunction + "\n" + LinuxSweepFunction;
 
     /// <summary>
     /// The PowerShell helpers (they need $root): <c>Take</c> and <c>Drop</c> the slot's lock file the same way as the sh ones (CreateNew with a
@@ -849,7 +850,9 @@ public static partial class RemoteScripts
     /// </summary>
     internal static string JobEnvironmentPosix(Machine m, string? jobId = null, ShardInfo? shard = null, string? planJob = null, IReadOnlyList<JobEnvVar>? env = null)
     {
-        var words = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)).ToList();
+        // hygiene: first (0.13.0 D1), so the machine's own env: and the job's --env, both later, win over a profile's value.
+        var words = Hygiene.EnvFor(m).Select(e => ShellQuote.Posix(e.Name + "=" + e.Value)).ToList();
+        words.AddRange(m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => ShellQuote.Posix(e.Key + "=" + e.Value)));
 
         // The job's --env, in the order given: after the machine's (a clash is refused before this), before lanq's own.
         words.AddRange((env ?? []).Select(e => ShellQuote.Posix(SafeJobEnvName(e.Name) + "=" + e.Value)));
@@ -989,7 +992,9 @@ public static partial class RemoteScripts
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
     internal static string JobEnvironmentPowerShell(Machine m)
     {
-        var lines = m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => $"$env:{e.Key} = {ShellQuote.PowerShell(e.Value)}").ToList();
+        // hygiene: first (0.13.0 D1), then env:; a job's --env is set after both, so it wins over a profile's value.
+        var lines = Hygiene.EnvFor(m).Select(e => $"$env:{e.Name} = {ShellQuote.PowerShell(e.Value)}").ToList();
+        lines.AddRange(m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => $"$env:{e.Key} = {ShellQuote.PowerShell(e.Value)}"));
         if (m.PathPrepend.Count > 0)
         {
             var dirs = ShellQuote.PowerShell(string.Join(';', m.PathPrepend.Select(d => d.Replace('/', '\\'))));
@@ -1047,6 +1052,46 @@ public static partial class RemoteScripts
     internal const string LinuxKillRecordedJob = LinuxKillRecordedFunction + "\n" + "kill_recorded \"$R/locks/job-$ID.pid\" \"$R/jobs/$ID\" \"$ID\"";
 
     /// <summary>
+    /// 0.13.0 D1: <c>sweep_marked JOBID NODES LEAN</c>, the Linux leftover sweep after <c>kill_recorded</c>. It stops (TERM, 2 s, KILL) every
+    /// process of this uid whose environment holds exactly LANQ_JOB=JOBID: the job's own descendants, also those that left its process group
+    /// (a server that called setsid). It records each one's start time at the scan and checks start time, the exact marker and the Uid again
+    /// before every signal (review M12), so a pid reused meanwhile is never signalled. Shared processes are skipped (review H3): an MSBuild
+    /// node (MSBuild.dll or .exe with /nodemode:) unless NODES is 1 (node reuse off: hygiene), and the compiler server (VBCSCompiler) unless
+    /// LEAN is 1 (hygiene: [dotnet-lean]); a sibling slot may be using them. Without /proc it does nothing.
+    /// </summary>
+    internal const string LinuxSweepFunction = """
+        sweep_alive() {
+          [ "$(sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20)" = "$2" ] || return 1
+          { tr '\000' '\n' < "/proc/$1/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$3" || return 1
+          [ "$(sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status" 2>/dev/null)" = "$(id -u)" ]
+        }
+        sweep_marked() {
+          case "$1" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+          [ -d /proc/self ] || return 0
+          sl=
+          for sd in /proc/[0-9]*; do
+            sp=${sd#/proc/}
+            [ "$sp" = "$$" ] && continue
+            { tr '\000' '\n' < "$sd/environ"; } 2>/dev/null | grep -qxF "LANQ_JOB=$1" || continue
+            sc=$(tr '\000' ' ' < "$sd/cmdline" 2>/dev/null)
+            if [ "$2" != 1 ]; then case "$sc" in *MSBuild.dll*nodemode:*|*MSBuild.exe*nodemode:*) continue ;; esac; fi
+            if [ "$3" != 1 ]; then case "$sc" in *VBCSCompiler*) continue ;; esac; fi
+            sst=$(sed -n 's/.*) //p' "$sd/stat" 2>/dev/null | cut -d' ' -f20)
+            [ -n "$sst" ] && sweep_alive "$sp" "$sst" "$1" && sl="$sl $sp:$sst"
+          done
+          [ -n "$sl" ] || return 0
+          for se in $sl; do sweep_alive "${se%%:*}" "${se#*:}" "$1" && kill -s TERM "${se%%:*}" 2>/dev/null; done
+          sleep 2
+          for se in $sl; do sweep_alive "${se%%:*}" "${se#*:}" "$1" && kill -s KILL "${se%%:*}" 2>/dev/null; done
+          return 0
+        }
+        """;
+
+    /// <summary>The sweep for one machine's job (needs $ID): its hygiene decides which shared .NET processes are private (<see cref="LinuxSweepFunction"/>).</summary>
+    internal static string LinuxSweepJob(Machine m) =>
+        LinuxSweepFunction + "\n" + $"sweep_marked \"$ID\" {(Hygiene.NodesPrivate(m) ? 1 : 0)} {(Hygiene.CompilerServerPrivate(m) ? 1 : 0)}";
+
+    /// <summary>
     /// Stops a job lanq gave up on (timed out, or its machine's hours ended) before its files are fetched. The worker enforces the same limit
     /// itself only <see cref="JobRunner.WorkerDeadlineMargin"/> later, so the job can still be running and writing. This uses the recorded
     /// processes exactly as cleanup does: the process group on Linux, and on Windows only processes whose pid and start time match what the
@@ -1065,6 +1110,7 @@ public static partial class RemoteScripts
             {{StopJobMarker}}
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
+            {{LinuxSweepJob(m)}}
             sleep 1
             exit 0
             """;
@@ -1098,6 +1144,7 @@ public static partial class RemoteScripts
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
+            {{LinuxSweepJob(m)}}
             rm -rf "$R/jobs/$ID"
             {{LinuxSlotRemoval(slot, "rm -f \"$R/incoming/$ID.tar.gz\" \"$R/incoming/$ID.list\"")}}
             exit 0
@@ -1119,6 +1166,7 @@ public static partial class RemoteScripts
         : $$"""
             R={{ShellQuote.Posix(m.WorkRoot)}}; ID={{ShellQuote.Posix(jobId)}}
             {{LinuxKillRecordedJob}}
+            {{LinuxSweepJob(m)}}
             {{(repoId is null ? "" : LinuxCacheCleanupBefore(repoId))}}
             rm -rf "$R/jobs/$ID"
             {{(repoId is null ? "" : LinuxCacheCleanupAfter)}}

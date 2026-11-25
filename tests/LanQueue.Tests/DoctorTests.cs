@@ -53,6 +53,14 @@ public sealed class DoctorTests : IDisposable
             _ => Task.FromResult(unencrypted),
             home ?? _home);
 
+    /// <summary>T.Config with build-01 (dotnet, max_jobs 2) given hygiene: [dotnet], so the 0.13.0 hygiene WARN does not change these tests' exit codes.</summary>
+    private static Config.FleetConfig Cfg()
+    {
+        var c = T.Config();
+        c.Machines[0].Hygiene = ["dotnet"];
+        return c;
+    }
+
     private static async Task<(int Code, string Out)> Doctor(
         DoctorHost host, ISshClient? ssh = null, Func<FleetConfig>? config = null, bool remote = false, bool force = false, TimeProvider? clock = null,
         Func<Machine, string>? doctorScript = null)
@@ -73,7 +81,7 @@ public sealed class DoctorTests : IDisposable
             "doctor", .. remote ? ["--remote"] : (string[])[], .. force ? ["--force"] : (string[])[], .. json ? ["--json"] : (string[])[],
             .. configPath is null ? (string[])[] : ["--config", configPath]]);
         ssh ??= new FakeSsh();
-        var code = await Cli.Doctor(p, config ?? T.Config, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, e, ct, doctorScript);
+        var code = await Cli.Doctor(p, config ?? Cfg, host, ssh, new HealthProbe(ssh, clock ?? TimeProvider.System), o, e, ct, doctorScript);
         return (code, o.ToString(), e.ToString());
     }
 
@@ -108,7 +116,7 @@ public sealed class DoctorTests : IDisposable
     /// <summary>--remote where build-01 has a missing tool and an unknown capability, and build-02 is outside its allowed hours (noon).</summary>
     private static (FleetConfig Config, FakeSsh Ssh, FakeClock Noon) HeldAndFailing()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines[0].Capabilities = ["dotnet", "node", "gpu"];
         var ssh = new FakeSsh
         {
@@ -239,7 +247,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task HeldMachinesAreHoldChecksAndAWaitStepWithoutForce()
     {
-        var config = T.Config();
+        var config = Cfg();
         var noon = new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero));
         var ssh = new FakeSsh
         {
@@ -351,7 +359,7 @@ public sealed class DoctorTests : IDisposable
         Assert.Equal(0, code);
         Assert.Contains("OK    logs: 2 files, 1.5 MB (kept 30 days)" + Environment.NewLine, o, StringComparison.Ordinal);
 
-        var config = T.Config();
+        var config = Cfg();
         config.Policy.KeepLogsDays = 0;
         (code, o) = await Doctor(Host(), config: () => config);
         Assert.Equal(0, code); // small and never pruned: fine
@@ -365,7 +373,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task AnAllowedEnvPrefixCoveringDeniedNamesIsAWarning()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Policy.AllowedEnv.AddRange(["CONFIGURATION", "NODE_*"]);
         var (code, o) = await Doctor(Host(), config: () => config);
         Assert.Equal(0, code);
@@ -397,7 +405,7 @@ public sealed class DoctorTests : IDisposable
     [InlineData(0, 2L * 1024 * 1024 * 1024, "ok")]
     public async Task TheLogsCheckWarnsOverTwoGigabytesWhenNeverPruned(int keepDays, long bytes, string level)
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Policy.KeepLogsDays = keepDays;
         var host = Host() with { MeasureLogs = _ => (6000, bytes) };
         var (code, o, _) = await DoctorRun(host, config: () => config, json: true);
@@ -462,7 +470,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task RemoteRespectsAPauseFileAndAllowedHoursUnlessForced()
     {
-        var config = T.Config(); // build-02 is allowed 22:00-07:00
+        var config = Cfg(); // build-02 is allowed 22:00-07:00
         var noon = new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero));
         var ssh = new FakeSsh
         {
@@ -492,7 +500,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task RemoteReportsATimedOutCheckAndKeepsTheOthers()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=timeout|\ncap.node=0|v22.1.0\n") };
         var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
@@ -508,7 +516,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task RuntimeOnlyDotnetIsMissingAndDoctorFixSuggestsPathPrepend()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         config.Machines[0].Capabilities = ["dotnet"];
         var ssh = new FakeSsh
@@ -536,7 +544,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task WmiDeniedIsAWarnWithAFix()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines[1].Capabilities = [];
         var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok~tool=ok~git_version=git version 2.47.0~wmi=fail|Access denied~cap.dotnet=0|10.0.100~cap.node=0|v22~".Replace('~', (char)10)) };
         var (code, o, _) = await DoctorRun(Host(), ssh, () => config, remote: true, force: true, json: true);
@@ -552,7 +560,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task AnSdkInAFolderOthersCanWriteIsNamedButNotProposed()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         config.Machines[0].Capabilities = ["dotnet"];
         var ssh = new FakeSsh
@@ -574,7 +582,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task AMissingToolNotFoundAnywhereKeepsThePlainFailure()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         config.Machines[0].Capabilities = ["dotnet"];
         var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(0, "root=ok\ntool=ok\ncap.dotnet=127|sh: 1: dotnet: not found\n") };
@@ -731,7 +739,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task RemoteParsesPartialOutputWhenTheWholeCallTimesOut()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe) : new SshResult(124, "root=ok\ntool=ok\ncap.dotnet=0|10.0.100\n", TimedOut: true) };
         var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
@@ -943,7 +951,7 @@ public sealed class DoctorTests : IDisposable
             Golden(o));
 
         // 2. --remote at noon: build-02 is outside its allowed hours (HOLD, only probed); build-01 is checked: OK, WARN, FAIL and SKIP lines.
-        var config = T.Config();
+        var config = Cfg();
         config.Machines[0].Capabilities = ["dotnet", "node", "gpu"];
         var noon = new FakeClock(new DateTimeOffset(2026, 1, 5, 12, 0, 0, TimeSpan.Zero));
         var ssh = new FakeSsh
@@ -1139,7 +1147,7 @@ public sealed class DoctorTests : IDisposable
     [Fact]
     public async Task RemoteChecksEachMachineOnceAndExplainsAToolMissingFromTheNonLoginShell()
     {
-        var config = T.Config();
+        var config = Cfg();
         config.Machines[0].Capabilities = ["dotnet", "npm", "gpu"];
         config.Machines[0].PathPrepend = ["/opt/node/bin"];
         var ssh = new FakeSsh
@@ -1173,7 +1181,7 @@ public sealed class DoctorTests : IDisposable
     public async Task RemoteWarnsAboutAGitTooOldToIgnoreTheGlobalConfig(string version, bool warns)
     {
         var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, "root=ok\ntool=ok\ngit_version=" + version + "\ncap.dotnet=0|10.0.100\ncap.node=0|v22\n") };
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
         Assert.Equal(warns ? 1 : 0, code);
@@ -1187,7 +1195,7 @@ public sealed class DoctorTests : IDisposable
     {
         // Today's doctor script is always shorter than the job script for the same env:, so a too-long one is stood in for: the job
         // script of this machine fits (the config loads), only the doctor script is over the cap.
-        var config = T.Config();
+        var config = Cfg();
         static string Oversized(Machine m) => m.Os == MachineOs.Windows ? RemoteScripts.Doctor(m) + "\n#" + new string('x', 3500) : RemoteScripts.Doctor(m);
         var ssh = new FakeSsh { Handler = (_, cmd) => IsProbe(cmd) ? new SshResult(0, HealthyProbe + "local_time=2026-01-05T23:00:00\n") : new SshResult(0, "root=ok\ntool=ok\n") };
         var (code, o) = await Doctor(Host(), ssh, () => config, remote: true, force: true, doctorScript: Oversized);
@@ -1204,7 +1212,7 @@ public sealed class DoctorTests : IDisposable
     public async Task RemoteReportsAReadOnlyWorkRootAndAMissingTransferTool()
     {
         var ssh = new FakeSsh { Handler = (_, _) => new SshResult(0, "root=readonly\ntool=missing\n") };
-        var config = T.Config();
+        var config = Cfg();
         config.Machines.RemoveAt(1);
         var (code, o) = await Doctor(Host(), ssh, () => config, remote: true);
         Assert.Equal(1, code);

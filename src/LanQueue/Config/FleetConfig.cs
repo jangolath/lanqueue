@@ -142,6 +142,12 @@ public sealed class Machine
     /// </summary>
     public bool Fallback { get; set; }
 
+    /// <summary>
+    /// hygiene: [dotnet] or [dotnet-lean] (0.13.0 D1): environment profiles for this machine's jobs (see <see cref="Config.Hygiene"/>); null or
+    /// empty = none.
+    /// </summary>
+    public List<string>? Hygiene { get; set; }
+
     /// <summary>local: true (0.13.0 B3): run on this computer through a local process instead of ssh (only with fallback: true; no ssh: then).</summary>
     public bool Local { get; set; }
 }
