@@ -182,7 +182,7 @@ public sealed class PostStepTests : IDisposable
         var pid = root + "/locks/post-" + _j1 + ".pid";
         string[] argv = windows
             ? ["powershell", "-NoProfile", "-Command", "if (Test-Path '" + pid + "') { 'present' }"]
-            : ["sh", "-c", "test -f " + pid + " && echo present"];
+            : ["sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do test -f " + pid + " && echo present && exit 0; sleep 0.25; done; exit 1"]; // the wrapper writes the pid file just after the start
         if (windows)
         {
             Assert.Equal(0, Shells.Run("windows", RemoteScripts.EnsureIncoming(m)).Code);

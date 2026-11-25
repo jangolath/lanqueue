@@ -143,7 +143,8 @@ public sealed class HygieneTests : IDisposable
         var server = Marked(id, "MSBuild.dll", "/nodemode:8", "/nodeReuse:false");
         var compiler = Marked(id, "VBCSCompiler.dll", "-pipename:x");
         var razor = Marked(id, "rzc.dll", "server", "-p", "x"); // final review L7: shared like the compiler server
-        var razorOnce = Marked(id, "rzc.dll", "generate", "-s", "x"); // a one-off Razor compile is the job's own
+        Directory.CreateDirectory(Path.Combine(_root, "once"));
+        var razorOnce = Marked(id, Path.Combine("once", "rzc.dll"), "generate", "-s", "x"); // a one-off Razor compile is the job's own (its own script file)
         var other = Marked(id + "x", "other.sh"); // a marker that only starts with the id: not this job
         var again = (Process?)null;
         Process[] spared = [reusable, unknown, server, compiler, razor, other];
