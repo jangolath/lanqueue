@@ -16,6 +16,7 @@ public sealed class StaticYamlTests
           min_free_disk_gb: 7.5
           min_free_mem_gb: 1.5
           max_mem_pressure: 30
+          job_mem_gb: 3
           window_grace_minutes: 20
           min_window_minutes: 5
           keep_logs_days: 45
@@ -33,6 +34,7 @@ public sealed class StaticYamlTests
             capabilities: [dotnet, node]
             max_jobs: 3
             min_free_mem_gb: 2
+            job_mem_gb: 4.5
             env:
               NODE_OPTIONS: "--max-old-space-size=2048"
               DOTNET_GCConserveMemory: "1"
@@ -67,6 +69,7 @@ public sealed class StaticYamlTests
         Assert.Equal(7.5, c.Policy.MinFreeDiskGb);
         Assert.Equal(1.5, c.Policy.MinFreeMemGb);
         Assert.Equal(30, c.Policy.MaxMemPressure);
+        Assert.Equal(3, c.Policy.JobMemGb);
         Assert.Equal(20, c.Policy.WindowGraceMinutes);
         Assert.Equal(5, c.Policy.MinWindowMinutes);
         Assert.Equal(45, c.Policy.KeepLogsDays);
@@ -79,6 +82,7 @@ public sealed class StaticYamlTests
         Assert.Equal(["dotnet", "node"], lin.Capabilities);
         Assert.Equal(3, lin.MaxJobs);
         Assert.Equal(2, lin.MinFreeMemGb);
+        Assert.Equal(4.5, lin.JobMemGb);
         Assert.Equal("--max-old-space-size=2048", lin.Env["NODE_OPTIONS"]);
         Assert.Equal("1", lin.Env["DOTNET_GCConserveMemory"]);
         Assert.Equal(["/home/build/.nvm/versions/node/v22/bin"], lin.PathPrepend);
@@ -93,6 +97,7 @@ public sealed class StaticYamlTests
         Assert.Equal(MachineOs.Windows, win.Os);
         Assert.Null(win.KeyEnv);
         Assert.Null(win.MinFreeMemGb);
+        Assert.Null(win.JobMemGb);
         Assert.Empty(win.Capabilities);
         Assert.Empty(win.Env);
         Assert.Equal(1, win.MaxJobs);

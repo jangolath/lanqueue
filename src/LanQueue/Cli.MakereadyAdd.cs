@@ -380,6 +380,7 @@ public static partial class Cli
         string.Join(',', m.Capabilities),
         m.MaxJobs.ToString(CultureInfo.InvariantCulture),
         m.MinFreeMemGb?.ToString("R", CultureInfo.InvariantCulture) ?? "-",
+        m.JobMemGb?.ToString("R", CultureInfo.InvariantCulture) ?? "-",
         string.Join(',', m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => e.Key + "=" + e.Value)),
         string.Join(',', m.PathPrepend),
         m.Priority,
@@ -390,7 +391,7 @@ public static partial class Cli
 
     private static string Describe(PolicyConfig p) => string.Join(
         "\u001f",
-        string.Create(CultureInfo.InvariantCulture, $"{p.LoadThreshold:R}/{p.MinFreeDiskGb:R}/{p.MinFreeMemGb:R}/{p.MaxMemPressure:R}/{p.WindowGraceMinutes}/{p.MinWindowMinutes}"),
+        string.Create(CultureInfo.InvariantCulture, $"{p.LoadThreshold:R}/{p.MinFreeDiskGb:R}/{p.MinFreeMemGb:R}/{p.MaxMemPressure:R}/{p.WindowGraceMinutes}/{p.MinWindowMinutes}/{p.JobMemGb?.ToString("R", CultureInfo.InvariantCulture) ?? "-"}"),
         string.Join(',', p.AllowedCommands),
         string.Join(',', p.AllowedDirectories));
 
