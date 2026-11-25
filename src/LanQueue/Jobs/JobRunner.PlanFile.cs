@@ -330,6 +330,15 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
 
     /// <summary>baseline: true, a single job that ended Failed: its rerun at the base commit (a sharded job has one per failed shard); else null.</summary>
     public BaselineResult? Baseline { get; init; }
+
+    /// <summary>0.13.0 B3: the job's runs (1, or its shards) that ran on this computer's fallback entry.</summary>
+    public int FallbackJobs => (Single?.Fallback == true ? 1 : 0) + (Sharded?.FallbackJobs ?? 0);
+
+    /// <summary>The job's units of work for the fallback note: its shards, 1 for a single job, 0 when it was skipped.</summary>
+    public int Units => Sharded?.Count ?? (Status == Skipped ? 0 : 1);
+
+    /// <summary>NoCapacity only (0.13.0 B3): see <see cref="JobResult.FallbackHint"/>.</summary>
+    public FallbackHint? FallbackHint => Single?.FallbackHint ?? Sharded?.FallbackHint;
 }
 
 /// <summary>
@@ -339,6 +348,15 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
 public sealed record PlanRunResult(string Status, int ExitCode, string Message, IReadOnlyList<PlanJobOutcome> Jobs)
 {
     public string? Decided { get; init; }
+
+    /// <summary>0.13.0 B3: how many runs (jobs and shards) of the plan ran on this computer's fallback entry.</summary>
+    public int FallbackJobs => Jobs.Sum(j => j.FallbackJobs);
+
+    /// <summary>0.13.0 B3: every run (job or shard) of the plan that started, for the fallback note.</summary>
+    public int Units => Jobs.Sum(j => j.Units);
+
+    /// <summary>NoCapacity only (0.13.0 B3): the deciding job's fallback hint.</summary>
+    public FallbackHint? FallbackHint => Status == nameof(JobStatus.NoCapacity) ? Jobs.FirstOrDefault(j => j.Name == Decided)?.FallbackHint : null;
 
     /// <summary>NoCapacity only: from the deciding job.</summary>
     public bool? Retryable { get; init; }

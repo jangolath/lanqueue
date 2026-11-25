@@ -186,6 +186,28 @@ internal sealed class SuggestedCommand
     }
 
     /// <summary>
+    /// 0.13.0 B3: the same lanq run with --fallback on, so a job the pool cannot take may run on this computer's fallback entry. Never safe
+    /// unattended: only the developer decides to use their own PC (an agent reports it as ask_developer).
+    /// </summary>
+    public static SuggestedCommand? RunWithFallback(ParsedArgs p) =>
+        p.Command != "run" ? null : Make(["lanq", .. CommandLine.Edit(p.Raw, [("--fallback", "on")], remove: ["--dry-run"])], safe: false);
+
+    /// <summary>
+    /// 0.13.0 B3: the same lanq run on the pool only, with time to wait for a slot: --fallback off and --wait-slot 1800 (or --wait 1800 when
+    /// the run used --wait). Not safe unattended: it repeats a run that already passed, which the developer decides.
+    /// </summary>
+    public static SuggestedCommand? RerunOnPool(ParsedArgs p)
+    {
+        if (p.Command != "run")
+        {
+            return null;
+        }
+
+        var wait = p.Raw.Contains("--wait") ? ("--wait", Math.Max(p.WaitSeconds, 1800)) : ("--wait-slot", Math.Max(p.SlotSeconds, 1800));
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, [("--fallback", "off"), (wait.Item1, wait.Item2.ToString(CultureInfo.InvariantCulture))])], safe: false);
+    }
+
+    /// <summary>
     /// The user's own lanq run --plan again for some of its jobs: <see cref="ParsedArgs.Raw"/> with --only set to <paramref name="only"/> (the
     /// jobs that did not complete; --only only ever narrows, and every job named was in the run). <paramref name="waitSeconds"/> only raises
     /// --wait, and a run that could not wake a machine (--wait 0 without --no-wake) gets --no-wake, as <see cref="Rerun"/>. Nothing else
@@ -384,6 +406,33 @@ internal static class NextSteps
         {
             await stderr.WriteLineAsync(line).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// 0.13.0 B3: the fallback's next steps, added after a run's own. <paramref name="hint"/> on a NoCapacity: TurnOn suggests the same run with
+    /// --fallback on (ask_developer: an agent never decides to use the developer's PC); SetUp points at WORKERS.md "Using this PC as a fallback".
+    /// <paramref name="onFallback"/> above 0: the result is not pool evidence; an ask_developer step says so with the pool-only rerun.
+    /// </summary>
+    internal static List<NextStepJson> WithFallback(ParsedArgs p, List<NextStepJson> steps, Jobs.FallbackHint? hint, int onFallback, int jobs)
+    {
+        if (hint == Jobs.FallbackHint.TurnOn)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "this computer's fallback entry could run the job; only the developer may allow it (lanq run --fallback on, or policy.fallback)", SuggestedCommand.RunWithFallback(p)));
+        }
+        else if (hint == Jobs.FallbackHint.SetUp)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "no pool machine took the job; the developer may let this computer run such a job as a last resort (docs/WORKERS.md, \"Using this PC as a fallback\")"));
+        }
+
+        if (onFallback > 0)
+        {
+            steps.Add(Step(
+                NextAction.AskDeveloper,
+                string.Create(CultureInfo.InvariantCulture, $"{onFallback} of {jobs} job(s) ran on this computer (fallback), not on the pool: this is not pool evidence; rerun on the pool to confirm"),
+                SuggestedCommand.RerunOnPool(p)));
+        }
+
+        return steps;
     }
 
     /// <summary>What one lanq run (or dry run) ended with, for <see cref="ForRun(ParsedArgs, RunOutcome)"/>.</summary>

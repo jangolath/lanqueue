@@ -108,6 +108,7 @@ public static partial class ConfigLoader
             .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
             .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
             .WithTypeConverter(new WordEnumConverter<MachineOs>("os"))
+            .WithTypeConverter(new WordEnumConverter<FallbackMode>("policy.fallback"))
             .WithTypeConverter(new StringOrListConverter())
             .Build();
         FleetConfig config;
@@ -177,11 +178,16 @@ public static partial class ConfigLoader
 
     public static FleetConfig Load(string path) => Parse(File.ReadAllText(path));
 
+    /// <summary>This computer's OS, which a fallback entry (local: true) must name (0.13.0 B3).</summary>
+    internal static MachineOs ThisOs => OperatingSystem.IsWindows() ? MachineOs.Windows : MachineOs.Linux;
+
     public static void Validate(FleetConfig config)
     {
-        if (config.Machines is null || config.Machines.Count == 0)
+        if (config.Machines is null || config.Machines.Count == 0 || config.Machines.All(m => m is { Fallback: true }))
         {
-            throw new ConfigException("No machines configured.");
+            throw new ConfigException(config.Machines is { Count: > 0 }
+                ? "No machines configured: a fallback entry (this computer) alone is not a pool; add at least one worker."
+                : "No machines configured.");
         }
 
         if (config.Policy is null || config.Machines.Any(m => m is null))
@@ -250,7 +256,11 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine name '{m.Name}' is invalid or duplicated.");
             }
 
-            if (!SshTargetRegex().IsMatch(m.Ssh))
+            if (m.Local || m.Fallback)
+            {
+                ValidateFallbackEntry(m);
+            }
+            else if (!SshTargetRegex().IsMatch(m.Ssh))
             {
                 throw new ConfigException($"Machine '{m.Name}': ssh target must be user@host (no leading '-', no spaces).");
             }
@@ -331,6 +341,67 @@ public static partial class ConfigLoader
                 }
             }
         }
+
+        SplitFallback(config);
+    }
+
+    /// <summary>
+    /// 0.13.0 B3: the fallback entry describes this computer. local: true and fallback: true go together (local: true replaces ssh:), and the keys
+    /// that only make sense for a remote worker are refused on it. At most one such entry (checked by <see cref="SplitFallback"/>).
+    /// </summary>
+    private static void ValidateFallbackEntry(Machine m)
+    {
+        if (!m.Fallback)
+        {
+            throw new ConfigException($"Machine '{m.Name}': local: true goes only with fallback: true (this computer as the last resort; see policy.fallback).");
+        }
+
+        if (!m.Local)
+        {
+            throw new ConfigException($"Machine '{m.Name}': fallback: true describes this computer and needs local: true instead of ssh:.");
+        }
+
+        if (m.Ssh.Length > 0)
+        {
+            throw new ConfigException($"Machine '{m.Name}': local: true replaces ssh:; give one or the other (to use this PC as an ordinary worker over ssh, leave out fallback and local).");
+        }
+
+        string? refused = m.AllowedHours is not null ? "allowed_hours" : m.Wake is not null ? "wake" : m.KeyEnv is not null ? "key_env" : m.Transfer == TransferMode.Archive ? "transfer: archive" : null;
+        if (refused is not null)
+        {
+            throw new ConfigException($"Machine '{m.Name}': {refused} is not allowed on the fallback entry (this computer; it is used only when you allow it with policy.fallback or --fallback).");
+        }
+    }
+
+    /// <summary>
+    /// 0.13.0 B3 (review H4): moves the fallback entry out of <see cref="FleetConfig.Machines"/> into <see cref="FleetConfig.Fallback"/>, so no
+    /// placement loop can ever treat it as a worker. An entry whose os is not this computer's disables only the fallback (L8):
+    /// <see cref="FleetConfig.FallbackProblem"/> says so, and the rest of the file still loads.
+    /// </summary>
+    private static void SplitFallback(FleetConfig config)
+    {
+        var entries = config.Machines.Where(m => m.Fallback).ToList();
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        if (entries.Count > 1)
+        {
+            throw new ConfigException($"Only one machine may be the fallback (this computer); found {string.Join(", ", entries.Select(m => m.Name))}.");
+        }
+
+        var fallback = entries[0];
+        config.Machines.Remove(fallback);
+        if (fallback.Os != ThisOs)
+        {
+            config.Fallback = null;
+            config.FallbackProblem = $"the fallback entry '{fallback.Name}' says os: {fallback.Os.ToString().ToLowerInvariant()} but this computer runs {ThisOs.ToString().ToLowerInvariant()}; the fallback is off on this computer";
+            return;
+        }
+
+        config.Fallback = fallback;
+        config.FallbackProblem = null;
     }
 
     /// <summary>A list key must be a list (not null), and every entry a non-blank string.</summary>

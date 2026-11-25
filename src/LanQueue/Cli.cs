@@ -143,6 +143,15 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>Both wait budgets (<see cref="Scheduling.WaitBudgets"/>).</summary>
     public Scheduling.WaitBudgets Budgets => new(TimeSpan.FromSeconds(EligibleSeconds), TimeSpan.FromSeconds(SlotSeconds));
 
+    /// <summary>True when --wait, --wait-eligible or --wait-slot was given (0.13.0 B3: without any, a run that may fall back waits 120 s for a slot first).</summary>
+    public bool WaitGiven { get; init; }
+
+    /// <summary>
+    /// lanq run --fallback off|on|ask (0.13.0 B3; lanq.yml fallback: off): overrides policy.fallback for this run, or null. Also valid with --plan,
+    /// where it applies to every job except one whose lanq.yml says fallback: off.
+    /// </summary>
+    public FallbackMode? Fallback { get; init; }
+
     /// <summary>
     /// lanq run --plan --plan-timeout M (lanq.yml plan_timeout: M; the command line wins): the whole plan's limit in minutes, 1 to 10080, from
     /// after the snapshot to the last baseline (0.10.0). Null without it.
@@ -182,7 +191,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
 
     /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
     internal const string PlanTakes =
-        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --wait-eligible, --wait-slot, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
+        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --wait-eligible, --wait-slot, --fallback, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -198,7 +207,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results", "--wait-eligible", "--wait-slot",
+            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results", "--wait-eligible", "--wait-slot", "--fallback",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -225,6 +234,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var wait = 0;
         int? waitEligible = null;
         int? waitSlot = null;
+        FallbackMode? fallback = null;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
@@ -293,6 +303,15 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--wait-slot" when i + 1 < own.Length:
                     waitSlot = WaitValue("--wait-slot", own[++i]);
+                    break;
+                case "--fallback" when i + 1 < own.Length:
+                    fallback = own[++i] switch
+                    {
+                        "off" => FallbackMode.Off,
+                        "on" => FallbackMode.On,
+                        "ask" => FallbackMode.Ask,
+                        _ => throw new ArgumentException("--fallback must be off, on or ask (whether a job the pool cannot take may run on this computer's fallback entry)."),
+                    };
                     break;
                 case "--timeout" when i + 1 < own.Length:
                     timeout = int.Parse(own[++i], CultureInfo.InvariantCulture);
@@ -533,6 +552,8 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         {
             WaitEligibleSeconds = waitEligible,
             WaitSlotSeconds = waitSlot,
+            WaitGiven = seen.Contains("--wait") || waitEligible is not null || waitSlot is not null,
+            Fallback = fallback,
             TimeoutMinutes = timeout,
             MemGb = mem,
             Json = json,
@@ -956,7 +977,15 @@ public static partial class Cli
             return 2;
         }
 
-        var ssh = new ProcessSshClient(Environment.GetEnvironmentVariable);
+        // 0.13.0 B3: the fallback entry (this computer, local: true) runs through local processes; every worker through ssh.
+        ISshClient ssh = config.Fallback is null
+            ? new ProcessSshClient(Environment.GetEnvironmentVariable)
+            : new RoutingSshClient(new ProcessSshClient(Environment.GetEnvironmentVariable), new LocalProcessClient());
+        if (config.FallbackProblem is { } fallbackProblem && p.Command == "run")
+        {
+            await stderr.WriteLineAsync(JobRunner.SafeLine("[lanq] warning: " + fallbackProblem)).ConfigureAwait(false);
+        }
+
         if (p.Command == "unlock")
         {
             return await Unlock(p, config, ssh, stdout, stderr, ct).ConfigureAwait(false);
@@ -1006,7 +1035,11 @@ public static partial class Cli
             fetch = new FetchRequest(p.Fetch, root, new FetchLimits(p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total), anchor);
         }
 
-        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
+        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")))
+        {
+            Prompt = FallbackPrompt(p, config, stderr, out var noAsk),
+            NoAskReason = noAsk,
+        };
         if (p.Shards is { } shards)
         {
             return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct, () => PruneLogs(log, config, stderr)).ConfigureAwait(false);
@@ -1042,7 +1075,7 @@ public static partial class Cli
         PruneLogs(log, config, stderr);
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
-        var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        var next = NextSteps.WithFallback(p, NextSteps.ForRun(p, NextSteps.Outcome(result)), result.Status == JobStatus.NoCapacity ? result.FallbackHint : null, result.Fallback ? 1 : 0, 1);
         if (NoTestsRan(result.Status.ToString(), result.Results) is { } noTests)
         {
             next = WithNoTestsSteps(next, [(null, noTests)]);
@@ -1066,6 +1099,8 @@ public static partial class Cli
                         Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
                         Waited = result.Status == JobStatus.NoCapacity ? WaitedJson.Of(result.Waited) : null,
+                        Fallback = Flag(result.Fallback),
+                        FallbackJobs = result.Fallback ? 1 : null,
                         NextSteps = next,
                         Env = EnvNames(p.Env),
                         Exclusive = Flag(p.Exclusive),
@@ -1083,6 +1118,22 @@ public static partial class Cli
         }
 
         return result.CliExitCode;
+    }
+
+    /// <summary>
+    /// 0.13.0 B3: the terminal prompt of policy.fallback ask, or null (with why) when lanq may not prompt here (<see cref="FallbackAsk.WhyNot"/>):
+    /// --json, no terminal on stdin or stderr, CI, TERM=dumb, LANQ_NONINTERACTIVE or a coding agent.
+    /// </summary>
+    internal static IFallbackPrompt? FallbackPrompt(ParsedArgs p, FleetConfig config, TextWriter stderr, out string? why)
+    {
+        if (config.Fallback is null || (p.Fallback ?? config.Policy.Fallback) != FallbackMode.Ask)
+        {
+            why = null;
+            return null; // nothing will ever ask: never read the terminal
+        }
+
+        why = FallbackAsk.WhyNot(p.Json, Console.IsInputRedirected, Console.IsErrorRedirected, Environment.GetEnvironmentVariables());
+        return why is null ? new TerminalPrompt(Console.In, stderr, TerminalPrompt.DefaultTimeout) : null;
     }
 
     /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
@@ -1125,6 +1176,9 @@ public static partial class Cli
         new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
         {
             Budgets = p.SplitWait ? p.Budgets : null,
+            WaitGiven = p.WaitGiven,
+            Fallback = p.Fallback,
+            FallbackOff = p.Fallback == FallbackMode.Off,
             NoWake = p.NoWake,
             On = p.On,
             Size = p.Size,
@@ -1236,7 +1290,7 @@ public static partial class Cli
     }
 
     /// <summary>The final line on stderr; TimedOut and WindowClosed (both exit 124) are told apart here.</summary>
-    internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}: {result.Message}";
+    internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}{JobRunner.FallbackNote(result.Fallback ? 1 : 0, 1)}: {result.Message}";
 
     /// <summary>State folder: $LANQ_HOME, else a per-user folder. Deliberately never inside the current repository.</summary>
     internal static string ResolveHome(Func<string, string?> env, bool windows)

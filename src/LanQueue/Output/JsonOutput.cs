@@ -157,6 +157,13 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public WaitedJson? Waited { get; init; }
 
+    /// <summary>0.13.0 B3: true when this job ran on this computer's fallback entry, not on the pool (absent otherwise).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Fallback { get; init; }
+    /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackJobs { get; init; }
+
     /// <summary>Always present: the full path of the job's local log (every line lanq printed for the job), or null when no job started.</summary>
     public string? LogPath { get; init; }
 
@@ -297,6 +304,10 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public WaitedJson? Waited { get; init; }
+
+    /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackJobs { get; init; }
 
     /// <summary>--shards auto --target-minutes only: how N was picked from earlier runs (left out otherwise).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -463,6 +474,10 @@ internal sealed record PlanFileRunJson(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public WaitedJson? Waited { get; init; }
 
+    /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackJobs { get; init; }
+
     /// <summary>The plan file's static warnings (also printed on stderr).</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
 
@@ -513,6 +528,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public WaitedJson? Waited { get; init; }
+
+    /// <summary>0.13.0 B3: true when this job ran on this computer's fallback entry, not on the pool (absent otherwise).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Fallback { get; init; }
 
     /// <summary>A single job with fetch: in lanq.yml only, as in <see cref="RunJson.Fetched"/> (a sharded job has them per shard).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -724,7 +743,12 @@ internal sealed record StatsLogsJson(int Files, double Megabytes, int? KeepDays)
 /// <param name="SpeedSamples">How many such jobs it has (0 for none).</param>
 internal sealed record StatsMachineJson(
     string Machine, int Jobs, int Completed, int Failed, int Other, double WallMinutes, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
-    double? SpeedFactor, int SpeedSamples);
+    double? SpeedFactor, int SpeedSamples)
+{
+    /// <summary>0.13.0 B3: true when the machine is this computer's fallback entry (its jobs ran here, not on the pool); absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ThisComputer { get; init; }
+}
 
 /// <summary>One command of <c>lanq stats --json</c>: every job with the same key and dir (or, before 0.7.0, the same recorded command; dir null).</summary>
 /// <param name="Runs">Distinct runs: every shard of one --shards run is one run.</param>

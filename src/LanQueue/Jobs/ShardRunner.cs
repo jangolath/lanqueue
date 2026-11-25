@@ -79,6 +79,12 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
 
     /// <summary>lanq run --baseline: the shard's rerun at the base commit after it ended Failed; else null.</summary>
     public BaselineResult? Baseline { get; init; }
+
+    /// <summary>0.13.0 B3: true when the shard's last attempt ran on this computer's fallback entry.</summary>
+    public bool Fallback { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0 B3): see <see cref="JobResult.FallbackHint"/>.</summary>
+    public FallbackHint? FallbackHint { get; init; }
 }
 
 /// <summary>A whole lanq run --shards: the overall status and exit code (see <see cref="JobRunner.Aggregate"/>) and every shard, in index order.</summary>
@@ -101,6 +107,12 @@ public sealed record ShardRunResult(string Status, int ExitCode, int Count, IRea
 
     /// <summary>--shards auto --target-minutes: how N was picked (<see cref="ShardTiming.Pick"/>); null otherwise.</summary>
     public ShardTimingResult? Timing { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0 B3): see <see cref="JobResult.FallbackHint"/>, from the shard that decided the status.</summary>
+    public FallbackHint? FallbackHint { get; init; }
+
+    /// <summary>0.13.0 B3: how many shards ran on this computer's fallback entry (top-level JSON fallbackJobs).</summary>
+    public int FallbackJobs => Shards.Count(s => s.Fallback);
 }
 
 public sealed partial class JobRunner
@@ -333,6 +345,7 @@ public sealed partial class JobRunner
             Waited = noCapacity ? worst.Waited : null,
             RejectKind = worst.RejectKind,
             InfraKind = worst.InfraKind,
+            FallbackHint = noCapacity ? worst.FallbackHint : null,
         };
 
         static int Rank(string status) => status switch
@@ -514,6 +527,7 @@ public sealed partial class JobRunner
                     Retryable = none.Retryable,
                     Excluded = none.Excluded,
                     Waited = none.Waited,
+                    FallbackHint = none.FallbackHint,
                 };
             }
 
@@ -555,6 +569,29 @@ public sealed partial class JobRunner
                     var free = Placeable(
                         assessed, MemNeeds(template), m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
+
+                    // 0.13.0 B3 (M2): once this run fell back, shards the pool cannot take now may use this computer's own slots (max_jobs and
+                    // memory there, so many shards never pile onto the PC), always after every free pool slot.
+                    Assessment? engaged;
+                    try
+                    {
+                        engaged = await EngagedFallbackAsync(template, needs, stop.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (stop.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    if (engaged is not null)
+                    {
+                        assessed = [.. assessed, engaged];
+                        if (engaged.Eligible)
+                        {
+                            var left = pending.Where(p => !deal.Any(d => ReferenceEquals(d.Item, p))).ToList();
+                            var local = Placeable([engaged], MemNeeds(template), m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
+                            deal.AddRange(Scheduler.Deal(local, left, (p, m) => !p.Avoid.Contains(m.Name)));
+                        }
+                    }
                     var first = firstRound == -1;
                     if (first)
                     {
@@ -576,8 +613,15 @@ public sealed partial class JobRunner
                     (lastProbes, lastAssessed) = (probes, assessed); // a wake below updates both in place
                     if (pending.Count > 0 && assessed.All(a => a.Permanent))
                     {
-                        // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish).
-                        EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()));
+                        // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish),
+                        // unless this computer's fallback may take them (0.13.0 B3): then look again with it as the last candidate.
+                        var never = await FallbackGateAsync(template, needs, "no pool machine can take it", line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                        if (never.Go)
+                        {
+                            continue;
+                        }
+
+                        EndWaiting(WithFallback(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()), never));
                     }
                     else if (launched == 0 && template.EffectiveBudgets.Eligible > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
                     {
@@ -593,7 +637,14 @@ public sealed partial class JobRunner
                 else if (pending.Count > 0 && running.Count == 0
                     && WaitedOut(template, waitClock, idleSince, Scheduler.WaitKindOf(lastAssessed), round, relooked) is { } budget)
                 {
-                    EndWaiting(WaitedNoCapacity(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()), template, waitClock, budget));
+                    var waited = await FallbackGateAsync(
+                        template, needs, budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now", line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                    if (waited.Go)
+                    {
+                        continue;
+                    }
+
+                    EndWaiting(WithFallback(WaitedNoCapacity(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()), template, waitClock, budget), waited));
                     break;
                 }
                 else if (pending.Count > 0 && running.Count == 0 && launched == 0 && Relook(plan, round, relooked) is > 0 and var release)
@@ -756,6 +807,8 @@ public sealed partial class JobRunner
             RejectKind = r.RejectKind,
             InfraKind = r.InfraKind,
             MayStillRun = r.MayStillRun && !r.CleanedUp,
+            Fallback = r.Fallback,
+            FallbackHint = r.FallbackHint,
         };
         return r.Status != JobStatus.Completed;
     }

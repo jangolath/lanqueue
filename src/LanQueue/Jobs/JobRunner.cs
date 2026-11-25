@@ -181,6 +181,18 @@ public sealed record JobRequest(
     /// <summary>Lines of this job are prefixed "[Label machine] " (a baseline rerun's "baseline 2/4"), instead of a plan job's name; null otherwise.</summary>
     public string? Label { get; init; }
 
+    /// <summary>lanq run --fallback off|on|ask (0.13.0 B3): overrides policy.fallback for this run; null keeps the policy.</summary>
+    public FallbackMode? Fallback { get; init; }
+
+    /// <summary>lanq.yml fallback: off (0.13.0 B3): this job never runs on this computer, whatever --fallback or the policy say.</summary>
+    public bool FallbackOff { get; init; }
+
+    /// <summary>
+    /// True when the caller gave --wait, --wait-eligible or --wait-slot. Without any, a run that may fall back waits at least
+    /// <see cref="JobRunner.FallbackSlotFloor"/> for a pool slot first (0.13.0 B3, review M1).
+    /// </summary>
+    public bool WaitGiven { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -242,6 +254,15 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>lanq run --baseline: the rerun at the base commit after this job ended Failed (never changes the status or exit code); else null.</summary>
     public BaselineResult? Baseline { get; init; }
 
+    /// <summary>0.13.0 B3: true when the job ran on this computer's fallback entry (not on the pool: its result is not pool evidence).</summary>
+    public bool Fallback { get; init; }
+
+    /// <summary>
+    /// NoCapacity only (0.13.0 B3): what the next steps may say about the fallback: <see cref="FallbackHint.TurnOn"/> when this computer's
+    /// fallback entry could be tried with --fallback on, <see cref="FallbackHint.SetUp"/> when none is configured; null for neither.
+    /// </summary>
+    public FallbackHint? FallbackHint { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -251,6 +272,16 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
         JobStatus.Rejected => 2,
         _ => 70,
     };
+}
+
+/// <summary>0.13.0 B3: the fallback suggestion a NoCapacity result carries (see <see cref="JobResult.FallbackHint"/>).</summary>
+public enum FallbackHint
+{
+    /// <summary>A fallback entry is configured and the job may use it: the developer can rerun with --fallback on.</summary>
+    TurnOn,
+
+    /// <summary>No fallback entry is configured: WORKERS.md "Using this PC as a fallback" says how.</summary>
+    SetUp,
 }
 
 /// <summary>One machine that did not take a job: its name, the reason code (missing_capability, busy, ...), the reason for people, and whether waiting can never help.</summary>
@@ -363,13 +394,20 @@ public sealed partial class JobRunner(
         // Arguments unsafe on Windows (" < > ^ %, or & | for a program that is not an .exe) can still run on a Linux worker; refuse only
         // when no non-Windows machine has the needed capabilities, before any network or git work.
         var windows = JobPolicy.ValidateForWindows(req.Argv);
-        if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs))
+            && !(FallbackCouldTake(req) && config.Fallback!.Os != MachineOs.Windows))
         {
             return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!) { RejectKind = Jobs.RejectKind.WindowsArgs };
         }
 
-        // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
-        return NeverByConfig(req) is { } never ? NoCapacity(jobId, never, "") : null;
+        // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable),
+        // unless this computer's fallback may take it (0.13.0 B3: then the job goes on to that point; see Dispatch).
+        if (NeverByConfig(req) is not { } never || FallbackCouldTake(req))
+        {
+            return null;
+        }
+
+        return WithFallback(NoCapacity(jobId, never, ""), PrecheckFallbackHint(req));
     }
 
     /// <summary>
@@ -796,6 +834,14 @@ public sealed partial class JobRunner(
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
+            // 0.13.0 B3 (M2): once this run fell back, this computer is a candidate too, always after every pool machine.
+            var engaged = await EngagedFallbackAsync(req, needs, ct).ConfigureAwait(false);
+            var judged = engaged is null ? assessed : [.. assessed, engaged];
+            if (engaged is { Eligible: true })
+            {
+                ranked = [.. ranked, engaged];
+            }
+
             sshFailed.Clear();
             // Never longer than what is left of the slot-wait budget (with 0, not at all: any machine that can take it now).
             var waitLeft = req.EffectiveBudgets.Slot - deadline.Elapsed;
@@ -861,10 +907,16 @@ public sealed partial class JobRunner(
                 continue;
             }
 
-            // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now.
-            if (assessed.All(a => a.Permanent))
+            // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now (or fall back).
+            if (judged.All(a => a.Permanent))
             {
-                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
+                var never = await FallbackGateAsync(req, needs, "no pool machine can take it", say, ct).ConfigureAwait(false);
+                if (never.Go)
+                {
+                    continue;
+                }
+
+                return WithFallback(NoCapacity(jobId, judged, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), never);
             }
 
             // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
@@ -874,9 +926,15 @@ public sealed partial class JobRunner(
                 await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false);
             }
 
-            if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(assessed, sshFailed), round, relooked) is { } budget)
+            if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(judged, sshFailed), round, relooked) is { } budget)
             {
-                return WaitedNoCapacity(NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), req, waitClock, budget);
+                var waited = await FallbackGateAsync(req, needs, budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now", say, ct).ConfigureAwait(false);
+                if (waited.Go)
+                {
+                    continue;
+                }
+
+                return WithFallback(WaitedNoCapacity(NoCapacity(jobId, judged, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), req, waitClock, budget), waited);
             }
 
             if (Relook(req.Progress, round, relooked) is > 0 and var release)
@@ -902,7 +960,7 @@ public sealed partial class JobRunner(
     /// machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before its sibling gave it back
     /// looks again instead of ending NoCapacity next to a free slot. Returns the budget that ran out, or null.
     /// </summary>
-    private static WaitKind? WaitedOut(JobRequest req, WaitClock clock, long ownSince, WaitKind state, long round, long relooked)
+    private WaitKind? WaitedOut(JobRequest req, WaitClock clock, long ownSince, WaitKind state, long round, long relooked)
     {
         var since = ownSince;
         if (req.Progress is { } plan)
@@ -916,7 +974,7 @@ public sealed partial class JobRunner(
         }
 
         clock.Look(Stopwatch.GetElapsedTime(0, Stopwatch.GetTimestamp()), Stopwatch.GetElapsedTime(0, since), state);
-        return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(req.EffectiveBudgets);
+        return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(BudgetsOf(req));
     }
 
     /// <summary>
@@ -1223,6 +1281,11 @@ public sealed partial class JobRunner(
         NoteStuckSlots(machine, acquire.Output, emit); // it got a slot past a stale one it could not reclaim
 
         onSlot?.Invoke();
+        if (machine.Local)
+        {
+            emit("[lanq] running on this computer (fallback: no pool slot)");
+        }
+
         emit(slot.Contains(',', StringComparison.Ordinal)
             ? $"[lanq] job {jobId} -> {machine.Name} (slots {slot}, exclusive)"
             : $"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
@@ -1298,8 +1361,9 @@ public sealed partial class JobRunner(
                 EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
                 BaselineOf = req.BaselineOf,
                 Commit = req.BaselineOf is null ? null : req.Commit,
+                Fallback = machine.Local ? true : null,
             });
-            return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
+            return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath), Fallback = machine.Local };
         }
         finally
         {

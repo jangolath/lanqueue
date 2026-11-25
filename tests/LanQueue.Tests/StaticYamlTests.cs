@@ -25,6 +25,7 @@ public sealed class StaticYamlTests
             - dotnet test
           allowed_directories: [".", src]
           allowed_env: [CONFIGURATION, "MYAPP_*"]
+          fallback: on
         machines:
           - name: lin
             os: linux
@@ -59,6 +60,11 @@ public sealed class StaticYamlTests
               - "Mon-Fri 22:00-07:00"
               - "Sat,Sun 01:00-09:00"
             transfer: Git
+          - name: dev
+            os: linux
+            local: true
+            fallback: true
+            work_root: /srv/dev
         """;
 
     [Fact]
@@ -76,6 +82,9 @@ public sealed class StaticYamlTests
         Assert.Equal(["dotnet build", "dotnet test"], c.Policy.AllowedCommands);
         Assert.Equal([".", "src"], c.Policy.AllowedDirectories);
         Assert.Equal(["CONFIGURATION", "MYAPP_*"], c.Policy.AllowedEnv);
+        Assert.Equal(FallbackMode.On, c.Policy.Fallback);
+        Assert.Equal(2, c.Machines.Count); // the fallback entry is never in the pool (0.13.0 B3)
+        Assert.True(c.Fallback is { Name: "dev", Local: true, Fallback: true } || c.FallbackProblem?.Contains("'dev'", StringComparison.Ordinal) == true);
 
         var lin = c.Machines[0];
         Assert.Equal(("lin", MachineOs.Linux, "build@lin.lan", "LANQ_KEY_LIN", "/srv/lanq"), (lin.Name, lin.Os, lin.Ssh, lin.KeyEnv, lin.WorkRoot));
@@ -113,7 +122,7 @@ public sealed class StaticYamlTests
     {
         foreach (var type in new[] { typeof(FleetConfig), typeof(PolicyConfig), typeof(Machine), typeof(WakeConfig) })
         {
-            foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanWrite))
+            foreach (var p in type.GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(p => p.CanWrite && p.GetCustomAttribute<YamlDotNet.Serialization.YamlIgnoreAttribute>() is null))
             {
                 var key = string.Concat(p.Name.Select((ch, i) => char.IsUpper(ch) && i > 0 ? "_" + char.ToLowerInvariant(ch) : char.ToLowerInvariant(ch).ToString()));
                 Assert.True(Everything.Contains(key + ":", StringComparison.Ordinal), $"{type.Name}.{p.Name} ({key}) is not covered by the static YAML test config");

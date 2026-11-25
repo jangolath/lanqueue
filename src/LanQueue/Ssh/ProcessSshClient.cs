@@ -4,6 +4,12 @@ using LanQueue.Config;
 
 namespace LanQueue.Ssh;
 
+/// <summary>
+/// 0.13.0 B3: what <see cref="LocalProcessClient"/> changes about a child process: its environment before it starts (<see cref="Configure"/>),
+/// and the lanq-owned job object it joins right after (<see cref="Started"/>).
+/// </summary>
+internal sealed record ProcessHooks(Action<ProcessStartInfo>? Configure, Action<Process>? Started);
+
 /// <summary>Real implementation: shells out to the system ssh and scp binaries.</summary>
 public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
 {
@@ -27,7 +33,8 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     /// Writes <paramref name="input"/> to the process's stdin and closes it. Stdout is read raw (no line splitting) and only its first
     /// <paramref name="maxOutputChars"/> are kept, the rest is read and dropped; stderr is kept apart, bounded like a probe's output.
     /// </summary>
-    internal static async Task<SshResult> ExecuteWithInput(string exe, List<string> args, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct)
+    internal static async Task<SshResult> ExecuteWithInput(
+        string exe, List<string> args, ReadOnlyMemory<byte> input, int maxOutputChars, TimeSpan timeout, CancellationToken ct, ProcessHooks? hooks = null)
     {
         if (input.Length > MaxInputBytes)
         {
@@ -47,6 +54,7 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
             psi.ArgumentList.Add(a);
         }
 
+        hooks?.Configure?.Invoke(psi);
         var gate = new object();
         var stdout = new StringBuilder();
         var truncated = false;
@@ -56,6 +64,7 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
         try
         {
             proc.Start();
+            hooks?.Started?.Invoke(proc);
         }
         catch (System.ComponentModel.Win32Exception ex)
         {
@@ -199,7 +208,8 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
     /// <param name="input">Written to stdin, which is then closed; null closes stdin at once (never wait for interactive input).</param>
     /// <param name="onError">When given, stderr lines go only here (not to <paramref name="onLine"/> or the result's output).</param>
     internal static async Task<SshResult> Execute(
-        string exe, List<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct, ReadOnlyMemory<byte>? input = null, Action<string>? onError = null)
+        string exe, List<string> args, Action<string>? onLine, TimeSpan timeout, CancellationToken ct, ReadOnlyMemory<byte>? input = null, Action<string>? onError = null,
+        ProcessHooks? hooks = null)
     {
         if (input is { Length: > MaxInputBytes })
         {
@@ -257,10 +267,12 @@ public sealed class ProcessSshClient(Func<string, string?> getEnv) : ISshClient
             }
         }
 
+        hooks?.Configure?.Invoke(psi);
         using var proc = new Process { StartInfo = psi };
         try
         {
             proc.Start();
+            hooks?.Started?.Invoke(proc);
         }
         catch (System.ComponentModel.Win32Exception ex)
         {

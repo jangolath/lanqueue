@@ -180,7 +180,11 @@ public static partial class Cli
                 $"[lanq] plan_timeout: {minutes} min for the whole plan ({(p.PlanTimeoutMinutes is null ? "lanq.yml" : "--plan-timeout")}), from after the snapshot")).ConfigureAwait(false);
         }
 
-        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), Out, delay, clock, new BaseStore(Path.Combine(home, "bases.json")));
+        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), Out, delay, clock, new BaseStore(Path.Combine(home, "bases.json")))
+        {
+            Prompt = FallbackPrompt(p, config, stderr, out var noAsk),
+            NoAskReason = noAsk,
+        };
         var started = System.Diagnostics.Stopwatch.StartNew();
         PlanRunResult result;
         if (narrowedOut is not null)
@@ -215,7 +219,7 @@ public static partial class Cli
         }
 
         // What to do next, then the logs of the jobs that did not complete (--json carries every logPath); all before the status line.
-        var next = NextSteps.ForPlanFile(p, result, jobArgs);
+        var next = NextSteps.WithFallback(p, NextSteps.ForPlanFile(p, result, jobArgs), result.FallbackHint, result.FallbackJobs, result.Units);
 
         // results: (0.11.0): every completed job whose results show no test executed, whatever the plan's status.
         var noTests = result.Jobs.Select(j => (j.Name, Results: NoTestsRan(j.Status, PlanJobResults(j)))).Where(x => x.Results is not null).ToList();
@@ -235,7 +239,7 @@ public static partial class Cli
             }
         }
 
-        await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
+        await stderr.WriteLineAsync($"[lanq] {result.Status}{JobRunner.FallbackNote(result.FallbackJobs, result.Units)}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
             var json = PlanRunJsonOf(result, plan.Path, started.Elapsed, [.. ordered.Select(j => j.Name)], plan.Warnings, specs, p.LogTail) with
@@ -267,7 +271,16 @@ public static partial class Cli
             request = new FetchRequest(job.Args.Fetch, root, new FetchLimits(job.Args.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total), anchor);
         }
 
-        return RequestOf(job.Args, repoDir, request) with { Wait = TimeSpan.FromSeconds(p.WaitSeconds), Budgets = p.SplitWait ? p.Budgets : null, NoWake = p.NoWake };
+        // 0.13.0 B3: --fallback is the developer's, for every job; a job's own lanq.yml fallback: off (its --fallback off) still wins.
+        return RequestOf(job.Args, repoDir, request) with
+        {
+            Wait = TimeSpan.FromSeconds(p.WaitSeconds),
+            Budgets = p.SplitWait ? p.Budgets : null,
+            WaitGiven = p.WaitGiven,
+            NoWake = p.NoWake,
+            Fallback = p.Fallback,
+            FallbackOff = job.Args.Fallback == FallbackMode.Off,
+        };
     }
 
     /// <summary>
@@ -408,6 +421,7 @@ public static partial class Cli
             Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
             Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
             Waited = result.Status == nameof(JobStatus.NoCapacity) ? WaitedJson.Of(result.Waited) : null,
+            FallbackJobs = result.FallbackJobs > 0 ? result.FallbackJobs : null,
             Warnings = [.. warnings.Select(JobRunner.SafeLine)],
         };
 
@@ -435,6 +449,7 @@ public static partial class Cli
             Retryable = noCapacity ? j.Retryable ?? true : null,
             Excluded = noCapacity ? ExcludedJsons(j.Excluded) : null,
             Waited = noCapacity ? WaitedJson.Of(j.Waited) : null,
+            Fallback = Flag(j.Single?.Fallback == true),
             Fetched = single?.Fetched,
             FetchSkipped = single?.FetchSkipped,
             FetchSkippedMore = single?.FetchSkippedMore,

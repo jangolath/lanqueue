@@ -47,12 +47,12 @@ public static partial class PlanFileLoader
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
     internal static readonly string[] DefaultKeys =
-        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results"];
+        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results", "fallback"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
         ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "fetch_max",
-        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results"];
+        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results", "fallback"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -507,6 +507,18 @@ public static partial class PlanFileLoader
         if (values.TryGetValue("exclusive", out var exclusive) && Flag(exclusive, "exclusive", Error))
         {
             args.Add("--exclusive");
+        }
+
+        // fallback: off (0.13.0 B3) is --fallback off: a repository may forbid running a job on the developer's PC, never choose it.
+        if (values.TryGetValue("fallback", out var fallbackNode))
+        {
+            var word = Scalar(fallbackNode, "fallback");
+            if (word is not ("off" or "false"))
+            {
+                throw Error($"fallback: {(word is "on" or "ask" or "true" ? word : "...")} is refused: a repository never chooses to run on your PC; use --fallback on. lanq.yml may only say fallback: off.");
+            }
+
+            args.AddRange(["--fallback", "off"]);
         }
 
         // baseline: true is --baseline, baseline_ref: REF is --baseline-ref REF (which implies it, as on the command line). The job's own keys

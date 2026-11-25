@@ -78,6 +78,10 @@ public sealed record JobRecord(
     /// <summary>lanq run --baseline only (0.9.0): on the rerun at the base commit, that commit's short id. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Commit { get; init; }
+
+    /// <summary>0.13.0 B3: true when the job ran on this computer's fallback entry, not on the pool. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Fallback { get; init; }
 }
 
 /// <summary>What <see cref="JobLog.Read"/> found: the records (oldest file first), how many lines could not be read, and the files read.</summary>

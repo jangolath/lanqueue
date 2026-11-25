@@ -101,6 +101,12 @@ public static class Pinning
             }
         }
 
+        // 0.13.0 B3 (H4): this computer's fallback entry is never a target of --on: it is used only by the fallback policy.
+        if (config.Fallback is { } fb && unknown.FirstOrDefault(n => string.Equals(n, fb.Name, StringComparison.OrdinalIgnoreCase)) is { } local)
+        {
+            return (null, $"--on {local}: {fb.Name} is this computer's fallback, not a worker; use --fallback on (it is used only when the pool cannot take the job).");
+        }
+
         return unknown.Count > 0
             ? (null, $"--on names a machine that is not in the config: {string.Join(", ", unknown)}. Configured: {string.Join(", ", config.Machines.Select(m => m.Name))}.")
             : (names, null);
@@ -153,6 +159,12 @@ public enum Exclusion
 
     /// <summary>A hold of no known kind (never produced by the probe itself); temporary.</summary>
     Held,
+
+    /// <summary>
+    /// 0.13.0 B3: this computer's fallback entry may never take the job as things stand: lanq runs elevated or as root, or its work_root is
+    /// inside the repository (or holds it). Permanent.
+    /// </summary>
+    FallbackRefused,
 }
 
 /// <summary>One machine judged for one job.</summary>
@@ -207,12 +219,13 @@ public static class Eligibility
         Exclusion.MemBelowRequest => "mem_below_request",
         Exclusion.Busy => "busy",
         Exclusion.Avoided => "avoided",
+        Exclusion.FallbackRefused => "fallback_refused",
         _ => "held",
     };
 
     /// <summary>True for the reasons waiting can never cure: the config (capabilities, size:, Windows, env:) or the machine itself (its RAM, its size, its tools).</summary>
     public static bool IsPermanent(Exclusion reason) =>
-        reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
+        reason is Exclusion.FallbackRefused or Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
             or Exclusion.MemExceedsTotal or Exclusion.MemUnknown
             or Exclusion.SizeUnknown or Exclusion.ToolMissing;
 
