@@ -369,7 +369,7 @@ public sealed class DryRunTests : IDisposable
 
     [Theory(Timeout = TestTimeout)]
     [InlineData(null, 5)]
-    [InlineData(1.0, 4)]
+    [InlineData(1.0, 3)] // 0.13.0: 3 GB free less the 1 GB policy floor leaves big-01 two 1 GB copies (0.12: three)
     [InlineData(2.0, 2)]
     public async Task DryRunShardsAutoPicksTheSameNAsRun(double? mem, int expected)
     {
@@ -397,7 +397,7 @@ public sealed class DryRunTests : IDisposable
         // The plan is Scheduler.Deal over the ranked free slots of its own probe.
         var shards = Enumerable.Range(1, count).Select(i => new ShardInfo(i, count)).ToList();
         var dealt = Scheduler.Deal(
-            [.. Scheduler.Rank(plan.Assessed).Select(a => (a, Scheduler.FreeFor(a.Machine, a.Health, null, 0, 0))).Where(x => x.Item2 > 0)], shards, (_, _) => true);
+            [.. Scheduler.Rank(plan.Assessed).Select(a => (a, Scheduler.FreeFor(a.Machine, a.Health, (double?)null, 0, 0))).Where(x => x.Item2 > 0)], shards, (_, _) => true);
         Assert.Equal(
             dealt.GroupBy(d => d.Machine.Machine.Name).Select(g => (g.Key, string.Join(',', g.Select(d => d.Item.Index).Order()))),
             plan.Placement!.Select(p => (p.Machine.Name, string.Join(',', p.Shards))));

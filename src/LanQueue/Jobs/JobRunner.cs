@@ -439,7 +439,11 @@ public sealed partial class JobRunner(
         Size = req.Size,
         Exclusive = req.Exclusive,
         EnvRuledOut = EnvRuledOut(Candidates(req), req.Env, windowsUnsafe),
+        Policy = config.Policy,
     };
+
+    /// <summary>Only what slot counting needs of the job (<see cref="Scheduler.FreeFor(Machine, MachineHealth, JobNeeds, int, int)"/>): --mem, --exclusive and the pool policy (floor, job size).</summary>
+    private JobNeeds MemNeeds(JobRequest req) => new([], req.MinMemGb, false) { Exclusive = req.Exclusive, Policy = config.Policy };
 
     /// <summary>The candidates the job's --env rules out (<see cref="EnvExclusion"/>), by name; empty without --env.</summary>
     private static Dictionary<string, (Exclusion Reason, string Why)> EnvRuledOut(IEnumerable<Machine> candidates, IReadOnlyList<JobEnvVar> env, bool windowsUnsafe)
@@ -799,6 +803,7 @@ public sealed partial class JobRunner(
                 {
                     result = await TryOnMachine(
                         jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, MachineLines(req, a.Machine.Name), ct,
+                        slotCap: a.SlotCap,
                         onSlot: () =>
                         {
                             held = true;
@@ -1094,7 +1099,7 @@ public sealed partial class JobRunner(
     /// <param name="onRunning">Called just before the job's command starts on the machine (after upload and prepare).</param>
     private async Task<JobResult?> TryOnMachine(
         string jobId, JobRequest req, PreparedPayload prepared, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, Action<string> emit, CancellationToken ct,
-        Action? onSlot = null, Action? onRunning = null)
+        Action? onSlot = null, Action? onRunning = null, int? slotCap = null)
     {
         var (payload, archive) = (prepared.Payload, prepared.Archive);
         string? archivePath = null;
@@ -1132,7 +1137,8 @@ public sealed partial class JobRunner(
 
         // --exclusive claims every slot of the machine, all or nothing (SLOTS=1,...,n or SLOT=FULL).
         var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
-        var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout);
+        // 0.13.0: a job size caps the slots by total memory (Scheduler.SlotCap); the claim honours the same cap, so other lanq runs do too.
+        var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout, slotCap < machine.MaxJobs ? slotCap : null);
         SshResult acquire;
         try
         {

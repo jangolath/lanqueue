@@ -20,6 +20,13 @@ public sealed record JobNeeds(IReadOnlyCollection<string> Capabilities, double? 
     /// <see cref="Exclusion.EnvConflict"/> or <see cref="Exclusion.WindowsCommandTooLong"/>, each with its reason for people. Empty without --env.
     /// </summary>
     public IReadOnlyDictionary<string, (Exclusion Reason, string Why)> EnvRuledOut { get; init; } = new Dictionary<string, (Exclusion Reason, string Why)>();
+
+    /// <summary>
+    /// The pool policy (0.13.0 B1): its min_free_mem_gb is the free-memory floor a machine without its own keeps free, and its job_mem_gb
+    /// the job size of a machine without its own (see <see cref="Scheduler.NeedGb"/>). Null (tests, callers without a config) means no
+    /// floor beyond a machine's own and no pool job size: the 0.12 arithmetic.
+    /// </summary>
+    public Config.PolicyConfig? Policy { get; init; }
 }
 
 /// <summary>
@@ -157,6 +164,12 @@ public enum Exclusion
 /// <param name="JobSlots">How many copies of this job the machine could take now (see <see cref="Scheduler.FreeFor"/>); 0 when not eligible.</param>
 public sealed record Assessment(Machine Machine, MachineHealth Health, Exclusion Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots)
 {
+    /// <summary>The job's memory need on this machine (<see cref="Scheduler.NeedGb"/>), or null when neither --mem nor a job size applies (0.13.0).</summary>
+    public double? NeedGb { get; init; }
+
+    /// <summary>The slots this machine may run at once for the job: max_jobs, or fewer when a job size caps it by total memory (<see cref="Scheduler.SlotCap"/>).</summary>
+    public int SlotCap { get; init; } = int.MaxValue;
+
     public bool Eligible => Reason == Exclusion.None;
 
     /// <summary>The reason as the snake_case code lanq prints in JSON, or null when eligible.</summary>

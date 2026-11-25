@@ -921,7 +921,7 @@ public static partial class Cli
         {
             // --needs / --mem / --size / --min-size: judge each machine for such a job exactly as lanq run does (Windows-safe arguments
             // assumed). --on only narrows the rows.
-            var needs = p.Needs.Count > 0 || p.MemGb is not null || p.Size is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) { Size = p.Size } : null;
+            var needs = p.Needs.Count > 0 || p.MemGb is not null || p.Size is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) { Size = p.Size, Policy = config.Policy } : null;
             return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs, p.ConfigPath, p.On).ConfigureAwait(false);
         }
 
@@ -1366,6 +1366,7 @@ public static partial class Cli
         Reason = a.Code,
         Permanent = a.Permanent,
         JobSlots = a.JobSlots,
+        NeedGb = a.NeedGb,
     };
 
     internal static HealthJson HealthRow(Machine m, MachineHealth h)

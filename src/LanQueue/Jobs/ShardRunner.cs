@@ -267,7 +267,7 @@ public sealed partial class JobRunner
     /// </summary>
     private (int Count, string FreeWhy, ShardTimingResult? Timing) PickShardCount(JobRequest template, IReadOnlyList<Assessment> assessed, int? targetMinutes)
     {
-        var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards, template.Exclusive);
+        var (n, total, free) = Scheduler.AutoCount(assessed, MemNeeds(template), ShardInfo.MaxShards);
         var why = AutoShardWhy(total, free);
         if (targetMinutes is not { } minutes)
         {
@@ -275,7 +275,7 @@ public sealed partial class JobRunner
         }
 
         var history = JobHistory.For(log, template.CommandKey ?? JobHistory.Key(template.Argv), JobHistory.Dir(template.Directory), clock.GetUtcNow());
-        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
+        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, MemNeeds(template), _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
         return (timing.Picked, why, timing);
     }
 
@@ -288,9 +288,9 @@ public sealed partial class JobRunner
     /// this run's own shards there: <paramref name="ours"/> placed, <paramref name="oursNotRunning"/> placed but not running yet); only those above 0.
     /// An exclusive template's shards take a whole machine each, so a machine offers at most one.
     /// </summary>
-    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, JobRequest template, Func<string, int> ours, Func<string, int> oursNotRunning) =>
+    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, JobNeeds memNeeds, Func<string, int> ours, Func<string, int> oursNotRunning) =>
         [.. Scheduler.Rank(assessed)
-            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, template.MinMemGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name), template.Exclusive)))
+            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, memNeeds, ours(x.Machine.Name), oursNotRunning(x.Machine.Name))))
             .Where(x => x.Item2 > 0)];
 
     /// <summary>Why --shards auto picked its N: "free slots: build-01 2, micro-02 1" (and the cap), or that no machine can take the job right now.</summary>
@@ -447,7 +447,7 @@ public sealed partial class JobRunner
         MachineHealth[] lastProbes = [];
         List<Assessment> lastAssessed = [];
 
-        Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot)
+        Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot, int? slotCap = null)
         {
             st.Attempts++;
             var req = template with { Argv = st.Shard.Substitute(template.Argv), Shard = st.Shard };
@@ -465,7 +465,8 @@ public sealed partial class JobRunner
                             plan?.Hold();
                             slot.Hold();
                         },
-                        slot.Start).ConfigureAwait(false);
+                        slot.Start,
+                        slotCap).ConfigureAwait(false);
                     return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding, jobId);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
@@ -543,7 +544,7 @@ public sealed partial class JobRunner
                     // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
                     var free = Placeable(
-                        assessed, template, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
+                        assessed, MemNeeds(template), m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
                     var first = firstRound == -1;
                     if (first)
@@ -559,7 +560,7 @@ public sealed partial class JobRunner
                     {
                         pending.Remove(st);
                         var slot = new Running(at.Machine.Name, first ? FirstRoundPlaced : null);
-                        running[Launch(st, at.Machine, at.Health.WindowEndsUtc, slot)] = slot;
+                        running[Launch(st, at.Machine, at.Health.WindowEndsUtc, slot, at.SlotCap)] = slot;
                         launched++;
                     }
 

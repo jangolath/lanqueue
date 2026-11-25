@@ -107,7 +107,7 @@ public sealed class ShardTimingTests
     {
         var fleet = Fleet(("build-01", 2, 0.1, null, null), ("micro-01", 1, 0.2, null, null), ("micro-02", 2, 0.3, null, null));
         var r = Pick(History([]), 5, fleet);
-        Assert.Equal(Scheduler.AutoCount(fleet.Assessed, null, ShardInfo.MaxShards).Count, r.Picked);
+        Assert.Equal(Scheduler.AutoCount(fleet.Assessed, (double?)null, ShardInfo.MaxShards).Count, r.Picked);
         Assert.Equal((ShardTiming.NoHistory, 5, 5, 0), (r.Basis, r.Picked, r.FreeSlots, r.RunsUsed));
         Assert.Null(r.WorkMinutes);
         Assert.Null(r.Wanted);

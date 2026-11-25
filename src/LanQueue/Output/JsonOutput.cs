@@ -100,6 +100,13 @@ internal sealed record HealthNeedsJson : HealthJson
 
     /// <summary>How many copies of the job (shards) the machine could take now, with --mem counted per copy; 0 when not eligible.</summary>
     public int JobSlots { get; init; }
+
+    /// <summary>
+    /// The job's memory need on this machine in GB (0.13.0): max(--mem, the machine's job_mem_gb or policy.job_mem_gb); left out when
+    /// neither applies. jobSlots counts copies of this need above the machine's free-memory floor.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? NeedGb { get; init; }
 }
 
 /// <summary>

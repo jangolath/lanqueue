@@ -97,6 +97,9 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:[/\\]", RegexOptions.None, 1000)]
     private static partial Regex WindowsAbsolutePathRegex();
 
+    /// <summary>job_mem_gb (0.13.0): above 0, at most 4096, finite (the same range as --mem).</summary>
+    private static bool ValidJobMem(double gb) => double.IsFinite(gb) && gb is > 0 and <= 4096;
+
     public static FleetConfig Parse(string yaml)
     {
         // Strict: unknown keys (for example "password") are an error, not ignored.
@@ -131,7 +134,7 @@ public static partial class ConfigLoader
     /// <summary>Keys that may be given with no value (YAML null), by their path: they mean "not set".</summary>
     private static readonly HashSet<string> NullableKeys = new(StringComparer.Ordinal)
     {
-        "machines[].allowed_hours", "machines[].key_env", "machines[].min_free_mem_gb",
+        "machines[].allowed_hours", "machines[].key_env", "machines[].min_free_mem_gb", "machines[].job_mem_gb", "policy.job_mem_gb",
     };
 
     private static bool IsNull(YamlNode node) => YamlShape.IsNull(node);
@@ -209,6 +212,11 @@ public static partial class ConfigLoader
             throw new ConfigException("policy.load_threshold must be in (0, 1].");
         }
 
+        if (config.Policy.JobMemGb is { } policyJobMem && !ValidJobMem(policyJobMem))
+        {
+            throw new ConfigException("policy.job_mem_gb must be a number above 0 and at most 4096 (GB one job uses), or left out.");
+        }
+
         if (!double.IsFinite(config.Policy.MinFreeMemGb) || config.Policy.MinFreeMemGb < 0)
         {
             throw new ConfigException("policy.min_free_mem_gb must be >= 0.");
@@ -280,6 +288,11 @@ public static partial class ConfigLoader
             if (m.Size is not null && Health.MachineSize.Declared(m) is null)
             {
                 throw new ConfigException($"Machine '{m.Name}': size must be light, medium or heavy (or leave it out to use the probed size).");
+            }
+
+            if (m.JobMemGb is { } jobMem && !ValidJobMem(jobMem))
+            {
+                throw new ConfigException($"Machine '{m.Name}': job_mem_gb must be a number above 0 and at most 4096 (GB one job uses here), or left out.");
             }
 
             if (m.MinFreeMemGb is { } minMem && (!double.IsFinite(minMem) || minMem < 0))

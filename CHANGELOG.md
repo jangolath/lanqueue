@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.13.0 (unreleased)
+
+### Added
+
+- **Sample monorepo** (`samples/monorepo/`): a small .NET + React repository to try lanq on your own pool. Run
+  `lanq run --plan --plan-file samples/monorepo/lanq.yml` (Windows workers) or `lanq.linux.yml` (Linux workers);
+  `lanq.extras.yml` holds opt-in hang, zero-tests and Docker jobs. Its README lists the exact `allowed_commands`. CI
+  builds and tests it on Linux and Windows.
+- **Memory-aware placement.** machines.yml `job_mem_gb:` per machine and `policy.job_mem_gb:` for the pool (optional,
+  above 0 and at most 4096; **needs 0.13.0**: lanq 0.12 refuses the key). It is about how much memory one job uses on
+  that machine. A job's need there is the larger of its `--mem` (or lanq.yml `mem:`) and that size, so neither side can
+  make the other's number smaller. A machine with a job size also runs at most (total memory - its floor) / job size
+  jobs at once, and the slot claim enforces that cap, so parallel lanq runs cannot overcommit it. A machine that does
+  not report memory keeps slots-only placement unless the job gave `--mem` itself.
+- `lanq health --needs ... --json` rows have `needGb` (the job's need on that machine) when a need applies.
+
+### Changed
+
+- **The free-memory floor is kept free when slots are counted.** With `--mem` (or a job size), a machine's job slots are
+  now (free memory - `min_free_mem_gb`) / need instead of free memory / need, so a machine may take one copy fewer than
+  in 0.12 (for example 12.5 GB free, a 2 GB floor and `--mem 4`: two copies, not three). A machine whose total memory
+  less its floor is below the need is `mem_exceeds_total`. Without `--mem` and without a job size nothing changes.
+
 ## 0.12.0 (2026-11-14)
 
 ### Added

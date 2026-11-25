@@ -302,8 +302,8 @@ public sealed class ShardReviewTests : IDisposable
         Assert.Equal(1, auto.Count);
         Assert.Contains("[lanq] --shards auto: 1 shard(s) (free slots: big-01 1)", _output);
 
-        ssh.ProbeExtra = m => m.Name == "big-01" ? "mem_free_gb=12.5" : "mem_free_gb=3";
-        Assert.Equal(3, (await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest() with { MinMemGb = 4 }, new ShardOptions(null), CancellationToken.None)).Count);
+        ssh.ProbeExtra = m => m.Name == "big-01" ? "mem_free_gb=12.5" : "mem_free_gb=3"; // 0.13.0: 12.5 GB less the 1 GB policy floor holds two 4 GB copies (0.12: three)
+        Assert.Equal(2, (await Runner(ssh, new RunnerTests.FakePayloads("")).RunShardsAsync(Jest() with { MinMemGb = 4 }, new ShardOptions(null), CancellationToken.None)).Count);
     }
 
     /// <summary>A machine that stops answering during the upload or the prepare step: the job never started, so the shard is re-run.</summary>
@@ -585,7 +585,7 @@ public sealed class ShardReviewTests : IDisposable
         ssh.ProbeExtra = m => m.Name == "big-01"
             ? string.Create(
                 System.Globalization.CultureInfo.InvariantCulture, $"mem_free_gb={9 - (4 * (ssh.Used("big-01") - Volatile.Read(ref uploadingToBig)))}")
-            : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5";
+            : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=5.5";
         ssh.RefuseSlot = m =>
         {
             if (m.Name == "big-01" && ssh.Peak.TryGetValue("big-01", out var peak) && peak >= 2)
@@ -643,7 +643,7 @@ public sealed class ShardReviewTests : IDisposable
             // big-01's free memory drops by 4 GB for each job running there.
             ProbeExtra = m => m.Name == "big-01"
                 ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"mem_free_gb={9 - (4 * Volatile.Read(ref runningOnBig))}")
-                : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=4.5",
+                : Volatile.Read(ref tinyRan) ? "mem_free_gb=0.5" : "mem_free_gb=5.5",
             OnUpload = async (m, ct) =>
             {
                 if (m.Name == "big-01")

@@ -315,9 +315,13 @@ public static partial class RemoteScripts
     /// puts a file back. A slot without a deadline, or with a deadline that is not 1 to 18 decimal digits, is never reclaimed. A stale slot
     /// it could not reclaim adds a <see cref="ReclaimStuckMarker"/> line (see <see cref="WindowsReclaimFunction"/>) before SLOT=.
     /// </summary>
-    public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout)
+    /// <param name="maxSlots">
+    /// 0.13.0: claim only slot-1 to slot-N with N = this cap (<see cref="Scheduling.Scheduler.SlotCap"/>: a job size caps a machine by its total
+    /// memory), never above max_jobs; null claims up to max_jobs as before. Every lanq run with the same config uses the same cap.
+    /// </param>
+    public static string AcquireSlot(Machine m, string jobId, TimeSpan jobTimeout, int? maxSlots = null)
     {
-        var max = m.MaxJobs.ToString(CultureInfo.InvariantCulture);
+        var max = Math.Clamp(maxSlots ?? m.MaxJobs, 1, Math.Max(1, m.MaxJobs)).ToString(CultureInfo.InvariantCulture);
         var lease = ((long)(jobTimeout + SlotTransferAllowance).TotalSeconds).ToString(CultureInfo.InvariantCulture);
         return m.Os == MachineOs.Windows
             ? $$"""

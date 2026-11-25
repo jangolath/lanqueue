@@ -34,6 +34,12 @@ public sealed class PolicyConfig
     /// <summary>A machine with less available memory (GB) is held; a machine's own min_free_mem_gb overrides it.</summary>
     public double MinFreeMemGb { get; set; } = 1.0;
 
+    /// <summary>
+    /// job_mem_gb (0.13.0): about how much memory (GB) one job uses on a machine, for machines without their own job_mem_gb; null (the
+    /// default) means no per-machine job size. A job's need there is max(--mem, the job size); see Scheduling.Scheduler.NeedGb.
+    /// </summary>
+    public double? JobMemGb { get; set; }
+
     /// <summary>Linux PSI memory "some avg10" (percent of time stalled) above this holds the machine.</summary>
     public double MaxMemPressure { get; set; } = 20;
 
@@ -84,6 +90,12 @@ public sealed class Machine
 
     /// <summary>Overrides policy.min_free_mem_gb for this machine.</summary>
     public double? MinFreeMemGb { get; set; }
+
+    /// <summary>
+    /// job_mem_gb (0.13.0): about how much memory (GB) one job uses here (a machine fact: more cores run more test hosts). Overrides
+    /// policy.job_mem_gb; null = the policy value. It also caps the slots: no more than (total - floor) / job_mem_gb jobs at once.
+    /// </summary>
+    public double? JobMemGb { get; set; }
 
     /// <summary>Environment variables for the job process only (never for lanq's own remote scripts).</summary>
     public Dictionary<string, string> Env { get; set; } = [];
