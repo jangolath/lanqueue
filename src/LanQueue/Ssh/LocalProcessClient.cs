@@ -22,16 +22,24 @@ public sealed class LocalProcessClient : ISshClient
     private readonly Func<IDictionary> _environment;
     private readonly bool _windows;
     private readonly Action<string> _warn;
+    private readonly Func<Process, bool> _joinJobObject;
     private int _warnedJobObject;
 
     /// <param name="environment">lanq's own environment (tests pass their own); null reads the process environment.</param>
     /// <param name="windows">Whether this computer runs Windows; null asks the OS.</param>
     /// <param name="warn">Where the one-time warning goes when a child could not join lanq's job object; null writes to stderr.</param>
     public LocalProcessClient(Func<IDictionary>? environment = null, bool? windows = null, Action<string>? warn = null)
+        : this(environment, windows, warn, null)
+    {
+    }
+
+    /// <param name="joinJobObject">Puts a started child in lanq's job object, false when it could not (tests); null uses the real one on Windows.</param>
+    internal LocalProcessClient(Func<IDictionary>? environment, bool? windows, Action<string>? warn, Func<Process, bool>? joinJobObject)
     {
         _environment = environment ?? Environment.GetEnvironmentVariables;
         _windows = windows ?? OperatingSystem.IsWindows();
         _warn = warn ?? (line => Console.Error.WriteLine(line));
+        _joinJobObject = joinJobObject ?? (proc => !OperatingSystem.IsWindows() || LocalJobObject.Assign(proc));
     }
 
     /// <summary>
@@ -160,7 +168,7 @@ public sealed class LocalProcessClient : ISshClient
         },
         proc =>
         {
-            if (_windows && OperatingSystem.IsWindows() && !LocalJobObject.Assign(proc) && Interlocked.Exchange(ref _warnedJobObject, 1) == 0)
+            if (_windows && !_joinJobObject(proc) && Interlocked.Exchange(ref _warnedJobObject, 1) == 0)
             {
                 _warn("[lanq] warning: a fallback process could not join lanq's job object, so it may outlive lanq if lanq is killed (best effort; the job's own cleanup still runs)");
             }

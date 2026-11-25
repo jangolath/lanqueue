@@ -271,6 +271,67 @@ public sealed class PostStepTests : IDisposable
     }
 
     [Fact]
+    public async Task APostThatAlreadyEndedIsNeverReportedCancelled()
+    {
+        // Final review L1: the wrapper printed its exit marker (the step is over), and Ctrl+C (or plan_timeout, --fail-fast) came before lanq
+        // stopped reading: the step's own exit stands, never "cancelled".
+        using var cts = new CancellationTokenSource();
+        var inner = Worker(cmd => IsPost(cmd) ? new SshResult(0, "hook ran\n" + T.ExitMarkerOf(cmd) + "4") : IsMain(cmd) ? new SshResult(0, "ran\n" + T.ExitMarkerOf(cmd) + "0") : new SshResult(0, ""));
+        var ssh = new BlockingSsh(inner)
+        {
+            Block = cmd =>
+            {
+                if (!IsPost(cmd))
+                {
+                    return Task.CompletedTask;
+                }
+
+                cts.Cancel(); // after the marker was read
+                return Task.Delay(Timeout.Infinite);
+            },
+        };
+        var r = await Runner(ssh).RunAsync(Req(["dotnet", "build-server", "status"]), cts.Token).WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.False(r.Post!.Cancelled);
+        Assert.Equal(4, r.Post.ExitCode);
+        Assert.DoesNotContain(_output, l => l.Contains("cancelled before it ended", StringComparison.Ordinal));
+        Assert.Contains("[lanq] post: exit 4 (warning only)", _output);
+    }
+
+    [Fact]
+    public void APostKilledAtItsLimitAfterIgnoringTermIsTimedOut()
+    {
+        // Final review L2: a step that traps TERM is KILLed 30 s after its limit (timeout exits 137): the worker still says it stopped the step
+        // at its limit, so the JSON says timedOut. A step that exits 124 or 137 by itself before the limit is not timed out (the elapsed check).
+        var linux = RemoteScripts.Execute(T.Linux(), _j1, ".", ["x"], JobRunner.PostLimit, pidKind: "post");
+        Assert.Contains("case \"$rc\" in 124|137)", linux, StringComparison.Ordinal);
+        Assert.Contains("-ge 300 ]", linux, StringComparison.Ordinal);
+    }
+
+    /// <summary>The real post wrapper on Linux, with a timeout on PATH that acts as if the limit passed and the step needed a KILL.</summary>
+    [LinuxFact]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void TheRealPostWrapperSaysTimedOutForAStepKilledAtItsLimit()
+    {
+        var root = Path.Combine(_dir, "wr");
+        Directory.CreateDirectory(Path.Combine(root, "jobs", _j1));
+        Directory.CreateDirectory(Path.Combine(root, "locks"));
+        var bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        // "timeout -k 30 1 cmd": checks run as usual (-k 1 30 true), the real one is cut to the bare KILL result: 137 after the 1 s limit.
+        var fake = Path.Combine(bin, "timeout");
+        File.WriteAllText(fake, "#!/bin/sh\n[ \"$3\" = 30 ] && exit 0\nsleep 2\nexit 137\n");
+        File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var m = T.Linux();
+        m.WorkRoot = root;
+        var nonce = RemoteScripts.NewMarkerNonce();
+        var script = RemoteScripts.Execute(m, _j1, ".", ["true"], TimeSpan.FromSeconds(1), nonce: nonce, pidKind: "post");
+        var (_, output) = Shells.Run("linux", "PATH=" + bin + ":$PATH\n" + script);
+        Assert.Contains(RemoteScripts.LimitMarker(_j1, nonce), output, StringComparison.Ordinal);
+        Assert.Contains(RemoteScripts.ExitMarker(_j1, nonce) + "137", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FailFastDuringASiblingsPostKeepsThatShardCompleted()
     {
         // B-M1: shard 2 Completed and is in its post step when shard 1 fails with --fail-fast: shard 2 stays Completed.

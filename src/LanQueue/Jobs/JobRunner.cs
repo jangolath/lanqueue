@@ -1749,14 +1749,22 @@ public sealed partial class JobRunner(
             done.Cancel(); // the step is over: stop reading, even if something it started still holds the output open
         }
 
+        bool Ended()
+        {
+            lock (gate)
+            {
+                return marked is not null;
+            }
+        }
+
         SshResult? run = null;
         try
         {
             run = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, post, nonce, limit)), OnPostLine, limit + WorkerDeadlineMargin, done.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (marked is not null && !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (Ended())
         {
-            // stopped reading at the exit marker
+            // stopped reading at the exit marker: the step is over, so its own exit stands even when a cancel came after (final review L1)
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

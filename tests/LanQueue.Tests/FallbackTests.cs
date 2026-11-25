@@ -412,6 +412,75 @@ public sealed class FallbackTests : IDisposable
         Assert.False(JobRunner.WorkRootOverlaps(Path.Combine(_work, "other"), _dir));
     }
 
+    /// <summary>Runs a short command line through cmd and returns its first output line.</summary>
+    private static (int Code, string Output) Cmd(string line)
+    {
+        // Arguments as written: cmd does not read the \" escapes ArgumentList would add.
+        var psi = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/d /c " + line) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        using var p = System.Diagnostics.Process.Start(psi)!;
+        var output = p.StandardOutput.ReadToEnd();
+        _ = p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        return (p.ExitCode, output.Trim());
+    }
+
+    [WindowsFact]
+    public void AWorkRootNamedByItsShortNameIsInsideTheRepository()
+    {
+        // Final review L5: C:/src/APP~1/.lq is C:/src/app/.lq. (Skipped when the volume makes no 8.3 names.)
+        var repo = Path.Combine(_dir, "a repository with a long name");
+        Directory.CreateDirectory(repo);
+        var (_, shortName) = Cmd("for %I in (\"" + repo + "\") do @echo %~sI");
+        Assert.True(JobRunner.WorkRootOverlaps(Path.Combine(repo, ".lq"), repo));
+        if (shortName.Length > 0 && !string.Equals(Path.GetFileName(shortName), Path.GetFileName(repo), StringComparison.OrdinalIgnoreCase))
+        {
+            Assert.True(JobRunner.WorkRootOverlaps(Path.Combine(shortName, ".lq"), repo));
+            Assert.True(JobRunner.WorkRootOverlaps(repo + "/.lq", shortName));
+        }
+
+        Assert.False(JobRunner.WorkRootOverlaps(Path.Combine(_work, "lq"), repo));
+    }
+
+    [WindowsFact]
+    public void AWorkRootOnASubstDriveIsInsideTheRepository()
+    {
+        // Final review L5: subst S: C:\src; lanq runs from S:\app while work_root is C:/src/app/.lq (and the other way round).
+        var letter = Enumerable.Range('M', 'Z' - 'M' + 1).Select(c => (char)c).Reverse().FirstOrDefault(c => !Directory.Exists(c + ":\\"));
+        if (letter == default)
+        {
+            return; // no free drive letter
+        }
+
+        var drive = letter + ":";
+        var repo = Path.Combine(_dir, "app");
+        Directory.CreateDirectory(repo);
+        if (Cmd("subst " + drive + " \"" + _dir + "\"").Code != 0)
+        {
+            return; // subst refused here
+        }
+
+        try
+        {
+            Assert.True(JobRunner.WorkRootOverlaps(repo.Replace('\\', '/') + "/.lq", drive + "\\app"));
+            Assert.True(JobRunner.WorkRootOverlaps(drive + "/app/.lq", repo));
+            Assert.True(JobRunner.WorkRootOverlaps(drive + "\\", repo)); // holds it
+            Assert.False(JobRunner.WorkRootOverlaps(Path.Combine(_work, "lq"), drive + "\\app"));
+        }
+        finally
+        {
+            Cmd("subst " + drive + " /d");
+        }
+    }
+
+    [WindowsFact]
+    public void EveryNameOfAFolderIncludesItsVolumeAndItsDrivePath()
+    {
+        // Final review L5: a folder is named by its volume (mount points see through to it) and by its drive path; a missing tail is kept.
+        var names = WindowsPathNames.Of(Path.Combine(_dir, "not", "yet"));
+        Assert.Contains(names, n => n.StartsWith(@"\\?\Volume{", StringComparison.OrdinalIgnoreCase) && n.EndsWith(Path.Combine("not", "yet"), StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(names, n => n.Length > 2 && n[1] == ':' && n.EndsWith(Path.Combine("not", "yet"), StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public async Task ShardsFallBackWithoutOverloadingThisComputer()
     {
@@ -655,11 +724,28 @@ public sealed class FallbackTests : IDisposable
     {
         private readonly System.Collections.Concurrent.BlockingCollection<string?> _lines = [];
 
+        private int _reads;
+
         public void Type(string? line) => _lines.Add(line);
 
         public int Pending => _lines.Count;
 
-        public override string? ReadLine() => _lines.Take();
+        /// <summary>How many reads have begun.</summary>
+        public int Reads => Volatile.Read(ref _reads);
+
+        /// <summary>Stands in for the terminal's input flush: what was typed and not yet read is gone.</summary>
+        public void Discard()
+        {
+            while (_lines.TryTake(out _))
+            {
+            }
+        }
+
+        public override string? ReadLine()
+        {
+            Interlocked.Increment(ref _reads);
+            return _lines.Take();
+        }
     }
 
     [Fact]
@@ -667,7 +753,7 @@ public sealed class FallbackTests : IDisposable
     {
         var input = new SlowReader();
         var err = new StringWriter();
-        var prompt = new TerminalPrompt(input, err, TimeSpan.FromSeconds(3));
+        var prompt = new TerminalPrompt(input, err, TimeSpan.FromSeconds(3), input.Discard);
         input.Type("y"); // typed before any prompt: never taken as an answer
         await Task.Delay(200);
         Assert.Equal(1, input.Pending); // A-L13: nothing is read before the first prompt
@@ -676,9 +762,40 @@ public sealed class FallbackTests : IDisposable
         await Task.Delay(300);
         input.Type("yes");
         Assert.True(await second); // the answer reaches the second prompt, not a read the first one left behind
+        var third = prompt.AskAsync("q3", CancellationToken.None);
+        await Task.Delay(200);
         input.Type(null);
-        Assert.False(await prompt.AskAsync("q3", CancellationToken.None)); // end of input: no
+        Assert.False(await third); // end of input: no
         Assert.Contains("q1", err.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheReaderStartsOnlyAtTheFirstPromptAfterTheTypeaheadIsDiscarded()
+    {
+        // A-L13 and final review L3: constructing the prompt reads nothing; the first prompt discards the terminal's pending input before the
+        // reader begins its first read (no settle time to race), so a "y" typed earlier never consents, however slow the reader thread is.
+        var input = new SlowReader();
+        var err = new StringWriter();
+        var readsAtDiscard = new List<int>();
+        var prompt = new TerminalPrompt(input, err, TimeSpan.FromSeconds(1), () =>
+        {
+            readsAtDiscard.Add(input.Reads);
+            input.Discard();
+        });
+        input.Type("y");
+        input.Type("yes");
+        await Task.Delay(100);
+        Assert.Equal(0, input.Reads); // a run that never asks never reads
+        Assert.Null(await prompt.AskAsync("q1", CancellationToken.None)); // the typeahead was discarded: no answer
+        Assert.Equal(0, readsAtDiscard[0]); // discarded before the reader's first read
+        Assert.Equal(0, input.Pending);
+
+        // A later prompt discards again before it asks; the answer typed after the question is taken.
+        var second = prompt.AskAsync("q2", CancellationToken.None);
+        await Task.Delay(200);
+        input.Type("y");
+        Assert.True(await second);
+        Assert.Equal(2, readsAtDiscard.Count);
     }
 
     // ---- next steps and JSON (M9) ----
@@ -773,6 +890,47 @@ public sealed class FallbackTests : IDisposable
         Assert.Equal(Path.GetFullPath(_work), psi.WorkingDirectory);
         Assert.True(psi.CreateNoWindow);
         Assert.DoesNotContain("SSH_AUTH_SOCK", psi.Environment.Keys);
+    }
+
+    [Fact]
+    public void AChildThatCannotJoinTheJobObjectWarnsOnceAndStillRuns()
+    {
+        // A-L10 (final review L6): joining lanq's job object is best effort; the first failure warns once, through the warn hook, and the child
+        // is not stopped. Off Windows nothing joins and nothing warns.
+        var warnings = new List<string>();
+        var joins = 0;
+        var client = new LocalProcessClient(null, windows: true, warnings.Add, _ =>
+        {
+            joins++;
+            return false;
+        });
+        var started = client.Hooks(Config().Fallback!).Started!;
+        using var self = System.Diagnostics.Process.GetCurrentProcess();
+        started(self);
+        started(self);
+        Assert.Equal(2, joins);
+        var warning = Assert.Single(warnings);
+        Assert.StartsWith("[lanq] warning: a fallback process could not join lanq's job object", warning, StringComparison.Ordinal);
+        Assert.False(self.HasExited);
+
+        var linux = new List<string>();
+        new LocalProcessClient(null, windows: false, linux.Add, _ => false).Hooks(Config().Fallback!).Started!(self);
+        Assert.Empty(linux);
+        var joined = new List<string>();
+        new LocalProcessClient(null, windows: true, joined.Add, _ => true).Hooks(Config().Fallback!).Started!(self);
+        Assert.Empty(joined);
+    }
+
+    [Fact]
+    public void ABaselineWithOneSideOnTheFallbackSaysItIsNotPoolEvidence()
+    {
+        // A-L9 (final review L6): the rerun ran on this computer, or the failed job did: the verdict carries the caveat; both on the pool: none.
+        var fb = Config().Fallback!;
+        const string caveat = " (fallback: one side of this comparison ran on this computer, not on the pool; rerun both on the pool to be sure)";
+        Assert.Equal(caveat, JobRunner.FallbackCaveat(fb, rerunOnFallback: true, failedOn: "build-01"));
+        Assert.Equal(caveat, JobRunner.FallbackCaveat(fb, rerunOnFallback: false, failedOn: fb.Name));
+        Assert.Equal("", JobRunner.FallbackCaveat(fb, rerunOnFallback: false, failedOn: "build-01"));
+        Assert.Equal("", JobRunner.FallbackCaveat(null, rerunOnFallback: false, failedOn: fb.Name));
     }
 
     [Fact]

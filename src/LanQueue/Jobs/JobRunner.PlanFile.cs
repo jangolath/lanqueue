@@ -476,8 +476,11 @@ public sealed partial class JobRunner
                 }
                 else if (deadline is { Expired: true } && !result.PlanTimedOut)
                 {
-                    // The limit came while the last job was only cleaning up: the "stopping" line above stopped nothing; say so.
-                    output("[lanq] plan_timeout: nothing was stopped; every job had already ended");
+                    // The limit came while the last job was only cleaning up or in its post: step: no job was stopped; say so, and say when a
+                    // post: step was cut short (final review L4). The job's own result stands either way.
+                    output(PostCutShort(result)
+                        ? "[lanq] plan_timeout: only a post: step was cut short; every job had already ended (its result stands)"
+                        : "[lanq] plan_timeout: nothing was stopped; every job had already ended");
                 }
 
                 return result;
@@ -870,6 +873,10 @@ public sealed partial class JobRunner
 
         return timedOut ? PlanTimedOutResult(result, deadline!) : result;
     }
+
+    /// <summary>True when a job's (or a shard's) post: step was cancelled; the job itself had ended.</summary>
+    internal static bool PostCutShort(PlanRunResult result) =>
+        result.Jobs.Any(j => j.Single?.Post?.Cancelled == true || (j.Sharded?.Shards.Any(s => s.Post?.Cancelled == true) ?? false));
 
     /// <summary>
     /// The plan's status once --plan-timeout was reached: TimedOut (124) unless a Failed or Rejected job decides it, also when the limit came

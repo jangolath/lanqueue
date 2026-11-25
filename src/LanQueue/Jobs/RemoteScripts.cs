@@ -812,10 +812,10 @@ public static partial class RemoteScripts
 
         // The job runs in the background so its pid (with setsid: its session and process group; with timeout alone: timeout's own group)
         // is known here and recorded for cleanup; stdin is handed through on fd 3 since a background command would otherwise get /dev/null.
-        // The post: step says when timeout stopped it at its limit (exit 124 after the whole limit), so a step that exits 124 itself is not
-        // reported as timed out (review B-L3).
+        // The post: step says when timeout stopped it at its limit (exit 124 after the whole limit, or 137 when it ignored TERM and was KILLed
+        // 30 s later: final review L2), so a step that exits 124 or 137 itself before the limit is not reported as timed out (review B-L3).
         var postLimitLine = pidKind == "post" && limit is { } postLimit
-            ? $"; if [ \"$rc\" = 124 ] && [ -n \"$T\" ] && [ $(( $(date +%s) - t0 )) -ge {WholeSeconds(postLimit)} ]; then printf '%s\\n' {ShellQuote.Posix(LimitMarker(jobId, nonce))}; fi"
+            ? $"; case \"$rc\" in 124|137) if [ -n \"$T\" ] && [ $(( $(date +%s) - t0 )) -ge {WholeSeconds(postLimit)} ]; then printf '%s\\n' {ShellQuote.Posix(LimitMarker(jobId, nonce))}; fi ;; esac"
             : "";
         return $$"""
             cd -P {{ShellQuote.Posix(dir)}} || exit 126
@@ -1071,8 +1071,9 @@ public static partial class RemoteScripts
     /// that called setsid). It records each one's start time at the scan and checks start time, the exact marker and the Uid again before every
     /// signal (review M12), so a pid reused meanwhile is never signalled. Shared processes are judged per process, from their own command line,
     /// never from the machine's config (review B-M2; H3): an MSBuild node (MSBuild.dll or .exe with nodemode:) is the job's own only when its
-    /// command line says nodeReuse:false; the MSBuild server (nodemode:8) and the compiler server (VBCSCompiler) are always spared, since a
-    /// sibling slot may be using them and they end on their own idle timeout. The scan is one <c>grep -z</c> over every environ file where
+    /// command line says nodeReuse:false; the MSBuild server (nodemode:8), the compiler server (VBCSCompiler) and the Razor build server of
+    /// older SDKs (rzc.dll server, final review L7) are always spared, since a sibling slot may be using them and they end on their own idle
+    /// timeout. The scan is one <c>grep -z</c> over every environ file where
     /// grep has -z (NUL-delimited exact lines, review B-L5), else a loop. Without /proc it does nothing.
     /// </summary>
     internal const string LinuxSweepFunction = """
@@ -1096,7 +1097,7 @@ public static partial class RemoteScripts
             [ "$sp" = "$$" ] && continue
             sc=$(tr '\000' ' ' < "$sd/cmdline" 2>/dev/null)
             case "$sc" in
-              *VBCSCompiler*|*MSBuild.dll*nodemode:8*|*MSBuild.exe*nodemode:8*) continue ;;
+              *VBCSCompiler*|*MSBuild.dll*nodemode:8*|*MSBuild.exe*nodemode:8*|*rzc.dll*server*) continue ;;
               *MSBuild.dll*nodemode:*|*MSBuild.exe*nodemode:*)
                 case "$sc" in *[nN][oO][dD][eE][rR][eE][uU][sS][eE]:[fF][aA][lL][sS][eE]*) ;; *) continue ;; esac ;;
             esac

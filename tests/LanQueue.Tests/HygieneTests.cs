@@ -108,6 +108,7 @@ public sealed class HygieneTests : IDisposable
         Assert.Contains("case \"$1\" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac", s, StringComparison.Ordinal);
         Assert.Contains("*MSBuild.dll*nodemode:*", s, StringComparison.Ordinal);
         Assert.Contains("*VBCSCompiler*", s, StringComparison.Ordinal);
+        Assert.Contains("*rzc.dll*server*", s, StringComparison.Ordinal); // the Razor build server of older SDKs (final review L7)
         // M12: start time, marker and uid are checked again right before the TERM and again before the KILL.
         Assert.Equal(2, s.Split("sweep_alive \"${se%%:*}\"").Length - 1);
         Assert.DoesNotContain("build-server", RemoteScripts.Cleanup(Load("    hygiene: [dotnet-lean]").Machines[0], _j1, "1"), StringComparison.Ordinal);
@@ -141,9 +142,11 @@ public sealed class HygieneTests : IDisposable
         var unknown = Marked(id, "MSBuild.exe", "/nodemode:1");
         var server = Marked(id, "MSBuild.dll", "/nodemode:8", "/nodeReuse:false");
         var compiler = Marked(id, "VBCSCompiler.dll", "-pipename:x");
+        var razor = Marked(id, "rzc.dll", "server", "-p", "x"); // final review L7: shared like the compiler server
+        var razorOnce = Marked(id, "rzc.dll", "generate", "-s", "x"); // a one-off Razor compile is the job's own
         var other = Marked(id + "x", "other.sh"); // a marker that only starts with the id: not this job
         var again = (Process?)null;
-        Process[] spared = [reusable, unknown, server, compiler, other];
+        Process[] spared = [reusable, unknown, server, compiler, razor, other];
         try
         {
             Thread.Sleep(300);
@@ -151,6 +154,7 @@ public sealed class HygieneTests : IDisposable
             Assert.True(code == 0, output);
             Assert.True(leftover.WaitForExit(5000));
             Assert.True(privateNode.WaitForExit(5000));
+            Assert.True(razorOnce.WaitForExit(5000));
             Assert.All(spared, p => Assert.False(p.HasExited));
 
             // The same through the loop, where grep has no -z: a grep on PATH that refuses it.
@@ -168,7 +172,7 @@ public sealed class HygieneTests : IDisposable
         }
         finally
         {
-            foreach (var p in (Process?[])[leftover, privateNode, again, .. spared])
+            foreach (var p in (Process?[])[leftover, privateNode, razorOnce, again, .. spared])
             {
                 try
                 {

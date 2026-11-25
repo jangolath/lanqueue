@@ -26,20 +26,21 @@ public sealed class TerminalPrompt : IFallbackPrompt
     private readonly TextReader input;
     private readonly TextWriter error;
     private readonly TimeSpan timeout;
+    private readonly Action discardTypeahead;
 
     /// <summary>
-    /// The reader starts only at the first prompt (review A-L13): a run that never asks never reads the developer's typeahead. Lines typed
-    /// before a prompt are then read during a short settle time and discarded.
+    /// The reader starts only at the first prompt (review A-L13): a run that never asks never reads the developer's typeahead. Before every
+    /// prompt, what was typed and not yet read is discarded at the terminal itself (<paramref name="discardTypeahead"/>, final review L3), and
+    /// lines the reader already took are dropped from the queue, so typeahead is never taken as the answer, however slow the reader thread is.
     /// </summary>
-    public TerminalPrompt(TextReader input, TextWriter error, TimeSpan timeout)
+    /// <param name="discardTypeahead">Discards the terminal's pending input; null uses <see cref="ConsoleInput.Discard"/>.</param>
+    public TerminalPrompt(TextReader input, TextWriter error, TimeSpan timeout, Action? discardTypeahead = null)
     {
         this.input = input;
         this.error = error;
         this.timeout = timeout;
+        this.discardTypeahead = discardTypeahead ?? ConsoleInput.Discard;
     }
-
-    /// <summary>How long the first prompt lets lines already typed reach the queue, so they are discarded and never taken as the answer.</summary>
-    internal static readonly TimeSpan Settle = TimeSpan.FromMilliseconds(150);
 
     /// <summary>How long a prompt waits for y or n.</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(120);
@@ -47,12 +48,12 @@ public sealed class TerminalPrompt : IFallbackPrompt
     private readonly BlockingCollection<string?> _lines = [];
     private int _started;
 
-    /// <summary>Starts the one reader thread; true when this call started it.</summary>
-    private bool StartReader()
+    /// <summary>Starts the one reader thread (once).</summary>
+    private void StartReader()
     {
         if (Interlocked.Exchange(ref _started, 1) != 0)
         {
-            return false;
+            return;
         }
 
         var reader = new Thread(() =>
@@ -77,16 +78,14 @@ public sealed class TerminalPrompt : IFallbackPrompt
             Name = "lanq fallback prompt",
         };
         reader.Start();
-        return true;
     }
 
     public async Task<bool?> AskAsync(string question, CancellationToken ct)
     {
-        if (StartReader())
-        {
-            await Task.Delay(Settle, ct).ConfigureAwait(false);
-        }
-
+        // At the first prompt nothing has read the terminal yet, so this drops all typeahead before the reader starts (deterministic, no
+        // settle time). At later prompts it drops what the running reader has not taken yet; what it took is drained below.
+        discardTypeahead();
+        StartReader();
         while (_lines.TryTake(out var early))
         {
             if (early is null)
@@ -347,14 +346,25 @@ public sealed partial class JobRunner
             : null;
     }
 
-    /// <summary>True when <paramref name="workRoot"/> is <paramref name="repo"/>, inside it, or holds it, after following links on both paths.</summary>
+    /// <summary>
+    /// True when <paramref name="workRoot"/> is <paramref name="repo"/>, inside it, or holds it, after following links on both paths; on Windows
+    /// also through subst drives, 8.3 short names and volume mount points (final review L5): each path is compared by every name Windows knows
+    /// it by (<see cref="WindowsPathNames"/>), so any match refuses. Linux bind mounts are not followed (documented).
+    /// </summary>
     internal static bool WorkRootOverlaps(string workRoot, string repo)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        string Full(string p) => Path.TrimEndingDirectorySeparator(Resolved(Path.GetFullPath(p))) + Path.DirectorySeparatorChar;
-        var root = Full(workRoot);
-        var top = Full(repo);
-        return root.StartsWith(top, comparison) || top.StartsWith(root, comparison);
+        var roots = PathNames(workRoot);
+        var tops = PathNames(repo);
+        return roots.Any(root => tops.Any(top => root.StartsWith(top, comparison) || top.StartsWith(root, comparison)));
+    }
+
+    /// <summary>The path with its links followed, plus (Windows) every other name of it; each ends in a separator.</summary>
+    private static List<string> PathNames(string path)
+    {
+        static string Folder(string p) => Path.TrimEndingDirectorySeparator(p) + Path.DirectorySeparatorChar;
+        var resolved = Resolved(Path.GetFullPath(path));
+        return [Folder(resolved), .. WindowsPathNames.Of(resolved).Select(Folder)];
     }
 
     /// <summary>The full path with every existing link on it (a symlink or junction on any folder) followed; a part that does not exist yet is kept as written.</summary>
