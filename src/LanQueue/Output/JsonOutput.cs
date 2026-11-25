@@ -160,6 +160,11 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>0.13.0 B3: true when this job ran on this computer's fallback entry, not on the pool (absent otherwise).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Fallback { get; init; }
+
+    /// <summary>The post: step (0.13.0): exitCode (a warning only), timedOut, seconds; absent when none ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PostJson? Post { get; init; }
+
     /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? FallbackJobs { get; init; }
@@ -364,6 +369,12 @@ internal sealed record ShardTimingJson(
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
 
+/// <summary>The post: step of a job (0.13.0): its exit code is a warning only; timedOut when it was stopped at its 5-minute limit.</summary>
+internal sealed record PostJson(int ExitCode, bool TimedOut, double Seconds)
+{
+    internal static PostJson? Of(Jobs.PostResult? p) => p is null ? null : new PostJson(p.ExitCode, p.TimedOut, p.Seconds);
+}
+
 /// <summary>
 /// NoCapacity after waiting (0.13.0 B2): idle seconds charged to waiting for a machine that can take this kind of job (eligibleSeconds) and
 /// for a free slot (slotSeconds), and the budget that ran out: "eligible" (--wait-eligible) or "slot" (--wait-slot). With --wait both
@@ -537,6 +548,10 @@ internal sealed record PlanFileJobJson(
     /// <summary>0.13.0 B3: true when this job ran on this computer's fallback entry, not on the pool (absent otherwise).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Fallback { get; init; }
+
+    /// <summary>A single job's post: step (0.13.0); a sharded job has one per shard. Absent when none ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PostJson? Post { get; init; }
 
     /// <summary>A single job with fetch: in lanq.yml only, as in <see cref="RunJson.Fetched"/> (a sharded job has them per shard).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

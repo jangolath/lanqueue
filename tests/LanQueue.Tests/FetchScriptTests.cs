@@ -11,6 +11,7 @@ namespace LanQueue.Tests;
 /// The worker side of --fetch, run by the real shells (sh, and Windows PowerShell 5.1) against a job folder in the temp folder, with the
 /// output read by the real line reader and receiver. The hostile cases (links, loops, odd names, devices) need a real Linux file system.
 /// </summary>
+[Collection(nameof(RealJobScripts))]
 public sealed class FetchScriptTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-fetchsh-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
@@ -457,7 +458,8 @@ public sealed class FetchScriptTests : IDisposable
         Directory.CreateDirectory(_root + "/locks");
         var pf = _root + "/locks/job-j1.pid";
         var psi = new System.Diagnostics.ProcessStartInfo("setsid") { UseShellExecute = false, WorkingDirectory = Job };
-        foreach (var a in new[] { "sh", "-c", RecordSelf + "; sleep 300 & wait", "sh", pf })
+        // An unrelated process (no LANQ_JOB=j1 marker): since 0.13.0 the stop also sweeps marked processes, which a reused pid never carries.
+        foreach (var a in new[] { "sh", "-c", RecordSelf.Replace("; export LANQ_JOB=j1", "", StringComparison.Ordinal) + "; sleep 300 & wait", "sh", pf })
         {
             psi.ArgumentList.Add(a);
         }

@@ -80,6 +80,9 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
     /// <summary>lanq run --baseline: the shard's rerun at the base commit after it ended Failed; else null.</summary>
     public BaselineResult? Baseline { get; init; }
 
+    /// <summary>The post: step of the shard's last attempt (0.13.0), or null.</summary>
+    public PostResult? Post { get; init; }
+
     /// <summary>0.13.0 B3: true when the shard's last attempt ran on this computer's fallback entry.</summary>
     public bool Fallback { get; init; }
 
@@ -299,7 +302,7 @@ public sealed partial class JobRunner
 
     /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, its size rule, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
     private JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
-        NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
+        NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok) || (template.Post is { } post && !JobPolicy.ValidateForWindows(post).Ok));
 
     /// <summary>
     /// The machines shards can go to now, in rank order, each with its free slots for this job (<see cref="Scheduler.FreeFor"/>, counting
@@ -851,6 +854,7 @@ public sealed partial class JobRunner
             MayStillRun = r.MayStillRun && !r.CleanedUp,
             Fallback = r.Fallback,
             FallbackHint = r.FallbackHint,
+            Post = r.Post,
         };
         return r.Status != JobStatus.Completed;
     }

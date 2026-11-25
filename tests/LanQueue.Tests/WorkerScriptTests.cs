@@ -7,6 +7,7 @@ using Xunit;
 namespace LanQueue.Tests;
 
 /// <summary>The job wrapper on the worker: /bin/sh, the exit code, the worker-side deadline, and the PAUSE file name.</summary>
+[Collection(nameof(RealJobScripts))]
 public sealed class WorkerScriptTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-wscript-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');

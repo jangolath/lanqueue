@@ -469,3 +469,11 @@ internal static class Recorded
         }
     }
 }
+
+/// <summary>
+/// The test classes that run real job wrappers (each job carries LANQ_JOB=its id) and real cleanups, which since 0.13.0 D1 stop every process
+/// of this uid carrying that marker. Their tests reuse ids such as "j1", so they never run in parallel with one another (in production every
+/// job id is unique).
+/// </summary>
+[CollectionDefinition(nameof(RealJobScripts), DisableParallelization = true)]
+public sealed class RealJobScripts;

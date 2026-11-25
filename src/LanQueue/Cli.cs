@@ -143,6 +143,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>Both wait budgets (<see cref="Scheduling.WaitBudgets"/>).</summary>
     public Scheduling.WaitBudgets Budgets => new(TimeSpan.FromSeconds(EligibleSeconds), TimeSpan.FromSeconds(SlotSeconds));
 
+    /// <summary>
+    /// lanq run --post "CMD" (lanq.yml post:, 0.13.0): a step run after the job (after its fetch, before its cleanup, in the same slot), its exit
+    /// code a warning only; null without one. Checked like the command (allowlist, secrets, Windows rules).
+    /// </summary>
+    public IReadOnlyList<string>? Post { get; init; }
+
     /// <summary>True when --wait asked for more than a week (as 0.12 allowed): lanq waits a week and says so (p1 review L1).</summary>
     public bool WaitClamped { get; init; }
 
@@ -189,7 +195,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     internal static readonly string[] PlanFileOptions =
     [
         "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--env", "--exclusive", "--baseline",
-        "--baseline-ref", "--results",
+        "--baseline-ref", "--results", "--post",
     ];
 
     /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
@@ -210,7 +216,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results", "--wait-eligible", "--wait-slot", "--fallback",
+            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results", "--wait-eligible", "--wait-slot", "--fallback", "--post",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
@@ -239,6 +245,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         int? waitSlot = null;
         FallbackMode? fallback = null;
         var waitClamped = false;
+        IReadOnlyList<string>? post = null;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
@@ -307,6 +314,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     break;
                 case "--wait-slot" when i + 1 < own.Length:
                     waitSlot = WaitValue("--wait-slot", own[++i]);
+                    break;
+                case "--post" when i + 1 < own.Length:
+                    post = ParsePost(own[++i]);
                     break;
                 case "--fallback" when i + 1 < own.Length:
                     fallback = own[++i] switch
@@ -558,6 +568,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             WaitSlotSeconds = waitSlot,
             WaitGiven = seen.Contains("--wait") || waitEligible is not null || waitSlot is not null,
             WaitClamped = waitClamped,
+            Post = post,
             Fallback = fallback,
             TimeoutMinutes = timeout,
             MemGb = mem,
@@ -676,6 +687,28 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds) && seconds is >= 0 and <= MaxWaitSeconds
             ? seconds
             : throw new ArgumentException($"{option} must be a whole number of seconds from 0 to {MaxWaitSeconds} (one week), for example {option} 600.");
+
+    /// <summary>
+    /// --post "CMD" (0.13.0): split on spaces only. Quotes, backquotes and backslashes are refused (PowerShell 5.1 and POSIX shells pass them
+    /// differently), and so are {shard}/{shards} (the step runs once per shard, as it is). Arguments with spaces go in lanq.yml post: as a list.
+    /// </summary>
+    internal static IReadOnlyList<string> ParsePost(string text)
+    {
+        if (text.Any(c => c is '"' or '\'' or '`' or '\\') || text.Any(char.IsControl))
+        {
+            throw new ArgumentException("--post takes a plain command split on spaces (no quotes, backquotes or backslashes); use lanq.yml post: for arguments with spaces.");
+        }
+
+        var argv = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (argv.Length == 0)
+        {
+            throw new ArgumentException("--post needs a command, for example --post \"dotnet build-server status\".");
+        }
+
+        return argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal))
+            ? throw new ArgumentException("--post cannot use {shard} or {shards}: the step runs once per shard as written.")
+            : argv;
+    }
 
     /// <summary>
     /// --wait: whole seconds from 0 (negative or non-numeric is refused, 0.13.0). Above one week it is taken as one week, as 0.12 took any
@@ -1122,6 +1155,7 @@ public static partial class Cli
                         Waited = result.Status == JobStatus.NoCapacity ? WaitedJson.Of(result.Waited) : null,
                         Fallback = Flag(result.Fallback),
                         FallbackJobs = result.Fallback ? 1 : null,
+                        Post = PostJson.Of(result.Post),
                         NextSteps = next,
                         Env = EnvNames(p.Env),
                         Exclusive = Flag(p.Exclusive),
@@ -1200,6 +1234,7 @@ public static partial class Cli
             WaitGiven = p.WaitGiven,
             Fallback = p.Fallback,
             FallbackOff = p.Fallback == FallbackMode.Off,
+            Post = p.Post,
             NoWake = p.NoWake,
             On = p.On,
             Size = p.Size,

@@ -450,6 +450,7 @@ public static partial class Cli
             Excluded = noCapacity ? ExcludedJsons(j.Excluded) : null,
             Waited = noCapacity ? WaitedJson.Of(j.Waited) : null,
             Fallback = Flag(j.Single?.Fallback == true),
+            Post = PostJson.Of(j.Single?.Post),
             Fetched = single?.Fetched,
             FetchSkipped = single?.FetchSkipped,
             FetchSkippedMore = single?.FetchSkippedMore,

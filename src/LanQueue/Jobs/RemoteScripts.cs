@@ -756,12 +756,13 @@ public static partial class RemoteScripts
     /// before LANQ_JOB, LANQ_SHARD(S) and LANQ_PLAN_JOB, so lanq's own variables always win. Null or empty sets none.
     /// </param>
     public static string Execute(Machine m, string jobId, string directory, IReadOnlyList<string> argv, TimeSpan? limit = null, ShardInfo? shard = null, string? planJob = null,
-        string? nonce = null, IReadOnlyList<JobEnvVar>? env = null)
+        string? nonce = null, IReadOnlyList<JobEnvVar>? env = null, string pidKind = "job")
     {
         var rel = JobPolicy.Normalize(directory) ?? throw new ArgumentException("Directory is not a safe relative path.", nameof(directory));
         var worktree = $"{m.WorkRoot}/jobs/{jobId}";
         var dir = rel == "." ? worktree : worktree + "/" + rel;
-        var pidFile = $"{m.WorkRoot}/locks/job-{jobId}.pid";
+        // "job", or "post" for the post: step (0.13.0), whose processes cleanup stops through their own pid file.
+        var pidFile = $"{m.WorkRoot}/locks/{(pidKind == "post" ? "post" : "job")}-{jobId}.pid";
         if (m.Os == MachineOs.Windows)
         {
             var windows = JobPolicy.ValidateForWindows(argv);
@@ -1049,7 +1050,8 @@ public static partial class RemoteScripts
         """;
 
     /// <summary>Cleanup's and <see cref="StopJob"/>'s use of <see cref="LinuxKillRecordedFunction"/>; needs $R and $ID.</summary>
-    internal const string LinuxKillRecordedJob = LinuxKillRecordedFunction + "\n" + "kill_recorded \"$R/locks/job-$ID.pid\" \"$R/jobs/$ID\" \"$ID\"";
+    internal const string LinuxKillRecordedJob = LinuxKillRecordedFunction + "\n" + "kill_recorded \"$R/locks/job-$ID.pid\" \"$R/jobs/$ID\" \"$ID\""
+        + "\n" + "kill_recorded \"$R/locks/post-$ID.pid\" \"$R/jobs/$ID\" \"$ID\"";
 
     /// <summary>
     /// 0.13.0 D1: <c>sweep_marked JOBID NODES LEAN</c>, the Linux leftover sweep after <c>kill_recorded</c>. It stops (TERM, 2 s, KILL) every
@@ -1130,6 +1132,7 @@ public static partial class RemoteScripts
             $pf = "$root/locks/job-$id.pid"
             {{WindowsKillRecorded}}
             if (Test-Path -LiteralPath $pf) { KillRecorded $pf $true }
+            $pp = "$root/locks/post-$id.pid"; if (Test-Path -LiteralPath $pp) { KillRecorded $pp $true }
             $rc = 0
             $jd = "$root/jobs/$id"
             if (Test-Path -LiteralPath $jd) {
@@ -1156,6 +1159,7 @@ public static partial class RemoteScripts
             $pf = "$root/locks/job-$id.pid"
             {{WindowsKillRecorded}}
             if (Test-Path -LiteralPath $pf) { KillRecorded $pf $true }
+            $pp = "$root/locks/post-$id.pid"; if (Test-Path -LiteralPath $pp) { KillRecorded $pp $true }
             {{(repoId is null ? "" : WindowsCacheCleanupBefore(repoId))}}
             if (Test-Path "$root/jobs/$id") { cmd /c rd /s /q ("$root/jobs/$id").Replace('/','\') 2>$null }
             {{(repoId is null ? "" : WindowsCacheCleanupAfter)}}

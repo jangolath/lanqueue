@@ -11,6 +11,7 @@ namespace LanQueue.Tests;
 /// Phase 1 review M2, M4 and M5: the wait budgets and the memory cap through the real runner paths (a single job, a shard set and a plan),
 /// not only at the WaitClock and script-builder level.
 /// </summary>
+[Collection(nameof(RealJobScripts))]
 public sealed class WaitRunTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "lanq-waitrun-" + Guid.NewGuid().ToString("N"));

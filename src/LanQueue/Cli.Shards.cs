@@ -164,6 +164,7 @@ public static partial class Cli
                     Shard = s.Index,
                     Attempts = s.Attempts,
                     Fallback = Flag(s.Fallback),
+                    Post = PostJson.Of(s.Post),
                     Baseline = BaselineJsonOf(s.Baseline),
                     Results = ResultsJsonOf(s.Results),
                 },

@@ -10,6 +10,7 @@ namespace LanQueue.Tests;
 /// 0.13.0 D1: hygiene: [dotnet|dotnet-lean] profiles, the Linux leftover sweep scoped to the job's own marker that never stops a shared
 /// MSBuild node or compiler server unless the profile makes it private (review H3, M12), and the doctor WARN (owner decision).
 /// </summary>
+[Collection(nameof(RealJobScripts))]
 public sealed class HygieneTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-hygiene-" + Guid.NewGuid().ToString("N"));
@@ -109,7 +110,7 @@ public sealed class HygieneTests : IDisposable
     private Process Marked(string jobId, string name, string arg = "x")
     {
         var script = Path.Combine(_root, name);
-        File.WriteAllText(script, "sleep 60\n");
+        File.WriteAllText(script, "while :; do sleep 1; done\n"); // the sh lives on when a sweep stops one of its sleeps (they carry the marker too)
         var psi = new ProcessStartInfo("setsid") { UseShellExecute = false };
         foreach (var a in new[] { "sh", script, arg })
         {

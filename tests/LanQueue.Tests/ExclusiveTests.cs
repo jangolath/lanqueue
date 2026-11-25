@@ -18,6 +18,7 @@ namespace LanQueue.Tests;
 /// slot is in use, takes one machine per shard, and is reported in the JSON and jobs.jsonl. The claim scripts run for real (sh and
 /// PowerShell) against a temporary work root; a shell this machine does not have is reported as skipped.
 /// </summary>
+[Collection(nameof(RealJobScripts))]
 public sealed class ExclusiveTests : IDisposable
 {
     private const int TestTimeout = 60_000;

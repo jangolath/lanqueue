@@ -47,12 +47,12 @@ public static partial class PlanFileLoader
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
     internal static readonly string[] DefaultKeys =
-        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results", "fallback"];
+        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results", "fallback", "post"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
         ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "fetch_max",
-        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results", "fallback"];
+        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results", "fallback", "post"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -600,6 +600,18 @@ public static partial class PlanFileLoader
         {
             var key = parsed.FetchMaxBytes > Fetch.FetchLimits.DefaultMaxTotalBytes ? "fetch_max" : "fetch_max_files";
             throw Error($"{key} (line {values[key].Start.Line}): {PlanFetch.RaiseRefused}");
+        }
+
+        // post: (0.13.0) is --post: the same list-or-plain-string form as command:, without {shard} (the step runs once per shard as written).
+        if (values.TryGetValue("post", out var postNode))
+        {
+            var post = Command(postNode, m => Error("post" + m[m.IndexOf(':', StringComparison.Ordinal)..]));
+            if (post.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)))
+            {
+                throw Error("post: cannot use {shard} or {shards}: the step runs once per shard as written.");
+            }
+
+            parsed = parsed with { Post = post };
         }
 
         return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed);

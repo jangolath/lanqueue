@@ -12,6 +12,7 @@ namespace LanQueue.Tests;
 /// Availability windows v2: day lists, the worker's clock, "window closing" and the window-close stop. Every time is fixed (2026-01-02 is
 /// a Friday) and every zone is a fixed offset, so nothing depends on the machine running the tests or on DST.
 /// </summary>
+[Collection(nameof(RealJobScripts))]
 public sealed class WindowTests : IDisposable
 {
     private const char NL = (char)10;

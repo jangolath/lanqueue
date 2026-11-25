@@ -181,6 +181,12 @@ public sealed record JobRequest(
     /// <summary>Lines of this job are prefixed "[Label machine] " (a baseline rerun's "baseline 2/4"), instead of a plan job's name; null otherwise.</summary>
     public string? Label { get; init; }
 
+    /// <summary>
+    /// lanq run --post (lanq.yml post:, 0.13.0): the step run after the job, its fetch done, in the same slot, before cleanup (review H1); its exit
+    /// code is a warning only. Null without one.
+    /// </summary>
+    public IReadOnlyList<string>? Post { get; init; }
+
     /// <summary>lanq run --fallback off|on|ask (0.13.0 B3): overrides policy.fallback for this run; null keeps the policy.</summary>
     public FallbackMode? Fallback { get; init; }
 
@@ -254,6 +260,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>lanq run --baseline: the rerun at the base commit after this job ended Failed (never changes the status or exit code); else null.</summary>
     public BaselineResult? Baseline { get; init; }
 
+    /// <summary>The post: step's outcome (0.13.0), or null when none ran (no post:, or the job ended Cancelled, WindowClosed, Rejected, InfraError or NoCapacity).</summary>
+    public PostResult? Post { get; init; }
+
     /// <summary>0.13.0 B3: true when the job ran on this computer's fallback entry (not on the pool: its result is not pool evidence).</summary>
     public bool Fallback { get; init; }
 
@@ -273,6 +282,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
         _ => 70,
     };
 }
+
+/// <summary>The post: step's outcome (0.13.0): its exit code (124 when stopped at the limit), whether it was stopped, and how long it ran.</summary>
+public sealed record PostResult(int ExitCode, bool TimedOut, double Seconds);
 
 /// <summary>0.13.0 B3: the fallback suggestion a NoCapacity result carries (see <see cref="JobResult.FallbackHint"/>).</summary>
 public enum FallbackHint
@@ -386,6 +398,23 @@ public sealed partial class JobRunner(
             return Rejected(jobId, commandFindings);
         }
 
+        // post: (0.13.0): the same allowlist, directory and secret checks as the command itself.
+        if (req.Post is { } post)
+        {
+            var postPolicy = JobPolicy.Validate(config.Policy, post, req.Directory);
+            if (!postPolicy.Ok)
+            {
+                var badPost = post.Count == 0 || post.Any(a => a.Any(char.IsControl));
+                return new JobResult(jobId, JobStatus.Rejected, 2, null, "post: " + postPolicy.Reason!) { RejectKind = badPost ? Jobs.RejectKind.Arguments : Jobs.RejectKind.Policy };
+            }
+
+            var postFindings = SecretScanner.ScanText(string.Join(' ', post), "post: command line");
+            if (postFindings.Count > 0)
+            {
+                return Rejected(jobId, postFindings);
+            }
+        }
+
         if (PrecheckEnv(jobId, req) is { } envRefused)
         {
             return envRefused;
@@ -393,7 +422,7 @@ public sealed partial class JobRunner(
 
         // Arguments unsafe on Windows (" < > ^ %, or & | for a program that is not an .exe) can still run on a Linux worker; refuse only
         // when no non-Windows machine has the needed capabilities, before any network or git work.
-        var windows = JobPolicy.ValidateForWindows(req.Argv);
+        var windows = req.Post is { } windowsPost && JobPolicy.ValidateForWindows(req.Argv).Ok ? JobPolicy.ValidateForWindows(windowsPost) : JobPolicy.ValidateForWindows(req.Argv);
         if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs))
             && !(FallbackCouldTake(req) && config.Fallback!.Os != MachineOs.Windows))
         {
@@ -454,7 +483,7 @@ public sealed partial class JobRunner(
         // job is placed), and NeverByConfig ends the job when that leaves no capable machine. The one refusal here: every capable machine
         // not already ruled out is ruled out by --env, at least one of them because the values make its Windows command too long (the
         // values themselves must change).
-        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var windowsUnsafe = WindowsUnsafe(req);
         var judged = Candidates(req)
             .Where(m => HasCapabilities(m, req.Needs) && !(windowsUnsafe && m.Os == MachineOs.Windows))
             .Select(m => (Machine: m, Rule: EnvExclusion(m, req.Env, windowsUnsafe)))
@@ -491,6 +520,10 @@ public sealed partial class JobRunner(
         EnvRuledOut = EnvRuledOut(Candidates(req), req.Env, windowsUnsafe),
         Policy = config.Policy,
     };
+
+    /// <summary>Arguments unsafe on Windows in the command or in its post: step (0.13.0): then no Windows machine takes the job.</summary>
+    internal static bool WindowsUnsafe(JobRequest req) =>
+        !JobPolicy.ValidateForWindows(req.Argv).Ok || (req.Post is { } post && !JobPolicy.ValidateForWindows(post).Ok);
 
     /// <summary>Only what slot counting needs of the job (<see cref="Scheduler.FreeFor(Machine, MachineHealth, JobNeeds, int, int)"/>): --mem, --exclusive and the pool policy (floor, job size).</summary>
     private JobNeeds MemNeeds(JobRequest req) => new([], req.MinMemGb, false) { Exclusive = req.Exclusive, Policy = config.Policy };
@@ -550,7 +583,7 @@ public sealed partial class JobRunner(
     /// </summary>
     private List<Assessment>? NeverByConfig(JobRequest req)
     {
-        var windowsUnsafe = req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var windowsUnsafe = req.Env.Count > 0 && WindowsUnsafe(req);
         var judged = new List<Assessment>();
         foreach (var m in Candidates(req))
         {
@@ -608,7 +641,7 @@ public sealed partial class JobRunner(
     /// </summary>
     private int ExclusiveMachines(JobRequest req) =>
         Candidates(req).Count(m => Eligibility.Missing(m, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(m, req.Size) is null
-            && EnvExclusion(m, req.Env, req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok) is null);
+            && EnvExclusion(m, req.Env, req.Env.Count > 0 && WindowsUnsafe(req)) is null);
 
     /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
     private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
@@ -820,7 +853,7 @@ public sealed partial class JobRunner(
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
-        var needs = NeedsOf(req, !JobPolicy.ValidateForWindows(req.Argv).Ok);
+        var needs = NeedsOf(req, WindowsUnsafe(req));
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
         var candidates = Candidates(req);
         var say = Say(req);
@@ -1387,6 +1420,10 @@ public sealed partial class JobRunner(
         {
             // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
             executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob, env: req.Env));
+            if (req.Post is { } postArgv)
+            {
+                _ = RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, postArgv, null)); // the post: step too must fit (Windows command length)
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -1567,11 +1604,12 @@ public sealed partial class JobRunner(
         // A job whose ssh connection dropped may also still be running there: it is stopped the same way, on a fresh connection (the caller's
         // cleanup would kill it on one anyway). When the machine does not answer that either, nothing is fetched and the report says why.
         var dropped = sshFailed && !run.TimedOut;
-        if (req.Fetch is not null && (dropped || result.Status is JobStatus.TimedOut or JobStatus.WindowClosed))
+        var post = req.Post is not null && result.Status is JobStatus.Completed or JobStatus.Failed or JobStatus.TimedOut;
+        if ((req.Fetch is not null && (dropped || result.Status is JobStatus.TimedOut or JobStatus.WindowClosed)) || (post && result.Status == JobStatus.TimedOut))
         {
-            onLine($"[lanq] {machine.Name}: stopping the job before fetching its files");
+            onLine($"[lanq] {machine.Name}: stopping the job before {(req.Fetch is null ? "its post: step" : "fetching its files")}");
             var stop = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.StopJob(machine, jobId)), null, StopBeforeFetchTimeout, ct).ConfigureAwait(false);
-            if (dropped && stop.IsSshFailure)
+            if (dropped && stop.IsSshFailure && req.Fetch is not null)
             {
                 var lost = new FetchReport(Path.GetFullPath(Path.Combine(req.Fetch.OutputRoot, jobId)), [], [], "not fetched: the SSH connection failed during the job, and the machine did not answer afterwards");
                 Summarise(lost, result, onLine);
@@ -1580,13 +1618,66 @@ public sealed partial class JobRunner(
         }
 
         // The job ran (completed, failed, or was stopped): bring back what it produced, before the caller's cleanup deletes the job folder.
-        if (req.Fetch is not { } fetch)
+        if (req.Fetch is { } fetch)
         {
-            return result;
+            var report = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false);
+            result = result with { Fetch = report, Results = CountResults(req, report, machine, onLine) };
         }
 
-        var report = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false);
-        return result with { Fetch = report, Results = CountResults(req, report, machine, onLine) };
+        // post: (0.13.0, review H1) after the fetch, so it cannot rewrite fetched evidence, and before the caller's cleanup, in the same slot.
+        return post ? result with { Post = await RunPostAsync(jobId, req, machine, onLine, ct).ConfigureAwait(false) } : result;
+    }
+
+    /// <summary>How long a post: step may run (on the worker and here); it fits inside the slot lease's transfer allowance.</summary>
+    internal static readonly TimeSpan PostLimit = TimeSpan.FromMinutes(5);
+
+    /// <summary>The post: step's script: the job wrapper itself with its own pid file (locks/post-ID.pid) and the 5-minute limit.</summary>
+    private static string PostScript(Machine machine, string jobId, JobRequest req, IReadOnlyList<string> post, string? nonce) =>
+        RemoteScripts.Execute(machine, jobId, req.Directory, post, PostLimit, req.Shard, req.PlanJob, nonce, req.Env, pidKind: "post");
+
+    /// <summary>
+    /// Runs the post: step in the job's folder with the job's environment, on its own connection, under its own job object or process group
+    /// and pid file; never throws for its outcome. Its exit code is a warning only ("[lanq] post: exit N (warning only)"). Ctrl+C stops it
+    /// (the cancellation propagates; the cleanup kills what the pid file names).
+    /// </summary>
+    private async Task<PostResult> RunPostAsync(string jobId, JobRequest req, Machine machine, Action<string> onLine, CancellationToken ct)
+    {
+        var post = req.Post!;
+        var nonce = RemoteScripts.NewMarkerNonce();
+        onLine("[lanq] post: " + string.Join(' ', post));
+        var started = clock.GetTimestamp();
+        string? held = null;
+        void OnPostLine(string line)
+        {
+            if (held is not null)
+            {
+                onLine(held);
+            }
+
+            held = line;
+        }
+
+        var run = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, post, nonce)), OnPostLine, PostLimit + WorkerDeadlineMargin, ct).ConfigureAwait(false);
+        var seconds = Math.Round(clock.GetElapsedTime(started).TotalSeconds, 2);
+        int? marked = null;
+        if (held is { } last)
+        {
+            var (before, code) = ReadExitMarker(last, jobId, nonce);
+            marked = code;
+            if (before.Length > 0)
+            {
+                onLine(before);
+            }
+        }
+
+        var exit = marked ?? run.ExitCode;
+        var timedOut = run.TimedOut || exit == ProcessSshClient.TimedOutExitCode;
+        if (exit != 0)
+        {
+            onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq] post: exit {exit}{(timedOut ? " (stopped after 5 min)" : "")} (warning only)"));
+        }
+
+        return new PostResult(exit, timedOut, seconds);
     }
 
     /// <summary>
