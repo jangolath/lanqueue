@@ -171,25 +171,30 @@ public sealed partial class JobRunner
     private JobPlan NoneNow(string id, JobRequest req, JobNeeds needs, IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobPlan plan)
     {
         var none = NoCapacity(id, [.. plan.Assessed], "");
-        // As the real run: the wake gate uses the eligible budget (p1 review L2), or wakes before falling back to this computer (0.13.0).
-        var wake = !plan.Never && MayWake(req) ? WouldWake(candidates, needs, probes) : null;
-        return plan with { Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable, WouldWake = wake };
+        // As the real run: the wake gate uses the eligible budget (p1 review L2): the first sleeper by name; or, before falling back to this
+        // computer (0.13.0), every sleeper the job could use, at once.
+        var wake = !plan.Never && MayWake(req) ? WouldWake(candidates, needs, probes) : [];
+        var all = WakesBeforeFallback(req) && wake.Count > 0 ? wake : null;
+        return plan with
+        {
+            Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable,
+            WouldWake = wake.FirstOrDefault(), WouldWakeAll = all,
+        };
     }
 
     /// <summary>
-    /// The machine <see cref="WakeBestSleeperAsync"/> would send a packet to: the first by name that <see cref="CouldWakeFor"/> allows and that
+    /// The machines <see cref="WakeSleepersAsync"/> may send a packet to, by name: those <see cref="CouldWakeFor"/> allows and that
     /// <see cref="WakeService.Evaluate"/> says to wake. Asks the rules of a fresh WakeService whose sender refuses to send, so nothing is claimed or sent.
     /// </summary>
     /// <param name="candidates">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> is index-aligned with it.</param>
-    private string? WouldWake(IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes)
+    private List<string> WouldWake(IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes)
     {
         var rules = new WakeService(new RefusingMagicPacketSender(), clock);
         var now = clock.GetLocalNow().DateTime;
-        return WakeOrder(candidates)
+        return [.. WakeOrder(candidates)
             .Where(i => CouldWakeFor(candidates[i], probes[i], needs, archiveFailed: false)
                 && rules.Evaluate(candidates[i], probes[i], now, config.Policy).Decision == WakeDecision.Wake)
-            .Select(i => candidates[i].Name)
-            .FirstOrDefault();
+            .Select(i => candidates[i].Name)];
     }
 
     /// <summary>A plan for a run that would end before starting: refused (2), no machine at all (75), or the snapshot failed (70).</summary>

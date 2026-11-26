@@ -888,9 +888,10 @@ public static partial class Cli
         init writes a commented starter machines.yml (default the per-user config file, or --config FILE) and never overwrites a file or writes through
         a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
-        up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
-        inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0, or before falling back to this computer
-        (fallback on/ask, no --wait or --wait-eligible: it then waits up to 120 s for it; --no-wake turns both off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
+        up to its wake.wait_seconds for ssh. lanq run wakes such a machine by itself (once) only when no awake machine can take the job and it is
+        inside its allowed hours with min_window_minutes + wake.wait_seconds left: one at a time when --wait is above 0, or every such machine at once
+        before falling back to this computer (fallback on/ask, no --wait or --wait-eligible: one shared wait of up to 120 s from the first packet;
+        --no-wake turns both off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         Every job's output is also kept in a log in the state folder: run prints "[lanq] log: PATH" just before its status line (--shards: for
         each shard that did not complete); run --json always carries logPath (null when no job started), and --log-tail N (1 to 200, --json
         only) adds logTail, the log's last N lines (each shard its own with --shards).
@@ -1140,9 +1141,10 @@ public static partial class Cli
         {
             // Ctrl+C: an agent reading --json still gets its one object, with the log of a job that had already started.
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
+            // The Wake-on-LAN packets it sent are still reported (review L8: Ctrl+C during the wake wait).
             await WriteJsonError(
                 "run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, NextSteps.Nothing("cancelled (Ctrl+C)"), started.Elapsed,
-                fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
+                fetch is not null, p.LogTail, runner.StartedLogPath, runner.WakeAttempts).ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
@@ -1219,8 +1221,27 @@ public static partial class Cli
             return null; // nothing will ever ask: never read the terminal
         }
 
-        why = FallbackAsk.WhyNot(p.Json, Console.IsInputRedirected, Console.IsErrorRedirected, Environment.GetEnvironmentVariables());
+        why = AskWhyNot(p);
         return why is null ? new TerminalPrompt(Console.In, stderr, TerminalPrompt.DefaultTimeout) : null;
+    }
+
+    /// <summary>Why policy.fallback ask could not prompt in this process (<see cref="FallbackAsk.WhyNot"/>), or null when it could.</summary>
+    internal static string? AskWhyNot(ParsedArgs p) =>
+        FallbackAsk.WhyNot(p.Json, Console.IsInputRedirected, Console.IsErrorRedirected, Environment.GetEnvironmentVariables());
+
+    /// <summary>
+    /// lanq run --dry-run (review L6): where the real run could ask (fallback ask, and <paramref name="whyNot"/> null), a stand-in prompt, so the
+    /// plan predicts the wake and the fallback as for ask; null otherwise (ask that cannot prompt acts as off, as in the real run). It never asks.
+    /// </summary>
+    internal static IFallbackPrompt? DryRunPrompt(ParsedArgs p, FleetConfig config, string? whyNot) =>
+        config.Fallback is not null && (p.Fallback ?? config.Policy.Fallback) == FallbackMode.Ask && whyNot is null ? NeverAsks.Instance : null;
+
+    /// <summary>The dry run's stand-in for the ask prompt: a dry run never asks, so a call is a bug.</summary>
+    private sealed class NeverAsks : IFallbackPrompt
+    {
+        public static readonly NeverAsks Instance = new();
+
+        public Task<bool?> AskAsync(string question, CancellationToken ct) => throw new InvalidOperationException("A dry run never asks.");
     }
 
     /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
@@ -1292,11 +1313,14 @@ public static partial class Cli
     /// <param name="logPath">run only: the log of a job that had started (Ctrl+C or an unexpected error after it held a slot), or null.</param>
     private static Task WriteJsonError(
         string command, string status, int exitCode, string message, TextWriter stdout, IReadOnlyList<NextStepJson> steps, TimeSpan? elapsed = null, bool fetch = false,
-        int? logTail = null, string? logPath = null) =>
+        int? logTail = null, string? logPath = null, IReadOnlyList<WakeAttempt>? wakes = null) =>
         stdout.WriteLineAsync(command switch
         {
             "run" => JsonSerializer.Serialize(
-                WithFetch(WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps }, logPath, logTail), fetch, null),
+                WithFetch(
+                    WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps, Wakes = WakeAttemptJson.Of(wakes ?? []) }, logPath, logTail),
+                    fetch,
+                    null),
                 LanqJson.Default.RunJson),
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
             "doctor" => JsonSerializer.Serialize(

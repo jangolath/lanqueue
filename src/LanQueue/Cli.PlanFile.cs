@@ -477,8 +477,12 @@ public static partial class Cli
     {
         var time = clock ?? TimeProvider.System;
 
-        // No waker, no BaseStore file, no output: as lanq run --dry-run.
-        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, time), log, Path.Combine(home, "tmp"), _ => { }, clock: time);
+        // No waker, no BaseStore file, no output, and ask that could prompt counts as ask: as lanq run --dry-run.
+        var runner = new JobRunner(config, ssh, payloads, new HealthProbe(ssh, time), log, Path.Combine(home, "tmp"), _ => { }, clock: time)
+        {
+            Prompt = DryRunPrompt(p, config, AskWhyNot(p)),
+            NoAskReason = AskWhyNot(p),
+        };
         PlanDryResult dry;
         if (narrowedOut is not null)
         {

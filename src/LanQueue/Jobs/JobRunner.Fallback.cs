@@ -219,45 +219,71 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// The wait budgets a job waits under: its own, but with a fallback that can really act and no wait flag given, at least 120 s for a slot
-    /// (M1); and while a Wake-on-LAN this run sent before falling back is pending (<paramref name="wakePending"/>, <see cref="WakesBeforeFallback"/>),
-    /// at least <see cref="FallbackWakeWait"/> for an eligible machine.
+    /// (M1). The wake wait before a fallback is not a budget: it is its own window, counted from the first packet (<see cref="InWakeWait"/>).
     /// </summary>
-    internal WaitBudgets BudgetsOf(JobRequest req, bool wakePending = false)
+    internal WaitBudgets BudgetsOf(JobRequest req)
     {
         var budgets = req.EffectiveBudgets;
-        if (EffectiveFallbackModeOf(req) != FallbackMode.Off && !req.WaitGiven && budgets.Slot < FallbackSlotFloor)
-        {
-            budgets = budgets with { Slot = FallbackSlotFloor };
-        }
-
-        return wakePending && WakesBeforeFallback(req) && budgets.Eligible < FallbackWakeWait ? budgets with { Eligible = FallbackWakeWait } : budgets;
+        return EffectiveFallbackModeOf(req) != FallbackMode.Off && !req.WaitGiven && budgets.Slot < FallbackSlotFloor ? budgets with { Slot = FallbackSlotFloor } : budgets;
     }
 
     /// <summary>The Wake-on-LAN packets this run sent (or tried to) and what came of each, for its output, JSON wakes and next steps.</summary>
     public IReadOnlyList<WakeAttempt> WakeAttempts => probe.Waker?.Attempts ?? [];
 
-    /// <summary>How long a run that may fall back waits for a pool machine it woke before it uses this computer (0.13.0, wake before fallback).</summary>
+    /// <summary>
+    /// The one shared wait of wake before fallback (0.13.0): at most this long from the first packet the run sent to a machine the job could use,
+    /// before it uses this computer (or, under ask, asks to).
+    /// </summary>
     internal static readonly TimeSpan FallbackWakeWait = TimeSpan.FromSeconds(120);
 
     /// <summary>
-    /// Wake before fallback (0.13.0, owner decision; replaces final review A-L6): a job that would fall back to this computer first wakes a
-    /// sleeping pool machine that could take it and waits up to <see cref="FallbackWakeWait"/> for it (never past that machine's
-    /// wake.wait_seconds). Only when the fallback could really take the job (<see cref="FallbackCouldTake"/>: on, or ask that can prompt),
-    /// without --no-wake, and when the caller left the eligible budget to lanq (no --wait, no --wait-eligible: <see cref="JobRequest.EligibleWaitGiven"/>);
-    /// a given eligible budget decides as for any run (above 0 it may wake, 0 never does). Off: unchanged.
+    /// Wake before fallback (0.13.0, owner decision; replaces final review A-L6): a job that would fall back to this computer first wakes every
+    /// sleeping pool machine that could take it, all at once (each at most once per run), and waits one shared wait (<see cref="InWakeWait"/>).
+    /// Only when the fallback could really take the job (<see cref="FallbackCouldTake"/>: on, or ask that can prompt), without --no-wake, and
+    /// when the caller left the eligible budget to lanq (no --wait, no --wait-eligible: <see cref="JobRequest.EligibleWaitGiven"/>); a given
+    /// eligible budget decides as for any run (above 0 it may wake one sleeper at a time within it, 0 never does). Off: unchanged.
     /// </summary>
     internal bool WakesBeforeFallback(JobRequest req) => !req.NoWake && !req.EligibleWaitGiven && FallbackCouldTake(req);
 
     /// <summary>Whether a job may wake a sleeper at all: an eligible budget above 0 to wait in, or wake before fallback; never with --no-wake.</summary>
     internal bool MayWake(JobRequest req) => !req.NoWake && (req.EffectiveBudgets.Eligible > TimeSpan.Zero || WakesBeforeFallback(req));
 
-    /// <summary>True while a packet this run sent to one of the job's candidates may still bring it up, within <see cref="FallbackWakeWait"/> of the send.</summary>
-    private bool WakePendingFor(JobRequest req) =>
-        probe.Waker is { } waker && Candidates(req).Any(m => waker.IsPending(m.Name, FallbackWakeWait));
+    /// <summary>
+    /// Whether the job could use <paramref name="m"/> once it is awake, by everything knowable from the config (review M3): its capabilities, a
+    /// declared size:, not Windows for arguments unsafe there, not ruled out by the job's --env, not an archive machine when the archive failed.
+    /// </summary>
+    internal static bool CouldUse(Machine m, JobNeeds needs, bool archiveFailed) =>
+        Eligibility.Missing(m, needs.Capabilities).Count == 0 && Eligibility.DeclaredSizeMismatch(m, needs.Size) is null
+        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !needs.EnvRuledOut.ContainsKey(m.Name) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+
+    /// <summary>The job's candidates it could use once awake (<see cref="CouldUse"/>): the only machines whose wakes concern it (review M3).</summary>
+    private IEnumerable<Machine> WakeRelevant(JobRequest req, JobNeeds needs, bool archiveFailed) => Candidates(req).Where(m => CouldUse(m, needs, archiveFailed));
+
+    /// <summary>When the job's shared wake wait began: the first packet this run sent to a machine the job could use; null when none went out.</summary>
+    private DateTimeOffset? WakeWaitStart(JobRequest req, JobNeeds needs, bool archiveFailed) =>
+        probe.Waker is { } waker ? WakeRelevant(req, needs, archiveFailed).Select(m => waker.SentAt(m.Name)).Min() : null;
 
     /// <summary>
-    /// The packets this run sent to the job's candidates and what came of them, for the NoCapacity message and the fallback line: "" when none.
-    /// "Wake-on-LAN: build-02 woken, no ssh answer within 120 s."
+    /// Wake before fallback: whether the job may still send packets. Before any packet to a machine it could use, or while that shared wait is
+    /// open: a sleeper found later in the wait is woken too, but never once the wait is over (the job would not wait for it).
+    /// </summary>
+    private bool WakeWaitNotOver(JobRequest req, JobNeeds needs, bool archiveFailed) =>
+        probe.Waker is { } waker && (WakeWaitStart(req, needs, archiveFailed) is not { } start || waker.Now < start + FallbackWakeWait);
+
+    /// <summary>
+    /// Wake before fallback (reviews H1, M1, M3): true while the job keeps waiting for the machines this run woke instead of falling back. The
+    /// wait is one window of <see cref="FallbackWakeWait"/> from the first packet to a machine the job could use (not from the job's start). It
+    /// ends early only when every such woken machine is ruled out for good or paused in the latest look (<paramref name="latest"/>), or has
+    /// neither answered ssh nor still has time left of its own wake.wait_seconds. A woken machine that answers but is held (load or memory
+    /// pressure just after boot, an unreadable probe) keeps the wait going; when the job is placed the wait is moot.
+    /// </summary>
+    internal bool InWakeWait(JobRequest req, JobNeeds needs, bool archiveFailed, IReadOnlyList<Assessment> latest) =>
+        WakesBeforeFallback(req) && probe.Waker is { } waker && WakeWaitStart(req, needs, archiveFailed) is { } start && waker.Now < start + FallbackWakeWait
+        && latest.Any(a => waker.IsLive(a.Machine.Name) && !a.Permanent && a.Reason != Exclusion.Paused && !a.Health.Paused && CouldUse(a.Machine, needs, archiveFailed));
+
+    /// <summary>
+    /// The packets this run sent to machines the job could use and what came of them, for the NoCapacity message and the fallback line: "" when
+    /// none (a wake for another plan job's machine is never named, review M3). "Wake-on-LAN: build-02 woken, no ssh answer within 120 s."
     /// </summary>
     internal string WakeNote(JobRequest req)
     {
@@ -266,7 +292,7 @@ public sealed partial class JobRunner
             return "";
         }
 
-        var names = Candidates(req).Select(m => m.Name).ToHashSet(StringComparer.Ordinal);
+        var names = WakeRelevant(req, NeedsOf(req, WindowsUnsafe(req)), archiveFailed: false).Select(m => m.Name).ToHashSet(StringComparer.Ordinal);
         var parts = waker.Attempts.Where(a => names.Contains(a.Machine)).Select(WakeText).ToList();
         return parts.Count == 0 ? "" : " Wake-on-LAN: " + string.Join("; ", parts) + ".";
     }

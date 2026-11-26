@@ -259,20 +259,18 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
         _woken[machine.Name] = now + TimeSpan.FromSeconds(w.WaitSeconds);
     }
 
-    /// <summary>
-    /// True while a packet sent to <paramref name="machine"/> in this invocation may still bring it up: its wake.wait_seconds, but never more
-    /// than <paramref name="cap"/> after the send, have not passed and it has not answered yet (0.13.0: a run that may fall back waits for it).
-    /// </summary>
-    public bool IsPending(string machine, TimeSpan cap)
-    {
-        if (!_sent.TryGetValue(machine, out var s) || s.Up || s.Error is not null)
-        {
-            return false;
-        }
+    /// <summary>When the packet to <paramref name="machine"/> went out in this invocation; null when none was sent (or the send failed).</summary>
+    public DateTimeOffset? SentAt(string machine) => _sent.TryGetValue(machine, out var s) && s.Error is null ? s.At : null;
 
-        var wait = TimeSpan.FromSeconds(s.WaitSeconds);
-        return s.At + (wait < cap ? wait : cap) > clock.GetUtcNow();
-    }
+    /// <summary>
+    /// True while a machine sent a packet in this invocation may still take a job (0.13.0 wake before fallback): it answered ssh (it may be busy
+    /// just after boot, review H1), or it has not answered yet but its wake.wait_seconds since the packet have not passed. False for a failed send.
+    /// </summary>
+    public bool IsLive(string machine) =>
+        _sent.TryGetValue(machine, out var s) && s.Error is null && (s.Up || s.At + TimeSpan.FromSeconds(s.WaitSeconds) > clock.GetUtcNow());
+
+    /// <summary>The time on this service's clock (the wake wait of a run that may fall back is measured on it).</summary>
+    public DateTimeOffset Now => clock.GetUtcNow();
 
     /// <summary>Every packet this invocation sent or tried to send, by machine name, and what became of it so far.</summary>
     public IReadOnlyList<WakeAttempt> Attempts
@@ -291,7 +289,10 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
         }
     }
 
-    /// <summary>True while a machine woken in this invocation may still come up (so a waiting job should keep waiting).</summary>
+    /// <summary>
+    /// True while a machine woken in this invocation may still come up within its wake.wait_seconds and has not answered: a run with an explicit
+    /// --wait (or --wait-eligible) above 0 wakes the next sleeper only once this is false.
+    /// </summary>
     public bool AnyPending => _woken.Values.Any(d => d > clock.GetUtcNow());
 
     public void MarkUp(Machine machine)

@@ -455,8 +455,15 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>Every machine judged for the job, in config order (empty when the run was refused before any machine was looked at).</summary>
     public IReadOnlyList<PlanMachineJson> Machines { get; init; } = [];
 
-    /// <summary>The sleeping machine lanq run would wake (with --wait above 0 and without --no-wake, when no awake machine can take the job), or null.</summary>
+    /// <summary>
+    /// The sleeping machine lanq run would wake (with --wait above 0, or before falling back to this computer; without --no-wake; when no awake
+    /// machine can take the job), or null; the first by name when it would wake several (<see cref="WouldWakeAll"/>).
+    /// </summary>
     public string? WouldWake { get; init; }
+
+    /// <summary>0.13.0: before falling back to this computer, every sleeper lanq run would wake at once, by name. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? WouldWakeAll { get; init; }
 
     /// <summary>NoCapacity only (0.13.0): this computer's fallback entry when lanq run would go there instead of ending NOT RUN. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

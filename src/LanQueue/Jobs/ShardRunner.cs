@@ -672,9 +672,10 @@ public sealed partial class JobRunner
 
                         EndWaiting(WithFallback(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()), never));
                     }
-                    else if (launched == 0 && MayWake(template) && probe.Waker is { AnyPending: false })
+                    else if (launched == 0)
                     {
-                        await WakeBestSleeperAsync(candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token, WakesBeforeFallback(template)).ConfigureAwait(false);
+                        // No new shard could start: wake as Dispatch does. While shards still run elsewhere this adds capacity (review L3, WORKERS.md).
+                        await MaybeWakeAsync(template, candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
                     }
                 }
 
@@ -684,7 +685,9 @@ public sealed partial class JobRunner
                     idleSince = Timestamp();
                 }
                 else if (pending.Count > 0 && running.Count == 0
-                    && WaitedOut(template, waitClock, idleSince, WaitKindOfShards(candidates, lastProbes, needs, pending, lastEngaged, sshFailed), round, relooked) is { } budget)
+                    && WaitedOut(
+                        template, waitClock, idleSince, WaitKindOfShards(candidates, lastProbes, needs, pending, lastEngaged, sshFailed), round, relooked,
+                        InWakeWait(template, needs, prepared.Archive.Failure is not null, lastAssessed)) is { } budget)
                 {
                     var why = (budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now") + WakeWhy(template);
                     var waited = await FallbackGateAsync(template, needs, why, fellBack, line => Emit(lead + line), stop.Token).ConfigureAwait(false);

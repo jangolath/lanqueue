@@ -983,15 +983,16 @@ public sealed partial class JobRunner(
                 return WithFallback(NoCapacity(jobId, judged, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), never);
             }
 
-            // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
-            // always inside that wait, so --wait 0 never blocks on one) or before falling back to this computer (MayWake, 0.13.0), and only
-            // one machine at a time, the best-ranked sleeper; each machine at most once per run (WakeService).
-            if (ranked.Count == 0 && MayWake(req) && probe.Waker is { AnyPending: false })
+            // Wake-on-LAN last resort: only when no awake machine can take the job now, and each machine at most once per run (WakeService).
+            // With a real --wait to wait in (a pending wake is always inside that wait, so --wait 0 never blocks on one): one machine at a time,
+            // the first sleeper by name. Before falling back to this computer (0.13.0): every sleeper the job could use at once, then one shared
+            // wait (InWakeWait in WaitedOut).
+            if (ranked.Count == 0 && await MaybeWakeAsync(req, candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false))
             {
-                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct, WakesBeforeFallback(req)).ConfigureAwait(false);
+                judged = engaged is null ? assessed : [.. assessed, engaged]; // the woken machines are judged again
             }
 
-            if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(judged, sshFailed), round, relooked) is { } budget)
+            if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(judged, sshFailed), round, relooked, InWakeWait(req, needs, archive.Failure is not null, assessed)) is { } budget)
             {
                 var why = budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now";
                 var waited = await FallbackGateAsync(req, needs, why + WakeWhy(req), fellBack, say, ct).ConfigureAwait(false);
@@ -1033,7 +1034,9 @@ public sealed partial class JobRunner(
     /// machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before its sibling gave it back
     /// looks again instead of ending NoCapacity next to a free slot. Returns the budget that ran out, or null.
     /// </summary>
-    private WaitKind? WaitedOut(JobRequest req, WaitClock clock, long ownSince, WaitKind state, long round, long relooked)
+    /// <param name="inWakeWait">True while the job waits for the machines this run woke before falling back (<see cref="InWakeWait"/>): the
+    /// wait is charged as usual but never runs out (review M1: that wait counts from the packet, not from the job's start).</param>
+    private WaitKind? WaitedOut(JobRequest req, WaitClock clock, long ownSince, WaitKind state, long round, long relooked, bool inWakeWait = false)
     {
         var since = ownSince;
         if (req.Progress is { } plan)
@@ -1047,7 +1050,7 @@ public sealed partial class JobRunner(
         }
 
         clock.Look(Stopwatch.GetElapsedTime(0, Timestamp()), Stopwatch.GetElapsedTime(0, since), state);
-        return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(BudgetsOf(req, WakePendingFor(req)));
+        return (req.Progress is { } p && Relook(p, round, relooked) != 0) || inWakeWait ? null : clock.SpentOut(BudgetsOf(req));
     }
 
     /// <summary>
@@ -1239,25 +1242,67 @@ public sealed partial class JobRunner(
     /// memory and load are unknown, so they are not judged. <paramref name="raw"/> is the probe result as returned (no job holds).
     /// </summary>
     internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
-        m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
-        && Eligibility.DeclaredSizeMismatch(m, needs.Size) is null
-        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !needs.EnvRuledOut.ContainsKey(m.Name) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+        m.Wake is not null && raw.LooksAsleep && CouldUse(m, needs, archiveFailed);
 
     /// <summary>
-    /// Wakes at most one machine: the first by name among those <see cref="CouldWakeFor"/> allows that are inside their hours. The decision uses
-    /// the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the new result in <paramref name="probes"/>
-    /// and is judged again in <paramref name="assessed"/>.
+    /// The wake step of one look at the machines (no awake machine can take the job): with an eligible budget above 0 given by the caller, one
+    /// sleeper at a time, and only once no earlier wake is still coming up; before falling back to this computer (<see cref="WakesBeforeFallback"/>),
+    /// every sleeper the job could use at once, as long as the job's shared wake wait is not over. Never with --no-wake. True when a packet went
+    /// out (or failed) and <paramref name="probes"/> / <paramref name="assessed"/> were updated.
+    /// </summary>
+    private async Task<bool> MaybeWakeAsync(
+        JobRequest req, IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit,
+        CancellationToken ct)
+    {
+        if (!MayWake(req) || probe.Waker is not { } waker)
+        {
+            return false;
+        }
+
+        var archiveFailed = archive.Failure is not null;
+        if (WakesBeforeFallback(req))
+        {
+            return WakeWaitNotOver(req, needs, archiveFailed)
+                && await WakeSleepersAsync(candidates, needs, probes, assessed, archiveFailed, emit, ct, FallbackAsks(req) ? WakeLine.BeforeAsking : WakeLine.BeforeFallback).ConfigureAwait(false);
+        }
+
+        return !waker.AnyPending && await WakeSleepersAsync(candidates, needs, probes, assessed, archiveFailed, emit, ct, WakeLine.WithinBudget).ConfigureAwait(false);
+    }
+
+    /// <summary>True when this job's fallback would ask first (policy or --fallback ask, no yes yet): the wake line then says so (review L7).</summary>
+    private bool FallbackAsks(JobRequest req) => EffectiveFallbackModeOf(req) == FallbackMode.Ask && !_fallbackConsented;
+
+    /// <summary>What the wake line says the run does next.</summary>
+    private enum WakeLine
+    {
+        /// <summary>An explicit --wait / --wait-eligible: one sleeper, waited for within that budget.</summary>
+        WithinBudget,
+
+        /// <summary>Wake before fallback, fallback on.</summary>
+        BeforeFallback,
+
+        /// <summary>Wake before fallback, fallback ask.</summary>
+        BeforeAsking,
+    }
+
+    /// <summary>
+    /// Wakes the sleepers <see cref="CouldWakeFor"/> allows that are inside their hours, in name order: only the first one woken for
+    /// <see cref="WakeLine.WithinBudget"/>, else all of them (each at most once per run: <see cref="WakeService.TryClaim"/>, so parallel plan jobs
+    /// never wake one twice). The decision uses the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the
+    /// new result in <paramref name="probes"/> and is judged again in <paramref name="assessed"/>. One line names the machines woken.
     /// </summary>
     /// <param name="machines">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> and <paramref name="assessed"/> are index-aligned with it.</param>
-    /// <param name="beforeFallback">True when the wake comes before a fallback to this computer (<see cref="WakesBeforeFallback"/>): the line says so.</param>
-    private async Task WakeBestSleeperAsync(
-        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit, CancellationToken ct,
-        bool beforeFallback = false)
+    private async Task<bool> WakeSleepersAsync(
+        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, bool archiveFailed, Action<string> emit, CancellationToken ct,
+        WakeLine line)
     {
+        var waker = probe.Waker!;
+        var woken = new List<Machine>();
+        var changed = false;
         foreach (var i in WakeOrder(machines))
         {
             var m = machines[i];
-            if (!CouldWakeFor(m, probes[i], needs, archive.Failure is not null))
+            if (!CouldWakeFor(m, probes[i], needs, archiveFailed))
             {
                 continue;
             }
@@ -1270,19 +1315,51 @@ public sealed partial class JobRunner(
 
             probes[i] = after;
             assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
-            if (probe.Waker!.AnyPending)
+            changed = true;
+            if (waker.SentAt(m.Name) is not null)
             {
-                emit(beforeFallback
-                    ? string.Create(CultureInfo.InvariantCulture, $"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {Math.Min(m.Wake!.WaitSeconds, (int)FallbackWakeWait.TotalSeconds)} s for it before falling back to this computer)")
-                    : $"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within the wait budget)");
-                return;
+                woken.Add(m);
+                if (line == WakeLine.WithinBudget)
+                {
+                    break;
+                }
             }
-
-            if (after.Error is { } failed && failed.StartsWith("asleep, but the magic packet could not be sent", StringComparison.Ordinal))
+            else if (after.Error is { } failed && failed.StartsWith("asleep, but the magic packet could not be sent", StringComparison.Ordinal))
             {
                 emit($"[lanq] {m.Name}: {failed}");
             }
         }
+
+        if (woken.Count > 0)
+        {
+            emit(WakeLineText(woken, line));
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// "[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to build-02 (waiting up to 120 s for it before falling back to this
+    /// computer)"; for several machines "packets to build-02, build-03 (... for them ...)". Before a fallback the time is what is left of the
+    /// shared wait, never more than the longest wake.wait_seconds of the machines just woken.
+    /// </summary>
+    private string WakeLineText(List<Machine> woken, WakeLine line)
+    {
+        var one = woken.Count == 1;
+        var names = string.Join(", ", woken.Select(m => m.Name));
+        var sent = one ? $"sent a Wake-on-LAN packet to {names}" : $"sent Wake-on-LAN packets to {names}";
+        if (line == WakeLine.WithinBudget)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"[lanq] no awake machine can take the job; {sent} (waiting up to {woken.Max(m => m.Wake!.WaitSeconds)} s, within the wait budget)");
+        }
+
+        var waker = probe.Waker!;
+        var first = woken.Select(m => waker.SentAt(m.Name)).Min() ?? waker.Now;
+        var ends = first + FallbackWakeWait;
+        var own = woken.Max(m => waker.SentAt(m.Name)!.Value + TimeSpan.FromSeconds(m.Wake!.WaitSeconds));
+        var seconds = Math.Max(0, (int)Math.Ceiling(((own < ends ? own : ends) - waker.Now).TotalSeconds));
+        var then = line == WakeLine.BeforeAsking ? "before asking to use this computer" : "before falling back to this computer";
+        return string.Create(CultureInfo.InvariantCulture, $"[lanq] no awake machine can take the job; {sent} (waiting up to {seconds} s for {(one ? "it" : "them")} {then})");
     }
 
     /// <summary>The order sleepers are considered for a wake: the indexes of <paramref name="machines"/> (the job's candidates), by name (ordinal).</summary>

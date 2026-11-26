@@ -32,9 +32,13 @@ public static partial class Cli
         var time = clock ?? TimeProvider.System;
 
         // No waker: this probe can never send a Wake-on-LAN packet. No BaseStore file: bases.json is never read or written. No output: the
-        // plan prints nothing while it works.
+        // plan prints nothing while it works. Ask that could prompt here counts as ask (review L6), with a stand-in that never asks.
         var probe = new HealthProbe(ssh, time);
-        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), _ => { }, clock: time);
+        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), _ => { }, clock: time)
+        {
+            Prompt = DryRunPrompt(p, config, AskWhyNot(p)),
+            NoAskReason = AskWhyNot(p),
+        };
         var req = RequestOf(p, repoDir, null);
 
         JobPlan plan;
@@ -148,10 +152,14 @@ public static partial class Cli
             Line("Baseline: " + JobRunner.SafeLine(baseline.Message) + " (a dry run runs nothing)");
         }
 
+        var wakeBeforeFallback = plan.WouldFallBack is not null && !p.EligibleWaitGiven;
         if (plan.WouldWake is { } sleeper)
         {
-            Line(plan.WouldFallBack is not null && !p.EligibleWaitGiven
-                ? string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits up to {JobRunner.FallbackWakeWait.TotalSeconds:0} s for it, never past its wake.wait_seconds, before falling back to this computer)")
+            var all = plan.WouldWakeAll is { Count: > 1 } many ? many : null;
+            Line(wakeBeforeFallback
+                ? all is not null
+                    ? string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(string.Join(", ", all))} (one Wake-on-LAN packet each, at once, then lanq run waits up to {JobRunner.FallbackWakeWait.TotalSeconds:0} s for them, never past a machine's wake.wait_seconds while it does not answer, before falling back to this computer)")
+                    : string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits up to {JobRunner.FallbackWakeWait.TotalSeconds:0} s for it, never past its wake.wait_seconds, before falling back to this computer)")
                 : string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits for it within {(p.SplitWait ? "--wait-eligible " + p.EligibleSeconds : "--wait " + p.WaitSeconds)})"));
         }
 
@@ -164,6 +172,12 @@ public static partial class Cli
             ? plan.WouldFallBack is not null
                 ? "No pool machine can ever take this job as configured: lanq run would go to this computer's fallback at once."
                 : "No machine can ever take this job as configured: lanq run would end with exit 75 at once (waiting will not help)."
+            : wakeBeforeFallback && !p.WaitGiven
+                ? plan.WouldWake is not null
+                    ? string.Create(CultureInfo.InvariantCulture, $"With no --wait, lanq run would wait up to {JobRunner.FallbackWakeWait.TotalSeconds:0} s for the woken machine(s) (and up to {JobRunner.FallbackSlotFloor.TotalSeconds:0} s while capable machines are full), then go to this computer's fallback instead of ending with exit 75.")
+                    : string.Create(CultureInfo.InvariantCulture, $"With no --wait, lanq run would wait up to {JobRunner.FallbackSlotFloor.TotalSeconds:0} s while capable machines are full, then go to this computer's fallback instead of ending with exit 75.")
+            : wakeBeforeFallback
+                ? string.Create(CultureInfo.InvariantCulture, $"With --wait-slot {p.SlotSeconds}, lanq run would wait up to {p.SlotSeconds} s while capable machines are full{(plan.WouldWake is not null ? $" and up to {JobRunner.FallbackWakeWait.TotalSeconds:0} s for the woken machine(s)" : "")}, then go to this computer's fallback instead of ending with exit 75.")
             : p.SplitWait
                 ? string.Create(CultureInfo.InvariantCulture, $"With --wait-eligible {p.EligibleSeconds} --wait-slot {p.SlotSeconds}, lanq run would wait up to {p.EligibleSeconds} s while no machine can take this kind of job and up to {p.SlotSeconds} s while capable machines are full, then end with exit 75.")
             : p.WaitSeconds == 0
@@ -238,6 +252,7 @@ public static partial class Cli
         Machines = [.. plan.Assessed.Select(a => new PlanMachineJson(
             JobRunner.SafeLine(a.Machine.Name), a.Eligible, a.Code, a.Why is { } why ? JobRunner.SafeLine(why) : null, a.Permanent, a.FreeSlots, DryJobSlots(a, exclusive)) { NeedGb = a.NeedGb })],
         WouldWake = plan.WouldWake is { } w ? JobRunner.SafeLine(w) : null,
+        WouldWakeAll = plan.WouldWakeAll?.Select(JobRunner.SafeLine).ToList(),
         WouldFallBack = plan.WouldFallBack is { } fb ? JobRunner.SafeLine(fb) : null,
         Retryable = plan.Retryable,
         LogTail = logTail is null ? null : [],
