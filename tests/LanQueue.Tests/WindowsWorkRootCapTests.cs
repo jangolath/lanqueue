@@ -49,6 +49,8 @@ public sealed class WindowsWorkRootCapTests
             ["probe"] = RemoteScripts.Probe(m),
             ["archive-probe"] = RemoteScripts.Probe(archive),
             ["acquire"] = RemoteScripts.AcquireSlot(m, Job, TimeSpan.FromHours(4)),
+            // A job size caps the claim (0.13.0): it adds the count of every live slot, the largest claim (0.13.0 review 2 L1).
+            ["acquire-capped"] = RemoteScripts.AcquireSlot(m, Job, TimeSpan.FromHours(4), maxSlots: 1),
             ["acquire-exclusive"] = RemoteScripts.AcquireAll(m, Job, TimeSpan.FromHours(4)),
             ["release-claim"] = RemoteScripts.ReleaseClaim(m, Job),
             ["upload (EnsureIncoming)"] = RemoteScripts.EnsureIncoming(m),
@@ -100,6 +102,26 @@ public sealed class WindowsWorkRootCapTests
         // The helper and its temporary file ("$h.$PID", a pid of up to 10 digits), and the largest upload.
         Assert.True(RemoteScripts.WindowsHelperPath(m).Length + 11 <= MaxName);
         Assert.True((m.WorkRoot + "/incoming/" + Job + ".tar.gz").Length <= MaxName);
+    }
+
+    /// <summary>
+    /// The job's child PowerShell starts with -NoProfile -NonInteractive spelled out, as in 0.12 (0.13.0 review 2 L2: EDR rules key on
+    /// -nop -noni); only the post: step's child uses the short forms, which it needs to fit at the cap.
+    /// </summary>
+    [Fact]
+    public void TheJobChildSpellsOutItsSwitchesAndOnlyThePostStepShortensThem()
+    {
+        var scripts = CommandLineScripts(Loaded(RootOf(ConfigLoader.MaxWindowsWorkRootLength)));
+        foreach (var name in new[] { "job", "job-in-dir" })
+        {
+            Assert.Contains("$si.Arguments='-NoProfile -NonInteractive -ep Bypass -ec '", scripts[name], StringComparison.Ordinal);
+            Assert.DoesNotContain("-nop", scripts[name], StringComparison.Ordinal);
+        }
+
+        foreach (var name in new[] { "post", "post-in-dir" })
+        {
+            Assert.Contains("$si.Arguments='-nop -noni -ep Bypass -ec '", scripts[name], StringComparison.Ordinal);
+        }
     }
 
     /// <summary>The cap is checked at load, before anything is sent, and the message names the cap and the work_root's length.</summary>

@@ -440,6 +440,18 @@ public sealed class PlanFileLoaderTests : IDisposable
               cmd-env:
                 command: [cmd, /c, 'run-part %LANQ_SHARD%']
                 shards: 2
+              ps-braced:
+                command: [pwsh, -Command, 'run-part ${env:LANQ_SHARD}']
+                shards: 2
+              ps-getenv:
+                command: [powershell, -Command, "run-part ([Environment]::GetEnvironmentVariable('LANQ_SHARD'))"]
+                shards: 2
+              cmd-delayed:
+                command: [cmd, /v:on, /c, 'run-part !LANQ_SHARD!']
+                shards: 2
+              quoted-hash:
+                command: [sh, -c, 'run-part "lanq #shard $LANQ_SHARD"']
+                shards: 2
               off:
                 command: [sh, scripts/lanq/test-shard.sh]
                 shards: 3
@@ -472,9 +484,12 @@ public sealed class PlanFileLoaderTests : IDisposable
               bare:
                 command: [sh, -c, 'echo LANQ_SHARD']
                 shards: 2
+              quoted-then-comment:
+                command: [sh, -c, 'echo "#x" # $LANQ_SHARD']
+                shards: 2
             """);
         Assert.Equal(
-            ["comment", "ps-comment", "file", "count", "longer", "bare"],
+            ["comment", "ps-comment", "file", "count", "longer", "bare", "quoted-then-comment"],
             mentions.Warnings.Select(w => w.Split('\'')[1]).ToArray());
         Assert.True(plan.Job("script")!.ShardEnv);
         Assert.False(plan.Job("off")!.ShardEnv);
