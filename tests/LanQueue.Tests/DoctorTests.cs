@@ -1202,8 +1202,8 @@ public sealed class DoctorTests : IDisposable
 
         Assert.Equal(1, code);
         var fail = Assert.Single(Lines(o, "FAIL"), l => l.Contains("build-02 (remote)", StringComparison.Ordinal));
-        Assert.Contains("env:", fail, StringComparison.Ordinal);
-        Assert.Contains("path_prepend:", fail, StringComparison.Ordinal);
+        Assert.Contains("work_root (7 characters)", fail, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 entries", fail, StringComparison.Ordinal);
         Assert.Matches("[0-9]+ characters once encoded, [0-9]+ over the 8000", fail);
         Assert.DoesNotContain(ssh.Calls, c => c.Machine == "build-02" && !IsProbe(c.Command));
     }

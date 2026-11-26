@@ -42,12 +42,15 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(ManyEnv(30, 120))));
         Assert.Contains("build-02", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("env", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("path_prepend", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("env: (30 entries, 3770 characters)", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("work_root (7 characters)", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend", ex.Message, StringComparison.Ordinal);
         Assert.Matches("[0-9]+ over the 8000", ex.Message);
 
         var paths = "    path_prepend: [" + string.Join(", ", Enumerable.Range(0, 40).Select(i => "C:/tools/" + new string('p', 60) + i.ToString(System.Globalization.CultureInfo.InvariantCulture))) + "]";
-        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(paths)));
+        var pex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(paths)));
+        Assert.Contains("path_prepend: (40 entries, ", pex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("env:", pex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -88,6 +91,86 @@ public sealed class JobEnvironmentTests : IDisposable
             new string('x', LanQueue.Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
         var doctor = RemoteScripts.WindowsCommand(RemoteScripts.Doctor(m)).Length;
         Assert.True(doctor < job, $"doctor {doctor}, job {job}");
+    }
+
+    private static string WindowsRoot(string root) => T.Yaml.Replace("work_root: D:/lanq", "work_root: " + root, StringComparison.Ordinal);
+
+    private static int Occurrences(string text, string part)
+    {
+        var n = 0;
+        for (var i = text.IndexOf(part, StringComparison.Ordinal); i >= 0; i = text.IndexOf(part, i + part.Length, StringComparison.Ordinal))
+        {
+            n++;
+        }
+
+        return n;
+    }
+
+    /// <summary>
+    /// 0.13.0 smoke: the Windows job script spelled work_root out four times (pid file, worktree, folder, helper path), so a work_root of about
+    /// 95 characters passed the encoded cap. It is written once now (every other path is built from it on the worker), and each further
+    /// character of work_root costs only its own encoded size.
+    /// </summary>
+    [Fact]
+    public void TheWindowsJobScriptWritesTheWorkRootOnce()
+    {
+        var root = "D:/" + string.Join('/', Enumerable.Repeat("a-rather-long-folder", 10)); // 212 characters
+        var m = ConfigLoader.Parse(WindowsRoot(root)).Machines[1];
+        foreach (var dir in new[] { ".", "src" })
+        {
+            foreach (var kind in new[] { "job", "post" })
+            {
+                var script = RemoteScripts.Execute(m, "20260101-000000-000000", dir, ["dotnet", "test"], JobRequest.DefaultTimeout, pidKind: kind);
+                Assert.Equal(1, Occurrences(script, root));
+            }
+        }
+
+        Assert.True(RemoteScripts.WorstCaseWindowsCommandLength(m) <= RemoteScripts.MaxWindowsCommandLength);
+        var shortRoot = ConfigLoader.Parse(WindowsRoot("D:/l")).Machines[1];
+        var perCharacter = (double)(RemoteScripts.WorstCaseWindowsCommandLength(m) - RemoteScripts.WorstCaseWindowsCommandLength(shortRoot)) / (root.Length - 4);
+        Assert.True(perCharacter < 3, $"each work_root character costs {perCharacter:0.00} encoded characters");
+    }
+
+    /// <summary>
+    /// A work_root that alone passes the cap is refused at load, and the message says what used the room (the work_root and its length), not
+    /// "env: (0 entries) and path_prepend: (0 entries)".
+    /// </summary>
+    [Fact]
+    public void AWorkRootTooLongForTheCapIsRefusedNamingTheWorkRoot()
+    {
+        var root = "D:/" + new string('r', 1500);
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WindowsRoot(root)));
+        Assert.Contains("build-02", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("work_root (1503 characters)", ex.Message, StringComparison.Ordinal);
+        Assert.Matches("[0-9]+ over the 8000", ex.Message);
+        Assert.DoesNotContain("0 entries", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("env:", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend", ex.Message, StringComparison.Ordinal);
+
+        // With env: as well, both are named with their sizes.
+        var both = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WindowsRoot(root).Replace("    allowed_hours:", "    env:" + NL + "      A_B: xyz" + NL + "    allowed_hours:", StringComparison.Ordinal)));
+        Assert.Contains("work_root (1503 characters)", both.Message, StringComparison.Ordinal);
+        Assert.Contains("env: (1 entry, 6 characters)", both.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The run-time refusal of a too-long Windows command names work_root too, next to env: and path_prepend:.</summary>
+    [Fact]
+    public void TheRunTimeLengthErrorNamesTheWorkRoot()
+    {
+        var script = RemoteScripts.Execute(T.Windows(), "j", ".", ["dotnet", "test", new string('a', 4000)]);
+        var ex = Assert.Throws<InvalidOperationException>(() => RemoteScripts.Wrap(T.Windows(), script));
+        Assert.Contains("work_root", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The job script's paths, built on the worker from the one work_root, keep their meaning: quoting-hostile folders stay literal.</summary>
+    [Fact]
+    public void TheWindowsJobScriptBuildsItsPathsFromOneQuotedWorkRoot()
+    {
+        var script = RemoteScripts.Execute(T.Windows(), "20260101-000000-000000", "src/$(x)'y", ["dotnet", "test"]);
+        Assert.Contains("$rt='D:/lanq'", script, StringComparison.Ordinal);
+        Assert.Contains("$wt=$rt+'/jobs/20260101-000000-000000'", script, StringComparison.Ordinal);
+        Assert.Contains("$pf=$rt+'/locks/job-20260101-000000-000000.pid'", script, StringComparison.Ordinal);
+        Assert.Contains("Set-Location -LiteralPath ($wt+'/src/$(x)''y')", script, StringComparison.Ordinal);
     }
 
     [Fact]

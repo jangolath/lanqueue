@@ -470,10 +470,10 @@ public static partial class ConfigLoader
         var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
         if (size > limit)
         {
+            var (inputs, fix) = Jobs.RemoteScripts.WindowsScriptInputs(m);
             throw new ConfigException(
-                $"Machine '{m.Name}': its env: ({m.Env.Count} entries) and path_prepend: ({m.PathPrepend.Count} entries) make the Windows job script "
-                + $"{size} characters once encoded, {size - limit} over the {limit}-character Windows command-line limit before any job arguments. "
-                + "Shorten or remove some env: values or path_prepend: entries.");
+                $"Machine '{m.Name}': the Windows job script is {size} characters once encoded, {size - limit} over the {limit}-character Windows "
+                + $"command-line limit before any job arguments. From this machine's config it carries its {inputs}. Shorten {fix}.");
         }
     }
 

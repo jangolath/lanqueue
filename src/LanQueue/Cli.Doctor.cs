@@ -523,10 +523,11 @@ public static partial class Cli
         var script = doctorScript(m);
         if (m.Os == MachineOs.Windows && RemoteScripts.WindowsCommand(script).Length is var size && size > RemoteScripts.MaxWindowsCommandLength)
         {
-            return [Check("script_size", "fail", $"not checked: with its env: ({m.Env.Count} entries), path_prepend: ({m.PathPrepend.Count} entries) and "
+            var (inputs, fix) = RemoteScripts.WindowsScriptInputs(m);
+            return [Check("script_size", "fail", $"not checked: with its {inputs} and "
                 + $"{m.Capabilities.Count(RemoteScripts.ToolChecks.ContainsKey)} tool checks, the doctor script is {size} characters once encoded, "
                 + $"{size - RemoteScripts.MaxWindowsCommandLength} over the {RemoteScripts.MaxWindowsCommandLength}-character Windows command-line limit. "
-                + "Shorten env: or path_prepend: for this machine", "shorten env: or path_prepend: for this machine")];
+                + $"Shorten {fix} for this machine", $"shorten {fix} for this machine")];
         }
 
         SshResult r;

@@ -13,7 +13,8 @@ public class ScriptSafetyTests
         Assert.Contains("'/srv/lanq/jobs/job1/src/app/x'", linux, StringComparison.Ordinal);
         Assert.DoesNotContain("./src", linux, StringComparison.Ordinal);
         var win = RemoteScripts.Execute(T.Windows(), "job1", "./src//app", ["dotnet", "test"]);
-        Assert.Contains("'D:/lanq/jobs/job1/src/app'", win, StringComparison.Ordinal);
+        Assert.Contains("$wt=$rt+'/jobs/job1'", win, StringComparison.Ordinal);
+        Assert.Contains("Set-Location -LiteralPath ($wt+'/src/app')", win, StringComparison.Ordinal);
     }
 
     [Theory]

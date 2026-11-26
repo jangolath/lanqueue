@@ -22,8 +22,42 @@ public static partial class RemoteScripts
         return command.Length > MaxWindowsCommandLength
             ? throw new InvalidOperationException(
                 $"The command for Windows machine '{m.Name}' is {command.Length} characters once encoded; the limit is {MaxWindowsCommandLength}. "
-                + "Shorten the arguments (the machine's env: and path_prepend: count too).")
+                + "Shorten the arguments (the machine's work_root, env: and path_prepend: count too).")
             : command;
+    }
+
+    /// <summary>
+    /// For a message about a Windows script's length: what this machine's config puts into every such script, with its size. work_root always;
+    /// env:, hygiene: variables and path_prepend: only when set (0.13.0 smoke: a long work_root alone was reported as "env: (0 entries) and
+    /// path_prepend: (0 entries)"). <c>Fix</c> names the same settings for "Shorten ...".
+    /// </summary>
+    internal static (string Inputs, string Fix) WindowsScriptInputs(Machine m)
+    {
+        static string Count(int n, string one, string many) => n == 1 ? "1 " + one : n.ToString(CultureInfo.InvariantCulture) + " " + many;
+        var inputs = new List<string> { $"work_root ({m.WorkRoot.Length.ToString(CultureInfo.InvariantCulture)} characters)" };
+        var fix = new List<string> { "work_root" };
+        if (m.Env.Count > 0)
+        {
+            var chars = m.Env.Sum(e => e.Key.Length + e.Value.Length).ToString(CultureInfo.InvariantCulture);
+            inputs.Add($"env: ({Count(m.Env.Count, "entry", "entries")}, {chars} characters)");
+            fix.Add("env: values");
+        }
+
+        if (Hygiene.EnvFor(m) is { Count: > 0 } hygiene)
+        {
+            inputs.Add($"hygiene: ({Count(hygiene.Count, "variable", "variables")})");
+            fix.Add("hygiene: profiles");
+        }
+
+        if (m.PathPrepend.Count > 0)
+        {
+            var chars = m.PathPrepend.Sum(p => p.Length).ToString(CultureInfo.InvariantCulture);
+            inputs.Add($"path_prepend: ({Count(m.PathPrepend.Count, "entry", "entries")}, {chars} characters)");
+            fix.Add("path_prepend: entries");
+        }
+
+        static string Join(List<string> l, string last) => l.Count == 1 ? l[0] : string.Join(", ", l[..^1]) + " " + last + " " + l[^1];
+        return (Join(inputs, "and"), Join(fix, "or"));
     }
 
     /// <summary>The powershell command line for a script, whatever its length (<see cref="Wrap"/> refuses one over the cap).</summary>
@@ -773,10 +807,14 @@ public static partial class RemoteScripts
             }
 
             var parts = string.Join(' ', argv.Select(ShellQuote.PowerShell));
+            // work_root is written once ($rt) and every other path is built from it with single-quoted literals (0.13.0 smoke: it was
+            // spelled out four times, so a work_root of about 95 characters already passed the encoded cap).
+            var pidName = (pidKind == "post" ? "post" : "job") + "-" + jobId + ".pid";
             return $$"""
-                $pf={{ShellQuote.PowerShell(pidFile)}}
-                $wr=(Resolve-Path -LiteralPath {{ShellQuote.PowerShell(worktree)}}).ProviderPath
-                Set-Location -LiteralPath {{ShellQuote.PowerShell(dir)}}
+                $rt={{ShellQuote.PowerShell(m.WorkRoot)}};$wt=$rt+{{ShellQuote.PowerShell("/jobs/" + jobId)}}
+                $pf=$rt+{{ShellQuote.PowerShell("/locks/" + pidName)}}
+                $wr=(Resolve-Path -LiteralPath $wt).ProviderPath
+                Set-Location -LiteralPath {{(rel == "." ? "$wt" : "($wt+" + ShellQuote.PowerShell("/" + rel) + ")")}}
                 $here=(Get-Location).ProviderPath;$sep=[IO.Path]::DirectorySeparatorChar
                 if(!(($here+$sep).StartsWith($wr+$sep,'OrdinalIgnoreCase'))){exit 126}
                 $p=Get-Item -LiteralPath $here
@@ -788,7 +826,7 @@ public static partial class RemoteScripts
                 {{PlanJobEnvironmentPowerShell(planJob)}}
                 {{WindowsNativeCheck(jobId, argv, nonce)}}
                 {{(m.Priority == JobPriority.Low ? "try{(Get-Process -Id $PID).PriorityClass = 'BelowNormal'}catch{}" : "")}}
-                {{WindowsHelperLoad(ShellQuote.PowerShell(WindowsHelperPath(m)), job: true)}}
+                {{WindowsHelperLoad("($rt+" + ShellQuote.PowerShell(WindowsHelperPath(m)[m.WorkRoot.Length..]) + ")", job: true)}}
                 $me=Get-Process -Id $PID
                 Set-Content -LiteralPath $pf @($PID,$me.StartTime.ToUniversalTime().Ticks)
                 $job={
