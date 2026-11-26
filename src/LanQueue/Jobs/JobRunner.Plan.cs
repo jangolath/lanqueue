@@ -177,8 +177,13 @@ public sealed partial class JobRunner
         var all = WakesBeforeFallback(req) && wake.Count > 0 ? wake : null;
         return plan with
         {
-            Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable,
-            WouldWake = wake.FirstOrDefault(), WouldWakeAll = all,
+            Status = nameof(JobStatus.NoCapacity),
+            ExitCode = none.CliExitCode,
+            Message = none.Message,
+            Machine = null,
+            Retryable = none.Retryable,
+            WouldWake = wake.FirstOrDefault(),
+            WouldWakeAll = all,
         };
     }
 
