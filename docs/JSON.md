@@ -444,7 +444,7 @@ Every key is always there (`null` where it does not apply), except `logTail`, `e
 | `shardTiming` | object or null | `--shards auto --target-minutes M` only: how N was picked from earlier runs ([shardTiming](#shardtiming)). `null` otherwise. |
 | `placement` | array or null | `--shards` only: where the shards would start now, each `{"machine", "shards": [numbers]}`; empty when none could start. |
 | `machines` | array | Every machine as judged for the job, in config order: `{machine, eligible, reason, why, permanent, freeSlots, jobSlots}` ([reason codes](#reason-codes)). With `--exclusive`, `jobSlots` on an eligible machine is its `max_jobs`: the slots the job would take. Empty when the run was refused before any machine was looked at. |
-| `wouldWake` | string or null | The sleeping machine `lanq run` would wake (with `--wait` above 0, no `--no-wake`, and no awake machine able to take the job). |
+| `wouldWake` | string or null | The sleeping machine `lanq run` would wake (with `--wait` above 0, or before falling back to this computer when `wouldFallBack` is set and no `--wait`/`--wait-eligible` was given; no `--no-wake`, and no awake machine able to take the job). |
 | `retryable` | boolean or null | `NoCapacity` only, as for [a run](#nocapacity-retryable-and-excluded). |
 | `logTail` | array | Conditional: only with `--log-tail`, and then always empty (a dry run starts no job). |
 | `env`, `exclusive` | | Conditional (0.9.0): as for [a run](#lanq-run---json). The text plan shows the `--env` flags with their values (after the secret scan) on its `Options:` line. |
@@ -1037,7 +1037,8 @@ All are additions; a field is left out when it does not apply.
 | run, each shard, plan job row | `fallback` | `true` when it ran on this computer's fallback entry, not on the pool. |
 | run, shard set, plan (top level) | `fallbackJobs` | How many jobs (shards) ran on this computer. Above 0: not pool evidence; say so. |
 | run, each shard, single plan job | `post` | The `post:` step: `{exitCode, timedOut, seconds}`, plus `cancelled: true` (Ctrl+C, `plan_timeout` or `--fail-fast` ended the step, exit 130) or `skipped: true` (the machine's allowed hours end too soon). Its exit code is a warning only; `status`, the exit code, the fetch and the results stay the job's, even when the step was cancelled. `timedOut` is true only when the step was stopped at its limit (also when it ignored TERM and was killed, exit 137), not when it exited 124 or 137 itself. A step that had already ended when the cancel came keeps its own exit code and is not `cancelled`. |
-| `lanq run --dry-run` | `wouldFallBack` | NoCapacity only: this computer's fallback entry, when `lanq run` would go there instead of ending NOT RUN. |
+| `lanq run --dry-run` | `wouldFallBack` | NoCapacity only: this computer's fallback entry, when `lanq run` would go there instead of ending NOT RUN. With `wouldWake` set too, `lanq run` would first wake that machine and wait up to 120 s for it. |
+| run, shard set, plan (top level) | `wakes` | The Wake-on-LAN packets this run sent (also before falling back to this computer), each `{machine, result, waitSeconds, message}`; `result` is `Waking` (it may still come up), `Awake` (it answered ssh), `NoAnswer` (no ssh answer within `waitSeconds`) or `SendFailed`. Left out when none. |
 | plan dry run jobs | `wouldFallBack`, `post` | `wouldFallBack` as above, per job; `post`: the job's `post:` step as its words. A plain `post:` also rides in `runArgv` as `--post "..."`; a list with words `--post` cannot carry (spaces) shows only in `post`. |
 | `lanq stats` machines | `thisComputer` | `true` for this computer's fallback entry. |
 
@@ -1046,6 +1047,10 @@ computer could run the job; only the developer decides), one pointing at docs/WO
 fallback" (none is configured), or one saying why the configured fallback refused (lanq runs elevated or as root: run
 it from a terminal without those rights; its `work_root` overlaps the repository: give it a `work_root` of its own). A run with `fallbackJobs` above 0 carries an `ask_developer` step with the pool-only
 rerun (`--fallback off --wait-slot 1800`). Neither is ever `safeToRunUnattended`.
+
+Each packet in `wakes` that did not bring its machine up adds a step: `NoAnswer` and `SendFailed` an `ask_developer`
+(Wake-on-LAN may be off in the BIOS/UEFI or the network card driver, or the machine is not on wired Ethernet; or why the
+send failed), `Waking` a `run_health` with `lanq health --json` (read-only). Never a wake command.
 
 ### lanq prune --json
 

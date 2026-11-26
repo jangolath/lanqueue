@@ -550,6 +550,9 @@ plan (exit 2) with your configured names.
 - `fallback: off` (per job or in `defaults:`) keeps a job off the developer's PC whatever `--fallback` or
   `policy.fallback` say (for example a Docker job). `on` and `ask` are refused: only the developer chooses to use their
   PC, with `lanq run --plan --fallback on`.
+- With the fallback on or ask, a job that would fall back first wakes a sleeping pool machine that could take it and
+  waits up to 120 s for it (docs/WORKERS.md, "Wake before fallback"). The plan wakes one machine at a time and each
+  machine at most once per run; a paused machine is never woken. The plan's JSON lists the packets in `wakes`.
 - `post:` (a list or a plain string, like `command:`) runs one more allowlisted command after the job, its fetch done,
   before its cleanup (see docs/WORKERS.md). It runs once per shard, as written (`{shard}` is refused). `--post` is
   refused with `--plan`: the plan's `post:` keys own it.

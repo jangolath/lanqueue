@@ -48,6 +48,15 @@
   run is not pool evidence. With the fallback off, a NoCapacity whose job this computer could run suggests `--fallback
   on` (`ask_developer`, never run by an agent). `--on <the fallback>` is refused for `lanq run`; `lanq health --on`,
   `lanq unlock` and `lanq prune` can name it. `--dry-run` says when a run would fall back (`wouldFallBack`).
+- **Wake before fallback.** With the fallback `on` or `ask`, a job that would fall back first wakes a sleeping pool
+  machine that could take it (it has a `wake:` setting and is inside its `allowed_hours`) and waits up to 120 s for it,
+  never past its `wake.wait_seconds`; if it comes up the job runs there. A paused machine is never woken and never
+  delays the fallback. With `ask`, lanq wakes first and asks only if still needed. Shard sets and plans wake one
+  machine at a time, each at most once per run. It applies when no `--wait` or `--wait-eligible` is given (`--wait-slot`
+  alone keeps it); an explicit eligible budget decides as before, and with the fallback `off` nothing changes. The
+  fallback line, the ask question and the NOT RUN message say what the wake did; JSON has top-level `wakes`
+  (`{machine, result, waitSeconds, message}` on run, shard set and plan), with an `ask_developer` step for a wake that
+  got no answer and a `run_health` step for one still coming up; `--dry-run` names the machine (`wouldWake`).
 - **`hygiene: [dotnet]` / `[dotnet-lean]`** per machine: `dotnet` sets `MSBUILDDISABLENODEREUSE=1`,
   `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` for the machine's jobs (MSBuild nodes end with each build, so
   parallel jobs never share one); `dotnet-lean` also sets `UseSharedCompilation=false` (no resident compiler server;

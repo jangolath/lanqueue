@@ -795,7 +795,9 @@ interface: set `broadcast` to the directed broadcast of the worker's own subnet*
   Windows cannot take) and are inside their `allowed_hours` with at least `policy.min_window_minutes` plus the machine's
   `wake.wait_seconds` of the window left (10 min + 120 s by default): a machine with less left would be held as "window
   closing" once awake, so it is left asleep and the reason is shown. Nothing is woken while an awake machine can take the job,
-  with `--wait 0` (the default), or with `--no-wake`. The wake happens inside `--wait`: it never makes `lanq run`
+  with `--wait 0` (the default), or with `--no-wake`, except before falling back to this computer: with the fallback
+  `on` or `ask` and no `--wait`/`--wait-eligible`, lanq wakes such a machine and waits up to 120 s for it before it
+  uses your PC (docs/WORKERS.md). The wake happens inside `--wait`: it never makes `lanq run`
   wait longer than you asked, and the other machines keep being tried meanwhile. At most once per machine per `lanq`
   invocation, and not another machine while one is still coming up.
   When every awake machine that fits the job is merely busy, `lanq` may therefore wake a sleeper for extra capacity; use
