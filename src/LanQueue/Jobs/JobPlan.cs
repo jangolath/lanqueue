@@ -54,8 +54,20 @@ public sealed record JobPlan(string Status, int ExitCode, string Message)
     /// <summary>--baseline: the base a failure would be rerun at (or that the rerun would be skipped), from <see cref="JobRunner.PreviewBaseline"/>; else null.</summary>
     public BaselineResult? Baseline { get; init; }
 
-    /// <summary>The sleeping machine lanq run would wake (only with --wait above 0, without --no-wake, when no awake machine can take the job), or null.</summary>
+    /// <summary>
+    /// The sleeping machine lanq run would wake (only with --wait above 0, or before falling back to this computer, without --no-wake, when no
+    /// awake machine can take the job), or null; when it would wake several (<see cref="WouldWakeAll"/>), the first by name.
+    /// </summary>
     public string? WouldWake { get; init; }
+
+    /// <summary>Before falling back to this computer (0.13.0): every sleeper lanq run would wake at once, by name; null otherwise.</summary>
+    public IReadOnlyList<string>? WouldWakeAll { get; init; }
+
+    /// <summary>
+    /// NoCapacity only (0.13.0 B3, review A-L4): this computer's fallback entry, when lanq run would go there instead of ending NOT RUN (the
+    /// policy or --fallback is on, or ask with a terminal to ask at, and the fallback fits the job by the config); else null.
+    /// </summary>
+    public string? WouldFallBack { get; init; }
 
     /// <summary>NoCapacity only: as <see cref="JobResult.Retryable"/>; null otherwise.</summary>
     public bool? Retryable { get; init; }

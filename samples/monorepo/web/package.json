@@ -1,0 +1,23 @@
+{
+  "name": "sample-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The sample monorepo's web part: React components rendered on the server side, tested with Vitest.",
+  "scripts": {
+    "test": "vitest run",
+    "test:shard": "npm ci --no-audit --no-fund && vitest run --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml",
+    "typecheck": "tsc --noEmit",
+    "typecheck:ci": "npm ci --no-audit --no-fund && tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.6",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}

@@ -87,7 +87,7 @@ public static class JobHistory
         var since = now.AddDays(-HistoryDays);
         var runs = records
             .Where(r => r.Key == key && r.Dir == dir && r.Status == nameof(JobStatus.Completed) && r.RunSeconds is not null && r.Machine is not null
-                && r.StartedUtc >= since)
+                && r.StartedUtc >= since && r.Fallback != true) // this computer's fallback runs are not pool timing (review A-L9)
             .GroupBy(r => r.RunId is { } id ? "run:" + id : "job:" + r.Id, StringComparer.Ordinal)
             .Select(g =>
             {

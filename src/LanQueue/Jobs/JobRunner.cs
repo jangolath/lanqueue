@@ -87,6 +87,15 @@ public sealed record JobRequest(
     /// <summary>lanq run --no-wake: never wake a machine for this job.</summary>
     public bool NoWake { get; init; }
 
+    /// <summary>
+    /// lanq run --wait-eligible / --wait-slot (0.13.0 B2): the two wait budgets; null when neither was given, so <see cref="Wait"/> (--wait)
+    /// is both (<see cref="WaitBudgets"/>), with exactly the 0.12 timeline.
+    /// </summary>
+    public WaitBudgets? Budgets { get; init; }
+
+    /// <summary>The wait budgets in effect: <see cref="Budgets"/>, else <see cref="Wait"/> for both.</summary>
+    public WaitBudgets EffectiveBudgets => Budgets ?? new WaitBudgets(Wait, Wait) { Legacy = true };
+
     /// <summary>lanq run --shards: this job is shard <see cref="ShardInfo.Index"/> of <see cref="ShardInfo.Count"/> (LANQ_SHARD, LANQ_SHARDS), or null.</summary>
     public ShardInfo? Shard { get; init; }
 
@@ -172,6 +181,34 @@ public sealed record JobRequest(
     /// <summary>Lines of this job are prefixed "[Label machine] " (a baseline rerun's "baseline 2/4"), instead of a plan job's name; null otherwise.</summary>
     public string? Label { get; init; }
 
+    /// <summary>
+    /// lanq run --post (lanq.yml post:, 0.13.0): the step run after the job, its fetch done, in the same slot, before cleanup (review H1); its exit
+    /// code is a warning only. Null without one.
+    /// </summary>
+    public IReadOnlyList<string>? Post { get; init; }
+
+    /// <summary>lanq run --fallback off|on|ask (0.13.0 B3): overrides policy.fallback for this run; null keeps the policy.</summary>
+    public FallbackMode? Fallback { get; init; }
+
+    /// <summary>lanq.yml fallback: off (0.13.0 B3): this job never runs on this computer, whatever --fallback or the policy say.</summary>
+    public bool FallbackOff { get; init; }
+
+    /// <summary>
+    /// True when the caller gave --wait, --wait-eligible or --wait-slot. Without any, a run that may fall back waits at least
+    /// <see cref="JobRunner.FallbackSlotFloor"/> for a pool slot first (0.13.0 B3, review M1).
+    /// </summary>
+    public bool WaitGiven { get; init; }
+
+    /// <summary>
+    /// True when the caller gave the eligible budget: --wait or --wait-eligible (not --wait-slot alone). Without it, a run that may fall back
+    /// wakes a sleeping pool machine and waits up to <see cref="JobRunner.FallbackWakeWait"/> for it before it falls back (0.13.0, wake before
+    /// fallback); with it, that budget decides, as for any run.
+    /// </summary>
+    public bool EligibleWaitGiven { get; init; }
+
+    /// <summary>Set once the job fell back (0.13.0 B3): why the pool could not take it, for the "running on this computer" line (review A-L5).</summary>
+    public string? FallbackWhy { get; init; }
+
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromHours(4);
 }
 
@@ -212,6 +249,9 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>NoCapacity only: every machine that did not take the job and why, in config order. Null for every other status.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
+
     /// <summary>The full path of the job's local log (see <see cref="JobLog.LogPathFor"/>), set once the job held a slot and the log was created; null otherwise.</summary>
     public string? LogPath { get; init; }
 
@@ -230,6 +270,18 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
     /// <summary>lanq run --baseline: the rerun at the base commit after this job ended Failed (never changes the status or exit code); else null.</summary>
     public BaselineResult? Baseline { get; init; }
 
+    /// <summary>The post: step's outcome (0.13.0), or null when none ran (no post:, or the job ended Cancelled, WindowClosed, Rejected, InfraError or NoCapacity).</summary>
+    public PostResult? Post { get; init; }
+
+    /// <summary>0.13.0 B3: true when the job ran on this computer's fallback entry (not on the pool: its result is not pool evidence).</summary>
+    public bool Fallback { get; init; }
+
+    /// <summary>
+    /// NoCapacity only (0.13.0 B3): what the next steps may say about the fallback: <see cref="FallbackHint.TurnOn"/> when this computer's
+    /// fallback entry could be tried with --fallback on, <see cref="FallbackHint.SetUp"/> when none is configured; null for neither.
+    /// </summary>
+    public FallbackHint? FallbackHint { get; init; }
+
     /// <summary>Process exit code for the CLI: the remote code on completion/failure, 75 for no capacity, 2 for rejected, 124 for timed out or window closed, 70 for infra.</summary>
     public int CliExitCode => Status switch
     {
@@ -239,6 +291,35 @@ public sealed record JobResult(string JobId, JobStatus Status, int ExitCode, str
         JobStatus.Rejected => 2,
         _ => 70,
     };
+}
+
+/// <summary>The post: step's outcome (0.13.0): its exit code (124 when stopped at the limit), whether it was stopped, and how long it ran.</summary>
+public sealed record PostResult(int ExitCode, bool TimedOut, double Seconds)
+{
+    /// <summary>Ctrl+C, plan_timeout or --fail-fast ended the step before it ended (exit 130); the job's own result stands (review B-M1).</summary>
+    public bool Cancelled { get; init; }
+
+    /// <summary>The step was not started: the machine's allowed hours (plus grace) end too soon (review B-L2).</summary>
+    public bool Skipped { get; init; }
+
+    /// <summary>Where the step's lines begin in the job's log (bytes), so --log-tail ends at the job's own output (review B-L4); null when unknown.</summary>
+    public long? LogFrom { get; init; }
+}
+
+/// <summary>0.13.0 B3: the fallback suggestion a NoCapacity result carries (see <see cref="JobResult.FallbackHint"/>).</summary>
+public enum FallbackHint
+{
+    /// <summary>A fallback entry is configured and the job may use it: the developer can rerun with --fallback on.</summary>
+    TurnOn,
+
+    /// <summary>No fallback entry is configured: WORKERS.md "Using this PC as a fallback" says how.</summary>
+    SetUp,
+
+    /// <summary>The fallback could take the job, but lanq runs elevated or as root: run lanq from a terminal without those rights (review A-L8).</summary>
+    Elevated,
+
+    /// <summary>The fallback could take the job, but its work_root is inside the repository (or holds it): give it a work_root of its own.</summary>
+    WorkRoot,
 }
 
 /// <summary>One machine that did not take a job: its name, the reason code (missing_capability, busy, ...), the reason for people, and whether waiting can never help.</summary>
@@ -343,6 +424,23 @@ public sealed partial class JobRunner(
             return Rejected(jobId, commandFindings);
         }
 
+        // post: (0.13.0): the same allowlist, directory and secret checks as the command itself.
+        if (req.Post is { } post)
+        {
+            var postPolicy = JobPolicy.Validate(config.Policy, post, req.Directory);
+            if (!postPolicy.Ok)
+            {
+                var badPost = post.Count == 0 || post.Any(a => a.Any(char.IsControl));
+                return new JobResult(jobId, JobStatus.Rejected, 2, null, "post: " + postPolicy.Reason!) { RejectKind = badPost ? Jobs.RejectKind.Arguments : Jobs.RejectKind.Policy };
+            }
+
+            var postFindings = SecretScanner.ScanText(string.Join(' ', post), "post: command line");
+            if (postFindings.Count > 0)
+            {
+                return Rejected(jobId, postFindings);
+            }
+        }
+
         if (PrecheckEnv(jobId, req) is { } envRefused)
         {
             return envRefused;
@@ -350,14 +448,23 @@ public sealed partial class JobRunner(
 
         // Arguments unsafe on Windows (" < > ^ %, or & | for a program that is not an .exe) can still run on a Linux worker; refuse only
         // when no non-Windows machine has the needed capabilities, before any network or git work.
-        var windows = JobPolicy.ValidateForWindows(req.Argv);
-        if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs)))
+        var windows = req.Post is { } windowsPost && JobPolicy.ValidateForWindows(req.Argv).Ok ? JobPolicy.ValidateForWindows(windowsPost) : JobPolicy.ValidateForWindows(req.Argv);
+        if (!windows.Ok && !Candidates(req).Any(m => m.Os != MachineOs.Windows && HasCapabilities(m, req.Needs))
+            && !(FallbackCouldTake(req) && config.Fallback!.Os != MachineOs.Windows))
         {
             return new JobResult(jobId, JobStatus.Rejected, 2, null, windows.Reason!) { RejectKind = Jobs.RejectKind.WindowsArgs };
         }
 
-        // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable).
-        return NeverByConfig(req) is { } never ? NoCapacity(jobId, never, "") : null;
+        WarnFallbackOnce(req);
+
+        // No machine in the config has every capability asked for: waiting, waking or probing cannot help, so end now (75, not retryable),
+        // unless this computer's fallback may take it (0.13.0 B3: then the job goes on to that point; see Dispatch).
+        if (NeverByConfig(req) is not { } never || FallbackCouldTake(req))
+        {
+            return null;
+        }
+
+        return WithFallback(NoCapacity(jobId, never, ""), PrecheckFallbackHint(req));
     }
 
     /// <summary>
@@ -404,7 +511,7 @@ public sealed partial class JobRunner(
         // job is placed), and NeverByConfig ends the job when that leaves no capable machine. The one refusal here: every capable machine
         // not already ruled out is ruled out by --env, at least one of them because the values make its Windows command too long (the
         // values themselves must change).
-        var windowsUnsafe = !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var windowsUnsafe = WindowsUnsafe(req);
         var judged = Candidates(req)
             .Where(m => HasCapabilities(m, req.Needs) && !(windowsUnsafe && m.Os == MachineOs.Windows))
             .Select(m => (Machine: m, Rule: EnvExclusion(m, req.Env, windowsUnsafe)))
@@ -439,7 +546,15 @@ public sealed partial class JobRunner(
         Size = req.Size,
         Exclusive = req.Exclusive,
         EnvRuledOut = EnvRuledOut(Candidates(req), req.Env, windowsUnsafe),
+        Policy = config.Policy,
     };
+
+    /// <summary>Arguments unsafe on Windows in the command or in its post: step (0.13.0): then no Windows machine takes the job.</summary>
+    internal static bool WindowsUnsafe(JobRequest req) =>
+        !JobPolicy.ValidateForWindows(req.Argv).Ok || (req.Post is { } post && !JobPolicy.ValidateForWindows(post).Ok);
+
+    /// <summary>Only what slot counting needs of the job (<see cref="Scheduler.FreeFor(Machine, MachineHealth, JobNeeds, int, int)"/>): --mem, --exclusive and the pool policy (floor, job size).</summary>
+    private JobNeeds MemNeeds(JobRequest req) => new([], req.MinMemGb, false) { Exclusive = req.Exclusive, Policy = config.Policy };
 
     /// <summary>The candidates the job's --env rules out (<see cref="EnvExclusion"/>), by name; empty without --env.</summary>
     private static Dictionary<string, (Exclusion Reason, string Why)> EnvRuledOut(IEnumerable<Machine> candidates, IReadOnlyList<JobEnvVar> env, bool windowsUnsafe)
@@ -496,7 +611,7 @@ public sealed partial class JobRunner(
     /// </summary>
     private List<Assessment>? NeverByConfig(JobRequest req)
     {
-        var windowsUnsafe = req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok;
+        var windowsUnsafe = req.Env.Count > 0 && WindowsUnsafe(req);
         var judged = new List<Assessment>();
         foreach (var m in Candidates(req))
         {
@@ -554,7 +669,7 @@ public sealed partial class JobRunner(
     /// </summary>
     private int ExclusiveMachines(JobRequest req) =>
         Candidates(req).Count(m => Eligibility.Missing(m, req.Needs).Count == 0 && Eligibility.DeclaredSizeMismatch(m, req.Size) is null
-            && EnvExclusion(m, req.Env, req.Env.Count > 0 && !JobPolicy.ValidateForWindows(req.Argv).Ok) is null);
+            && EnvExclusion(m, req.Env, req.Env.Count > 0 && WindowsUnsafe(req)) is null);
 
     /// <summary>A placeholder health for a machine judged from the config alone (never probed).</summary>
     private static MachineHealth Unprobed(Machine m) => new(m.Name, false, 0, 0, 0, null, null);
@@ -766,19 +881,33 @@ public sealed partial class JobRunner(
     {
         var deadline = Stopwatch.StartNew();
         var archive = prepared.Archive;
-        var needs = NeedsOf(req, !JobPolicy.ValidateForWindows(req.Argv).Ok);
+        var needs = NeedsOf(req, WindowsUnsafe(req));
         var gitCanEverTakeIt = GitCanEverTakeIt(req);
         var candidates = Candidates(req);
         var say = Say(req);
         var relooked = 0L;
         var preferLooks = 0;
+        var waitClock = new WaitClock();
+        var waitingSince = Timestamp();
+        var sshFailed = new HashSet<string>(StringComparer.Ordinal);
+        var fellBack = false;
         while (true)
         {
             var round = RoundStart();
             var (probes, assessed) = await ProbeForJobAsync(candidates, needs, ct).ConfigureAwait(false);
             var ranked = Scheduler.Rank(assessed);
-            // Never longer than what is left of --wait (with --wait 0, not at all: any machine that can take it now).
-            var waitLeft = req.Wait - deadline.Elapsed;
+            // 0.13.0 B3: once this job reached its own NoCapacity point and fell back (A-M1), this computer is a candidate too, always after every
+            // pool machine.
+            var engaged = await EngagedFallbackAsync(req, needs, fellBack, ct).ConfigureAwait(false);
+            var judged = engaged is null ? assessed : [.. assessed, engaged];
+            if (engaged is { Eligible: true })
+            {
+                ranked = [.. ranked, engaged];
+            }
+
+            sshFailed.Clear();
+            // Never longer than what is left of the slot-wait budget (with 0, not at all: any machine that can take it now).
+            var waitLeft = req.EffectiveBudgets.Slot - deadline.Elapsed;
             var holdForPreferred = prefer is not null && preferLooks < PreferRounds && waitLeft > TimeSpan.Zero
                 && assessed.FirstOrDefault(a => string.Equals(a.Machine.Name, prefer, StringComparison.Ordinal)) is { } preferred
                 && (preferred.Eligible || preferred.Reason == Exclusion.Busy);
@@ -799,6 +928,14 @@ public sealed partial class JobRunner(
                 {
                     result = await TryOnMachine(
                         jobId, req, prepared, a.Machine, a.Health.WindowEndsUtc, gitCanEverTakeIt, MachineLines(req, a.Machine.Name), ct,
+                        slotCap: a.SlotCap,
+                        onNoSlot: overSsh =>
+                        {
+                            if (overSsh)
+                            {
+                                sshFailed.Add(a.Machine.Name);
+                            }
+                        },
                         onSlot: () =>
                         {
                             held = true;
@@ -833,22 +970,39 @@ public sealed partial class JobRunner(
                 continue;
             }
 
-            // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now.
-            if (assessed.All(a => a.Permanent))
+            // Every machine is ruled out for good (its config, its RAM, its tools): waiting or waking cannot help, so end now (or fall back).
+            if (judged.All(a => a.Permanent))
             {
-                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
+                var never = await FallbackGateAsync(req, needs, "no pool machine can take it", fellBack, say, ct).ConfigureAwait(false);
+                if (never.Go)
+                {
+                    (fellBack, req) = (true, req with { FallbackWhy = "no pool machine can take it" });
+                    continue;
+                }
+
+                return WithFallback(NoCapacity(jobId, judged, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), never);
             }
 
-            // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
-            // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
-            if (ranked.Count == 0 && req.Wait > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
+            // Wake-on-LAN last resort: only when no awake machine can take the job now, and each machine at most once per run (WakeService).
+            // With a real --wait to wait in (a pending wake is always inside that wait, so --wait 0 never blocks on one): one machine at a time,
+            // the first sleeper by name. Before falling back to this computer (0.13.0): every sleeper the job could use at once, then one shared
+            // wait (InWakeWait in WaitedOut).
+            if (ranked.Count == 0 && await MaybeWakeAsync(req, candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false))
             {
-                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false);
+                judged = engaged is null ? assessed : [.. assessed, engaged]; // the woken machines are judged again
             }
 
-            if (WaitedOut(req, deadline, round, relooked))
+            if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(judged, sshFailed), round, relooked, InWakeWait(req, needs, archive.Failure is not null, assessed)) is { } budget)
             {
-                return NoCapacity(jobId, assessed, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure);
+                var why = budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now";
+                var waited = await FallbackGateAsync(req, needs, why + WakeWhy(req), fellBack, say, ct).ConfigureAwait(false);
+                if (waited.Go)
+                {
+                    (fellBack, req) = (true, req with { FallbackWhy = why + WakeWhy(req) });
+                    continue;
+                }
+
+                return WithFallback(WaitedNoCapacity(NoCapacity(jobId, judged, (archive.Failure is null ? "" : " Archive build failed: " + archive.Failure) + WakeNote(req)), req, waitClock, budget), waited);
             }
 
             if (Relook(req.Progress, round, relooked) is > 0 and var release)
@@ -863,17 +1017,57 @@ public sealed partial class JobRunner(
         }
     }
 
+    /// <summary>
+    /// The monotonic clock the wait budgets are charged on (<see cref="Stopwatch.GetTimestamp"/>); tests replace it, with a delay that moves it,
+    /// to run a whole --wait timeline through the runner.
+    /// </summary>
+    internal Func<long> Timestamp { get; init; } = Stopwatch.GetTimestamp;
+
     /// <summary>How many looks a baseline rerun waits for the machine the job failed on (busy there) before it takes another machine.</summary>
     internal const int PreferRounds = 2;
 
     /// <summary>
-    /// Whether a job still waiting for a slot has used up --wait: from its own start, or in a plan (<see cref="JobRequest.Progress"/>) only
-    /// while no job of the plan holds a slot (a job waits behind its siblings even with --wait 0), and only when no slot of the plan was given
-    /// back since the look at the machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before
-    /// its sibling gave it back looks again instead of ending NoCapacity next to a free slot.
+    /// Whether a job still waiting for a slot has used up its wait budgets (0.13.0 B2, <see cref="WaitClock"/>): this look in state
+    /// <paramref name="state"/> is charged on idle clocks that count from <paramref name="ownSince"/> (the job's start, or a sharded run's last
+    /// slot change) or, in a plan (<see cref="JobRequest.Progress"/>), only while no job of the plan holds a slot, from the last time one was
+    /// given back (a job waits behind its siblings even with --wait 0). Not while a slot of the plan was given back since the look at the
+    /// machines began (<paramref name="round"/>, <see cref="RoundStart"/>): a job that saw the slot full just before its sibling gave it back
+    /// looks again instead of ending NoCapacity next to a free slot. Returns the budget that ran out, or null.
     /// </summary>
-    private static bool WaitedOut(JobRequest req, Stopwatch own, long round, long relooked) =>
-        req.Progress is { } plan ? !plan.AnyHolding && plan.IdleFor >= req.Wait && Relook(plan, round, relooked) == 0 : own.Elapsed >= req.Wait;
+    /// <param name="inWakeWait">True while the job waits for the machines this run woke before falling back (<see cref="InWakeWait"/>): the
+    /// wait is charged as usual but never runs out (review M1: that wait counts from the packet, not from the job's start).</param>
+    private WaitKind? WaitedOut(JobRequest req, WaitClock clock, long ownSince, WaitKind state, long round, long relooked, bool inWakeWait = false)
+    {
+        var since = ownSince;
+        if (req.Progress is { } plan)
+        {
+            if (plan.IdleSince is not { } idle)
+            {
+                return null; // a job of the plan holds a slot: this job waits behind it, whatever its budgets
+            }
+
+            since = idle;
+        }
+
+        clock.Look(Stopwatch.GetElapsedTime(0, Timestamp()), Stopwatch.GetElapsedTime(0, since), state);
+        return (req.Progress is { } p && Relook(p, round, relooked) != 0) || inWakeWait ? null : clock.SpentOut(BudgetsOf(req));
+    }
+
+    /// <summary>
+    /// A NoCapacity result after waiting, with <see cref="JobResult.Waited"/> (top-level JSON waited). With --wait-eligible / --wait-slot the
+    /// message also says which budget ran out; with --wait (both budgets) the message stays as before.
+    /// </summary>
+    private static JobResult WaitedNoCapacity(JobResult none, JobRequest req, WaitClock clock, WaitKind budget) => none with
+    {
+        Waited = new WaitedInfo(clock.Eligible, clock.Slot, budget),
+        Message = req.Budgets is null ? none.Message : none.Message + " " + WaitedNote(clock, budget, req.EffectiveBudgets),
+    };
+
+    /// <summary>"Waited 30 s for a machine that can take this kind of job and 0 s for a free slot; --wait-eligible 30 ran out."</summary>
+    internal static string WaitedNote(WaitClock clock, WaitKind budget, WaitBudgets budgets) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"Waited {clock.Eligible.TotalSeconds:0} s for a machine that can take this kind of job and {clock.Slot.TotalSeconds:0} s for a free slot; "
+        + $"{(budget == WaitKind.Slot ? "--wait-slot" : "--wait-eligible")} {budgets.Of(budget).TotalSeconds:0} ran out.");
 
     /// <summary>
     /// The plan's slot release a job must look again for (<see cref="PlanProgress.ReleaseSince"/>): one given back after this look began
@@ -1048,23 +1242,67 @@ public sealed partial class JobRunner(
     /// memory and load are unknown, so they are not judged. <paramref name="raw"/> is the probe result as returned (no job holds).
     /// </summary>
     internal static bool CouldWakeFor(Machine m, MachineHealth raw, JobNeeds needs, bool archiveFailed) =>
-        m.Wake is not null && raw.LooksAsleep && Eligibility.Missing(m, needs.Capabilities).Count == 0
-        && Eligibility.DeclaredSizeMismatch(m, needs.Size) is null
-        && !(needs.WindowsUnsafe && m.Os == MachineOs.Windows) && !needs.EnvRuledOut.ContainsKey(m.Name) && !(m.Transfer == TransferMode.Archive && archiveFailed);
+        m.Wake is not null && raw.LooksAsleep && CouldUse(m, needs, archiveFailed);
 
     /// <summary>
-    /// Wakes at most one machine: the first by name among those <see cref="CouldWakeFor"/> allows that are inside their hours. The decision uses
-    /// the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the new result in <paramref name="probes"/>
-    /// and is judged again in <paramref name="assessed"/>.
+    /// The wake step of one look at the machines (no awake machine can take the job): with an eligible budget above 0 given by the caller, one
+    /// sleeper at a time, and only once no earlier wake is still coming up; before falling back to this computer (<see cref="WakesBeforeFallback"/>),
+    /// every sleeper the job could use at once, as long as the job's shared wake wait is not over. Never with --no-wake. True when a packet went
+    /// out (or failed) and <paramref name="probes"/> / <paramref name="assessed"/> were updated.
+    /// </summary>
+    private async Task<bool> MaybeWakeAsync(
+        JobRequest req, IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit,
+        CancellationToken ct)
+    {
+        if (!MayWake(req) || probe.Waker is not { } waker)
+        {
+            return false;
+        }
+
+        var archiveFailed = archive.Failure is not null;
+        if (WakesBeforeFallback(req))
+        {
+            return WakeWaitNotOver(req, needs, archiveFailed)
+                && await WakeSleepersAsync(candidates, needs, probes, assessed, archiveFailed, emit, ct, FallbackAsks(req) ? WakeLine.BeforeAsking : WakeLine.BeforeFallback).ConfigureAwait(false);
+        }
+
+        return !waker.AnyPending && await WakeSleepersAsync(candidates, needs, probes, assessed, archiveFailed, emit, ct, WakeLine.WithinBudget).ConfigureAwait(false);
+    }
+
+    /// <summary>True when this job's fallback would ask first (policy or --fallback ask, no yes yet): the wake line then says so (review L7).</summary>
+    private bool FallbackAsks(JobRequest req) => EffectiveFallbackModeOf(req) == FallbackMode.Ask && !_fallbackConsented;
+
+    /// <summary>What the wake line says the run does next.</summary>
+    private enum WakeLine
+    {
+        /// <summary>An explicit --wait / --wait-eligible: one sleeper, waited for within that budget.</summary>
+        WithinBudget,
+
+        /// <summary>Wake before fallback, fallback on.</summary>
+        BeforeFallback,
+
+        /// <summary>Wake before fallback, fallback ask.</summary>
+        BeforeAsking,
+    }
+
+    /// <summary>
+    /// Wakes the sleepers <see cref="CouldWakeFor"/> allows that are inside their hours, in name order: only the first one woken for
+    /// <see cref="WakeLine.WithinBudget"/>, else all of them (each at most once per run: <see cref="WakeService.TryClaim"/>, so parallel plan jobs
+    /// never wake one twice). The decision uses the raw probe results; a machine that was sent a packet (or was refused one with a reason) gets the
+    /// new result in <paramref name="probes"/> and is judged again in <paramref name="assessed"/>. One line names the machines woken.
     /// </summary>
     /// <param name="machines">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> and <paramref name="assessed"/> are index-aligned with it.</param>
-    private async Task WakeBestSleeperAsync(
-        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit, CancellationToken ct)
+    private async Task<bool> WakeSleepersAsync(
+        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, bool archiveFailed, Action<string> emit, CancellationToken ct,
+        WakeLine line)
     {
+        var waker = probe.Waker!;
+        var woken = new List<Machine>();
+        var changed = false;
         foreach (var i in WakeOrder(machines))
         {
             var m = machines[i];
-            if (!CouldWakeFor(m, probes[i], needs, archive.Failure is not null))
+            if (!CouldWakeFor(m, probes[i], needs, archiveFailed))
             {
                 continue;
             }
@@ -1077,12 +1315,51 @@ public sealed partial class JobRunner(
 
             probes[i] = after;
             assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
-            if (probe.Waker!.AnyPending)
+            changed = true;
+            if (waker.SentAt(m.Name) is not null)
             {
-                emit($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within --wait)");
-                return;
+                woken.Add(m);
+                if (line == WakeLine.WithinBudget)
+                {
+                    break;
+                }
+            }
+            else if (after.Error is { } failed && failed.StartsWith("asleep, but the magic packet could not be sent", StringComparison.Ordinal))
+            {
+                emit($"[lanq] {m.Name}: {failed}");
             }
         }
+
+        if (woken.Count > 0)
+        {
+            emit(WakeLineText(woken, line));
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// "[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to build-02 (waiting up to 120 s for it before falling back to this
+    /// computer)"; for several machines "packets to build-02, build-03 (... for them ...)". Before a fallback the time is what is left of the
+    /// shared wait, never more than the longest wake.wait_seconds of the machines just woken.
+    /// </summary>
+    private string WakeLineText(List<Machine> woken, WakeLine line)
+    {
+        var one = woken.Count == 1;
+        var names = string.Join(", ", woken.Select(m => m.Name));
+        var sent = one ? $"sent a Wake-on-LAN packet to {names}" : $"sent Wake-on-LAN packets to {names}";
+        if (line == WakeLine.WithinBudget)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"[lanq] no awake machine can take the job; {sent} (waiting up to {woken.Max(m => m.Wake!.WaitSeconds)} s, within the wait budget)");
+        }
+
+        var waker = probe.Waker!;
+        var first = woken.Select(m => waker.SentAt(m.Name)).Min() ?? waker.Now;
+        var ends = first + FallbackWakeWait;
+        var own = woken.Max(m => waker.SentAt(m.Name)!.Value + TimeSpan.FromSeconds(m.Wake!.WaitSeconds));
+        var seconds = Math.Max(0, (int)Math.Ceiling(((own < ends ? own : ends) - waker.Now).TotalSeconds));
+        var then = line == WakeLine.BeforeAsking ? "before asking to use this computer" : "before falling back to this computer";
+        return string.Create(CultureInfo.InvariantCulture, $"[lanq] no awake machine can take the job; {sent} (waiting up to {seconds} s for {(one ? "it" : "them")} {then})");
     }
 
     /// <summary>The order sleepers are considered for a wake: the indexes of <paramref name="machines"/> (the job's candidates), by name (ordinal).</summary>
@@ -1094,7 +1371,7 @@ public sealed partial class JobRunner(
     /// <param name="onRunning">Called just before the job's command starts on the machine (after upload and prepare).</param>
     private async Task<JobResult?> TryOnMachine(
         string jobId, JobRequest req, PreparedPayload prepared, Machine machine, DateTimeOffset? windowEnds, bool gitCanEverTakeIt, Action<string> emit, CancellationToken ct,
-        Action? onSlot = null, Action? onRunning = null)
+        Action? onSlot = null, Action? onRunning = null, int? slotCap = null, Action<bool>? onNoSlot = null)
     {
         var (payload, archive) = (prepared.Payload, prepared.Archive);
         string? archivePath = null;
@@ -1122,6 +1399,7 @@ public sealed partial class JobRunner(
                 }
 
                 archive.Failure = message;
+                onNoSlot?.Invoke(true); // p1 review L3: a failure that repeats is not a slot wait
                 return null;
             }
         }
@@ -1132,7 +1410,8 @@ public sealed partial class JobRunner(
 
         // --exclusive claims every slot of the machine, all or nothing (SLOTS=1,...,n or SLOT=FULL).
         var timeout = req.Timeout ?? JobRequest.DefaultTimeout;
-        var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout);
+        // 0.13.0: a job size caps the slots by total memory (Scheduler.SlotCap); the claim honours the same cap, so other lanq runs do too.
+        var claim = req.Exclusive ? RemoteScripts.AcquireAll(machine, jobId, timeout) : RemoteScripts.AcquireSlot(machine, jobId, timeout, slotCap < machine.MaxJobs ? slotCap : null);
         SshResult acquire;
         try
         {
@@ -1155,12 +1434,19 @@ public sealed partial class JobRunner(
             }
 
             NoteStuckSlots(machine, acquire.Output, emit);
+            // 0.13.0 B2: a claim that failed over ssh, or whose reply was unreadable (p1 review L3), is an eligible wait; a clean FULL a slot wait.
+            onNoSlot?.Invoke(!acquire.Ok || !IsCleanFull(acquire.Output));
             return null;
         }
 
         NoteStuckSlots(machine, acquire.Output, emit); // it got a slot past a stale one it could not reclaim
 
         onSlot?.Invoke();
+        if (machine.Local)
+        {
+            emit($"[lanq] running on this computer (fallback: {req.FallbackWhy ?? "no pool slot"})");
+        }
+
         emit(slot.Contains(',', StringComparison.Ordinal)
             ? $"[lanq] job {jobId} -> {machine.Name} (slots {slot}, exclusive)"
             : $"[lanq] job {jobId} -> {machine.Name} (slot {slot})");
@@ -1170,6 +1456,15 @@ public sealed partial class JobRunner(
         StartedLogPath = Path.GetFullPath(logPath);
         var logGate = new object();
         var logOpen = true;
+        long MarkLog()
+        {
+            lock (logGate)
+            {
+                logFile.Flush();
+                return logFile.BaseStream.Position;
+            }
+        }
+
         void OnLine(string line)
         {
             line = SafeLine(line);
@@ -1193,7 +1488,7 @@ public sealed partial class JobRunner(
             {
                 try
                 {
-                    result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning).ConfigureAwait(false);
+                    result = await Transfer(jobId, req, prepared, archivePath, machine, windowEnds, OnLine, ct, onRunning, MarkLog).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (req.PlanTimeout is { Expired: true } planTimeout)
                 {
@@ -1236,8 +1531,9 @@ public sealed partial class JobRunner(
                 EnvNames = req.Env.Count > 0 ? [.. req.Env.Select(e => e.Name)] : null,
                 BaselineOf = req.BaselineOf,
                 Commit = req.BaselineOf is null ? null : req.Commit,
+                Fallback = machine.Local ? true : null,
             });
-            return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath) };
+            return result with { CleanedUp = cleanedUp, LogPath = Path.GetFullPath(logPath), Fallback = machine.Local };
         }
         finally
         {
@@ -1252,13 +1548,17 @@ public sealed partial class JobRunner(
 
     private async Task<JobResult> Transfer(
         string jobId, JobRequest req, PreparedPayload prepared, string? archivePath, Machine machine, DateTimeOffset? windowEnds, Action<string> onLine, CancellationToken ct,
-        Action? onRunning = null)
+        Action? onRunning = null, Func<long>? markLog = null)
     {
         string executeCommand;
         try
         {
             // Built once up front only to refuse a command that cannot run on this machine before anything is uploaded.
             executeCommand = RemoteScripts.Wrap(machine, RemoteScripts.Execute(machine, jobId, req.Directory, req.Argv, req.Timeout ?? JobRequest.DefaultTimeout, req.Shard, req.PlanJob, env: req.Env));
+            if (req.Post is { } postArgv)
+            {
+                _ = RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, postArgv, null, PostLimit)); // the post: step too must fit (Windows command length)
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -1439,11 +1739,12 @@ public sealed partial class JobRunner(
         // A job whose ssh connection dropped may also still be running there: it is stopped the same way, on a fresh connection (the caller's
         // cleanup would kill it on one anyway). When the machine does not answer that either, nothing is fetched and the report says why.
         var dropped = sshFailed && !run.TimedOut;
-        if (req.Fetch is not null && (dropped || result.Status is JobStatus.TimedOut or JobStatus.WindowClosed))
+        var post = req.Post is not null && result.Status is JobStatus.Completed or JobStatus.Failed or JobStatus.TimedOut;
+        if ((req.Fetch is not null && (dropped || result.Status is JobStatus.TimedOut or JobStatus.WindowClosed)) || (post && result.Status == JobStatus.TimedOut))
         {
-            onLine($"[lanq] {machine.Name}: stopping the job before fetching its files");
+            onLine($"[lanq] {machine.Name}: stopping the job before {(req.Fetch is null ? "its post: step" : "fetching its files")}");
             var stop = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, RemoteScripts.StopJob(machine, jobId)), null, StopBeforeFetchTimeout, ct).ConfigureAwait(false);
-            if (dropped && stop.IsSshFailure)
+            if (dropped && stop.IsSshFailure && req.Fetch is not null)
             {
                 var lost = new FetchReport(Path.GetFullPath(Path.Combine(req.Fetch.OutputRoot, jobId)), [], [], "not fetched: the SSH connection failed during the job, and the machine did not answer afterwards");
                 Summarise(lost, result, onLine);
@@ -1452,15 +1753,132 @@ public sealed partial class JobRunner(
         }
 
         // The job ran (completed, failed, or was stopped): bring back what it produced, before the caller's cleanup deletes the job folder.
-        if (req.Fetch is not { } fetch)
+        if (req.Fetch is { } fetch)
         {
-            return result;
+            var report = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false);
+            result = result with { Fetch = report, Results = CountResults(req, report, machine, onLine) };
         }
 
-        var report = await FetchFiles(jobId, req.Directory, fetch, machine, windowEnds, grace, result, onLine, ct).ConfigureAwait(false);
-        return result with { Fetch = report, Results = CountResults(req, report, machine, onLine) };
+        // post: (0.13.0, review H1) after the fetch, so it cannot rewrite fetched evidence, and before the caller's cleanup, in the same slot.
+        return post ? result with { Post = await RunPostAsync(jobId, req, machine, windowEnds, grace, onLine, markLog, ct).ConfigureAwait(false) } : result;
     }
 
+    /// <summary>How long a post: step may run (on the worker and here); it fits inside the slot lease's transfer allowance.</summary>
+    internal static readonly TimeSpan PostLimit = TimeSpan.FromMinutes(5);
+
+    /// <summary>Tests only: one post: step on its own (<see cref="RunPostAsync"/>), with a given window end.</summary>
+    internal Task<PostResult> PostForTestAsync(string jobId, JobRequest req, Machine machine, DateTimeOffset? windowEnds, TimeSpan grace, Action<string> onLine) =>
+        RunPostAsync(jobId, req, machine, windowEnds, grace, onLine, null, CancellationToken.None);
+
+    /// <summary>A post: step with less than this left of the machine's allowed hours plus grace is skipped, not started (review B-L2).</summary>
+    internal static readonly TimeSpan PostMinimum = TimeSpan.FromSeconds(30);
+
+    /// <summary>The post: step's script: the job wrapper itself with its own pid file (locks/post-ID.pid) and its limit.</summary>
+    private static string PostScript(Machine machine, string jobId, JobRequest req, IReadOnlyList<string> post, string? nonce, TimeSpan limit) =>
+        RemoteScripts.Execute(machine, jobId, req.Directory, post, limit, req.Shard, req.PlanJob, nonce, req.Env, pidKind: "post");
+
+    /// <summary>
+    /// Runs the post: step in the job's folder with the job's environment, on its own connection, under its own job object or process group
+    /// and pid file; never throws for its outcome, and never for a cancel either (review B-M1): Ctrl+C, plan_timeout or --fail-fast during the
+    /// step end only the step (cancelled: true); the job's own status, exit code, fetch and results stand, and the caller's cleanup kills what
+    /// the pid file names. Its exit code is a warning only ("[lanq] post: exit N (warning only)"). The step ends at the wrapper's exit marker
+    /// even when a process it left behind still holds the output open (review B-L3), and it never runs past the machine's allowed hours plus
+    /// grace (B-L2). <paramref name="markLog"/> notes where its lines start in the job's log, so --log-tail shows the job's own end (B-L4).
+    /// </summary>
+    private async Task<PostResult> RunPostAsync(
+        string jobId, JobRequest req, Machine machine, DateTimeOffset? windowEnds, TimeSpan grace, Action<string> onLine, Func<long>? markLog, CancellationToken ct)
+    {
+        var post = req.Post!;
+        var logFrom = markLog?.Invoke();
+        var limit = PostLimit;
+        if (windowEnds is { } end)
+        {
+            var left = end + grace - clock.GetUtcNow();
+            if (left < PostMinimum)
+            {
+                onLine($"[lanq] post: skipped: {machine.Name}'s allowed hours (plus grace) end before the step could run");
+                return new PostResult(0, false, 0) { Skipped = true, LogFrom = logFrom };
+            }
+
+            limit = left < limit ? left : limit;
+        }
+
+        var nonce = RemoteScripts.NewMarkerNonce();
+        onLine("[lanq] post: " + string.Join(' ', post));
+        var started = clock.GetTimestamp();
+        int? marked = null;
+        var limitHit = false;
+        var limitMarker = RemoteScripts.LimitMarker(jobId, nonce);
+        var gate = new object();
+        using var done = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        void OnPostLine(string line)
+        {
+            lock (gate)
+            {
+                if (marked is not null)
+                {
+                    return; // after the wrapper's exit marker: a process the step left behind, not the step
+                }
+
+                if (line.TrimEnd('\r').EndsWith(limitMarker, StringComparison.Ordinal))
+                {
+                    limitHit = true; // the worker stopped the step at its own limit
+                    return;
+                }
+
+                if (ReadExitMarker(line, jobId, nonce) is not { Code: { } code } exit)
+                {
+                    onLine(line);
+                    return;
+                }
+
+                if (exit.Before.Length > 0)
+                {
+                    onLine(exit.Before);
+                }
+
+                marked = code;
+            }
+
+            done.Cancel(); // the step is over: stop reading, even if something it started still holds the output open
+        }
+
+        bool Ended()
+        {
+            lock (gate)
+            {
+                return marked is not null;
+            }
+        }
+
+        SshResult? run = null;
+        try
+        {
+            run = await ssh.RunAsync(machine, RemoteScripts.Wrap(machine, PostScript(machine, jobId, req, post, nonce, limit)), OnPostLine, limit + WorkerDeadlineMargin, done.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (Ended())
+        {
+            // stopped reading at the exit marker: the step is over, so its own exit stands even when a cancel came after (final review L1)
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            var cut = Math.Round(clock.GetElapsedTime(started).TotalSeconds, 2);
+            onLine("[lanq] post: cancelled before it ended (the job's own result stands)");
+            return new PostResult(130, false, cut) { Cancelled = true, LogFrom = logFrom };
+        }
+
+        var seconds = Math.Round(clock.GetElapsedTime(started).TotalSeconds, 2);
+        var exitCode = marked ?? run?.ExitCode ?? 1;
+        // Timed out: the worker said it stopped the step at its limit, or this side gave up waiting (no marker by the limit plus margin). A
+        // step that itself exits 124 is not called timed out.
+        var timedOut = limitHit || (marked is null && run is { TimedOut: true });
+        if (exitCode != 0)
+        {
+            onLine(string.Create(CultureInfo.InvariantCulture, $"[lanq] post: exit {exitCode}{(timedOut ? $" (stopped after {ProcessSshClient.Describe(limit)})" : "")} (warning only)"));
+        }
+
+        return new PostResult(exitCode, timedOut, seconds) { LogFrom = logFrom };
+    }
     /// <summary>
     /// --results (0.11.0): counts the fetched results files (never throws) and prints, after the fetch summary, the reader's warnings, one
     /// "[lanq] results:" line and up to 10 failed names. Null without --results.
@@ -1974,7 +2392,7 @@ public sealed partial class JobRunner(
         }
     }
 
-    private static string NewId() =>
+    internal static string NewId() =>
         DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..6];
 
     private static void TryDelete(string? path)

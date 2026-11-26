@@ -326,12 +326,20 @@ public sealed partial class SupplyChainTests
         var yaml = new YamlStream();
         yaml.Load(new StringReader(File.ReadAllText(Path.Combine(Root, ".github", "dependabot.yml"))));
         var updates = ((YamlSequenceNode)((YamlMappingNode)yaml.Documents[0].RootNode).Children[new YamlScalarNode("updates")]).Cast<YamlMappingNode>().ToList();
-        Assert.Equal(["github-actions", "nuget"], updates.Select(u => Scalar(u, "package-ecosystem")).Order(StringComparer.Ordinal));
+        Assert.Equal(["github-actions", "npm", "nuget"], updates.Select(u => Scalar(u, "package-ecosystem")).Order(StringComparer.Ordinal));
         Assert.All(updates, u =>
         {
             Assert.Equal("weekly", Scalar(Map(u, "schedule"), "interval"));
             Assert.NotEmpty(Map(u, "groups").Children);
         });
+
+        // samples/monorepo (0.13.0): its NuGet lock files and its web package-lock.json are watched too, grouped weekly.
+        static IEnumerable<string> Dirs(YamlMappingNode u) =>
+            u.Children.TryGetValue(new YamlScalarNode("directories"), out var d) ? ((YamlSequenceNode)d).Select(n => ((YamlScalarNode)n).Value!) : [Scalar(u, "directory")!];
+        var byEcosystem = updates.ToDictionary(u => Scalar(u, "package-ecosystem")!, StringComparer.Ordinal);
+        Assert.Contains("/samples/monorepo/web", Dirs(byEcosystem["npm"]));
+        Assert.Contains("/", Dirs(byEcosystem["nuget"]));
+        Assert.Contains("/samples/monorepo", Dirs(byEcosystem["nuget"]));
     }
 
     /// <summary>

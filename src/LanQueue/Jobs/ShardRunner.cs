@@ -62,6 +62,9 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
     /// <summary>NoCapacity only: see <see cref="JobResult.Excluded"/>.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
+
     /// <summary>The full path of the local log of the shard's last attempt that got a slot (see <see cref="JobResult.LogPath"/>), or null.</summary>
     public string? LogPath { get; init; }
 
@@ -76,6 +79,15 @@ public sealed record ShardResult(int Index, string Status, int ExitCode, string?
 
     /// <summary>lanq run --baseline: the shard's rerun at the base commit after it ended Failed; else null.</summary>
     public BaselineResult? Baseline { get; init; }
+
+    /// <summary>The post: step of the shard's last attempt (0.13.0), or null.</summary>
+    public PostResult? Post { get; init; }
+
+    /// <summary>0.13.0 B3: true when the shard's last attempt ran on this computer's fallback entry.</summary>
+    public bool Fallback { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0 B3): see <see cref="JobResult.FallbackHint"/>.</summary>
+    public FallbackHint? FallbackHint { get; init; }
 }
 
 /// <summary>A whole lanq run --shards: the overall status and exit code (see <see cref="JobRunner.Aggregate"/>) and every shard, in index order.</summary>
@@ -87,6 +99,9 @@ public sealed record ShardRunResult(string Status, int ExitCode, int Count, IRea
     /// <summary>NoCapacity only: every machine that took none of the waiting shards and why. Null otherwise.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
+
     /// <summary>Rejected only: why (the whole run's refusal, or the shard that decided the status). Null otherwise.</summary>
     public RejectKind? RejectKind { get; init; }
 
@@ -95,6 +110,12 @@ public sealed record ShardRunResult(string Status, int ExitCode, int Count, IRea
 
     /// <summary>--shards auto --target-minutes: how N was picked (<see cref="ShardTiming.Pick"/>); null otherwise.</summary>
     public ShardTimingResult? Timing { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0 B3): see <see cref="JobResult.FallbackHint"/>, from the shard that decided the status.</summary>
+    public FallbackHint? FallbackHint { get; init; }
+
+    /// <summary>0.13.0 B3: how many shards ran on this computer's fallback entry (top-level JSON fallbackJobs).</summary>
+    public int FallbackJobs => Shards.Count(s => s.Fallback);
 }
 
 public sealed partial class JobRunner
@@ -267,7 +288,7 @@ public sealed partial class JobRunner
     /// </summary>
     private (int Count, string FreeWhy, ShardTimingResult? Timing) PickShardCount(JobRequest template, IReadOnlyList<Assessment> assessed, int? targetMinutes)
     {
-        var (n, total, free) = Scheduler.AutoCount(assessed, template.MinMemGb, ShardInfo.MaxShards, template.Exclusive);
+        var (n, total, free) = Scheduler.AutoCount(assessed, MemNeeds(template), ShardInfo.MaxShards);
         var why = AutoShardWhy(total, free);
         if (targetMinutes is not { } minutes)
         {
@@ -275,22 +296,22 @@ public sealed partial class JobRunner
         }
 
         var history = JobHistory.For(log, template.CommandKey ?? JobHistory.Key(template.Argv), JobHistory.Dir(template.Directory), clock.GetUtcNow());
-        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, template, _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
+        var timing = ShardTiming.Pick(history, minutes, Placeable(assessed, MemNeeds(template), _ => 0, _ => 0), assessed, ShardInfo.MaxShards);
         return (timing.Picked, why, timing);
     }
 
     /// <summary>What a sharded job needs of a machine: its capabilities, --mem per shard, its size rule, and Windows-safe arguments for every one of <paramref name="shards"/>.</summary>
     private JobNeeds ShardNeeds(JobRequest template, IEnumerable<ShardInfo> shards) =>
-        NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok));
+        NeedsOf(template, shards.Any(s => !JobPolicy.ValidateForWindows(s.Substitute(template.Argv)).Ok) || (template.Post is { } post && !JobPolicy.ValidateForWindows(post).Ok));
 
     /// <summary>
     /// The machines shards can go to now, in rank order, each with its free slots for this job (<see cref="Scheduler.FreeFor"/>, counting
     /// this run's own shards there: <paramref name="ours"/> placed, <paramref name="oursNotRunning"/> placed but not running yet); only those above 0.
     /// An exclusive template's shards take a whole machine each, so a machine offers at most one.
     /// </summary>
-    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, JobRequest template, Func<string, int> ours, Func<string, int> oursNotRunning) =>
+    private static List<(Assessment Machine, int Free)> Placeable(IReadOnlyList<Assessment> assessed, JobNeeds memNeeds, Func<string, int> ours, Func<string, int> oursNotRunning) =>
         [.. Scheduler.Rank(assessed)
-            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, template.MinMemGb, ours(x.Machine.Name), oursNotRunning(x.Machine.Name), template.Exclusive)))
+            .Select(x => (x, Scheduler.FreeFor(x.Machine, x.Health, memNeeds, ours(x.Machine.Name), oursNotRunning(x.Machine.Name))))
             .Where(x => x.Item2 > 0)];
 
     /// <summary>Why --shards auto picked its N: "free slots: build-01 2, micro-02 1" (and the cap), or that no machine can take the job right now.</summary>
@@ -324,8 +345,10 @@ public sealed partial class JobRunner
         {
             Retryable = noCapacity ? worst.Retryable ?? true : null,
             Excluded = noCapacity ? worst.Excluded ?? [] : null,
+            Waited = noCapacity ? worst.Waited : null,
             RejectKind = worst.RejectKind,
             InfraKind = worst.InfraKind,
+            FallbackHint = noCapacity ? worst.FallbackHint : null,
         };
 
         static int Rank(string status) => status switch
@@ -354,6 +377,25 @@ public sealed partial class JobRunner
         }
 
         return Scheduler.Assess(raw, needs, avoid);
+    }
+
+    /// <summary>
+    /// What the waiting shards wait for (p1 review M2): judged avoid-aware (<see cref="AssessForWaiting"/>: a machine every waiting shard must
+    /// avoid is not a slot wait), with the engaged fallback, and with the claims that failed over ssh in the latest round as an eligible wait.
+    /// </summary>
+    private static WaitKind WaitKindOfShards(
+        IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobNeeds needs, IReadOnlyCollection<ShardState> pending, Assessment? engaged, HashSet<string> sshFailed)
+    {
+        var judged = AssessForWaiting(candidates.Zip(probes), needs, pending);
+        if (engaged is not null)
+        {
+            judged.Add(engaged);
+        }
+
+        lock (sshFailed)
+        {
+            return Scheduler.WaitKindOf(judged, new HashSet<string>(sshFailed, StringComparer.Ordinal));
+        }
     }
 
     private sealed class ShardState(ShardInfo shard)
@@ -437,7 +479,8 @@ public sealed partial class JobRunner
 
         // --wait: how long no shard of this run has held a slot. Restarted only by an attempt that really got one, so attempts that keep
         // failing to claim a slot (the probe said free, the machine said full) cannot hold the run open for ever.
-        var idle = Stopwatch.StartNew();
+        var idleSince = Timestamp();
+        var waitClock = new WaitClock();
         var round = RoundStart();
         var relooked = 0L;
         var backoff = false;
@@ -445,9 +488,16 @@ public sealed partial class JobRunner
 
         // The latest probe, raw and judged for this job, for choosing another machine for a re-run by the same rules as placement.
         MachineHealth[] lastProbes = [];
+        Assessment? lastEngaged = null;
+
+        // 0.13.0 B3 (A-M1): true once this shard set reached its own NoCapacity point and fell back.
+        var fellBack = false;
+
+        // p1 review M2: the machines whose claim failed over ssh in the latest launch round (an eligible wait, not a lost race).
+        var sshFailed = new HashSet<string>(StringComparer.Ordinal);
         List<Assessment> lastAssessed = [];
 
-        Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot)
+        Task<Attempt> Launch(ShardState st, Machine machine, DateTimeOffset? windowEnds, Running slot, int? slotCap = null)
         {
             st.Attempts++;
             var req = template with { Argv = st.Shard.Substitute(template.Argv), Shard = st.Shard };
@@ -465,7 +515,18 @@ public sealed partial class JobRunner
                             plan?.Hold();
                             slot.Hold();
                         },
-                        slot.Start).ConfigureAwait(false);
+                        slot.Start,
+                        slotCap,
+                        overSsh =>
+                        {
+                            if (overSsh)
+                            {
+                                lock (sshFailed)
+                                {
+                                    sshFailed.Add(machine.Name);
+                                }
+                            }
+                        }).ConfigureAwait(false);
                     return new Attempt(st, machine, r, clock.Elapsed, false, slot.Holding, jobId);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested)
@@ -504,6 +565,8 @@ public sealed partial class JobRunner
                 {
                     Retryable = none.Retryable,
                     Excluded = none.Excluded,
+                    Waited = none.Waited,
+                    FallbackHint = none.FallbackHint,
                 };
             }
 
@@ -543,8 +606,31 @@ public sealed partial class JobRunner
                     // own shards there count too). Shards are dealt round-robin over the ranked machines, so a few shards spread out and many
                     // fill every slot: a machine with max_jobs 4 takes four. A shard never goes to a machine it must avoid.
                     var free = Placeable(
-                        assessed, template, m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
+                        assessed, MemNeeds(template), m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
                     var deal = Scheduler.Deal(free, pending, (p, m) => !p.Avoid.Contains(m.Name));
+
+                    // 0.13.0 B3 (M2): once this shard set fell back (at its own NoCapacity point, A-M1), shards the pool cannot take now may use
+                    // this computer's own slots (max_jobs and memory there, so many shards never pile onto the PC), always after every free pool slot.
+                    Assessment? engaged;
+                    try
+                    {
+                        engaged = await EngagedFallbackAsync(template, needs, fellBack, stop.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (stop.IsCancellationRequested)
+                    {
+                        break;
+                    }
+
+                    if (engaged is not null)
+                    {
+                        assessed = [.. assessed, engaged];
+                        if (engaged.Eligible)
+                        {
+                            var left = pending.Where(p => !deal.Any(d => ReferenceEquals(d.Item, p))).ToList();
+                            var local = Placeable([engaged], MemNeeds(template), m => running.Values.Count(r => r.Machine == m), m => notRunning.GetValueOrDefault(m));
+                            deal.AddRange(Scheduler.Deal(local, left, (p, m) => !p.Avoid.Contains(m.Name)));
+                        }
+                    }
                     var first = firstRound == -1;
                     if (first)
                     {
@@ -555,34 +641,63 @@ public sealed partial class JobRunner
                         }
                     }
 
+                    if (deal.Count > 0)
+                    {
+                        lock (sshFailed)
+                        {
+                            sshFailed.Clear(); // a new round of claims: only its failures count from here
+                        }
+                    }
+
+                    lastEngaged = engaged;
                     foreach (var (st, at) in deal)
                     {
                         pending.Remove(st);
                         var slot = new Running(at.Machine.Name, first ? FirstRoundPlaced : null);
-                        running[Launch(st, at.Machine, at.Health.WindowEndsUtc, slot)] = slot;
+                        running[Launch(st, at.Machine, at.Health.WindowEndsUtc, slot, at.SlotCap)] = slot;
                         launched++;
                     }
 
                     (lastProbes, lastAssessed) = (probes, assessed); // a wake below updates both in place
                     if (pending.Count > 0 && assessed.All(a => a.Permanent))
                     {
-                        // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish).
-                        EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()));
+                        // Every machine is ruled out for good: the waiting shards end now, without waiting or waking (running ones finish),
+                        // unless this computer's fallback may take them (0.13.0 B3): then look again with it as the last candidate.
+                        var never = await FallbackGateAsync(template, needs, "no pool machine can take it", fellBack, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                        if (never.Go)
+                        {
+                            (fellBack, template) = (true, template with { FallbackWhy = "no pool machine can take it" });
+                            continue;
+                        }
+
+                        EndWaiting(WithFallback(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()), never));
                     }
-                    else if (launched == 0 && template.Wait > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
+                    else if (launched == 0)
                     {
-                        await WakeBestSleeperAsync(candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                        // No new shard could start: wake as Dispatch does. While shards still run elsewhere this adds capacity (review L3, WORKERS.md).
+                        await MaybeWakeAsync(template, candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
                     }
                 }
 
                 backoff = false;
                 if (running.Values.Any(r => r.Holding))
                 {
-                    idle.Restart();
+                    idleSince = Timestamp();
                 }
-                else if (pending.Count > 0 && running.Count == 0 && WaitedOut(template, idle, round, relooked))
+                else if (pending.Count > 0 && running.Count == 0
+                    && WaitedOut(
+                        template, waitClock, idleSince, WaitKindOfShards(candidates, lastProbes, needs, pending, lastEngaged, sshFailed), round, relooked,
+                        InWakeWait(template, needs, prepared.Archive.Failure is not null, lastAssessed)) is { } budget)
                 {
-                    EndWaiting(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()));
+                    var why = (budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now") + WakeWhy(template);
+                    var waited = await FallbackGateAsync(template, needs, why, fellBack, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                    if (waited.Go)
+                    {
+                        (fellBack, template) = (true, template with { FallbackWhy = why });
+                        continue;
+                    }
+
+                    EndWaiting(WithFallback(WaitedNoCapacity(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote() + WakeNote(template)), template, waitClock, budget), waited));
                     break;
                 }
                 else if (pending.Count > 0 && running.Count == 0 && launched == 0 && Relook(plan, round, relooked) is > 0 and var release)
@@ -634,7 +749,7 @@ public sealed partial class JobRunner
                     var a = await task.ConfigureAwait(false);
                     if (a.HadSlot)
                     {
-                        idle.Restart();
+                        idleSince = Timestamp();
                     }
 
                     if (Settle(a, options, pending, Emit, lastAssessed, name) && options.FailFast && !stop.IsCancellationRequested)
@@ -740,10 +855,14 @@ public sealed partial class JobRunner
             Results = r.Results,
             Retryable = r.Retryable,
             Excluded = r.Excluded,
+            Waited = r.Waited,
             LogPath = r.LogPath ?? LogIfCreated(a),
             RejectKind = r.RejectKind,
             InfraKind = r.InfraKind,
             MayStillRun = r.MayStillRun && !r.CleanedUp,
+            Fallback = r.Fallback,
+            FallbackHint = r.FallbackHint,
+            Post = r.Post,
         };
         return r.Status != JobStatus.Completed;
     }

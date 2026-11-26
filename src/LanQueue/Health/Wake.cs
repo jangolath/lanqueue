@@ -120,6 +120,27 @@ public enum WakeDecision
 /// <summary>A wake decision and, for people, why.</summary>
 public readonly record struct WakeVerdict(WakeDecision Decision, string Reason);
 
+/// <summary>What became of one automatic or explicit wake in this lanq invocation (0.13.0: run output, JSON wakes, next steps).</summary>
+public enum WakeOutcome
+{
+    /// <summary>The packet went out and the machine may still come up (its wake.wait_seconds have not run out).</summary>
+    Waking,
+
+    /// <summary>The packet went out and the machine answered ssh afterwards.</summary>
+    Awake,
+
+    /// <summary>The packet went out, but the machine did not answer ssh within its wake.wait_seconds.</summary>
+    NoAnswer,
+
+    /// <summary>The packet could not be sent.</summary>
+    SendFailed,
+}
+
+/// <summary>One machine lanq tried to wake in this invocation (at most one attempt per machine), and what came of it.</summary>
+/// <param name="WaitSeconds">The machine's wake.wait_seconds.</param>
+/// <param name="Error">SendFailed only: why the packet could not be sent (sanitised by the caller before it is shown).</param>
+public sealed record WakeAttempt(string Machine, WakeOutcome Outcome, int WaitSeconds, string? Error = null);
+
 /// <summary>
 /// Decides whether to wake a machine, sends the packet, and remembers per lanq invocation which machines it has already woken (at most
 /// once each) and which are still coming up. Waits use <see cref="TimeProvider"/>, so tests need no real time.
@@ -149,6 +170,11 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
     ];
 
     private readonly ConcurrentDictionary<string, DateTimeOffset> _woken = new(StringComparer.Ordinal);
+
+    // 0.13.0 wake before fallback: what became of each packet (sent at, wait_seconds, answered, send error), for the run's output and JSON.
+    private readonly ConcurrentDictionary<string, Sent> _sent = new(StringComparer.Ordinal);
+
+    private sealed record Sent(DateTimeOffset At, int WaitSeconds, bool Up, string? Error);
 
     /// <summary>
     /// Unreachable in the connection sense: ssh exit 255 and ssh's own "connect to host ..." line gives a timeout or an unreachable
@@ -217,13 +243,56 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
             throw new InvalidOperationException($"Machine '{machine.Name}': wake settings are invalid.");
         }
 
-        await sender.SendAsync(MagicPacket.Build(mac), broadcast, w.Port, ct).ConfigureAwait(false);
+        try
+        {
+            await sender.SendAsync(MagicPacket.Build(mac), broadcast, w.Port, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _sent[machine.Name] = new Sent(clock.GetUtcNow(), w.WaitSeconds, false, ex.Message);
+            throw;
+        }
 
         // Pending only once the packet really went out: a failed send leaves the machine claimed (no retry storm) but not waiting.
-        _woken[machine.Name] = clock.GetUtcNow() + TimeSpan.FromSeconds(w.WaitSeconds);
+        var now = clock.GetUtcNow();
+        _sent[machine.Name] = new Sent(now, w.WaitSeconds, false, null);
+        _woken[machine.Name] = now + TimeSpan.FromSeconds(w.WaitSeconds);
     }
 
-    /// <summary>True while a machine woken in this invocation may still come up (so a waiting job should keep waiting).</summary>
+    /// <summary>When the packet to <paramref name="machine"/> went out in this invocation; null when none was sent (or the send failed).</summary>
+    public DateTimeOffset? SentAt(string machine) => _sent.TryGetValue(machine, out var s) && s.Error is null ? s.At : null;
+
+    /// <summary>
+    /// True while a machine sent a packet in this invocation may still take a job (0.13.0 wake before fallback): it answered ssh (it may be busy
+    /// just after boot, review H1), or it has not answered yet but its wake.wait_seconds since the packet have not passed. False for a failed send.
+    /// </summary>
+    public bool IsLive(string machine) =>
+        _sent.TryGetValue(machine, out var s) && s.Error is null && (s.Up || s.At + TimeSpan.FromSeconds(s.WaitSeconds) > clock.GetUtcNow());
+
+    /// <summary>The time on this service's clock (the wake wait of a run that may fall back is measured on it).</summary>
+    public DateTimeOffset Now => clock.GetUtcNow();
+
+    /// <summary>Every packet this invocation sent or tried to send, by machine name, and what became of it so far.</summary>
+    public IReadOnlyList<WakeAttempt> Attempts
+    {
+        get
+        {
+            var now = clock.GetUtcNow();
+            return [.. _sent.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => new WakeAttempt(
+                kv.Key,
+                kv.Value.Error is not null ? WakeOutcome.SendFailed
+                    : kv.Value.Up ? WakeOutcome.Awake
+                    : kv.Value.At + TimeSpan.FromSeconds(kv.Value.WaitSeconds) > now ? WakeOutcome.Waking
+                    : WakeOutcome.NoAnswer,
+                kv.Value.WaitSeconds,
+                kv.Value.Error))];
+        }
+    }
+
+    /// <summary>
+    /// True while a machine woken in this invocation may still come up within its wake.wait_seconds and has not answered: a run with an explicit
+    /// --wait (or --wait-eligible) above 0 wakes the next sleeper only once this is false.
+    /// </summary>
     public bool AnyPending => _woken.Values.Any(d => d > clock.GetUtcNow());
 
     public void MarkUp(Machine machine)
@@ -231,6 +300,11 @@ public sealed class WakeService(IMagicPacketSender sender, TimeProvider clock)
         if (_woken.ContainsKey(machine.Name))
         {
             _woken[machine.Name] = DateTimeOffset.MinValue;
+        }
+
+        if (_sent.TryGetValue(machine.Name, out var s) && s.Error is null && !s.Up)
+        {
+            _sent[machine.Name] = s with { Up = true };
         }
     }
 

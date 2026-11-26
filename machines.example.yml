@@ -22,6 +22,10 @@ policy:
   # window_grace_minutes: 15     # a running job may overrun the end of its machine's allowed_hours by this much
   # min_window_minutes: 10       # do not start a job on a machine whose window ends sooner than this
   # keep_logs_days: 30           # delete this PC's per-job logs (state folder logs/) after this many days; 0 keeps them
+  # job_mem_gb: 4                # lanq 0.13.0+: about how much memory one job uses (a machine's own job_mem_gb wins); a job
+  #                              # needs max(--mem, this) there, and a machine runs at most (total - floor) / this jobs at once
+  # fallback: off                # lanq 0.13.0+: off (default), on or ask: may a job the pool cannot take run on this computer's
+  #                              # fallback entry (see the commented dev-pc entry below and docs/WORKERS.md)
   # A job's argv must start with one of these token sequences. Everything else is refused.
   allowed_commands:
     - dotnet build
@@ -51,6 +55,9 @@ machines:
     work_root: /srv/lanq       # absolute, forward slashes, no spaces
     capabilities: [dotnet, node, linux]
     max_jobs: 2
+    # hygiene: [dotnet]        # lanq 0.13.0+: MSBuild node reuse off for this machine's jobs, so parallel .NET jobs never share
+    #                          # nodes (a few seconds per build); [dotnet-lean] also turns the compiler server off (slower builds)
+    # job_mem_gb: 6            # lanq 0.13.0+: about how much memory one job uses here (more cores run more test hosts)
     transfer: git              # git (default, recommended): bundle + per-job worktree; the worker needs git
     priority: normal           # a dedicated build box; the default, low, yields to whoever uses the machine
     # size: heavy              # optional: light, medium or heavy for --size / --min-size; leave it out to use the probed size
@@ -100,3 +107,14 @@ machines:
       NODE_OPTIONS: "--max-old-space-size=2048"  # Node heap at most 2 GB
     path_prepend:              # tools installed per user that a non-login SSH session does not find
       - C:/Users/build/AppData/Roaming/nvm/v22.11.0
+
+  # This computer as a last resort (lanq 0.13.0+). Never an ordinary worker: used only when a job would otherwise end
+  # NoCapacity, and only when policy.fallback (or lanq run --fallback) is on or ask. local: true replaces ssh:; os must be
+  # this computer's; work_root must not be inside a repository you run. It runs repository code under your own account.
+  # - name: dev-pc
+  #   os: windows
+  #   local: true
+  #   fallback: true
+  #   work_root: C:/lq-fallback
+  #   capabilities: [dotnet, windows]
+  #   max_jobs: 1

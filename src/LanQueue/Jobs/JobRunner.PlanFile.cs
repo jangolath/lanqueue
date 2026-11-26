@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using LanQueue.Config;
 using LanQueue.Payload;
+using LanQueue.Scheduling;
 using LanQueue.Ssh;
 
 namespace LanQueue.Jobs;
@@ -44,6 +45,21 @@ public sealed class PlanProgress(string holders = "this plan's other jobs")
             lock (_gate)
             {
                 return _holding > 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(_idleSince);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="Stopwatch"/> timestamp since which no job of the plan has held a slot (the plan's start or the last release), or null
+    /// while one does (0.13.0: the wait clocks count from it).
+    /// </summary>
+    public long? IdleSince
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _holding > 0 ? null : _idleSince;
             }
         }
     }
@@ -302,6 +318,9 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
     /// <summary>NoCapacity only: see <see cref="JobResult.Excluded"/>.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
 
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
+
     public RejectKind? RejectKind { get; init; }
 
     public InfraKind? InfraKind { get; init; }
@@ -311,6 +330,15 @@ public sealed record PlanJobOutcome(string Name, string Status, int ExitCode, st
 
     /// <summary>baseline: true, a single job that ended Failed: its rerun at the base commit (a sharded job has one per failed shard); else null.</summary>
     public BaselineResult? Baseline { get; init; }
+
+    /// <summary>0.13.0 B3: the job's runs (1, or its shards) that ran on this computer's fallback entry.</summary>
+    public int FallbackJobs => (Single?.Fallback == true ? 1 : 0) + (Sharded?.FallbackJobs ?? 0);
+
+    /// <summary>The job's units of work for the fallback note: its shards, 1 for a single job, 0 when it was skipped.</summary>
+    public int Units => Sharded?.Count ?? (Status == Skipped ? 0 : 1);
+
+    /// <summary>NoCapacity only (0.13.0 B3): see <see cref="JobResult.FallbackHint"/>.</summary>
+    public FallbackHint? FallbackHint => Single?.FallbackHint ?? Sharded?.FallbackHint;
 }
 
 /// <summary>
@@ -321,11 +349,23 @@ public sealed record PlanRunResult(string Status, int ExitCode, string Message, 
 {
     public string? Decided { get; init; }
 
+    /// <summary>0.13.0 B3: how many runs (jobs and shards) of the plan ran on this computer's fallback entry.</summary>
+    public int FallbackJobs => Jobs.Sum(j => j.FallbackJobs);
+
+    /// <summary>0.13.0 B3: every run (job or shard) of the plan that started, for the fallback note.</summary>
+    public int Units => Jobs.Sum(j => j.Units);
+
+    /// <summary>NoCapacity only (0.13.0 B3): the deciding job's fallback hint.</summary>
+    public FallbackHint? FallbackHint => Status == nameof(JobStatus.NoCapacity) ? Jobs.FirstOrDefault(j => j.Name == Decided)?.FallbackHint : null;
+
     /// <summary>NoCapacity only: from the deciding job.</summary>
     public bool? Retryable { get; init; }
 
     /// <summary>NoCapacity only: from the deciding job.</summary>
     public IReadOnlyList<ExcludedMachine>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0 B2): how long it waited in each state, and which budget ran out; null otherwise.</summary>
+    public WaitedInfo? Waited { get; init; }
 
     public RejectKind? RejectKind { get; init; }
 
@@ -436,8 +476,11 @@ public sealed partial class JobRunner
                 }
                 else if (deadline is { Expired: true } && !result.PlanTimedOut)
                 {
-                    // The limit came while the last job was only cleaning up: the "stopping" line above stopped nothing; say so.
-                    output("[lanq] plan_timeout: nothing was stopped; every job had already ended");
+                    // The limit came while the last job was only cleaning up or in its post: step: no job was stopped; say so, and say when a
+                    // post: step was cut short (final review L4). The job's own result stands either way.
+                    output(PostCutShort(result)
+                        ? "[lanq] plan_timeout: only a post: step was cut short; every job had already ended (its result stands)"
+                        : "[lanq] plan_timeout: nothing was stopped; every job had already ended");
                 }
 
                 return result;
@@ -831,6 +874,10 @@ public sealed partial class JobRunner
         return timedOut ? PlanTimedOutResult(result, deadline!) : result;
     }
 
+    /// <summary>True when a job's (or a shard's) post: step was cancelled; the job itself had ended.</summary>
+    internal static bool PostCutShort(PlanRunResult result) =>
+        result.Jobs.Any(j => j.Single?.Post?.Cancelled == true || (j.Sharded?.Shards.Any(s => s.Post?.Cancelled == true) ?? false));
+
     /// <summary>
     /// The plan's status once --plan-timeout was reached: TimedOut (124) unless a Failed or Rejected job decides it, also when the limit came
     /// between after: waves or while every job was waiting (nothing running). The job that decides is the first TimedOut one in lanq.yml, if any.
@@ -920,6 +967,7 @@ public sealed partial class JobRunner
                     Sharded = r,
                     Retryable = r.Retryable,
                     Excluded = r.Excluded,
+                    Waited = r.Waited,
                     RejectKind = r.RejectKind,
                     InfraKind = r.InfraKind,
                     MayStillRun = r.Shards.Any(s => s.MayStillRun),
@@ -937,6 +985,7 @@ public sealed partial class JobRunner
                 Single = one,
                 Retryable = one.Status == JobStatus.NoCapacity ? one.Retryable ?? true : null,
                 Excluded = one.Status == JobStatus.NoCapacity ? one.Excluded ?? [] : null,
+                Waited = one.Status == JobStatus.NoCapacity ? one.Waited : null,
                 RejectKind = one.RejectKind,
                 InfraKind = one.InfraKind,
                 MayStillRun = one.MayStillRun && !one.CleanedUp,
@@ -1000,6 +1049,7 @@ public sealed partial class JobRunner
             Decided = worst.Name,
             Retryable = noCapacity ? worst.Retryable ?? true : null,
             Excluded = noCapacity ? worst.Excluded ?? [] : null,
+            Waited = noCapacity ? worst.Waited : null,
             RejectKind = worst.RejectKind,
             InfraKind = worst.InfraKind,
         };

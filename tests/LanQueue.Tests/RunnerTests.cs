@@ -373,6 +373,64 @@ public sealed class RunnerTests : IDisposable
         Assert.NotEmpty(delays);
     }
 
+    /// <summary>0.13.0 B2: a paused pool is an eligible wait: --wait-eligible ends it, however long --wait-slot is.</summary>
+    [Fact]
+    public async Task APausedPoolEndsOnTheEligibleBudget()
+    {
+        var (runner, _, delays) = Counted((m, cmd) =>
+            DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=0\npaused=1\ntool=ok") : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(
+            Waiting(TimeSpan.FromMinutes(10), "dotnet") with { Budgets = new Scheduling.WaitBudgets(TimeSpan.FromMilliseconds(200), TimeSpan.FromMinutes(10)) }, CancellationToken.None);
+
+        Assert.Equal((JobStatus.NoCapacity, 75, true), (r.Status, r.CliExitCode, r.Retryable));
+        Assert.Equal(Scheduling.WaitKind.Eligible, r.Waited!.Budget);
+        Assert.True(r.Waited.Eligible >= TimeSpan.FromMilliseconds(200));
+        Assert.Equal(TimeSpan.Zero, r.Waited.Slot);
+        Assert.Contains("--wait-eligible 0 ran out", r.Message, StringComparison.Ordinal); // 200 ms rounds to 0 s
+        Assert.NotEmpty(delays);
+    }
+
+    /// <summary>0.13.0 B2: a full pool is a slot wait: --wait-slot ends it, however long --wait-eligible is.</summary>
+    [Fact]
+    public async Task AFullPoolEndsOnTheSlotBudget()
+    {
+        var (runner, _, _) = Counted((m, cmd) =>
+            DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=2\ntool=ok") : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(
+            Waiting(TimeSpan.FromMinutes(10), "dotnet") with { Budgets = new Scheduling.WaitBudgets(TimeSpan.FromMinutes(10), TimeSpan.FromMilliseconds(200)) }, CancellationToken.None);
+
+        Assert.Equal((JobStatus.NoCapacity, Scheduling.WaitKind.Slot), (r.Status, r.Waited!.Budget));
+        Assert.Equal(TimeSpan.Zero, r.Waited.Eligible);
+        Assert.Contains("--wait-slot", r.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>0.13.0 B2: plain --wait keeps the 0.12 message (no budget note), and still reports waited in the result.</summary>
+    [Fact]
+    public async Task PlainWaitKeepsTheOldMessage()
+    {
+        var (runner, _, _) = Counted((m, cmd) =>
+            DecodedContains(m, cmd, "disk_free_gb") ? new SshResult(0, "load=0.1\ndisk_free_gb=50\nslots_used=2\ntool=ok") : HealthyFleet(m, cmd));
+
+        var r = await runner.RunAsync(Waiting(TimeSpan.FromMilliseconds(200), "dotnet"), CancellationToken.None);
+
+        Assert.Equal(JobStatus.NoCapacity, r.Status);
+        Assert.DoesNotContain("ran out", r.Message, StringComparison.Ordinal);
+        Assert.Equal(Scheduling.WaitKind.Slot, r.Waited!.Budget);
+        Assert.True(r.Waited.Eligible + r.Waited.Slot >= TimeSpan.FromMilliseconds(200));
+    }
+
+    /// <summary>Ruled out for good: no wait happened, so no waited.</summary>
+    [Fact]
+    public async Task APermanentNoCapacityHasNoWaited()
+    {
+        var (runner, _, _) = Counted(HealthyFleet);
+        var r = await runner.RunAsync(Waiting(TimeSpan.FromSeconds(600), "dotnet", "gpu"), CancellationToken.None);
+        Assert.Equal((JobStatus.NoCapacity, false), (r.Status, r.Retryable));
+        Assert.Null(r.Waited);
+    }
+
     [Fact]
     public async Task OneUnreachableMachineKeepsTheRunRetryable()
     {

@@ -196,6 +196,18 @@ public static partial class Cli
                 "nothing to change if that is intended (the deny list always wins); list exact names in policy.allowed_env to make it plain")).ConfigureAwait(false);
         }
         await say(LogsCheck(host, config.Policy.KeepLogsDays)).ConfigureAwait(false);
+        if (config.FallbackProblem is { } fallbackProblem)
+        {
+            await say(DoctorCheck.Local("fallback", "warn", fallbackProblem, "give the fallback entry this computer's os, or use a machines.yml without it here")).ConfigureAwait(false);
+        }
+        else if (config.Fallback is { } fallback)
+        {
+            await say(DoctorCheck.Local(
+                "fallback",
+                "ok",
+                $"fallback: {fallback.Name} (this computer), policy.fallback {config.Policy.Fallback.ToString().ToLowerInvariant()}; used only when the pool cannot take a job")).ConfigureAwait(false);
+        }
+
         foreach (var m in config.Machines)
         {
             foreach (var check in await LocalMachineChecks(m, host).ConfigureAwait(false))
@@ -212,10 +224,11 @@ public static partial class Cli
                 await gate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    if (!p.Force)
+                    // Like makeready: a family PC's PAUSE file and allowed hours are respected; the probe is the only call made then.
+                    // With --force the probe is made only for the job-size check (B4), on a machine that has a job size.
+                    var h = !p.Force || (m.JobMemGb ?? config.Policy.JobMemGb) is not null ? await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false) : null;
+                    if (!p.Force && h is not null)
                     {
-                        // Like makeready: a family PC's PAUSE file and allowed hours are respected; the probe is the only call made then.
-                        var h = await probe.ProbeAsync(m, config.Policy, ct).ConfigureAwait(false);
                         if (h.HoldKind is HoldKind.Paused or HoldKind.OutsideHours)
                         {
                             return
@@ -231,7 +244,13 @@ public static partial class Cli
                         }
                     }
 
-                    return await RemoteMachineChecks(m, ssh, doctorScript ?? (x => RemoteScripts.Doctor(x, DoctorCheckSeconds)), ct).ConfigureAwait(false);
+                    var checks = await RemoteMachineChecks(m, ssh, doctorScript ?? (x => RemoteScripts.Doctor(x, DoctorCheckSeconds)), ct).ConfigureAwait(false);
+                    if (h is { Reachable: true } && MemoryFitCheck(m, h, config.Policy) is { } fit)
+                    {
+                        checks.Add(fit);
+                    }
+
+                    return checks;
                 }
                 finally
                 {
@@ -388,6 +407,15 @@ public static partial class Cli
         }
 
         lines.Add(Check("work_root", "ok", $"work_root {m.WorkRoot} ({(m.Os == MachineOs.Windows ? "windows" : "linux")}, transfer: {m.Transfer.ToString().ToLowerInvariant()})"));
+        if (HygieneWarning(m) is { } hygiene)
+        {
+            lines.Add(hygiene);
+        }
+
+        if (WorkRootWarning(m) is { } broad)
+        {
+            lines.Add(broad);
+        }
 
         if (m.Wake is { } wake)
         {
@@ -395,6 +423,72 @@ public static partial class Cli
             lines.Add(Check("wake", "ok", $"wake: magic packet to {wake.Broadcast}:{wake.Port} for {wake.Mac}, waits up to {wake.WaitSeconds} s. {Note}"));
         }
         return lines;
+    }
+
+    /// <summary>
+    /// 0.13.0 D2 (design review M11, review B-L9): a work_root that is a filesystem or drive root, a share root or a home folder (/, C:/,
+    /// /root, /home/NAME, C:/Users/NAME, ~) mixes lanq's folders with the account's own files. lanq prune refuses such a work_root; doctor says
+    /// so for every machine. Null otherwise.
+    /// </summary>
+    internal static DoctorCheck? WorkRootWarning(Machine m)
+    {
+        var root = m.WorkRoot.Replace('\\', '/').TrimEnd('/');
+        var broad = root.Length == 0 || root == "~"
+            || System.Text.RegularExpressions.Regex.IsMatch(
+                root, "^(?:[A-Za-z]:|//[^/]+/[^/]+|/root|/home/[^/]+|/Users/[^/]+|[A-Za-z]:/Users/[^/]+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+        return broad
+            ? new DoctorCheck(
+                "machine",
+                m.Name,
+                "work_root_scope",
+                "warn",
+                $"work_root {m.WorkRoot} is a filesystem or drive root, a share root or a home folder: lanq's jobs/, repos/ and locks/ would sit among the account's own files, and lanq prune refuses it",
+                "give this machine a work_root of its own, such as /srv/lanq or C:/lanq, in machines.yml")
+            : null;
+    }
+
+    /// <summary>
+    /// 0.13.0 D1 (review H3, owner decision: a WARN only, no automatic profile): a .NET machine that runs several jobs at once without hygiene:
+    /// shares MSBuild nodes and the compiler server between its slots, so a finishing job can take down a sibling's build. Null otherwise.
+    /// </summary>
+    internal static DoctorCheck? HygieneWarning(Machine m) =>
+        m.Capabilities.Contains("dotnet", StringComparer.OrdinalIgnoreCase) && m.MaxJobs > 1 && m.Hygiene is not { Count: > 0 }
+            ? new DoctorCheck(
+                "machine",
+                m.Name,
+                "hygiene",
+                "warn",
+                $"max_jobs {m.MaxJobs} and no hygiene: parallel .NET jobs share MSBuild nodes and the compiler server; a finishing job can break a sibling's build",
+                "add hygiene: [dotnet] to this machine in machines.yml (node reuse off costs a few seconds per build; docs/WORKERS.md)")
+            : null;
+
+    /// <summary>
+    /// 0.13.0 B4: for a machine with a job size (its job_mem_gb or the policy's), how many jobs its total memory less its floor covers, next to
+    /// max_jobs: OK when max_jobs fits, WARN when max_jobs exceeds it by 2 or more (lanq already caps the slots at that number; the fix names
+    /// the key, doctor never edits the file), WARN when not even one job fits (every job is mem_exceeds_total there, review L4), OK with a note
+    /// when the machine reports no memory (the size cannot be checked there, review M6). Null without a job size.
+    /// </summary>
+    internal static DoctorCheck? MemoryFitCheck(Machine m, MachineHealth h, PolicyConfig policy)
+    {
+        if ((m.JobMemGb ?? policy.JobMemGb) is not { } size)
+        {
+            return null;
+        }
+
+        DoctorCheck Check(string level, string detail, string? fix = null) => new("remote", m.Name, "job_mem", level, detail, fix);
+        var floor = m.MinFreeMemGb ?? policy.MinFreeMemGb;
+        if (h.MemTotalGb is not { } total)
+        {
+            return Check("ok", string.Create(CultureInfo.InvariantCulture, $"job_mem_gb {size:0.#} cannot be checked on {m.Name} (no memory report); its slots are max_jobs only"));
+        }
+
+        var fits = Math.Max(0, (int)Math.Floor(((total - floor) / size) + 1e-9));
+        var text = string.Create(CultureInfo.InvariantCulture, $"max_jobs {m.MaxJobs}, and {total:0.#} GB total - {floor:0.#} GB floor covers {fits} job{(fits == 1 ? "" : "s")} of {size:0.#} GB");
+        return fits == 0
+            ? Check("warn", text + ": every job is mem_exceeds_total here", $"lower job_mem_gb or min_free_mem_gb for {m.Name} in machines.yml (doctor never edits the file)")
+            : m.MaxJobs - fits >= 2
+                ? Check("warn", text + string.Create(CultureInfo.InvariantCulture, $" (lanq caps it at {fits})"), string.Create(CultureInfo.InvariantCulture, $"set max_jobs: {fits} for {m.Name} in machines.yml (doctor never edits the file)"))
+                : Check("ok", text);
     }
 
     /// <summary>Expands a leading ~ the way ssh does; a path with other ssh tokens (%d, %u) is skipped.</summary>
@@ -429,10 +523,12 @@ public static partial class Cli
         var script = doctorScript(m);
         if (m.Os == MachineOs.Windows && RemoteScripts.WindowsCommand(script).Length is var size && size > RemoteScripts.MaxWindowsCommandLength)
         {
-            return [Check("script_size", "fail", $"not checked: with its env: ({m.Env.Count} entries), path_prepend: ({m.PathPrepend.Count} entries) and "
+            var (inputs, fix) = RemoteScripts.WindowsScriptInputs(m);
+            return [Check("script_size", "fail", $"not checked: with its {inputs} and "
                 + $"{m.Capabilities.Count(RemoteScripts.ToolChecks.ContainsKey)} tool checks, the doctor script is {size} characters once encoded, "
-                + $"{size - RemoteScripts.MaxWindowsCommandLength} over the {RemoteScripts.MaxWindowsCommandLength}-character Windows command-line limit. "
-                + "Shorten env: or path_prepend: for this machine", "shorten env: or path_prepend: for this machine")];
+                + $"{size - RemoteScripts.MaxWindowsCommandLength} over the {RemoteScripts.MaxWindowsCommandLength}-character Windows command-line limit "
+                + $"({RemoteScripts.EncodedCostNote}). "
+                + $"Shorten {fix} for this machine", $"shorten {fix} for this machine")];
         }
 
         SshResult r;
@@ -484,6 +580,17 @@ public static partial class Cli
                 $"git older than 2.32: global config not isolated (git {git} ignores GIT_CONFIG_GLOBAL, so a filter or "
                     + "attributes file in the ssh user's ~/.gitconfig can still run during a job's checkout; update git on that machine)",
                 "update git on that machine to 2.32 or later"));
+        }
+
+        // 0.13.0 D1 (review B-L9): without lanq's native helper (PowerShell refused to load it, ConstrainedLanguage) Windows cleanup has no job
+        // object and stops only the recorded processes and their tree, so a process that left the tree can outlive its job.
+        if (m.Os == MachineOs.Windows && values.GetValueOrDefault("jobobject") == "none")
+        {
+            lines.Add(Check(
+                "job_object",
+                "warn",
+                "leftover processes possible (no job object): PowerShell on this machine did not load lanq's native helper, so cleanup stops only the processes it recorded and their children",
+                "let the ssh user's PowerShell run in FullLanguage mode (no AppLocker or WDAC constrained language for it); docs/WORKERS.md"));
         }
 
         if (m.Os == MachineOs.Windows && await WmiDenied(m, ssh, ct).ConfigureAwait(false) is { } why)

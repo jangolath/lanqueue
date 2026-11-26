@@ -19,7 +19,7 @@ public class ScriptTests
     {
         var s = RemoteScripts.Execute(T.Windows(), "job1", ".", ["dotnet", "test"]);
         Assert.Contains("& 'dotnet' 'test'", s, StringComparison.Ordinal);
-        Assert.Contains("'D:/lanq/jobs/job1'", s, StringComparison.Ordinal);
+        Assert.Contains("$rt='D:/lanq';$wt=$rt+'/jobs/job1'", s, StringComparison.Ordinal);
         Assert.Contains("$LASTEXITCODE", s, StringComparison.Ordinal);
     }
 

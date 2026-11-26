@@ -25,7 +25,11 @@ internal sealed class FakeSender : IMagicPacketSender
             throw Failure;
         }
 
-        Sent.Add((packet, broadcast, port));
+        lock (Sent)
+        {
+            Sent.Add((packet, broadcast, port)); // parallel plan jobs may send at the same moment
+        }
+
         OnSend?.Invoke(packet);
         return Task.CompletedTask;
     }

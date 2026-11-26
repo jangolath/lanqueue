@@ -77,6 +77,7 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `on` | `--on` | Machine names from your `machines.yml`; see the note under [lanq.yml and machines.yml](#lanqyml-and-machinesyml). |
 | `timeout` | `--timeout` | Minutes, 1 to 10080 (default 240). |
 | `shards` | `--shards` | A number (1 to 64) or `auto`. |
+| `shard_env` | (none) | `true`: the command splits its work through `LANQ_SHARD` / `LANQ_SHARDS` (a shard script reads them), so the dry run does not warn that it has no `{shard}` or `{shards}` (0.13.0). Needs `shards`. A command that reads `LANQ_SHARD` itself (`$LANQ_SHARD`, `${LANQ_SHARD}`, `$env:LANQ_SHARD`, `${env:LANQ_SHARD}`, `GetEnvironmentVariable('LANQ_SHARD')`, `%LANQ_SHARD%`, `!LANQ_SHARD!`, not in a `#` comment; a `#` inside quotes is not a comment) needs no `shard_env`; `LANQ_SHARDS` alone does not count, and any other way of reading it needs `shard_env: true`. |
 | `target_minutes` | `--target-minutes` | With `shards: auto`. |
 | `shard_retries` | `--shard-retries` | 0 to 3; only re-runs a shard whose machine stopped answering. |
 | `fail_fast` | `--fail-fast` | `true`: the first failing shard of this job cancels its other shards. Needs `shards`. |
@@ -275,7 +276,9 @@ running when the time ran out, for example between `after:` waves or while every
 `timeout:` still applies. `--wait` cannot outlast the plan's limit. Ctrl+C before the limit still ends the plan
 `Cancelled` (130). If the limit comes while the last job is only cleaning up, it stops nothing: lanq adds
 `[lanq] plan_timeout: nothing was stopped; every job had already ended` and the plan keeps its own status, without
-`planTimedOut`. After `--fail-fast` the limit still bounds the baseline reruns that follow. If it comes while
+`planTimedOut`. If it comes during the last job's `post:` step, the step is cut short, the job keeps its own result,
+and lanq says `[lanq] plan_timeout: only a post: step was cut short; every job had already ended (its result stands)`.
+After `--fail-fast` the limit still bounds the baseline reruns that follow. If it comes while
 `--fail-fast` is still stopping the jobs, those jobs stay `Cancelled`, lanq prints `[lanq] plan_timeout: 60 min reached
 while the jobs were already being stopped (--fail-fast or an error); no baseline rerun will start`, and every baseline
 is `inconclusive` ("plan_timeout reached before it started").
@@ -540,3 +543,21 @@ picks the folder fetched files go to. If a plan job is refused for an `env:` nam
 Machine names are per person: `big-01` in your `machines.yml` may not exist in a colleague's. In a shared `lanq.yml`
 prefer `needs:` and `size:` / `min_size:`, which travel. `on:` is for a plan only you use; an unknown name refuses the
 plan (exit 2) with your configured names.
+
+## Waits, the fallback and post: (0.13.0)
+
+- `--wait-eligible S` and `--wait-slot S` work with `--plan` as with a single run: plan-level budgets, idle clocks that
+  count only while no job of the plan holds a slot. `--wait S` sets both.
+- `fallback: off` (per job or in `defaults:`) keeps a job off the developer's PC whatever `--fallback` or
+  `policy.fallback` say (for example a Docker job). `on` and `ask` are refused: only the developer chooses to use their
+  PC, with `lanq run --plan --fallback on`.
+- With the fallback on or ask, a job that would fall back first wakes every sleeping pool machine it could use, at
+  once, and waits one shared wait of up to 120 s from the first packet (docs/WORKERS.md, "Wake before fallback"). Each
+  machine is woken at most once per run, also when parallel jobs look at the same time, so later jobs that could use the
+  same machines do not wait another 120 s. A job waits only for wakes on machines it could use (a `docker` job never
+  waits for a woken machine without docker), and its messages name only those. A machine known to be paused is never
+  woken; one paused while asleep may be, but it does not delay the fallback once it answers as paused. The plan's JSON
+  lists the packets in `wakes`.
+- `post:` (a list or a plain string, like `command:`) runs one more allowlisted command after the job, its fetch done,
+  before its cleanup (see docs/WORKERS.md). It runs once per shard, as written (`{shard}` is refused). `--post` is
+  refused with `--plan`: the plan's `post:` keys own it.

@@ -47,12 +47,12 @@ public static partial class PlanFileLoader
 
     /// <summary>The keys of defaults:, each with the same meaning as on a job.</summary>
     internal static readonly string[] DefaultKeys =
-        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results"];
+        ["dir", "needs", "mem", "size", "min_size", "on", "timeout", "env", "exclusive", "baseline", "baseline_ref", "fetch_max", "fetch_max_files", "results", "fallback", "post"];
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
-        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "fetch_max",
-        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results"];
+        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "shard_env", "target_minutes", "shard_retries", "fail_fast", "after", "fetch",
+        "fetch_max", "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results", "fallback", "post"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -66,6 +66,57 @@ public static partial class PlanFileLoader
 
     [GeneratedRegex(@"^[0-9]+\z", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex WholeNumberRegex();
+
+    /// <summary>
+    /// A reference to the shard index in a command: $LANQ_SHARD or ${LANQ_SHARD} (sh, exact case); $env:LANQ_SHARD, ${env:LANQ_SHARD} or
+    /// GetEnvironmentVariable('LANQ_SHARD') (PowerShell and .NET); %LANQ_SHARD%, %LANQ_SHARD:~...% or !LANQ_SHARD! (cmd), any case; not
+    /// LANQ_SHARDS or a longer name (0.13.0 review L4, review 2 L3). A warning heuristic only: a command it misses says shard_env: true.
+    /// </summary>
+    [GeneratedRegex(@"(?:\$\{?LANQ_SHARD|(?i:\$\{?env:LANQ_SHARD|GetEnvironmentVariable\(\s*['""]LANQ_SHARD['""]|%LANQ_SHARD[%:]|!LANQ_SHARD!))(?![A-Za-z0-9_])", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex ShardReferenceRegex();
+
+    /// <summary>
+    /// The argument without its shell comments: from a # at the start of a line or after white space, outside single or double quotes, to
+    /// the end of that line (sh and PowerShell alike). Escapes are not followed; it only decides whether to warn.
+    /// </summary>
+    internal static string WithoutComments(string argument)
+    {
+        var text = new System.Text.StringBuilder(argument.Length);
+        var quote = '\0';
+        for (var i = 0; i < argument.Length; i++)
+        {
+            var c = argument[i];
+            if (quote != '\0')
+            {
+                quote = c == quote ? '\0' : quote;
+            }
+            else if (c is '\'' or '"')
+            {
+                quote = c;
+            }
+            else if (c == '#' && (i == 0 || char.IsWhiteSpace(argument[i - 1])))
+            {
+                while (i < argument.Length && argument[i] != '\n')
+                {
+                    i++;
+                }
+
+                if (i < argument.Length)
+                {
+                    text.Append('\n');
+                }
+
+                continue;
+            }
+
+            text.Append(c);
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>True when an argument reads the shard index through the environment (<see cref="ShardReferenceRegex"/>) outside a comment.</summary>
+    internal static bool ReadsShardIndex(string argument) => ShardReferenceRegex().IsMatch(WithoutComments(argument));
 
     /// <summary>
     /// The plan file lanq run --plan reads: <paramref name="planFile"/> (relative to <paramref name="cwd"/>) when given, else lanq.yml at the
@@ -504,9 +555,32 @@ public static partial class PlanFileLoader
             args.Add("--fail-fast");
         }
 
+        // shard_env: true (0.13.0) says the command splits its work through LANQ_SHARD / LANQ_SHARDS (a shard script reads them), so the dry
+        // run does not warn that it has no {shard}. It changes nothing that runs, so it is not on the lanq run line.
+        var shardEnv = values.TryGetValue("shard_env", out var shardEnvNode) && Flag(shardEnvNode, "shard_env", Error);
+        if (shardEnv && !values.ContainsKey("shards"))
+        {
+            throw Error("shard_env: needs shards: (it only says how a sharded job's command splits its work).");
+        }
+
         if (values.TryGetValue("exclusive", out var exclusive) && Flag(exclusive, "exclusive", Error))
         {
             args.Add("--exclusive");
+        }
+
+        // fallback: off (0.13.0 B3) is --fallback off: a repository may forbid running a job on the developer's PC, never choose it.
+        if (values.TryGetValue("fallback", out var fallbackNode))
+        {
+            var word = Scalar(fallbackNode, "fallback");
+            if (word is not ("off" or "false"))
+            {
+                // Another spelling (Off, no) is most likely meant as off: say the one form lanq.yml takes, not a refusal of a choice (review A-L15).
+                throw Error(word is "on" or "ask" or "true"
+                    ? $"fallback: {word} is refused: a repository never chooses to run on your PC; use --fallback on. lanq.yml may only say fallback: off."
+                    : "fallback: lanq.yml may only say fallback: off (lower case) or fallback: false.");
+            }
+
+            args.AddRange(["--fallback", "off"]);
         }
 
         // baseline: true is --baseline, baseline_ref: REF is --baseline-ref REF (which implies it, as on the command line). The job's own keys
@@ -570,6 +644,26 @@ public static partial class PlanFileLoader
             args.AddRange(["--env", envName + "=" + envValue]);
         }
 
+        // post: (0.13.0) is --post: the same list-or-plain-string form as command:, without {shard} (the step runs once per shard as written).
+        // When every word is plain, the run line carries it as --post "<words>" (review B-L1: runArgv reruns the job with its post step); a
+        // list with words --post cannot carry (spaces, quotes, backslashes) is set on the parsed job only, and the dry run's post array shows it.
+        List<string>? post = null;
+        var postOnLine = false;
+        if (values.TryGetValue("post", out var postNode))
+        {
+            post = Command(postNode, m => Error("post" + m[m.IndexOf(':', StringComparison.Ordinal)..]));
+            if (post.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)))
+            {
+                throw Error("post: cannot use {shard} or {shards}: the step runs once per shard as written.");
+            }
+
+            postOnLine = PostFitsTheLine(post);
+            if (postOnLine)
+            {
+                args.AddRange(["--post", string.Join(' ', post)]);
+            }
+        }
+
         args.Add("--");
         args.AddRange(command);
 
@@ -590,7 +684,28 @@ public static partial class PlanFileLoader
             throw Error($"{key} (line {values[key].Start.Line}): {PlanFetch.RaiseRefused}");
         }
 
-        return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed);
+        if (post is not null && !postOnLine)
+        {
+            parsed = parsed with { Post = post };
+        }
+
+        return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed)
+        {
+            ShardEnv = shardEnv,
+        };
+    }
+
+    /// <summary>True when --post "<words joined by spaces>" gives back exactly these words (none has a space or a character --post refuses).</summary>
+    private static bool PostFitsTheLine(List<string> post)
+    {
+        try
+        {
+            return !post.Any(a => a.Contains(' ', StringComparison.Ordinal) || a.Length == 0) && ParsedArgs.ParsePost(string.Join(' ', post)).SequenceEqual(post);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -767,7 +882,9 @@ public static partial class PlanFileLoader
 
     /// <summary>
     /// What a dry run warns about (stderr on a real run): two jobs with the same command in the same folder, and a sharded job whose command
-    /// has neither {shard} nor {shards} (each shard would run the same command unless a script reads LANQ_SHARD).
+    /// has neither {shard} nor {shards} (each shard would run the same command unless a script reads LANQ_SHARD). No such warning when the
+    /// command itself reads the index (as $LANQ_SHARD, ${env:LANQ_SHARD}, %LANQ_SHARD% and the like, not in a comment; LANQ_SHARDS alone,
+    /// the count, does not split the work: <see cref="ReadsShardIndex"/>) or the job says shard_env: true.
     /// </summary>
     private static List<string> Warnings(List<PlanJob> jobs)
     {
@@ -785,10 +902,11 @@ public static partial class PlanFileLoader
                 seen[key] = job;
             }
 
-            if (job.Args.Shards is not null
-                && !job.Args.Argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)))
+            if (job.Args.Shards is not null && !job.ShardEnv
+                && !job.Args.Argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)
+                    || ReadsShardIndex(a)))
             {
-                warnings.Add($"job '{job.Name}' has shards: but its command has no {{shard}} or {{shards}}: each shard runs the same command unless a script reads LANQ_SHARD");
+                warnings.Add($"job '{job.Name}' has shards: but its command has no {{shard}} or {{shards}}: each shard runs the same command unless a script reads LANQ_SHARD (then say shard_env: true)");
             }
         }
 

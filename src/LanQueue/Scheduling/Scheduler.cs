@@ -52,7 +52,12 @@ public static class Scheduler
             why,
             Eligibility.IsPermanent(reason),
             Math.Max(0, m.MaxJobs - h.SlotsLive),
-            reason == Exclusion.None ? Math.Max(0, FreeFor(m, h, needs.MemGb, 0, 0, needs.Exclusive)) : 0);
+            reason == Exclusion.None ? Math.Max(0, FreeFor(m, h, needs, 0, 0)) : 0)
+        {
+            NeedGb = NeedGb(m, needs),
+            SlotCap = SlotCap(m, h, needs),
+            FloorGb = FloorGb(m, needs),
+        };
     }
 
     private static (Exclusion Reason, string? Why) Judge(Machine m, MachineHealth h, JobNeeds needs, IReadOnlySet<string>? avoid)
@@ -80,17 +85,22 @@ public static class Scheduler
             return env;
         }
 
-        // --mem: a reachable machine whose total memory is below it, or that never reports memory, can never take the job. (A machine whose
-        // probe output was unreadable reports nothing at all: that is its hold, not its memory.)
+        // Memory (--mem, or a job size: job_mem_gb, 0.13.0): a reachable machine whose total memory less its floor is below the need can
+        // never take the job. One that never reports memory cannot take a job that gave --mem; a need that comes only from a job size then
+        // falls back to slots (a machine fact must not drop a machine that cannot report). (A machine whose probe output was unreadable
+        // reports nothing at all: that is its hold, not its memory.)
         var reportsHealth = h.Reachable && h.HoldKind != HoldKind.Unreadable;
-        if (needs.MemGb is { } need && reportsHealth && !(h.MemFreeGb >= need))
+        var memNeed = NeedGb(m, needs);
+        var floor = FloorGb(m, needs);
+        if (memNeed is { } need && reportsHealth)
         {
-            if (h.MemTotalGb is { } total && total < need)
+            if (h.MemTotalGb is { } total && Mb(total) - Mb(floor) < Mb(need))
             {
-                return (Exclusion.MemExceedsTotal, string.Create(CultureInfo.InvariantCulture, $"{total:0.0} GB total memory, --mem needs {need:0.0} GB"));
+                return (Exclusion.MemExceedsTotal, string.Create(
+                    CultureInfo.InvariantCulture, $"{total:0.0} GB total memory, {NeedText(m, needs, need)}{FloorText(floor)}"));
             }
 
-            if (h.MemFreeGb is null)
+            if (h.MemFreeGb is null && needs.MemGb is not null)
             {
                 return (Exclusion.MemUnknown, "free memory unknown (--mem needs the machine to report it)");
             }
@@ -142,9 +152,9 @@ public static class Scheduler
             }, hold);
         }
 
-        if (needs.MemGb is { } want && h.MemFreeGb is { } free && free < want)
+        if (memNeed is { } want && h.MemFreeGb is { } free && Mb(free) - Mb(floor) < Mb(want))
         {
-            return (Exclusion.MemBelowRequest, string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, --mem needs {want:0.0} GB"));
+            return (Exclusion.MemBelowRequest, string.Create(CultureInfo.InvariantCulture, $"{free:0.0} GB free memory, {NeedText(m, needs, want)}{FloorText(floor)}"));
         }
 
         if (avoid is not null && avoid.Contains(m.Name))
@@ -159,10 +169,93 @@ public static class Scheduler
             return (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}{StaleNote(h)}; --exclusive needs all {m.MaxJobs} free)"));
         }
 
-        return h.SlotsLive >= m.MaxJobs
-            ? (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}{StaleNote(h)})"))
+        var cap = SlotCap(m, h, needs);
+        return h.SlotsLive >= cap
+            ? (Exclusion.Busy, string.Create(CultureInfo.InvariantCulture, $"busy (slots {h.SlotsUsed}/{m.MaxJobs}{StaleNote(h)}{CapNote(m, cap)})"))
             : (Exclusion.None, null);
     }
+
+    /// <summary>
+    /// The job's memory need on <paramref name="m"/> (0.13.0 B1): the larger of its own --mem and the machine's job size (its job_mem_gb,
+    /// else policy.job_mem_gb). Either may be absent; null when both are (no memory accounting, as before). Neither side can make the
+    /// other's number smaller: the repository declares a minimum, the machine owner knows the local multiplier.
+    /// </summary>
+    public static double? NeedGb(Machine m, JobNeeds needs) =>
+        (needs.MemGb, JobSizeGb(m, needs)) switch
+        {
+            ({ } mem, { } size) => Math.Max(mem, size),
+            ({ } mem, null) => mem,
+            (null, { } size) => size,
+            _ => null,
+        };
+
+    /// <summary>
+    /// What a job that no machine took at this look is waiting for (0.13.0 B2, see <see cref="WaitKind"/>): a slot wait when some machine
+    /// could take it but is busy, when an eligible machine's claim lost the race (its slot was taken first; not when the claim failed over
+    /// ssh: <paramref name="claimFailedOverSsh"/>), or when a reachable machine running lanq jobs is short of memory (a LowMemory hold or
+    /// mem_below_request) while its total less its floor covers the need, or is held for load or memory pressure: what a finishing job gives
+    /// back. Otherwise an eligible wait.
+    /// </summary>
+    public static WaitKind WaitKindOf(IReadOnlyList<Assessment> assessed, IReadOnlySet<string>? claimFailedOverSsh = null)
+    {
+        foreach (var a in assessed)
+        {
+            var slot = a.Reason switch
+            {
+                Exclusion.Busy => true,
+                Exclusion.None => claimFailedOverSsh is null || !claimFailedOverSsh.Contains(a.Machine.Name),
+                Exclusion.LowMemory or Exclusion.MemBelowRequest => a.Health.Reachable && a.Health.SlotsLive > 0
+                    && (a.NeedGb is not { } need || (a.Health.MemTotalGb is { } total && Mb(total) - Mb(a.FloorGb) >= Mb(need))),
+
+                // p1 review H1 (owner decision): load or memory pressure on a machine running lanq jobs is load a finishing job gives back.
+                Exclusion.Load or Exclusion.MemoryPressure => a.Health.Reachable && a.Health.SlotsLive > 0,
+                _ => false,
+            };
+            if (slot)
+            {
+                return WaitKind.Slot;
+            }
+        }
+
+        return WaitKind.Eligible;
+    }
+
+    /// <summary>The machine's job size: its job_mem_gb, else the policy's, else null.</summary>
+    private static double? JobSizeGb(Machine m, JobNeeds needs) => m.JobMemGb ?? needs.Policy?.JobMemGb;
+
+    /// <summary>The free memory the machine keeps: its min_free_mem_gb, else the policy's, else (no policy given) 0.</summary>
+    public static double FloorGb(Machine m, JobNeeds needs) => m.MinFreeMemGb ?? needs.Policy?.MinFreeMemGb ?? 0;
+
+    /// <summary>
+    /// The slots the machine may run at once for this job: max_jobs, capped by floor((total - floor) / job size) when the machine has a job
+    /// size and reports its total memory (0.13.0, M5). The claim script uses the same cap, and slot files are shared by every lanq run, so
+    /// parallel orchestrators cannot overcommit a machine whose jobs reach their peak memory only minutes after they start. --mem alone
+    /// does not cap: it is the job's own declaration, and the free-memory test gates each next job.
+    /// </summary>
+    public static int SlotCap(Machine m, MachineHealth h, JobNeeds needs)
+    {
+        if (JobSizeGb(m, needs) is not { } size || h.MemTotalGb is not { } total)
+        {
+            return m.MaxJobs;
+        }
+
+        var fit = (Mb(total) - Mb(FloorGb(m, needs))) / Math.Max(1, Mb(size));
+        return (int)Math.Clamp(fit, 1, m.MaxJobs); // never 0: a machine the size cannot fit at all is mem_exceeds_total, not busy
+    }
+
+    /// <summary>Whole megabytes (rounded), so that (8.7 - 2.7) / 3 is 2 and not 1.9999999999999998 (L4).</summary>
+    private static long Mb(double gb) => (long)Math.Round(gb * 1024, MidpointRounding.AwayFromZero);
+
+    private static string FloorText(double floor) =>
+        floor > 0 ? string.Create(CultureInfo.InvariantCulture, $" above its {floor:0.0} GB floor") : "";
+
+    private static string NeedText(Machine m, JobNeeds needs, double need) =>
+        needs.MemGb is { } mem && mem >= need
+            ? string.Create(CultureInfo.InvariantCulture, $"--mem needs {need:0.0} GB")
+            : string.Create(CultureInfo.InvariantCulture, $"a job needs {need:0.0} GB here (job_mem_gb{(m.JobMemGb is null ? " in policy" : "")})");
+
+    private static string CapNote(Machine m, int cap) =>
+        cap < m.MaxJobs ? string.Create(CultureInfo.InvariantCulture, $"; job_mem_gb caps it at {cap}") : "";
 
     /// <summary>
     /// ", 1 stale: reclaimed by the next claim" when the probe saw stale slots, ", 1 stale, not reclaimable" for stale slots a claim of this run
@@ -180,12 +273,27 @@ public static class Scheduler
     /// report memory is already excluded under --mem. An <paramref name="exclusive"/> job takes every slot of its machine: 1 when no slot
     /// is in use and none of this run's shards is there, else 0 (--mem still applies).
     /// </summary>
-    public static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours, int oursNotRunning, bool exclusive = false)
+    public static int FreeFor(Machine machine, MachineHealth h, double? memGb, int ours, int oursNotRunning, bool exclusive = false) =>
+        FreeFor(machine, h, new JobNeeds([], memGb, false) { Exclusive = exclusive }, ours, oursNotRunning);
+
+    /// <summary>
+    /// 0.13.0 B1: as above with the job's per-machine need (<see cref="NeedGb"/>), the machine's floor kept free (<see cref="FloorGb"/>), and
+    /// the slots capped by <see cref="SlotCap"/>: min(cap - used, floor((free - floor - need x ours not running) / need)), in whole MB.
+    /// Unknown free memory counts slots only (the judge already refused a --mem job there).
+    /// </summary>
+    public static int FreeFor(Machine machine, MachineHealth h, JobNeeds needs, int ours, int oursNotRunning)
     {
-        var slots = exclusive
+        var cap = SlotCap(machine, h, needs);
+        var slots = needs.Exclusive
             ? (h.SlotsLive == 0 && ours == 0 && machine.MaxJobs > 0 ? 1 : 0)
-            : machine.MaxJobs - Math.Max(h.SlotsLive, ours);
-        return memGb is { } need && h.MemFreeGb is { } free ? Math.Min(slots, Math.Max(0, (int)Math.Floor((free - (oursNotRunning * need)) / need))) : slots;
+            : cap - Math.Max(h.SlotsLive, ours);
+        if (NeedGb(machine, needs) is not { } need || h.MemFreeGb is not { } free)
+        {
+            return slots;
+        }
+
+        var usable = Mb(free) - Mb(FloorGb(machine, needs)) - (oursNotRunning * Mb(need));
+        return Math.Min(slots, (int)Math.Max(0, usable / Math.Max(1, Mb(need))));
     }
 
     /// <summary>
@@ -220,9 +328,13 @@ public static class Scheduler
     /// --shards auto: the free slots (<see cref="FreeFor"/>) of every machine that can take the job now, in rank order, and N = their sum, at
     /// least 1 and at most <paramref name="max"/>. For an <paramref name="exclusive"/> job each idle machine counts once.
     /// </summary>
-    public static (int Count, int Total, List<(Machine Machine, int Free)> Free) AutoCount(IReadOnlyList<Assessment> assessed, double? memGb, int max, bool exclusive = false)
+    public static (int Count, int Total, List<(Machine Machine, int Free)> Free) AutoCount(IReadOnlyList<Assessment> assessed, double? memGb, int max, bool exclusive = false) =>
+        AutoCount(assessed, new JobNeeds([], memGb, false) { Exclusive = exclusive }, max);
+
+    /// <summary>As above with the job's needs (0.13.0: per-machine need, floor and slot cap; see <see cref="FreeFor(Machine, MachineHealth, JobNeeds, int, int)"/>).</summary>
+    public static (int Count, int Total, List<(Machine Machine, int Free)> Free) AutoCount(IReadOnlyList<Assessment> assessed, JobNeeds needs, int max)
     {
-        List<(Machine Machine, int Free)> free = [.. Rank(assessed).Select(a => (a.Machine, FreeFor(a.Machine, a.Health, memGb, 0, 0, exclusive))).Where(f => f.Item2 > 0)];
+        List<(Machine Machine, int Free)> free = [.. Rank(assessed).Select(a => (a.Machine, FreeFor(a.Machine, a.Health, needs, 0, 0))).Where(f => f.Item2 > 0)];
         var total = free.Sum(f => f.Free);
         return (Math.Clamp(total, 1, max), total, free);
     }

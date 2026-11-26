@@ -19,8 +19,17 @@ public sealed partial class JobRunner
     /// It cannot foresee an archive that fails to build or a slot taken between the probe and the start; with --shards auto it plans from
     /// the one probe that picked N (a real run probes again before placing).
     /// </summary>
-    public async Task<JobPlan> PlanAsync(JobRequest req, ShardOptions? shards, CancellationToken ct) =>
-        shards is null ? await PlanOneAsync(NewId(), req, ct).ConfigureAwait(false) : await PlanShardsAsync(NewId(), req, shards, ct).ConfigureAwait(false);
+    public async Task<JobPlan> PlanAsync(JobRequest req, ShardOptions? shards, CancellationToken ct)
+    {
+        var plan = shards is null ? await PlanOneAsync(NewId(), req, ct).ConfigureAwait(false) : await PlanShardsAsync(NewId(), req, shards, ct).ConfigureAwait(false);
+        return plan.Status == nameof(JobStatus.NoCapacity) ? plan with { WouldFallBack = WouldFallBack(req) } : plan;
+    }
+
+    /// <summary>
+    /// The dry run's view of the fallback (review A-L4): this computer's entry when, at the point the job would end NoCapacity, lanq run would go
+    /// there instead (the fallback can act and fits the job by the config; its own probe and slots are not looked at), else null.
+    /// </summary>
+    internal string? WouldFallBack(JobRequest req) => FallbackCouldTake(req) ? config.Fallback!.Name : null;
 
     private async Task<JobPlan> PlanOneAsync(string id, JobRequest req, CancellationToken ct)
     {
@@ -125,7 +134,7 @@ public sealed partial class JobRunner
         }
 
         // A fresh run has no shard of its own anywhere yet: the free slots are FreeFor with none placed, dealt round-robin as DispatchShards does.
-        var dealt = Scheduler.Deal(Placeable(assessed, template, _ => 0, _ => 0), shards, (_, _) => true);
+        var dealt = Scheduler.Deal(Placeable(assessed, MemNeeds(template), _ => 0, _ => 0), shards, (_, _) => true);
         List<ShardPlacement> placement = [.. dealt
             .GroupBy(d => d.Machine.Machine.Name, StringComparer.Ordinal)
             .Select(g => new ShardPlacement(g.First().Machine.Machine, [.. g.Select(d => d.Item.Index).Order()]))];
@@ -156,29 +165,41 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// No machine can take the job now: the NoCapacity lanq run would end with (its message, retryable), and the sleeper it would wake first,
-    /// by the rules of <see cref="Dispatch"/>: only with --wait above 0, without --no-wake, and when not every machine is ruled out for good.
+    /// by the rules of <see cref="Dispatch"/>: only with --wait above 0 or before a fallback (<see cref="MayWake"/>), without --no-wake, and when
+    /// not every machine is ruled out for good.
     /// </summary>
     private JobPlan NoneNow(string id, JobRequest req, JobNeeds needs, IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobPlan plan)
     {
         var none = NoCapacity(id, [.. plan.Assessed], "");
-        var wake = !plan.Never && req.Wait > TimeSpan.Zero && !req.NoWake ? WouldWake(candidates, needs, probes) : null;
-        return plan with { Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable, WouldWake = wake };
+        // As the real run: the wake gate uses the eligible budget (p1 review L2): the first sleeper by name; or, before falling back to this
+        // computer (0.13.0), every sleeper the job could use, at once.
+        var wake = !plan.Never && MayWake(req) ? WouldWake(candidates, needs, probes) : [];
+        var all = WakesBeforeFallback(req) && wake.Count > 0 ? wake : null;
+        return plan with
+        {
+            Status = nameof(JobStatus.NoCapacity),
+            ExitCode = none.CliExitCode,
+            Message = none.Message,
+            Machine = null,
+            Retryable = none.Retryable,
+            WouldWake = wake.FirstOrDefault(),
+            WouldWakeAll = all,
+        };
     }
 
     /// <summary>
-    /// The machine <see cref="WakeBestSleeperAsync"/> would send a packet to: the first by name that <see cref="CouldWakeFor"/> allows and that
+    /// The machines <see cref="WakeSleepersAsync"/> may send a packet to, by name: those <see cref="CouldWakeFor"/> allows and that
     /// <see cref="WakeService.Evaluate"/> says to wake. Asks the rules of a fresh WakeService whose sender refuses to send, so nothing is claimed or sent.
     /// </summary>
     /// <param name="candidates">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> is index-aligned with it.</param>
-    private string? WouldWake(IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes)
+    private List<string> WouldWake(IReadOnlyList<Machine> candidates, JobNeeds needs, MachineHealth[] probes)
     {
         var rules = new WakeService(new RefusingMagicPacketSender(), clock);
         var now = clock.GetLocalNow().DateTime;
-        return WakeOrder(candidates)
+        return [.. WakeOrder(candidates)
             .Where(i => CouldWakeFor(candidates[i], probes[i], needs, archiveFailed: false)
                 && rules.Evaluate(candidates[i], probes[i], now, config.Policy).Decision == WakeDecision.Wake)
-            .Select(i => candidates[i].Name)
-            .FirstOrDefault();
+            .Select(i => candidates[i].Name)];
     }
 
     /// <summary>A plan for a run that would end before starting: refused (2), no machine at all (75), or the snapshot failed (70).</summary>

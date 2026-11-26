@@ -125,6 +125,51 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>lanq run --fail-fast: with --shards the first shard that does not complete cancels the rest (also in <see cref="Shards"/>); with --plan the first job.</summary>
     public bool FailFast { get; init; }
 
+    /// <summary>lanq run --wait-eligible S (0.13.0): seconds a job may wait while no machine can take this kind of job; null when not given.</summary>
+    public int? WaitEligibleSeconds { get; init; }
+
+    /// <summary>lanq run --wait-slot S (0.13.0): seconds a job may wait while a machine could take it but its slots are full; null when not given.</summary>
+    public int? WaitSlotSeconds { get; init; }
+
+    /// <summary>True when --wait-eligible or --wait-slot was given (then <see cref="WaitSeconds"/> is the larger of the two; --wait is refused with them).</summary>
+    public bool SplitWait => WaitEligibleSeconds is not null || WaitSlotSeconds is not null;
+
+    /// <summary>The eligible-wait budget in seconds: --wait-eligible (0 when only --wait-slot was given), else --wait.</summary>
+    public int EligibleSeconds => SplitWait ? WaitEligibleSeconds ?? 0 : WaitSeconds;
+
+    /// <summary>The slot-wait budget in seconds: --wait-slot (0 when only --wait-eligible was given), else --wait.</summary>
+    public int SlotSeconds => SplitWait ? WaitSlotSeconds ?? 0 : WaitSeconds;
+
+    /// <summary>Both wait budgets (<see cref="Scheduling.WaitBudgets"/>).</summary>
+    public Scheduling.WaitBudgets Budgets => new(TimeSpan.FromSeconds(EligibleSeconds), TimeSpan.FromSeconds(SlotSeconds));
+
+    /// <summary>
+    /// lanq run --post "CMD" (lanq.yml post:, 0.13.0): a step run after the job (after its fetch, before its cleanup, in the same slot), its exit
+    /// code a warning only; null without one. Checked like the command (allowlist, secrets, Windows rules).
+    /// </summary>
+    public IReadOnlyList<string>? Post { get; init; }
+
+    /// <summary>lanq prune --older-than Nh|Nd (0.13.0 D2) in seconds, or null for the default (2 days).</summary>
+    public long? OlderThanSeconds { get; init; }
+
+    /// <summary>lanq prune --caches (0.13.0 D2): also old, unused repository caches.</summary>
+    public bool Caches { get; init; }
+
+    /// <summary>True when --wait asked for more than a week (as 0.12 allowed): lanq waits a week and says so (p1 review L1).</summary>
+    public bool WaitClamped { get; init; }
+
+    /// <summary>True when --wait, --wait-eligible or --wait-slot was given (0.13.0 B3: without any, a run that may fall back waits 120 s for a slot first).</summary>
+    public bool WaitGiven { get; init; }
+
+    /// <summary>True when --wait or --wait-eligible was given (--wait-slot alone leaves the eligible budget to lanq: wake before fallback).</summary>
+    public bool EligibleWaitGiven => WaitGiven && (WaitEligibleSeconds is not null || WaitSlotSeconds is null);
+
+    /// <summary>
+    /// lanq run --fallback off|on|ask (0.13.0 B3; lanq.yml fallback: off): overrides policy.fallback for this run, or null. Also valid with --plan,
+    /// where it applies to every job except one whose lanq.yml says fallback: off.
+    /// </summary>
+    public FallbackMode? Fallback { get; init; }
+
     /// <summary>
     /// lanq run --plan --plan-timeout M (lanq.yml plan_timeout: M; the command line wins): the whole plan's limit in minutes, 1 to 10080, from
     /// after the snapshot to the last baseline (0.10.0). Null without it.
@@ -159,12 +204,12 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     internal static readonly string[] PlanFileOptions =
     [
         "--needs", "--dir", "--mem", "--timeout", "--shards", "--shard-retries", "--target-minutes", "--fetch", "--env", "--exclusive", "--baseline",
-        "--baseline-ref", "--results",
+        "--baseline-ref", "--results", "--post",
     ];
 
     /// <summary>What lanq run --plan takes (the refusal of a run-only option lists them).</summary>
     internal const string PlanTakes =
-        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
+        "lanq run --plan takes --plan-file, --only, --on, --size, --min-size, --plan-timeout, --fetch-dir, --fetch-max, --fetch-max-files, --wait, --wait-eligible, --wait-slot, --fallback, --no-wake, --json, --log-tail, --dry-run, --fail-fast and --config";
 
     /// <summary>
     /// The command line exactly as given (without the program name). A suggested next step that re-runs the command edits a copy of it
@@ -180,10 +225,11 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         [
             "--needs", "--dir", "--wait", "--timeout", "--mem", "--json", "--no-wake", "--fetch", "--fetch-dir", "--fetch-max", "--fetch-max-files", "--shards",
             "--shard-retries", "--fail-fast", "--target-minutes", "--log-tail", "--dry-run", "--on", "--size", "--min-size", "--plan", "--plan-file", "--only",
-            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results",
+            "--env", "--exclusive", "--baseline", "--baseline-ref", "--plan-timeout", "--results", "--wait-eligible", "--wait-slot", "--fallback", "--post",
         ],
         ["stats"] = ["--json", "--target-minutes"],
         ["unlock"] = ["--all", "--yes"],
+        ["prune"] = ["--all", "--older-than", "--caches", "--yes", "--force", "--json"],
         ["doctor"] = ["--remote", "--force", "--json"],
         ["makeready"] = ["--ssh", "--os", "--json", "--force", "--all", "--key-env", "--setup", "--add", "--name", "--yes", "--tune"],
         ["init"] = ["--json"],
@@ -193,7 +239,7 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     };
 
     /// <summary>Commands that take one positional machine name.</summary>
-    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready", "wake" };
+    private static readonly HashSet<string> TakesTarget = new(StringComparer.Ordinal) { "unlock", "makeready", "wake", "prune" };
 
     /// <summary>Everything after a bare "--" is the job command and is never interpreted as lanq options.</summary>
     public static ParsedArgs Parse(string[] args)
@@ -205,6 +251,13 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         var needs = new List<string>();
         var dir = ".";
         var wait = 0;
+        int? waitEligible = null;
+        int? waitSlot = null;
+        FallbackMode? fallback = null;
+        var waitClamped = false;
+        IReadOnlyList<string>? post = null;
+        long? olderThan = null;
+        var cachesFlag = false;
         var timeout = DefaultTimeoutMinutes;
         double? mem = null;
         var json = false;
@@ -266,7 +319,31 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
                     waitForSsh = true;
                     break;
                 case "--wait" when i + 1 < own.Length:
-                    wait = int.Parse(own[++i], CultureInfo.InvariantCulture);
+                    (wait, waitClamped) = PlainWaitValue(own[++i]);
+                    break;
+                case "--wait-eligible" when i + 1 < own.Length:
+                    waitEligible = WaitValue("--wait-eligible", own[++i]);
+                    break;
+                case "--wait-slot" when i + 1 < own.Length:
+                    waitSlot = WaitValue("--wait-slot", own[++i]);
+                    break;
+                case "--older-than" when i + 1 < own.Length:
+                    olderThan = Cli.ParseAge(own[++i]);
+                    break;
+                case "--caches":
+                    cachesFlag = true;
+                    break;
+                case "--post" when i + 1 < own.Length:
+                    post = ParsePost(own[++i]);
+                    break;
+                case "--fallback" when i + 1 < own.Length:
+                    fallback = own[++i] switch
+                    {
+                        "off" => FallbackMode.Off,
+                        "on" => FallbackMode.On,
+                        "ask" => FallbackMode.Ask,
+                        _ => throw new ArgumentException("--fallback must be off, on or ask (whether a job the pool cannot take may run on this computer's fallback entry)."),
+                    };
                     break;
                 case "--timeout" when i + 1 < own.Length:
                     timeout = int.Parse(own[++i], CultureInfo.InvariantCulture);
@@ -492,8 +569,27 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
             throw new ArgumentException($"lanq {command} does not take a command after --; only lanq run does.");
         }
 
+        // 0.13.0: --wait sets both budgets; the split flags set one each. Together the meaning would be ambiguous.
+        if (command == "run" && seen.Contains("--wait") && (waitEligible is not null || waitSlot is not null))
+        {
+            throw new ArgumentException("--wait sets both wait budgets; give either --wait, or --wait-eligible and/or --wait-slot, not both.");
+        }
+
+        if (waitEligible is not null || waitSlot is not null)
+        {
+            wait = Math.Max(waitEligible ?? 0, waitSlot ?? 0);
+        }
+
         return new ParsedArgs(command, config, needs, dir, wait, argv)
         {
+            WaitEligibleSeconds = waitEligible,
+            WaitSlotSeconds = waitSlot,
+            WaitGiven = seen.Contains("--wait") || waitEligible is not null || waitSlot is not null,
+            WaitClamped = waitClamped,
+            Post = post,
+            OlderThanSeconds = olderThan,
+            Caches = cachesFlag,
+            Fallback = fallback,
             TimeoutMinutes = timeout,
             MemGb = mem,
             Json = json,
@@ -603,6 +699,48 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
         }
     }
 
+    /// <summary>The longest wait budget (seconds): one week.</summary>
+    internal const int MaxWaitSeconds = 604800;
+
+    /// <summary>--wait, --wait-eligible, --wait-slot: whole seconds from 0 to one week (0.13.0 adds the range check; before, any int was taken).</summary>
+    internal static int WaitValue(string option, string text) =>
+        int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds) && seconds is >= 0 and <= MaxWaitSeconds
+            ? seconds
+            : throw new ArgumentException($"{option} must be a whole number of seconds from 0 to {MaxWaitSeconds} (one week), for example {option} 600.");
+
+    /// <summary>
+    /// --post "CMD" (0.13.0): split on spaces only. Quotes, backquotes and backslashes are refused (PowerShell 5.1 and POSIX shells pass them
+    /// differently), and so are {shard}/{shards} (the step runs once per shard, as it is). Arguments with spaces go in lanq.yml post: as a list.
+    /// </summary>
+    internal static IReadOnlyList<string> ParsePost(string text)
+    {
+        if (text.Any(c => c is '"' or '\'' or '`' or '\\') || text.Any(char.IsControl))
+        {
+            throw new ArgumentException("--post takes a plain command split on spaces (no quotes, backquotes or backslashes); use lanq.yml post: for arguments with spaces.");
+        }
+
+        var argv = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (argv.Length == 0)
+        {
+            throw new ArgumentException("--post needs a command, for example --post \"dotnet build-server status\".");
+        }
+
+        return argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal))
+            ? throw new ArgumentException("--post cannot use {shard} or {shards}: the step runs once per shard as written.")
+            : argv;
+    }
+
+    /// <summary>
+    /// --wait: whole seconds from 0 (negative or non-numeric is refused, 0.13.0). Above one week it is taken as one week, as 0.12 took any
+    /// number ("wait for ever" scripts keep working): the second value says it was clamped, for a note on stderr (p1 review L1).
+    /// </summary>
+    internal static (int Seconds, bool Clamped) PlainWaitValue(string text) =>
+        text.Length > 0 && text.All(char.IsAsciiDigit)
+            ? text.TrimStart('0').Length <= 9 && int.Parse(text, CultureInfo.InvariantCulture) <= MaxWaitSeconds
+                ? (int.Parse(text, CultureInfo.InvariantCulture), false)
+                : (MaxWaitSeconds, true)
+            : throw new ArgumentException($"--wait must be a whole number of seconds from 0 (at most {MaxWaitSeconds}, one week, is used), for example --wait 600.");
+
     /// <summary>--plan-timeout (and lanq.yml plan_timeout:): whole minutes from 1 to 10080 (one week), as --timeout.</summary>
     internal static int ParsePlanTimeout(string text) =>
         int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var minutes) && minutes is >= 1 and <= 10080
@@ -649,12 +787,15 @@ public static partial class Cli
           lanq run ... [--env NAME=VALUE ...] -- dotnet test
           lanq run ... --exclusive [--shards N|auto] -- dotnet test
           lanq run ... --baseline | --baseline-ref REF [--shards N|auto] -- dotnet test
+          lanq run ... [--wait-eligible 3600] [--wait-slot 14400] -- dotnet test
+          lanq run ... [--fallback off|on|ask] [--post "CMD"] -- dotnet test
           lanq health [--on big-01] [--size light,medium | --min-size heavy] [--needs dotnet] [--json]
           lanq run --plan [--plan-file PATH] [--only a,b] [--fail-fast] [--wait 120] [--no-wake] [--json [--log-tail 60]] [--dry-run]
           lanq run --plan ... [--on big-01,build-01] [--size light,medium | --min-size heavy] [--plan-timeout M]
           lanq run --plan ... [--fetch-dir DIR] [--fetch-max 1G] [--fetch-max-files 2000]
           lanq stats [--json] [--target-minutes M]
           lanq unlock <machine> [--all --yes] [--config FILE]
+          lanq prune <machine>|--all [--older-than 2d] [--caches] [--yes] [--force] [--json] [--config FILE]
           lanq doctor [--remote [--force]] [--json] [--config FILE]
           lanq makeready <machine> [--json] [--force] [--tune] [--config FILE]
           lanq makeready --ssh user@host --os windows|linux [--key-env VAR] [--json] [--tune]
@@ -667,7 +808,10 @@ public static partial class Cli
 
         Config lookup: --config, then $LANQ_CONFIG, then the per-user config folder (never the current directory); lanq init writes there too.
         State (job log, logs) lives in $LANQ_HOME or a per-user folder, never inside your repository.
-        --wait is in seconds (how long to wait for a free machine); --timeout is in minutes (how long the job may run, default 240).
+        --wait is in seconds (how long to wait for a free machine, 0 to 604800); --timeout is in minutes (how long the job may run, default 240).
+        --wait-eligible S and --wait-slot S split --wait in two (also with --plan; not together with --wait): S seconds while no machine can
+        take this kind of job (held, asleep, unreachable, short of memory), and S seconds while one can but its slots are full. Both count
+        only while the run (or plan) holds no slot; NoCapacity JSON then says which ran out (waited.budget: eligible or slot).
         --mem is in GB: only machines reporting at least that much available memory take the job.
         --min-size light|medium|heavy (that class or larger) or --size C[,C] (one of these classes) routes by machine size: a machine's size:
         in machines.yml when it has one, else its probed class (under 6 GB light; 16 GB or more with 4 cores heavy; else medium). A machine of
@@ -744,8 +888,10 @@ public static partial class Cli
         init writes a commented starter machines.yml (default the per-user config file, or --config FILE) and never overwrites a file or writes through
         a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
-        up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
-        inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
+        up to its wake.wait_seconds for ssh. lanq run wakes such a machine by itself (once) only when no awake machine can take the job and it is
+        inside its allowed hours with min_window_minutes + wake.wait_seconds left: one at a time when --wait is above 0, or every such machine at once
+        before falling back to this computer (fallback on/ask, no --wait or --wait-eligible: one shared wait of up to 120 s from the first packet;
+        --no-wake turns both off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         Every job's output is also kept in a log in the state folder: run prints "[lanq] log: PATH" just before its status line (--shards: for
         each shard that did not complete); run --json always carries logPath (null when no job started), and --log-tail N (1 to 200, --json
         only) adds logTail, the log's last N lines (each shard its own with --shards).
@@ -824,7 +970,7 @@ public static partial class Cli
             await stderr.WriteLineAsync(message).ConfigureAwait(false);
             await NextSteps.WriteAsync(stderr, steps).ConfigureAwait(false);
             var own = Array.IndexOf(args, "--") is var dash and >= 0 ? args[..dash] : args;
-            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" && own.Contains("--json"))
+            if (own.Length > 0 && own[0] is "run" or "health" or "makeready" or "wake" or "init" or "doctor" or "stats" or "prune" && own.Contains("--json"))
             {
                 // --fetch promises fetched and fetchSkipped on every run path, a refused command line included (only lanq's own words count).
                 await (own[0] == "run" && (own.Contains("--plan") || own.Contains("--plan-file"))
@@ -837,6 +983,11 @@ public static partial class Cli
             }
 
             return 2;
+        }
+
+        if (p.WaitClamped && p.Command == "run")
+        {
+            await stderr.WriteLineAsync(string.Create(CultureInfo.InvariantCulture, $"[lanq] note: --wait above one week waits one week ({ParsedArgs.MaxWaitSeconds} s)")).ConfigureAwait(false);
         }
 
         if (p.Command is "--version" or "version")
@@ -857,7 +1008,7 @@ public static partial class Cli
             return await Stats(p, log, StatsKeepDays(p, loadConfig), stdout, stderr, ct).ConfigureAwait(false);
         }
 
-        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake"))
+        if (p.Command is not ("health" or "run" or "unlock" or "doctor" or "makeready" or "wake" or "prune"))
         {
             // Help that was asked for goes to stdout; usage after a mistake goes to stderr, so stdout stays clean for scripts.
             var asked = p.Command is "help" or "--help" or "-h";
@@ -904,10 +1055,24 @@ public static partial class Cli
             return 2;
         }
 
-        var ssh = new ProcessSshClient(Environment.GetEnvironmentVariable);
+        // 0.13.0 B3: the fallback entry (this computer, local: true) runs through local processes; every worker through ssh.
+        ISshClient ssh = config.Fallback is null
+            ? new ProcessSshClient(Environment.GetEnvironmentVariable)
+            : new RoutingSshClient(new ProcessSshClient(Environment.GetEnvironmentVariable), new LocalProcessClient());
+        if (config.FallbackProblem is { } fallbackProblem && p.Command == "run")
+        {
+            await stderr.WriteLineAsync(JobRunner.SafeLine("[lanq] warning: " + fallbackProblem)).ConfigureAwait(false);
+        }
+
         if (p.Command == "unlock")
         {
             return await Unlock(p, config, ssh, stdout, stderr, ct).ConfigureAwait(false);
+        }
+
+        if (p.Command == "prune")
+        {
+            // No waker: prune never wakes a machine; a sleeping one is unreachable (70) and left alone.
+            return await Prune(p, config, ssh, new HealthProbe(ssh, TimeProvider.System), stdout, stderr, ct).ConfigureAwait(false);
         }
 
         var waker = new WakeService(new UdpMagicPacketSender(), TimeProvider.System);
@@ -921,7 +1086,7 @@ public static partial class Cli
         {
             // --needs / --mem / --size / --min-size: judge each machine for such a job exactly as lanq run does (Windows-safe arguments
             // assumed). --on only narrows the rows.
-            var needs = p.Needs.Count > 0 || p.MemGb is not null || p.Size is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) { Size = p.Size } : null;
+            var needs = p.Needs.Count > 0 || p.MemGb is not null || p.Size is not null ? new JobNeeds(p.Needs, p.MemGb, WindowsUnsafe: false) { Size = p.Size, Policy = config.Policy } : null;
             return await Health(config, probe, stdout, stderr, ct, p.Json, p.WakeSleepers, needs, p.ConfigPath, p.On).ConfigureAwait(false);
         }
 
@@ -954,7 +1119,11 @@ public static partial class Cli
             fetch = new FetchRequest(p.Fetch, root, new FetchLimits(p.FetchMaxFiles ?? FetchLimits.DefaultMaxFiles, total, total), anchor);
         }
 
-        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")));
+        var runner = new JobRunner(config, ssh, payloads, probe, log, Path.Combine(home, "tmp"), line => jobOutput.WriteLine(line), bases: new BaseStore(Path.Combine(home, "bases.json")))
+        {
+            Prompt = FallbackPrompt(p, config, stderr, out var noAsk),
+            NoAskReason = noAsk,
+        };
         if (p.Shards is { } shards)
         {
             return await RunShards(p, shards, runner, repoDir, fetch, stdout, stderr, ct, () => PruneLogs(log, config, stderr)).ConfigureAwait(false);
@@ -972,9 +1141,10 @@ public static partial class Cli
         {
             // Ctrl+C: an agent reading --json still gets its one object, with the log of a job that had already started.
             await stderr.WriteLineAsync("[lanq] Cancelled").ConfigureAwait(false);
+            // The Wake-on-LAN packets it sent are still reported (review L8: Ctrl+C during the wake wait).
             await WriteJsonError(
                 "run", "Cancelled", 130, "cancelled (Ctrl+C); the job was cleaned up where it had started", stdout, NextSteps.Nothing("cancelled (Ctrl+C)"), started.Elapsed,
-                fetch is not null, p.LogTail, runner.StartedLogPath).ConfigureAwait(false);
+                fetch is not null, p.LogTail, runner.StartedLogPath, runner.WakeAttempts).ConfigureAwait(false);
             return 130;
         }
         catch (Exception ex) when (p.Json && (ex is not OperationCanceledException || !ct.IsCancellationRequested))
@@ -990,7 +1160,8 @@ public static partial class Cli
         PruneLogs(log, config, stderr);
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
-        var next = NextSteps.ForRun(p, NextSteps.Outcome(result));
+        var wakes = runner.WakeAttempts;
+        var next = NextSteps.WithWakes(p, NextSteps.WithFallback(p, NextSteps.ForRun(p, NextSteps.Outcome(result)), result.Status == JobStatus.NoCapacity ? result.FallbackHint : null, result.Fallback ? 1 : 0, 1), wakes);
         if (NoTestsRan(result.Status.ToString(), result.Results) is { } noTests)
         {
             next = WithNoTestsSteps(next, [(null, noTests)]);
@@ -1013,6 +1184,11 @@ public static partial class Cli
                     {
                         Retryable = result.Status == JobStatus.NoCapacity ? result.Retryable ?? true : null,
                         Excluded = result.Status == JobStatus.NoCapacity ? ExcludedJsons(result.Excluded) : null,
+                        Waited = result.Status == JobStatus.NoCapacity ? WaitedJson.Of(result.Waited) : null,
+                        Fallback = Flag(result.Fallback),
+                        FallbackJobs = result.Fallback ? 1 : null,
+                        Wakes = WakeAttemptJson.Of(wakes),
+                        Post = PostJson.Of(result.Post),
                         NextSteps = next,
                         Env = EnvNames(p.Env),
                         Exclusive = Flag(p.Exclusive),
@@ -1020,7 +1196,8 @@ public static partial class Cli
                         ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
                     },
                     result.LogPath,
-                    p.LogTail),
+                    p.LogTail,
+                    result.Post?.LogFrom),
                 fetch is not null,
                 result.Fetch) with
             {
@@ -1030,6 +1207,41 @@ public static partial class Cli
         }
 
         return result.CliExitCode;
+    }
+
+    /// <summary>
+    /// 0.13.0 B3: the terminal prompt of policy.fallback ask, or null (with why) when lanq may not prompt here (<see cref="FallbackAsk.WhyNot"/>):
+    /// --json, no terminal on stdin or stderr, CI, TERM=dumb, LANQ_NONINTERACTIVE or a coding agent.
+    /// </summary>
+    internal static IFallbackPrompt? FallbackPrompt(ParsedArgs p, FleetConfig config, TextWriter stderr, out string? why)
+    {
+        if (config.Fallback is null || (p.Fallback ?? config.Policy.Fallback) != FallbackMode.Ask)
+        {
+            why = null;
+            return null; // nothing will ever ask: never read the terminal
+        }
+
+        why = AskWhyNot(p);
+        return why is null ? new TerminalPrompt(Console.In, stderr, TerminalPrompt.DefaultTimeout) : null;
+    }
+
+    /// <summary>Why policy.fallback ask could not prompt in this process (<see cref="FallbackAsk.WhyNot"/>), or null when it could.</summary>
+    internal static string? AskWhyNot(ParsedArgs p) =>
+        FallbackAsk.WhyNot(p.Json, Console.IsInputRedirected, Console.IsErrorRedirected, Environment.GetEnvironmentVariables());
+
+    /// <summary>
+    /// lanq run --dry-run (review L6): where the real run could ask (fallback ask, and <paramref name="whyNot"/> null), a stand-in prompt, so the
+    /// plan predicts the wake and the fallback as for ask; null otherwise (ask that cannot prompt acts as off, as in the real run). It never asks.
+    /// </summary>
+    internal static IFallbackPrompt? DryRunPrompt(ParsedArgs p, FleetConfig config, string? whyNot) =>
+        config.Fallback is not null && (p.Fallback ?? config.Policy.Fallback) == FallbackMode.Ask && whyNot is null ? NeverAsks.Instance : null;
+
+    /// <summary>The dry run's stand-in for the ask prompt: a dry run never asks, so a call is a bug.</summary>
+    private sealed class NeverAsks : IFallbackPrompt
+    {
+        public static readonly NeverAsks Instance = new();
+
+        public Task<bool?> AskAsync(string question, CancellationToken ct) => throw new InvalidOperationException("A dry run never asks.");
     }
 
     /// <summary>The names of a job's --env for the JSON (never the values), or null when it sets none (the key is then left out).</summary>
@@ -1071,6 +1283,12 @@ public static partial class Cli
     internal static JobRequest RequestOf(ParsedArgs p, string repoDir, FetchRequest? fetch) =>
         new(p.Needs, p.Argv, p.Directory, repoDir, TimeSpan.FromSeconds(p.WaitSeconds), TimeSpan.FromMinutes(p.TimeoutMinutes), p.MemGb, fetch)
         {
+            Budgets = p.SplitWait ? p.Budgets : null,
+            WaitGiven = p.WaitGiven,
+            EligibleWaitGiven = p.EligibleWaitGiven,
+            Fallback = p.Fallback,
+            FallbackOff = p.Fallback == FallbackMode.Off,
+            Post = p.Post,
             NoWake = p.NoWake,
             On = p.On,
             Size = p.Size,
@@ -1095,11 +1313,14 @@ public static partial class Cli
     /// <param name="logPath">run only: the log of a job that had started (Ctrl+C or an unexpected error after it held a slot), or null.</param>
     private static Task WriteJsonError(
         string command, string status, int exitCode, string message, TextWriter stdout, IReadOnlyList<NextStepJson> steps, TimeSpan? elapsed = null, bool fetch = false,
-        int? logTail = null, string? logPath = null) =>
+        int? logTail = null, string? logPath = null, IReadOnlyList<WakeAttempt>? wakes = null) =>
         stdout.WriteLineAsync(command switch
         {
             "run" => JsonSerializer.Serialize(
-                WithFetch(WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps }, logPath, logTail), fetch, null),
+                WithFetch(
+                    WithLog(new RunJson(status, exitCode, null, null, Math.Round((elapsed ?? TimeSpan.Zero).TotalSeconds, 1), message) { NextSteps = steps, Wakes = WakeAttemptJson.Of(wakes ?? []) }, logPath, logTail),
+                    fetch,
+                    null),
                 LanqJson.Default.RunJson),
             "init" => JsonSerializer.Serialize(new InitJson(status, exitCode, null, message) { NextSteps = steps }, LanqJson.Default.InitJson),
             "doctor" => JsonSerializer.Serialize(
@@ -1116,10 +1337,11 @@ public static partial class Cli
     /// logPath (always; null when no job started) and, with --log-tail N, logTail: the log's last N lines (<see cref="JobLog.Tail"/>), empty when
     /// no job started.
     /// </summary>
-    internal static RunJson WithLog(RunJson json, string? logPath, int? tail) => json with
+    /// <param name="end">Where a post: step's lines begin in the log (<see cref="PostResult.LogFrom"/>): the tail ends there; null for the whole log.</param>
+    internal static RunJson WithLog(RunJson json, string? logPath, int? tail, long? end = null) => json with
     {
         LogPath = logPath is null ? null : JobRunner.SafeLine(logPath),
-        LogTail = tail is { } n ? logPath is null ? [] : JobLog.Tail(logPath, n) : null,
+        LogTail = tail is { } n ? logPath is null ? [] : JobLog.Tail(logPath, n, end) : null,
     };
 
     /// <summary>
@@ -1182,7 +1404,7 @@ public static partial class Cli
     }
 
     /// <summary>The final line on stderr; TimedOut and WindowClosed (both exit 124) are told apart here.</summary>
-    internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}: {result.Message}";
+    internal static string StatusLine(JobResult result) => $"[lanq] {result.Status}{JobRunner.FallbackNote(result.Fallback ? 1 : 0, 1)}: {result.Message}";
 
     /// <summary>State folder: $LANQ_HOME, else a per-user folder. Deliberately never inside the current repository.</summary>
     internal static string ResolveHome(Func<string, string?> env, bool windows)
@@ -1291,12 +1513,19 @@ public static partial class Cli
             return code;
         }
 
-        if (Pinning.Resolve(config, on).Error is { } unknown)
+        // --on may name this computer's fallback entry (review A-M4): health probes it then, by name only; run still refuses that name.
+        var named = on is not null && config.Fallback is { } fb && on.Any(n => string.Equals(n, fb.Name, StringComparison.OrdinalIgnoreCase)) ? fb : null;
+        var poolOn = named is null ? on : [.. on!.Where(n => !string.Equals(n, named.Name, StringComparison.OrdinalIgnoreCase))];
+        if (Pinning.Resolve(config, poolOn).Error is { } unknown)
         {
             return await Error("Rejected", 2, unknown, NextSteps.ArgumentsError(unknown)).ConfigureAwait(false);
         }
 
-        var machines = Pinning.Candidates(config, on);
+        var machines = Pinning.Candidates(config, poolOn);
+        if (named is not null)
+        {
+            machines = [.. machines, named];
+        }
 
         foreach (var w in await KeyCheck.WarningsAsync(config, Environment.GetEnvironmentVariable, KeyCheck.SshKeygenAcceptsEmptyPassphrase).ConfigureAwait(false))
         {
@@ -1335,7 +1564,7 @@ public static partial class Cli
 
         foreach (var (i, (m, h)) in machines.Zip(results).Index())
         {
-            var line = HealthLine(m, h);
+            var line = HealthLine(m, h, Scheduler.SlotCap(m, h, new JobNeeds([], null, false) { Policy = config.Policy }));
             await stdout.WriteLineAsync(assessed is null ? line : line + "  -> " + Verdict(assessed[i])).ConfigureAwait(false);
         }
 
@@ -1347,11 +1576,12 @@ public static partial class Cli
     }
 
     /// <summary>One machine's lanq health line (also printed by lanq makeready --add for the machine it added).</summary>
-    internal static string HealthLine(Machine m, MachineHealth h)
+    /// <param name="cap">The slots a job size lets the machine run at once (<see cref="Scheduler.SlotCap"/>, p1 review L5); null = max_jobs.</param>
+    internal static string HealthLine(Machine m, MachineHealth h, int? cap = null)
     {
         var state = !h.Reachable ? "DOWN" : h.Hold is not null ? "HOLD" : "OK";
         var detail = h.Reachable
-            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {FreeSlots(m, h)}/{m.MaxJobs}{StaleText(h)}")
+            ? string.Create(CultureInfo.InvariantCulture, $"{Load(h)}  {Size(h)}  disk free {h.DiskFreeGb:0.#} GB  {Memory(h)}  slots free {(cap is { } c && c < m.MaxJobs ? Math.Max(0, c - h.SlotsLive) : FreeSlots(m, h))}/{m.MaxJobs}{(cap is { } k && k < m.MaxJobs ? $" (capped at {k} by job_mem_gb)" : "")}{StaleText(h)}")
                 + (m.AllowedHours is { Count: > 0 } && !h.WorkerClock ? "  time: local" : "")
                 + "  suited: " + MachineSize.SuitedFor(m, h.MemTotalGb, h.Cores) + DeclaredSizeNote(m, h)
             : h.Error ?? "";
@@ -1366,6 +1596,7 @@ public static partial class Cli
         Reason = a.Code,
         Permanent = a.Permanent,
         JobSlots = a.JobSlots,
+        NeedGb = a.NeedGb,
     };
 
     internal static HealthJson HealthRow(Machine m, MachineHealth h)

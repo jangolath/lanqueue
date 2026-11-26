@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly, so the sample (skipped on pull requests that do not touch it) still cannot rot.
+  schedule:
+    - cron: "17 5 * * 1"
 permissions:
   contents: read
 jobs:
@@ -32,6 +35,61 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lanq/check-test-split.ps1 -Project tests/LanQueue.Tests/LanQueue.Tests.csproj -Shards 2
+  sample:
+    # samples/monorepo (the public fixture for pool-facing changes) builds and its tests pass on both OSes, so it never rots. The opt-in
+    # Hang and Docker projects are not in Sample.slnx (they are only built here).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_NOLOGO: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # A pull request runs the sample only when it touches the sample, the shard scripts or this workflow (lanq's own code cannot affect it).
+      - id: changed
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || git diff --name-only "origin/$BASE_REF...HEAD" | grep -qE '^(samples/|scripts/lanq/|\.github/workflows/ci\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        if: steps.changed.outputs.run == 'true'
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.changed.outputs.run == 'true'
+        with:
+          node-version: 22.x
+      - run: dotnet build samples/monorepo/Sample.slnx -c Release
+        if: steps.changed.outputs.run == 'true'
+      - run: dotnet test samples/monorepo/Sample.slnx -c Release --no-build
+        if: steps.changed.outputs.run == 'true'
+      - run: dotnet build samples/monorepo/tests/Sample.HangTests -c Release
+        if: steps.changed.outputs.run == 'true'
+      - run: dotnet build samples/monorepo/tests/Sample.DockerTests -c Release
+        if: steps.changed.outputs.run == 'true'
+      # One command per step: a multi-line pwsh step on Windows would not stop at a failing native command.
+      - working-directory: samples/monorepo/web
+        if: steps.changed.outputs.run == 'true'
+        run: npm ci --no-audit --no-fund
+      - working-directory: samples/monorepo/web
+        if: steps.changed.outputs.run == 'true'
+        run: npm test
+      - working-directory: samples/monorepo/web
+        if: steps.changed.outputs.run == 'true'
+        run: npm run typecheck
   aot-linux:
     # A cheap NativeAOT check on every PR: trimming/AOT breakage (a reflection-only API, a lost embedded resource) fails here, not at
     # release time. It links against the runner's own glibc; the release builds link against glibc 2.27 (see release.yml).

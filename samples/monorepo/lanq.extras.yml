@@ -1,0 +1,21 @@
+# Opt-in fixtures for the sample monorepo (any OS with dotnet). Run one job at a time, from the lanqueue repository top:
+#   lanq run --plan --plan-file samples/monorepo/lanq.extras.yml --only hang --json --no-wake
+# - hang: one test that never returns; the job ends TimedOut after 3 minutes.
+# - zero-tests: a filter that matches nothing; lanq warns "no tests ran" (the run itself passes today).
+# - docker: Testcontainers starts a throwaway nginx container on a random port; needs a worker tagged docker with a
+#   working Docker engine.
+# allowed_commands: "dotnet test"; allowed_directories: "."
+version: 1
+defaults:
+  needs: [dotnet]
+  timeout: 15
+jobs:
+  hang:
+    timeout: 3
+    command: [dotnet, test, samples/monorepo/tests/Sample.HangTests/Sample.HangTests.csproj, -c, Release]
+  zero-tests:
+    command: [dotnet, test, samples/monorepo/tests/Sample.UnitTests/Sample.UnitTests.csproj, -c, Release, --filter, Category=DoesNotExist, --logger, "trx;LogFileName=zero.trx"]
+    results: { format: trx, path: "samples/monorepo/tests/Sample.UnitTests/TestResults/*.trx" }
+  docker:
+    needs: [dotnet, docker]
+    command: [dotnet, test, samples/monorepo/tests/Sample.DockerTests/Sample.DockerTests.csproj, -c, Release]

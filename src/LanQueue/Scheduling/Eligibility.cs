@@ -20,6 +20,13 @@ public sealed record JobNeeds(IReadOnlyCollection<string> Capabilities, double? 
     /// <see cref="Exclusion.EnvConflict"/> or <see cref="Exclusion.WindowsCommandTooLong"/>, each with its reason for people. Empty without --env.
     /// </summary>
     public IReadOnlyDictionary<string, (Exclusion Reason, string Why)> EnvRuledOut { get; init; } = new Dictionary<string, (Exclusion Reason, string Why)>();
+
+    /// <summary>
+    /// The pool policy (0.13.0 B1): its min_free_mem_gb is the free-memory floor a machine without its own keeps free, and its job_mem_gb
+    /// the job size of a machine without its own (see <see cref="Scheduler.NeedGb"/>). Null (tests, callers without a config) means no
+    /// floor beyond a machine's own and no pool job size: the 0.12 arithmetic.
+    /// </summary>
+    public Config.PolicyConfig? Policy { get; init; }
 }
 
 /// <summary>
@@ -94,6 +101,12 @@ public static class Pinning
             }
         }
 
+        // 0.13.0 B3 (H4): this computer's fallback entry is never a target of --on: it is used only by the fallback policy.
+        if (config.Fallback is { } fb && unknown.FirstOrDefault(n => string.Equals(n, fb.Name, StringComparison.OrdinalIgnoreCase)) is { } local)
+        {
+            return (null, $"--on {local}: {fb.Name} is this computer's fallback, not a worker; use --fallback on (it is used only when the pool cannot take the job).");
+        }
+
         return unknown.Count > 0
             ? (null, $"--on names a machine that is not in the config: {string.Join(", ", unknown)}. Configured: {string.Join(", ", config.Machines.Select(m => m.Name))}.")
             : (names, null);
@@ -146,6 +159,15 @@ public enum Exclusion
 
     /// <summary>A hold of no known kind (never produced by the probe itself); temporary.</summary>
     Held,
+
+    /// <summary>
+    /// 0.13.0 B3: this computer's fallback entry may never take the job as things stand: lanq runs elevated or as root, or its work_root is
+    /// inside the repository (or holds it). Permanent.
+    /// </summary>
+    FallbackRefused,
+
+    /// <summary>0.13.0 B3 (review A-L8): this computer's fallback entry has a work_root inside the repository being run, or one that holds it. Permanent.</summary>
+    FallbackWorkRoot,
 }
 
 /// <summary>One machine judged for one job.</summary>
@@ -157,6 +179,15 @@ public enum Exclusion
 /// <param name="JobSlots">How many copies of this job the machine could take now (see <see cref="Scheduler.FreeFor"/>); 0 when not eligible.</param>
 public sealed record Assessment(Machine Machine, MachineHealth Health, Exclusion Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots)
 {
+    /// <summary>The job's memory need on this machine (<see cref="Scheduler.NeedGb"/>), or null when neither --mem nor a job size applies (0.13.0).</summary>
+    public double? NeedGb { get; init; }
+
+    /// <summary>The slots this machine may run at once for the job: max_jobs, or fewer when a job size caps it by total memory (<see cref="Scheduler.SlotCap"/>).</summary>
+    public int SlotCap { get; init; } = int.MaxValue;
+
+    /// <summary>The free memory this machine keeps for the job (<see cref="Scheduler.FloorGb"/>): its min_free_mem_gb, else the policy's.</summary>
+    public double FloorGb { get; init; }
+
     public bool Eligible => Reason == Exclusion.None;
 
     /// <summary>The reason as the snake_case code lanq prints in JSON, or null when eligible.</summary>
@@ -191,12 +222,14 @@ public static class Eligibility
         Exclusion.MemBelowRequest => "mem_below_request",
         Exclusion.Busy => "busy",
         Exclusion.Avoided => "avoided",
+        Exclusion.FallbackRefused => "fallback_refused",
+        Exclusion.FallbackWorkRoot => "fallback_work_root",
         _ => "held",
     };
 
     /// <summary>True for the reasons waiting can never cure: the config (capabilities, size:, Windows, env:) or the machine itself (its RAM, its size, its tools).</summary>
     public static bool IsPermanent(Exclusion reason) =>
-        reason is Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
+        reason is Exclusion.FallbackRefused or Exclusion.FallbackWorkRoot or Exclusion.MissingCapability or Exclusion.WrongSize or Exclusion.WindowsUnsafeArgs or Exclusion.EnvConflict or Exclusion.WindowsCommandTooLong
             or Exclusion.MemExceedsTotal or Exclusion.MemUnknown
             or Exclusion.SizeUnknown or Exclusion.ToolMissing;
 

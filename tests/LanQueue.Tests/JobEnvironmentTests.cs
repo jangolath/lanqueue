@@ -7,6 +7,9 @@ namespace LanQueue.Tests;
 /// <summary>Per-machine env: and path_prepend: reach the job process only, validated at load and quoted safely in both shells.</summary>
 public sealed class JobEnvironmentTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+
     private const char NL = (char)10;
 
     /// <summary>Tries to break out of the quoting in sh and PowerShell; it must arrive in the job as exactly these characters.</summary>
@@ -16,7 +19,7 @@ public sealed class JobEnvironmentTests : IDisposable
 
     public JobEnvironmentTests()
     {
-        Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(_root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(_root, "locks"));
     }
 
@@ -39,32 +42,37 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(ManyEnv(30, 120))));
         Assert.Contains("build-02", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("env", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("path_prepend", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("env: (30 entries, 3770 characters)", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("work_root (7 characters)", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend", ex.Message, StringComparison.Ordinal);
         Assert.Matches("[0-9]+ over the 8000", ex.Message);
 
         var paths = "    path_prepend: [" + string.Join(", ", Enumerable.Range(0, 40).Select(i => "C:/tools/" + new string('p', 60) + i.ToString(System.Globalization.CultureInfo.InvariantCulture))) + "]";
-        Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(paths)));
+        var pex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(paths)));
+        Assert.Contains("path_prepend: (40 entries, ", pex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("env:", pex.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The load check measures the job script at its largest: a job given &amp; or | carries the native .exe check too. An env: just long
-    /// enough that the script fits without that check but not with it is refused at load, not on the first such job.
+    /// The load check measures the job script at its largest: a job given &amp; or | carries the native .exe check too, and it is measured as
+    /// the post: step's script (the same wrapper with its limit line, 0.13.0 review M1). An env: just long enough that the post: script fits
+    /// without that check but not with it is refused at load, not on the first such job.
     /// </summary>
     [Fact]
     public void TheLoadCheckCountsTheNativeExeCheckOfAJobGivenAmpersandOrBar()
     {
         var m = ConfigLoader.Parse(Windows(ManyEnv(1, 10))).Machines[1];
-        int Size(string[] argv) => RemoteScripts.WindowsCommand(RemoteScripts.Execute(
+        int Size(string[] argv, string kind = "post") => RemoteScripts.WindowsCommand(RemoteScripts.Execute(
             m, "20260101-000000-000000", ".", argv, JobRequest.DefaultTimeout, new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards),
-            new string('x', LanQueue.Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
+            new string('x', LanQueue.Plan.PlanFileLoader.MaxNameLength), new string('0', 16), pidKind: kind)).Length;
         var n = Enumerable.Range(10, 4000).First(i =>
         {
             m.Env["VAR_0"] = new string('x', i);
             return Size(["x", "|"]) > RemoteScripts.MaxWindowsCommandLength;
         });
 
-        Assert.True(Size([]) <= RemoteScripts.MaxWindowsCommandLength, "the plain job script should still fit at " + n);
+        Assert.True(Size([]) <= RemoteScripts.MaxWindowsCommandLength, "the plain post: script should still fit at " + n);
+        Assert.True(Size(["x", "|"], "job") < Size(["x", "|"]), "the post: script is the larger one");
         var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(Windows(ManyEnv(1, n))));
         Assert.Matches("[0-9]+ over the 8000", ex.Message);
         Assert.Single(ConfigLoader.Parse(Windows(ManyEnv(1, n - 1))).Machines[1].Env);
@@ -85,6 +93,95 @@ public sealed class JobEnvironmentTests : IDisposable
             new string('x', LanQueue.Plan.PlanFileLoader.MaxNameLength), new string('0', 16))).Length;
         var doctor = RemoteScripts.WindowsCommand(RemoteScripts.Doctor(m)).Length;
         Assert.True(doctor < job, $"doctor {doctor}, job {job}");
+    }
+
+    private static string WindowsRoot(string root) => T.Yaml.Replace("work_root: D:/lanq", "work_root: " + root, StringComparison.Ordinal);
+
+    private static int Occurrences(string text, string part)
+    {
+        var n = 0;
+        for (var i = text.IndexOf(part, StringComparison.Ordinal); i >= 0; i = text.IndexOf(part, i + part.Length, StringComparison.Ordinal))
+        {
+            n++;
+        }
+
+        return n;
+    }
+
+    /// <summary>
+    /// 0.13.0 smoke: the Windows job script spelled work_root out four times (pid file, worktree, folder, helper path), so a work_root of about
+    /// 95 characters passed the encoded cap. It is written once now (every other path is built from it on the worker), and each further
+    /// character of work_root costs only its own encoded size.
+    /// </summary>
+    [Fact]
+    public void TheWindowsJobScriptWritesTheWorkRootOnce()
+    {
+        var root = "D:/" + string.Join('/', Enumerable.Repeat("a-rather-long-folder", 9)); // 191 characters, under the 200 cap
+        var m = ConfigLoader.Parse(WindowsRoot(root)).Machines[1];
+        foreach (var dir in new[] { ".", "src" })
+        {
+            foreach (var kind in new[] { "job", "post" })
+            {
+                var script = RemoteScripts.Execute(m, "20260101-000000-000000", dir, ["dotnet", "test"], JobRequest.DefaultTimeout, pidKind: kind);
+                Assert.Equal(1, Occurrences(script, root));
+            }
+        }
+
+        Assert.True(RemoteScripts.WorstCaseWindowsCommandLength(m) <= RemoteScripts.MaxWindowsCommandLength);
+        var shortRoot = ConfigLoader.Parse(WindowsRoot("D:/l")).Machines[1];
+        var perCharacter = (double)(RemoteScripts.WorstCaseWindowsCommandLength(m) - RemoteScripts.WorstCaseWindowsCommandLength(shortRoot)) / (root.Length - 4);
+        Assert.True(perCharacter < 3, $"each work_root character costs {perCharacter:0.00} encoded characters");
+    }
+
+    /// <summary>
+    /// A Windows work_root over the length cap (0.13.0 review M1) is refused for its length alone, naming the cap and its length. Within the cap
+    /// a work_root can still share the room with env:: when both pass the command-line cap, the message names each with its size, the
+    /// work_root included, not "env: (0 entries) and path_prepend: (0 entries)".
+    /// </summary>
+    [Fact]
+    public void AWorkRootTooLongForTheCapIsRefusedNamingTheWorkRoot()
+    {
+        var ex = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WindowsRoot("D:/" + new string('r', 1500))));
+        Assert.Contains("build-02", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("this one is 1503", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 entries", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("env:", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend", ex.Message, StringComparison.Ordinal);
+
+        var root = WindowsWorkRootCapTests.RootOf(ConfigLoader.MaxWindowsWorkRootLength);
+        var both = Assert.Throws<ConfigException>(() => ConfigLoader.Parse(WindowsRoot(root).Replace("    allowed_hours:", "    env:" + NL + "      A_B: " + new string('x', 400) + NL + "    allowed_hours:", StringComparison.Ordinal)));
+        Assert.Contains($"work_root ({root.Length} characters)", both.Message, StringComparison.Ordinal);
+        Assert.Contains("env: (1 entry, 403 characters)", both.Message, StringComparison.Ordinal);
+        Assert.Matches("[0-9]+ over the 8000", both.Message);
+        Assert.DoesNotContain("path_prepend", both.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The run-time refusal of a too-long Windows command names work_root too, next to env: and path_prepend:.</summary>
+    [Fact]
+    public void TheRunTimeLengthErrorNamesTheWorkRoot()
+    {
+        var script = RemoteScripts.Execute(T.Windows(), "j", ".", ["dotnet", "test", new string('a', 4000)]);
+        var ex = Assert.Throws<InvalidOperationException>(() => RemoteScripts.Wrap(T.Windows(), script));
+        Assert.Contains("work_root (7 characters)", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(RemoteScripts.EncodedCostNote, ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("path_prepend", ex.Message, StringComparison.Ordinal);
+
+        // 0.13.0 review L1: hygiene: is named too, as at load and in doctor (all from WindowsScriptInputs).
+        var m = T.Windows();
+        m.Hygiene = [Hygiene.Dotnet];
+        var withHygiene = Assert.Throws<InvalidOperationException>(() => RemoteScripts.Wrap(m, RemoteScripts.Execute(m, "j", ".", ["dotnet", "test", new string('a', 4000)])));
+        Assert.Contains("hygiene: (3 variables)", withHygiene.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The job script's paths, built on the worker from the one work_root, keep their meaning: quoting-hostile folders stay literal.</summary>
+    [Fact]
+    public void TheWindowsJobScriptBuildsItsPathsFromOneQuotedWorkRoot()
+    {
+        var script = RemoteScripts.Execute(T.Windows(), "20260101-000000-000000", "src/$(x)'y", ["dotnet", "test"]);
+        Assert.Contains("$rt='D:/lanq'", script, StringComparison.Ordinal);
+        Assert.Contains("$wt=$rt+'/jobs/20260101-000000-000000'", script, StringComparison.Ordinal);
+        Assert.Contains("$pf=$rt+'/locks/job-20260101-000000-000000.pid'", script, StringComparison.Ordinal);
+        Assert.Contains("Set-Location -LiteralPath ($wt+'/src/$(x)''y')", script, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -145,7 +242,7 @@ public sealed class JobEnvironmentTests : IDisposable
     public void TheJobMarkerComesAfterTheMachinesEnvOnLinux()
     {
         var m = WithEnv(T.Linux(), ("FOO", "1"));
-        Assert.Contains("env 'FOO=1' 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+        Assert.Contains("env 'FOO=1' 'LANQ_JOB=" + _j1 + "' /bin/sh -c", RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -260,13 +357,13 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var m = WithEnv(T.Linux(), ("NODE_OPTIONS", "--max-old-space-size=2048"));
         m.PathPrepend.AddRange(["/home/u/.nvm/bin", "/opt/x"]);
-        var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
-        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'LANQ_JOB=j1' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
+        var s = RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]);
+        Assert.Contains("env 'NODE_OPTIONS=--max-old-space-size=2048' 'LANQ_JOB=" + _j1 + "' 'PATH=/home/u/.nvm/bin:/opt/x'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
     public void LinuxJobWithoutEnvGetsOnlyTheJobMarker() =>
-        Assert.Contains(" env 'LANQ_JOB=j1' /bin/sh -c", RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), StringComparison.Ordinal);
+        Assert.Contains(" env 'LANQ_JOB=" + _j1 + "' /bin/sh -c", RemoteScripts.Execute(T.Linux(), _j1, ".", ["npm", "test"]), StringComparison.Ordinal);
 
     [Fact]
     public void AnUnsafeJobIdNeverReachesTheEnvironment() =>
@@ -275,7 +372,7 @@ public sealed class JobEnvironmentTests : IDisposable
     [Fact]
     public void LinuxHostileValueIsOneSingleQuotedWord()
     {
-        var s = RemoteScripts.Execute(WithEnv(T.Linux(), ("FOO", Hostile)), "j1", ".", ["npm", "test"]);
+        var s = RemoteScripts.Execute(WithEnv(T.Linux(), ("FOO", Hostile)), _j1, ".", ["npm", "test"]);
         Assert.Contains("'FOO=a'\\''; touch PWNED; echo '\\''b $(touch PWNED2)", s, StringComparison.Ordinal);
     }
 
@@ -284,7 +381,7 @@ public sealed class JobEnvironmentTests : IDisposable
     {
         var m = WithEnv(T.Windows(), ("NODE_OPTIONS", "--max-old-space-size=2048"), ("Q", "it\u2019s"));
         m.PathPrepend.AddRange(["C:/Users/b/.cargo/bin", "D:\\tools"]);
-        var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
+        var s = RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]);
         Assert.Contains("$env:NODE_OPTIONS = '--max-old-space-size=2048'", s, StringComparison.Ordinal);
         Assert.Contains("$env:Q = 'it\u2019\u2019s'", s, StringComparison.Ordinal);
         Assert.Contains("$env:Path = 'C:\\Users\\b\\.cargo\\bin;D:\\tools' + $(if ($env:Path) { ';' + $env:Path } else { '' })", s, StringComparison.Ordinal);
@@ -303,9 +400,9 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Linux(), ("FOO", Hostile));
         m.WorkRoot = _root;
         m.PathPrepend.Add(bin);
-        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["lanq-test-tool"])));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, _j1, ".", ["lanq-test-tool"])));
         Assert.Equal(Hostile + "|", output);
-        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", _j1)));
     }
 
     /// <summary>Runs the generated Windows script in a real Windows PowerShell: same guarantees.</summary>
@@ -318,7 +415,7 @@ public sealed class JobEnvironmentTests : IDisposable
         var m = WithEnv(T.Windows(), ("FOO", Hostile + " \u2018x\u2019 \u201A \u201B"));
         m.WorkRoot = _root;
         m.PathPrepend.Add(bin.Replace('\\', '/'));
-        var script = RemoteScripts.Execute(m, "j1", ".", ["lanqtesttool"])
+        var script = RemoteScripts.Execute(m, _j1, ".", ["lanqtesttool"])
             .Replace("& 'lanqtesttool'", "& 'lanqtesttool'; [Console]::Out.Write(($env:FOO -ceq " + LanQueue.Policy.ShellQuote.PowerShell(m.Env["FOO"]) + "))", StringComparison.Ordinal);
         var file = Path.Combine(Path.GetTempPath(), "lanq-env-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(file, "\ufeff" + script);
@@ -326,7 +423,7 @@ public sealed class JobEnvironmentTests : IDisposable
         {
             var output = T.JobOutput(WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file));
             Assert.Equal("found" + Environment.NewLine + "True", output);
-            Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
+            Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", _j1)));
         }
         finally
         {

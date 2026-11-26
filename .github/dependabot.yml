@@ -8,9 +8,17 @@ updates:
       actions:
         patterns: ["*"]
   - package-ecosystem: nuget
-    directory: /
+    directories: ["/", "/samples/monorepo"]
     schedule:
       interval: weekly
     groups:
       nuget:
+        patterns: ["*"]
+  # The sample monorepo's web part (samples/monorepo/web): one grouped pull request a week.
+  - package-ecosystem: npm
+    directory: /samples/monorepo/web
+    schedule:
+      interval: weekly
+    groups:
+      sample-web:
         patterns: ["*"]

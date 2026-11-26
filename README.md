@@ -795,12 +795,16 @@ interface: set `broadcast` to the directed broadcast of the worker's own subnet*
   Windows cannot take) and are inside their `allowed_hours` with at least `policy.min_window_minutes` plus the machine's
   `wake.wait_seconds` of the window left (10 min + 120 s by default): a machine with less left would be held as "window
   closing" once awake, so it is left asleep and the reason is shown. Nothing is woken while an awake machine can take the job,
-  with `--wait 0` (the default), or with `--no-wake`. The wake happens inside `--wait`: it never makes `lanq run`
-  wait longer than you asked, and the other machines keep being tried meanwhile. At most once per machine per `lanq`
-  invocation, and not another machine while one is still coming up.
+  with `--wait 0` (the default), or with `--no-wake`, except before falling back to this computer: with the fallback
+  `on` or `ask` and no `--wait`/`--wait-eligible`, lanq wakes every such machine at once and waits one shared wait of
+  up to 120 s for them before it uses your PC (docs/WORKERS.md, "Wake before fallback"). With an explicit `--wait` or
+  `--wait-eligible`, the wake happens inside that budget: it never makes `lanq run` wait longer than you asked, and the
+  other machines keep being tried meanwhile. At most once per machine per `lanq` invocation, and (with an explicit
+  budget) not another machine while one is still coming up.
   When every awake machine that fits the job is merely busy, `lanq` may therefore wake a sleeper for extra capacity; use
   `--no-wake` to avoid that. If a woken machine never answers, the next eligible sleeper (by name) may be tried once the
-  first one's `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run.
+  first one's `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run (before
+  a fallback all of them were woken at once already).
 - **`lanq health` stays read-only and quick.** It never wakes anything by itself. `lanq health --wake` sends a packet
   to every machine that looks asleep and is inside its hours with that much of its window left, then waits for each (probing again after 5 s, 10 s, then
   every 20 s, up to `wait_seconds`).
@@ -1158,6 +1162,25 @@ further back it reads `(merge-base with origin/main)`.
 The verdict is per job (or shard), not per test: a `preexisting` verdict means the same command failed at the base,
 not that the same tests did. Read both logs when it matters.
 
+## Memory, waiting, this PC and cleanup (0.13.0)
+
+- **Memory per job.** `job_mem_gb:` on a machine (or `policy.job_mem_gb:`) says about how much one job uses there. A
+  job then needs the larger of its `--mem` and that size, the machine keeps its `min_free_mem_gb` free, and it never
+  runs more jobs than its memory covers (`lanq doctor --remote` shows the arithmetic).
+- **Two wait budgets.** `--wait-eligible S` waits while no machine can take this kind of job; `--wait-slot S` waits
+  while capable machines are busy. `--wait S` still sets both. A job that runs out is NOT RUN (`NoCapacity`, 75), and
+  the JSON `waited.budget` says which budget ended it.
+- **This PC as a last resort, off by default.** A machines.yml entry with `fallback: true` and `local: true` describes
+  the computer you run lanq on; `policy.fallback: on|ask` or `lanq run --fallback on|ask` lets a job the pool cannot
+  take run there, labelled in every output. The job runs as you: only your shell's variables are kept out, your ssh
+  agent, credential managers and keyring stay reachable to it. See
+  [docs/WORKERS.md](docs/WORKERS.md#using-this-pc-as-a-fallback-0130).
+- **Hygiene and post: steps.** `hygiene: [dotnet]` keeps parallel .NET jobs from sharing MSBuild nodes; lanq.yml
+  `post:` (or `--post`) runs one more allowlisted command after a job, its exit code a warning only.
+- **`lanq prune`** lists (and with `--yes` removes) what crashed or interrupted jobs left on a worker.
+- **Try it:** `samples/monorepo/` is a small .NET + React repository with ready plans for your pool
+  (`lanq run --plan --plan-file samples/monorepo/lanq.yml`).
+
 ## Keeping your keys safe
 
 `lanq` never stores or sends your key; it only calls `ssh` and `scp`. The aim is that a synced folder, a stolen
@@ -1291,7 +1314,7 @@ machines:
     os: linux                 # linux | windows
     ssh: user@host            # no leading "-"
     key_env: ENV_VAR_NAME     # optional. Omit to use ssh-agent (no -i is passed). Else the NAME of an env var holding a key file path
-    work_root: /srv/lq        # Linux: absolute path. Windows: a drive path such as D:/lq. Forward slashes, no spaces, no ".."
+    work_root: /srv/lq        # Linux: absolute path. Windows: a drive path such as D:/lq, at most 200 characters. Forward slashes, no spaces, no ".."
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files
     transfer: git             # optional: git (default, recommended; worker needs git) | archive (worker needs only tar)
@@ -1475,6 +1498,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   lists are refused with a message giving the limit and the actual size. A Windows machine whose `env:` and
   `path_prepend:` alone would already pass that limit in the job script is refused when the config loads, with the
   machine, the settings and how much is over; `lanq doctor --remote` reports its own script's overflow as a FAIL line.
+  Since 0.13.0 that load check measures the `post:` step's script as well as the job script, whether or not a plan
+  uses `post:`, so the `post:` step slightly reduces the room left for `env:` entries.
   A job's `--env` values count too: a Windows machine they push over the limit is not used for that job
   (`windows_command_too_long`).
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
@@ -1485,7 +1510,7 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   is reclaimed by the next claim that passes it (its job is killed first if it is somehow still running); until then
   it does not count as in use (see [Stale slots](#exclusive-jobs---exclusive)). Slot files written by lanq before 0.4 carry no deadline and are never
   reclaimed: delete `locks/slot-N` (and any stale `locks/job-*.pid`) under the machine's `work_root`.
-- No persistent queue: `--wait` polls every 15 seconds.
+- No persistent queue: `--wait` (or `--wait-eligible` / `--wait-slot`) polls every 15 seconds.
 - Plan files (`lanq run --plan`) pass nothing between jobs: each job runs in its own throw-away folder, maybe on
   another machine, and `after:` only orders jobs (a test job builds what it needs itself).
 - A plan's fetches have no plan-wide total: at worst a plan writes the number of fetching jobs times the per-job limit

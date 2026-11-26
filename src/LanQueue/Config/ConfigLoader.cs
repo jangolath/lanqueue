@@ -90,12 +90,23 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*\z", RegexOptions.None, 1000)]
     private static partial Regex WindowsWorkRootRegex();
 
+    /// <summary>
+    /// The longest Windows work_root lanq loads (0.13.0 review M1). Two limits bind: the job object named "lanq-" plus the pid file path
+    /// (work_root + 43 characters for a post: step's, at most MAX_PATH - 1 = 259, so at most 216) and the post: step's script at its largest
+    /// (hygiene: dotnet-lean, the largest shard and plan job name, the native .exe check: about 218). Every other Windows script has more room.
+    /// WindowsWorkRootCapTests builds each one at this length and checks it against its limit.
+    /// </summary>
+    internal const int MaxWindowsWorkRootLength = 200;
+
     // \z, not $: "$" would also match just before a trailing newline.
     [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*\z", RegexOptions.None, 1000)]
     private static partial Regex EnvNameRegex();
 
     [GeneratedRegex(@"^[A-Za-z]:[/\\]", RegexOptions.None, 1000)]
     private static partial Regex WindowsAbsolutePathRegex();
+
+    /// <summary>job_mem_gb (0.13.0): above 0, at most 4096, finite (the same range as --mem).</summary>
+    private static bool ValidJobMem(double gb) => double.IsFinite(gb) && gb is > 0 and <= 4096;
 
     public static FleetConfig Parse(string yaml)
     {
@@ -105,6 +116,7 @@ public static partial class ConfigLoader
             .WithTypeConverter(new WordEnumConverter<TransferMode>("transfer"))
             .WithTypeConverter(new WordEnumConverter<JobPriority>("priority"))
             .WithTypeConverter(new WordEnumConverter<MachineOs>("os"))
+            .WithTypeConverter(new WordEnumConverter<FallbackMode>("policy.fallback"))
             .WithTypeConverter(new StringOrListConverter())
             .Build();
         FleetConfig config;
@@ -131,7 +143,7 @@ public static partial class ConfigLoader
     /// <summary>Keys that may be given with no value (YAML null), by their path: they mean "not set".</summary>
     private static readonly HashSet<string> NullableKeys = new(StringComparer.Ordinal)
     {
-        "machines[].allowed_hours", "machines[].key_env", "machines[].min_free_mem_gb",
+        "machines[].allowed_hours", "machines[].key_env", "machines[].hygiene", "machines[].min_free_mem_gb", "machines[].job_mem_gb", "policy.job_mem_gb",
     };
 
     private static bool IsNull(YamlNode node) => YamlShape.IsNull(node);
@@ -174,11 +186,16 @@ public static partial class ConfigLoader
 
     public static FleetConfig Load(string path) => Parse(File.ReadAllText(path));
 
+    /// <summary>This computer's OS, which a fallback entry (local: true) must name (0.13.0 B3).</summary>
+    internal static MachineOs ThisOs => OperatingSystem.IsWindows() ? MachineOs.Windows : MachineOs.Linux;
+
     public static void Validate(FleetConfig config)
     {
-        if (config.Machines is null || config.Machines.Count == 0)
+        if (config.Machines is null || config.Machines.Count == 0 || config.Machines.All(m => m is { Fallback: true }))
         {
-            throw new ConfigException("No machines configured.");
+            throw new ConfigException(config.Machines is { Count: > 0 }
+                ? "No machines configured: a fallback entry (this computer) alone is not a pool; add at least one worker."
+                : "No machines configured.");
         }
 
         if (config.Policy is null || config.Machines.Any(m => m is null))
@@ -207,6 +224,11 @@ public static partial class ConfigLoader
         if (config.Policy.LoadThreshold is <= 0 or > 1)
         {
             throw new ConfigException("policy.load_threshold must be in (0, 1].");
+        }
+
+        if (config.Policy.JobMemGb is { } policyJobMem && !ValidJobMem(policyJobMem))
+        {
+            throw new ConfigException("policy.job_mem_gb must be a number above 0 and at most 4096 (GB one job uses), or left out.");
         }
 
         if (!double.IsFinite(config.Policy.MinFreeMemGb) || config.Policy.MinFreeMemGb < 0)
@@ -242,7 +264,11 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine name '{m.Name}' is invalid or duplicated.");
             }
 
-            if (!SshTargetRegex().IsMatch(m.Ssh))
+            if (m.Local || m.Fallback)
+            {
+                ValidateFallbackEntry(m);
+            }
+            else if (!SshTargetRegex().IsMatch(m.Ssh))
             {
                 throw new ConfigException($"Machine '{m.Name}': ssh target must be user@host (no leading '-', no spaces).");
             }
@@ -258,6 +284,14 @@ public static partial class ConfigLoader
                 throw new ConfigException(m.Os == MachineOs.Windows
                     ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lq (forward slashes, no spaces, no '..')."
                     : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lq (no spaces, no '..').");
+            }
+
+            if (m.Os == MachineOs.Windows && m.WorkRoot.Length > MaxWindowsWorkRootLength)
+            {
+                throw new ConfigException(
+                    $"Machine '{m.Name}': a Windows work_root may be at most {MaxWindowsWorkRootLength} characters; this one is {m.WorkRoot.Length}. "
+                    + "Each job's Windows job object is named after its pid file under work_root (names stop at MAX_PATH, 260), and every script lanq "
+                    + "sends must fit one 8000-character command line. Use a shorter folder, like D:/lq.");
             }
 
             if (!Enum.IsDefined(m.Os))
@@ -282,9 +316,19 @@ public static partial class ConfigLoader
                 throw new ConfigException($"Machine '{m.Name}': size must be light, medium or heavy (or leave it out to use the probed size).");
             }
 
+            if (m.JobMemGb is { } jobMem && !ValidJobMem(jobMem))
+            {
+                throw new ConfigException($"Machine '{m.Name}': job_mem_gb must be a number above 0 and at most 4096 (GB one job uses here), or left out.");
+            }
+
             if (m.MinFreeMemGb is { } minMem && (!double.IsFinite(minMem) || minMem < 0))
             {
                 throw new ConfigException($"Machine '{m.Name}': min_free_mem_gb must be >= 0.");
+            }
+
+            if (m.Hygiene is { } hygiene && (hygiene.Any(w => !Hygiene.Words.Contains(w, StringComparer.Ordinal)) || hygiene.Distinct(StringComparer.Ordinal).Count() != hygiene.Count))
+            {
+                throw new ConfigException($"Machine '{m.Name}': hygiene must list profiles from: {string.Join(", ", Hygiene.Words)} (each once), for example hygiene: [dotnet].");
             }
 
             ValidateJobEnvironment(m);
@@ -318,6 +362,67 @@ public static partial class ConfigLoader
                 }
             }
         }
+
+        SplitFallback(config);
+    }
+
+    /// <summary>
+    /// 0.13.0 B3: the fallback entry describes this computer. local: true and fallback: true go together (local: true replaces ssh:), and the keys
+    /// that only make sense for a remote worker are refused on it. At most one such entry (checked by <see cref="SplitFallback"/>).
+    /// </summary>
+    private static void ValidateFallbackEntry(Machine m)
+    {
+        if (!m.Fallback)
+        {
+            throw new ConfigException($"Machine '{m.Name}': local: true goes only with fallback: true (this computer as the last resort; see policy.fallback).");
+        }
+
+        if (!m.Local)
+        {
+            throw new ConfigException($"Machine '{m.Name}': fallback: true describes this computer and needs local: true instead of ssh:.");
+        }
+
+        if (m.Ssh.Length > 0)
+        {
+            throw new ConfigException($"Machine '{m.Name}': local: true replaces ssh:; give one or the other (to use this PC as an ordinary worker over ssh, leave out fallback and local).");
+        }
+
+        string? refused = m.AllowedHours is not null ? "allowed_hours" : m.Wake is not null ? "wake" : m.KeyEnv is not null ? "key_env" : m.Transfer == TransferMode.Archive ? "transfer: archive" : null;
+        if (refused is not null)
+        {
+            throw new ConfigException($"Machine '{m.Name}': {refused} is not allowed on the fallback entry (this computer; it is used only when you allow it with policy.fallback or --fallback).");
+        }
+    }
+
+    /// <summary>
+    /// 0.13.0 B3 (review H4): moves the fallback entry out of <see cref="FleetConfig.Machines"/> into <see cref="FleetConfig.Fallback"/>, so no
+    /// placement loop can ever treat it as a worker. An entry whose os is not this computer's disables only the fallback (L8):
+    /// <see cref="FleetConfig.FallbackProblem"/> says so, and the rest of the file still loads.
+    /// </summary>
+    private static void SplitFallback(FleetConfig config)
+    {
+        var entries = config.Machines.Where(m => m.Fallback).ToList();
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        if (entries.Count > 1)
+        {
+            throw new ConfigException($"Only one machine may be the fallback (this computer); found {string.Join(", ", entries.Select(m => m.Name))}.");
+        }
+
+        var fallback = entries[0];
+        config.Machines.Remove(fallback);
+        if (fallback.Os != ThisOs)
+        {
+            config.Fallback = null;
+            config.FallbackProblem = $"the fallback entry '{fallback.Name}' says os: {fallback.Os.ToString().ToLowerInvariant()} but this computer runs {ThisOs.ToString().ToLowerInvariant()}; the fallback is off on this computer";
+            return;
+        }
+
+        config.Fallback = fallback;
+        config.FallbackProblem = null;
     }
 
     /// <summary>A list key must be a list (not null), and every entry a non-blank string.</summary>
@@ -381,10 +486,11 @@ public static partial class ConfigLoader
         var limit = Jobs.RemoteScripts.MaxWindowsCommandLength;
         if (size > limit)
         {
+            var (inputs, fix) = Jobs.RemoteScripts.WindowsScriptInputs(m);
             throw new ConfigException(
-                $"Machine '{m.Name}': its env: ({m.Env.Count} entries) and path_prepend: ({m.PathPrepend.Count} entries) make the Windows job script "
-                + $"{size} characters once encoded, {size - limit} over the {limit}-character Windows command-line limit before any job arguments. "
-                + "Shorten or remove some env: values or path_prepend: entries.");
+                $"Machine '{m.Name}': the Windows job script is {size} characters once encoded, {size - limit} over the {limit}-character Windows "
+                + $"command-line limit before any job arguments. From this machine's config it carries its {inputs} ({Jobs.RemoteScripts.EncodedCostNote}). "
+                + $"Shorten {fix}.");
         }
     }
 

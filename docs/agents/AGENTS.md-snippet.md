@@ -74,3 +74,4 @@
   plan job no machine, ask the developer. Run targeted tests first and the full plan once they pass (a plan can take
   several slots). On a retryable `NoCapacity`, use
   `--wait` or the `wait` step once, never a loop. A checker not on the allowlist: ask the developer.
+- lanq 0.13.0: `NoCapacity` is NOT RUN, never a pass. Never pass `--fallback on|ask`, `--post` or `lanq prune --yes` unless the developer said so; `lanq prune <machine> --json` without `--yes` only lists. A result with `fallbackJobs` above 0 ran on the developer's PC: report it as not pool evidence.

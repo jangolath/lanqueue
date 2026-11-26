@@ -20,6 +20,10 @@ namespace LanQueue.Tests;
 /// </summary>
 public sealed class ExclusiveTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _exJob = T.NewJobId();
+    private readonly string _sleepyJob = T.NewJobId();
+
     private const int TestTimeout = 60_000;
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-excl-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
@@ -84,7 +88,7 @@ public sealed class ExclusiveTests : IDisposable
     private void ExclusiveClaimsEverySlotOrNone(string shell)
     {
         var before = Now;
-        var output = ClaimAll(shell, "ex-job", 3);
+        var output = ClaimAll(shell, _exJob, 3);
 
         Assert.Contains("SLOTS=1,2,3", output, StringComparison.Ordinal);
         Assert.Equal("1,2,3", JobRunner.ParseSlot(output));
@@ -92,7 +96,7 @@ public sealed class ExclusiveTests : IDisposable
         foreach (var i in new[] { 1, 2, 3 })
         {
             var lines = File.ReadAllText(Slot(i)).Replace("\r", "", StringComparison.Ordinal).Split('\n');
-            Assert.Equal("ex-job", lines[0]);
+            Assert.Equal(_exJob, lines[0]);
             Assert.InRange(long.Parse(lines[1], CultureInfo.InvariantCulture), before + lease - 5, Now + lease + 5);
         }
 
@@ -100,7 +104,7 @@ public sealed class ExclusiveTests : IDisposable
         Assert.Null(JobRunner.ParseSlot(ClaimAll(shell, "ex-2", 3)));
         Assert.Contains("SLOT=FULL", ClaimOne(shell, "normal", 3), StringComparison.Ordinal);
         Assert.Equal(["slot-1", "slot-2", "slot-3"], LockFiles());
-        Assert.All(new[] { 1, 2, 3 }, i => Assert.Equal("ex-job", Holder(i)));
+        Assert.All(new[] { 1, 2, 3 }, i => Assert.Equal(_exJob, Holder(i)));
     }
 
     [ShFact]
@@ -115,7 +119,7 @@ public sealed class ExclusiveTests : IDisposable
         var live = Lines("other-job", Now + 3600);
         WriteSlot(3, live);
 
-        var output = ClaimAll(shell, "ex-job", 3);
+        var output = ClaimAll(shell, _exJob, 3);
 
         Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
         Assert.Null(JobRunner.ParseSlot(output));
@@ -125,7 +129,7 @@ public sealed class ExclusiveTests : IDisposable
         // A middle slot taken: slot-1 was created and backed out, slot-3 never tried.
         ClearLocks();
         WriteSlot(2, live);
-        Assert.Null(JobRunner.ParseSlot(ClaimAll(shell, "ex-job", 3)));
+        Assert.Null(JobRunner.ParseSlot(ClaimAll(shell, _exJob, 3)));
         Assert.Equal(["slot-2"], LockFiles());
     }
 
@@ -180,14 +184,14 @@ public sealed class ExclusiveTests : IDisposable
         foreach (var archive in new[] { false, true })
         {
             ClearLocks();
-            WriteSlot(1, Lines("ex-job", Now + 3600));
-            WriteSlot(2, Lines("ex-job", Now + 3600));
+            WriteSlot(1, Lines(_exJob, Now + 3600));
+            WriteSlot(2, Lines(_exJob, Now + 3600));
             WriteSlot(3, Lines("other-job", Now + 3600)); // reclaimed and claimed by another job meanwhile
-            WriteSlot(5, Lines("ex-job", Now + 3600)); // not in the list: never touched
+            WriteSlot(5, Lines(_exJob, Now + 3600)); // not in the list: never touched
             var worker = Worker(shell, 4);
             worker.Transfer = archive ? TransferMode.Archive : TransferMode.Git;
 
-            var (code, output) = Shells.Run(shell, RemoteScripts.Cleanup(worker, "ex-job", "1,2,3,4"));
+            var (code, output) = Shells.Run(shell, RemoteScripts.Cleanup(worker, _exJob, "1,2,3,4"));
 
             Assert.True(code == 0, output);
             Assert.Equal(["slot-3", "slot-5"], LockFiles());
@@ -204,7 +208,7 @@ public sealed class ExclusiveTests : IDisposable
     /// <summary>An exclusive job's slots are ordinary slot files: the probe counts each, and lanq unlock treats each as any other slot.</summary>
     private void UnlockAndTheProbeStillWork(string shell)
     {
-        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll(shell, "ex-job", 3)));
+        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll(shell, _exJob, 3)));
         var worker = Worker(shell, 3);
         Assert.Equal("3", HealthProbe.Parse(Shells.Run(shell, RemoteScripts.Probe(worker)).Output)["slots_used"]);
 
@@ -216,13 +220,13 @@ public sealed class ExclusiveTests : IDisposable
         // Past their deadline (a crashed exclusive job): unlock removes every one of them.
         foreach (var i in new[] { 1, 2, 3 })
         {
-            WriteSlot(i, Lines("ex-job", Now - 60));
+            WriteSlot(i, Lines(_exJob, Now - 60));
         }
 
         Assert.Equal(3, Cli.ParseUnlock(Shells.Run(shell, RemoteScripts.Unlock(worker, all: false)).Output).Removed.Count);
         Assert.Empty(LockFiles());
 
-        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll(shell, "ex-job", 3)));
+        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll(shell, _exJob, 3)));
         Assert.Equal(3, Cli.ParseUnlock(Shells.Run(shell, RemoteScripts.Unlock(worker, all: true)).Output).Removed.Count);
         Assert.Empty(LockFiles());
     }
@@ -416,16 +420,16 @@ public sealed class ExclusiveTests : IDisposable
         foreach (var archive in new[] { false, true })
         {
             ClearLocks();
-            var exclusive = Lines("ex-job", Now + 3600);
+            var exclusive = Lines(_exJob, Now + 3600);
             WriteSlot(1, exclusive);
-            WriteSlot(2, Lines("sleepy-job", Now + 3600));
+            WriteSlot(2, Lines(_sleepyJob, Now + 3600));
             var worker = Worker(shell, 2);
             worker.Transfer = archive ? TransferMode.Archive : TransferMode.Git;
 
-            Assert.Equal(0, Shells.Run(shell, RemoteScripts.Cleanup(worker, "sleepy-job", "1")).Code);
+            Assert.Equal(0, Shells.Run(shell, RemoteScripts.Cleanup(worker, _sleepyJob, "1")).Code);
             Assert.Equal(exclusive, File.ReadAllText(Slot(1)));
 
-            Assert.Equal(0, Shells.Run(shell, RemoteScripts.Cleanup(worker, "sleepy-job", "2")).Code);
+            Assert.Equal(0, Shells.Run(shell, RemoteScripts.Cleanup(worker, _sleepyJob, "2")).Code);
             Assert.Equal(["slot-1"], LockFiles());
         }
     }
@@ -954,7 +958,7 @@ public sealed class ExclusiveTests : IDisposable
             WriteSlot(5, content);
             File.WriteAllText(Slot(7) + ".reclaim", "x");
 
-            var output = ClaimAll(shell, "ex-job", 3);
+            var output = ClaimAll(shell, _exJob, 3);
 
             if (blocks)
             {
@@ -972,7 +976,7 @@ public sealed class ExclusiveTests : IDisposable
         ClearLocks();
         WriteSlot(5, "x");
         File.Move(Slot(5), Path.Combine(_root, "locks", "slot-05"));
-        Assert.Null(JobRunner.ParseSlot(ClaimAll(shell, "ex-job", 3)));
+        Assert.Null(JobRunner.ParseSlot(ClaimAll(shell, _exJob, 3)));
         Assert.Equal(["slot-05"], LockFiles());
     }
 
@@ -1048,16 +1052,29 @@ public sealed class ExclusiveTests : IDisposable
         return (r, ssh, lines);
     }
 
-    /// <summary>The deflated block both claims dot-source is exactly the slot functions plus the reclaim function, nothing else.</summary>
+    /// <summary>
+    /// The deflated block a claim dot-sources is exactly the slot functions plus the reclaim function, nothing else; the claim of every slot's
+    /// block (0.13.0 review M1) is the same text plus its own BO and HL functions.
+    /// </summary>
     [Fact]
     public void ThePackedSlotFunctionsAreExactlyTheSlotAndReclaimFunctions()
     {
-        var packed = RemoteScripts.WindowsSlotFunctionsPacked;
-        var start = packed.IndexOf("FromBase64String('", StringComparison.Ordinal) + "FromBase64String('".Length;
-        var base64 = packed[start..packed.IndexOf('\'', start)];
-        using var inflate = new System.IO.Compression.DeflateStream(new MemoryStream(Convert.FromBase64String(base64)), System.IO.Compression.CompressionMode.Decompress);
-        using var reader = new StreamReader(inflate, System.Text.Encoding.UTF8);
-        Assert.Equal(RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction, reader.ReadToEnd());
+        static string Inflate(string packed)
+        {
+            var start = packed.IndexOf("FromBase64String('", StringComparison.Ordinal) + "FromBase64String('".Length;
+            var base64 = packed[start..packed.IndexOf('\'', start)];
+            using var inflate = new System.IO.Compression.DeflateStream(new MemoryStream(Convert.FromBase64String(base64)), System.IO.Compression.CompressionMode.Decompress);
+            using var reader = new StreamReader(inflate, System.Text.Encoding.UTF8);
+            return reader.ReadToEnd();
+        }
+
+        Assert.Equal(RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction, Inflate(RemoteScripts.WindowsSlotFunctionsPacked));
+        Assert.Equal(
+            RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction + "\n" + RemoteScripts.WindowsExclusiveFunctions,
+            Inflate(RemoteScripts.WindowsExclusiveFunctionsPacked));
+        Assert.Contains("function BO{", RemoteScripts.WindowsExclusiveFunctions, StringComparison.Ordinal);
+        Assert.Contains("[long]$Matches[1] -le $mx)", RemoteScripts.WindowsExclusiveFunctions, StringComparison.Ordinal);
+        Assert.Contains("+1800)", RemoteScripts.WindowsExclusiveFunctions, StringComparison.Ordinal);
     }
 
     /// <summary>Many claims (shards, plan jobs) report the same stuck slot at once: the line is printed exactly once.</summary>
@@ -1139,7 +1156,7 @@ public sealed class ExclusiveTests : IDisposable
         // An exclusive claim that backs out because of a live slot above max_jobs prints no marker either.
         ClearLocks();
         WriteSlot(5, Lines("other-dev", Now + 3600));
-        var higher = ClaimAll(shell, "ex-job", 2);
+        var higher = ClaimAll(shell, _exJob, 2);
         Assert.Contains("SLOT=FULL", higher, StringComparison.Ordinal);
         Assert.Empty(JobRunner.StuckSlots(higher));
     }
@@ -1157,11 +1174,11 @@ public sealed class ExclusiveTests : IDisposable
         WriteSlot(5, Lines("other-dev", Stale)); // stale by its content, but nobody can read that now
         using (new FileStream(Slot(5), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
         {
-            var output = ClaimAll("windows", "ex-job", 3);
+            var output = ClaimAll("windows", _exJob, 3);
             Assert.Contains("SLOT=FULL", output, StringComparison.Ordinal);
             Assert.Equal(["slot-5"], LockFiles());
         }
 
-        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll("windows", "ex-job", 3))); // readable again, and stale: no longer blocks
+        Assert.Equal("1,2,3", JobRunner.ParseSlot(ClaimAll("windows", _exJob, 3))); // readable again, and stale: no longer blocks
     }
 }

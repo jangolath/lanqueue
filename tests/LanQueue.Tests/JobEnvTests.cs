@@ -18,6 +18,9 @@ namespace LanQueue.Tests;
 /// </summary>
 public sealed class JobEnvTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+
     private const int TestTimeout = 60_000;
 
     /// <summary>A value that tries to break out of the quoting in sh and PowerShell (quotes, typographic quotes, $, backtick, spaces).</summary>
@@ -27,7 +30,7 @@ public sealed class JobEnvTests : IDisposable
 
     public JobEnvTests()
     {
-        Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(_root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(_root, "locks"));
         Directory.CreateDirectory(Path.Combine(Repo, ".git"));
     }
@@ -675,26 +678,26 @@ public sealed class JobEnvTests : IDisposable
         var linux = T.Linux();
         linux.Env["MACHINE_ONLY"] = "1";
         Assert.Contains(
-            "env 'MACHINE_ONLY=1' 'CONFIGURATION=Release' 'TEST_FILTER=a b'\\''c' 'LANQ_JOB=j1' 'LANQ_SHARD=1' 'LANQ_SHARDS=2' 'LANQ_PLAN_JOB=unit' /bin/sh -c",
-            RemoteScripts.Execute(linux, "j1", ".", ["npm", "test"], shard: new ShardInfo(1, 2), planJob: "unit", env: env),
+            "env 'MACHINE_ONLY=1' 'CONFIGURATION=Release' 'TEST_FILTER=a b'\\''c' 'LANQ_JOB=" + _j1 + "' 'LANQ_SHARD=1' 'LANQ_SHARDS=2' 'LANQ_PLAN_JOB=unit' /bin/sh -c",
+            RemoteScripts.Execute(linux, _j1, ".", ["npm", "test"], shard: new ShardInfo(1, 2), planJob: "unit", env: env),
             StringComparison.Ordinal);
 
         var windows = T.Windows();
         windows.Env["MACHINE_ONLY"] = "1";
         windows.PathPrepend.Add("C:/tools");
-        var script = RemoteScripts.Execute(windows, "j1", ".", ["npm", "test"], shard: new ShardInfo(1, 2), planJob: "unit", env: env);
+        var script = RemoteScripts.Execute(windows, _j1, ".", ["npm", "test"], shard: new ShardInfo(1, 2), planJob: "unit", env: env);
         var lines = script.Split('\n').Select(l => l.Trim()).ToList();
         var order = new[]
         {
-            "$env:MACHINE_ONLY = '1'", "$env:Path = 'C:\\tools'", "$env:CONFIGURATION = 'Release'", "$env:TEST_FILTER = 'a b''c'", "$env:LANQ_JOB = 'j1'",
+            "$env:MACHINE_ONLY = '1'", "$env:Path = 'C:\\tools'", "$env:CONFIGURATION = 'Release'", "$env:TEST_FILTER = 'a b''c'", "$env:LANQ_JOB = '" + _j1 + "'",
             "$env:LANQ_SHARD = '1'", "$env:LANQ_PLAN_JOB = 'unit'",
         }.Select(prefix => lines.FindIndex(l => l.StartsWith(prefix, StringComparison.Ordinal))).ToList();
         Assert.DoesNotContain(-1, order);
         Assert.Equal(order.Order(), order);
 
         // Without --env the scripts are exactly as before.
-        Assert.Equal(RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"]), RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], env: []));
-        Assert.Equal(RemoteScripts.Execute(T.Windows(), "j1", ".", ["npm", "test"]), RemoteScripts.Execute(T.Windows(), "j1", ".", ["npm", "test"], env: []));
+        Assert.Equal(RemoteScripts.Execute(T.Linux(), _j1, ".", ["npm", "test"]), RemoteScripts.Execute(T.Linux(), _j1, ".", ["npm", "test"], env: []));
+        Assert.Equal(RemoteScripts.Execute(T.Windows(), _j1, ".", ["npm", "test"]), RemoteScripts.Execute(T.Windows(), _j1, ".", ["npm", "test"], env: []));
     }
 
     [Theory]
@@ -703,8 +706,8 @@ public sealed class JobEnvTests : IDisposable
     [InlineData("A=B")]
     public void AnUnsafeNameNeverReachesAScript(string name)
     {
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], env: [V(name, "x")]));
-        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Windows(), "j1", ".", ["npm", "test"], env: [V(name, "x")]));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Linux(), _j1, ".", ["npm", "test"], env: [V(name, "x")]));
+        Assert.Throws<ArgumentException>(() => RemoteScripts.Execute(T.Windows(), _j1, ".", ["npm", "test"], env: [V(name, "x")]));
     }
 
     /// <summary>Runs the generated Linux script in a real sh: the job sees each value verbatim, and nothing in it runs.</summary>
@@ -714,9 +717,9 @@ public sealed class JobEnvTests : IDisposable
     {
         var m = T.Linux();
         m.WorkRoot = _root;
-        var script = RemoteScripts.Execute(m, "j1", ".", ["sh", "-c", "printf '%s|%s|%s' \"$TEST_FILTER\" \"$CONFIGURATION\" \"$LANQ_JOB\""], env: [V("TEST_FILTER", Tricky), V("CONFIGURATION", "Release")]);
-        Assert.Equal(Tricky + "|Release|j1", T.JobOutput(WorkerHealthTests.Capture("sh", "-c", script)));
-        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
+        var script = RemoteScripts.Execute(m, _j1, ".", ["sh", "-c", "printf '%s|%s|%s' \"$TEST_FILTER\" \"$CONFIGURATION\" \"$LANQ_JOB\""], env: [V("TEST_FILTER", Tricky), V("CONFIGURATION", "Release")]);
+        Assert.Equal(Tricky + "|Release|" + _j1, T.JobOutput(WorkerHealthTests.Capture("sh", "-c", script)));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", _j1)));
     }
 
     /// <summary>Runs the generated Windows script in a real Windows PowerShell: the job's child process sees each value verbatim.</summary>
@@ -726,15 +729,15 @@ public sealed class JobEnvTests : IDisposable
         var m = T.Windows();
         m.WorkRoot = _root;
         var check = "[Console]::Out.Write(($env:TEST_FILTER -ceq " + ShellQuote.PowerShell(Tricky) + ").ToString() + '|' + $env:CONFIGURATION + '|' + $env:LANQ_JOB)";
-        var script = RemoteScripts.Execute(m, "j1", ".", ["lanqtesttool"], env: [V("TEST_FILTER", Tricky), V("CONFIGURATION", "Release")])
+        var script = RemoteScripts.Execute(m, _j1, ".", ["lanqtesttool"], env: [V("TEST_FILTER", Tricky), V("CONFIGURATION", "Release")])
             .Replace("& 'lanqtesttool'", check, StringComparison.Ordinal);
         var file = Path.Combine(Path.GetTempPath(), "lanq-jobenv-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(file, "\ufeff" + script);
         try
         {
             var output = T.JobOutput(WorkerHealthTests.Capture("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file));
-            Assert.Equal("True|Release|j1", output);
-            Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", "j1")));
+            Assert.Equal("True|Release|" + _j1 + "", output);
+            Assert.Empty(Directory.GetFiles(Path.Combine(_root, "jobs", _j1)));
         }
         finally
         {

@@ -123,7 +123,8 @@ public static partial class Cli
 
         // What to do next, then the logs of the shards that did not complete (--json carries every shard's logPath); all before the status
         // line, which stays last.
-        var next = NextSteps.ForShards(p, result);
+        var wakes = runner.WakeAttempts;
+        var next = NextSteps.WithWakes(p, NextSteps.WithFallback(p, NextSteps.ForShards(p, result), result.Status == nameof(JobStatus.NoCapacity) ? result.FallbackHint : null, result.FallbackJobs, result.Count), wakes);
         var merged = MergedResults(result);
         if (NoTestsRan(result.Status, merged) is { } noTests)
         {
@@ -142,10 +143,10 @@ public static partial class Cli
             }
         }
 
-        await stderr.WriteLineAsync($"[lanq] {result.Status}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
+        await stderr.WriteLineAsync($"[lanq] {result.Status}{JobRunner.FallbackNote(result.FallbackJobs, result.Count)}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), ScanSkipped = ScanSkippedJson(runner.ScanSkipped) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), ScanSkipped = ScanSkippedJson(runner.ScanSkipped), Wakes = WakeAttemptJson.Of(wakes) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
         }
 
         return result.ExitCode;
@@ -163,17 +164,22 @@ public static partial class Cli
                 {
                     Shard = s.Index,
                     Attempts = s.Attempts,
+                    Fallback = Flag(s.Fallback),
+                    Post = PostJson.Of(s.Post),
                     Baseline = BaselineJsonOf(s.Baseline),
                     Results = ResultsJsonOf(s.Results),
                 },
                 s.LogPath,
-                logTail),
+                logTail,
+                s.Post?.LogFrom),
             fetch,
             s.Fetch))])
     {
         Retryable = result.Status == nameof(JobStatus.NoCapacity) ? result.Retryable ?? true : null,
         Excluded = result.Status == nameof(JobStatus.NoCapacity) ? ExcludedJsons(result.Excluded) : null,
+        Waited = result.Status == nameof(JobStatus.NoCapacity) ? WaitedJson.Of(result.Waited) : null,
         ShardTiming = TimingJson(result.Timing),
+        FallbackJobs = result.FallbackJobs > 0 ? result.FallbackJobs : null,
         NextSteps = nextSteps ?? [],
         Results = ResultsJsonOf(MergedResults(result)),
     };

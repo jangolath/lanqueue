@@ -234,7 +234,7 @@ public class SchedulerTests
         Assert.Equal([("big-01", 4)], free.Select(f => (f.Machine.Name, f.Free)));
         Assert.Equal(3, Scheduler.AutoCount(assessed, 2, 3).Count);
 
-        var none = Scheduler.AutoCount(Scheduler.Assess([(Box("x", ["node"]), Up("x", slots: 2))], new JobNeeds(["node"], null, false)), null, 64);
+        var none = Scheduler.AutoCount(Scheduler.Assess([(Box("x", ["node"]), Up("x", slots: 2))], new JobNeeds(["node"], null, false)), (double?)null, 64);
         Assert.Equal((1, 0), (none.Count, none.Total));
     }
 }

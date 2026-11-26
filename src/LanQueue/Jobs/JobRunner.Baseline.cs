@@ -178,6 +178,15 @@ public sealed partial class JobRunner
             builds), null);
     }
 
+    /// <summary>
+    /// " (fallback: ...)" when the failed job or its rerun ran on this computer's fallback entry (review A-L9): the comparison is then not pool
+    /// evidence, even on the same machine; else "".
+    /// </summary>
+    internal static string FallbackCaveat(Machine? fallback, bool rerunOnFallback, string? failedOn) =>
+        rerunOnFallback || (fallback is { } fb && string.Equals(failedOn, fb.Name, StringComparison.Ordinal))
+            ? " (fallback: one side of this comparison ran on this computer, not on the pool; rerun both on the pool to be sure)"
+            : "";
+
     private async Task<BaselineResult> OneBaselineAsync(
         BaselineTarget t, JobPayload snapshot, PlanProgress gate, Func<BaseCommit, string, Task<(PreparedPayload? Prepared, string? Failure)>> baseOf, CancellationToken ct)
     {
@@ -237,7 +246,7 @@ public sealed partial class JobRunner
             var done = Result(verdict, message) with { Machine = r.Machine, FailedOn = t.Machine };
             return done with
             {
-                Message = SafeLine(message + done.MachineCaveat),
+                Message = SafeLine(message + done.MachineCaveat + FallbackCaveat(config.Fallback, r.Fallback, t.Machine)),
                 Status = r.Status.ToString(),
                 ExitCode = r.CliExitCode,
                 Machine = r.Machine,

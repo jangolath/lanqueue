@@ -355,7 +355,8 @@ public static partial class Cli
             throw new InsertRefusedException($"the file would hold {after.Machines.Count} machines, not {before.Machines.Count + 1}");
         }
 
-        if (!before.Machines.Select(Describe).SequenceEqual(after.Machines.Take(before.Machines.Count).Select(Describe)) || Describe(before.Policy) != Describe(after.Policy))
+        if (!before.Machines.Select(Describe).SequenceEqual(after.Machines.Take(before.Machines.Count).Select(Describe)) || Describe(before.Policy) != Describe(after.Policy)
+            || (before.Fallback is null ? "-" : Describe(before.Fallback)) != (after.Fallback is null ? "-" : Describe(after.Fallback)))
         {
             throw new InsertRefusedException("the existing machines or the policy would read differently with the entry added");
         }
@@ -380,17 +381,21 @@ public static partial class Cli
         string.Join(',', m.Capabilities),
         m.MaxJobs.ToString(CultureInfo.InvariantCulture),
         m.MinFreeMemGb?.ToString("R", CultureInfo.InvariantCulture) ?? "-",
+        m.JobMemGb?.ToString("R", CultureInfo.InvariantCulture) ?? "-",
         string.Join(',', m.Env.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => e.Key + "=" + e.Value)),
         string.Join(',', m.PathPrepend),
         m.Priority,
         m.AllowedHours is null ? "-" : string.Join(',', m.AllowedHours),
         m.Transfer,
         m.Wake is { } w ? string.Create(CultureInfo.InvariantCulture, $"{w.Mac}/{w.Broadcast}/{w.Port}/{w.WaitSeconds}") : "-",
-        m.Size ?? "-");
+        m.Size ?? "-",
+        m.Hygiene is null ? "-" : string.Join(',', m.Hygiene),
+        m.Fallback ? "fallback" : "-",
+        m.Local ? "local" : "-");
 
     private static string Describe(PolicyConfig p) => string.Join(
         "\u001f",
-        string.Create(CultureInfo.InvariantCulture, $"{p.LoadThreshold:R}/{p.MinFreeDiskGb:R}/{p.MinFreeMemGb:R}/{p.MaxMemPressure:R}/{p.WindowGraceMinutes}/{p.MinWindowMinutes}"),
+        string.Create(CultureInfo.InvariantCulture, $"{p.LoadThreshold:R}/{p.MinFreeDiskGb:R}/{p.MinFreeMemGb:R}/{p.MaxMemPressure:R}/{p.WindowGraceMinutes}/{p.MinWindowMinutes}/{p.JobMemGb?.ToString("R", CultureInfo.InvariantCulture) ?? "-"}/{p.Fallback}"),
         string.Join(',', p.AllowedCommands),
         string.Join(',', p.AllowedDirectories));
 

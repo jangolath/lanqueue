@@ -100,6 +100,13 @@ internal sealed record HealthNeedsJson : HealthJson
 
     /// <summary>How many copies of the job (shards) the machine could take now, with --mem counted per copy; 0 when not eligible.</summary>
     public int JobSlots { get; init; }
+
+    /// <summary>
+    /// The job's memory need on this machine in GB (0.13.0): max(--mem, the machine's job_mem_gb or policy.job_mem_gb); left out when
+    /// neither applies. jobSlots counts copies of this need above the machine's free-memory floor.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? NeedGb { get; init; }
 }
 
 /// <summary>
@@ -110,6 +117,10 @@ internal sealed record HealthNeedsJson : HealthJson
 /// <param name="ExitCode">lanq's own exit code (the job's code, or 2, 70, 75, 124, 130).</param>
 internal sealed record RunJson(string Status, int ExitCode, string? Machine, string? JobId, double DurationSeconds, string Message)
 {
+    /// <summary>The Wake-on-LAN packets this run sent (0.13.0: also before falling back to this computer) and what came of each; null when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WakeAttemptJson>? Wakes { get; init; }
+
     /// <summary>--shards only, in each element of shards: the 1-based shard index.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Shard { get; init; }
@@ -145,6 +156,22 @@ internal sealed record RunJson(string Status, int ExitCode, string? Machine, str
     /// <summary>NoCapacity only (top level): every machine that did not take the job, with its reason.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
+    /// <summary>0.13.0 B3: true when this job ran on this computer's fallback entry, not on the pool (absent otherwise).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Fallback { get; init; }
+
+    /// <summary>The post: step (0.13.0): exitCode (a warning only), timedOut, seconds; absent when none ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PostJson? Post { get; init; }
+
+    /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackJobs { get; init; }
 
     /// <summary>Always present: the full path of the job's local log (every line lanq printed for the job), or null when no job started.</summary>
     public string? LogPath { get; init; }
@@ -275,6 +302,10 @@ internal sealed record BaselineJson(
 /// <param name="Status">Completed, Failed, Rejected, NoCapacity, InfraError, TimedOut, WindowClosed or Cancelled.</param>
 internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount, double DurationSeconds, string Message, IReadOnlyList<RunJson> Shards)
 {
+    /// <summary>The Wake-on-LAN packets this run sent (0.13.0: also before falling back to this computer) and what came of each; null when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WakeAttemptJson>? Wakes { get; init; }
+
     /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Retryable { get; init; }
@@ -282,6 +313,14 @@ internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount,
     /// <summary>NoCapacity only: as in <see cref="RunJson.Excluded"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
+    /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackJobs { get; init; }
 
     /// <summary>--shards auto --target-minutes only: how N was picked from earlier runs (left out otherwise).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -339,6 +378,47 @@ internal sealed record ShardTimingJson(
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
 
 /// <summary>
+/// One Wake-on-LAN packet of a run (0.13.0, top-level wakes): the machine, its result (Waking: may still come up; Awake: answered ssh;
+/// NoAnswer: no ssh answer within waitSeconds; SendFailed: not sent), its wake.wait_seconds, and the same for people.
+/// </summary>
+internal sealed record WakeAttemptJson(string Machine, string Result, int WaitSeconds, string Message)
+{
+    /// <summary>null (left out) for no attempts.</summary>
+    public static List<WakeAttemptJson>? Of(IReadOnlyList<Health.WakeAttempt> attempts) =>
+        attempts.Count == 0 ? null : [.. attempts.Select(a => new WakeAttemptJson(Jobs.JobRunner.SafeLine(a.Machine), a.Outcome.ToString(), a.WaitSeconds, Jobs.JobRunner.SafeLine(Jobs.JobRunner.WakeText(a))))];
+}
+
+/// <summary>The post: step of a job (0.13.0): its exit code is a warning only; timedOut when it was stopped at its 5-minute limit.</summary>
+internal sealed record PostJson(int ExitCode, bool TimedOut, double Seconds)
+{
+    /// <summary>True when Ctrl+C, plan_timeout or --fail-fast ended the step (exit 130); the job's own status stands. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Cancelled { get; init; }
+
+    /// <summary>True when the step was not started: the machine's allowed hours (plus grace) end too soon. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Skipped { get; init; }
+
+    internal static PostJson? Of(Jobs.PostResult? p) => p is null ? null : new PostJson(p.ExitCode, p.TimedOut, p.Seconds)
+    {
+        Cancelled = p.Cancelled ? true : null,
+        Skipped = p.Skipped ? true : null,
+    };
+}
+
+/// <summary>
+/// NoCapacity after waiting (0.13.0 B2): idle seconds charged to waiting for a machine that can take this kind of job (eligibleSeconds) and
+/// for a free slot (slotSeconds), and the budget that ran out: "eligible" (--wait-eligible) or "slot" (--wait-slot). With --wait both
+/// budgets are that value.
+/// </summary>
+internal sealed record WaitedJson(int EligibleSeconds, int SlotSeconds, string Budget)
+{
+    internal static WaitedJson? Of(Scheduling.WaitedInfo? w) => w is null
+        ? null
+        : new((int)Math.Round(w.Eligible.TotalSeconds), (int)Math.Round(w.Slot.TotalSeconds), w.Budget == Scheduling.WaitKind.Slot ? "slot" : "eligible");
+}
+
+/// <summary>
 /// The one object <c>lanq run --dry-run --json</c> prints on stdout: what lanq run would do now. Every field is always present (null where it
 /// does not apply), except logTail (only with --log-tail, and then always empty: a dry run starts no job). Fields are only ever added.
 /// </summary>
@@ -375,8 +455,19 @@ internal sealed record PlanJson(string Status, int ExitCode)
     /// <summary>Every machine judged for the job, in config order (empty when the run was refused before any machine was looked at).</summary>
     public IReadOnlyList<PlanMachineJson> Machines { get; init; } = [];
 
-    /// <summary>The sleeping machine lanq run would wake (with --wait above 0 and without --no-wake, when no awake machine can take the job), or null.</summary>
+    /// <summary>
+    /// The sleeping machine lanq run would wake (with --wait above 0, or before falling back to this computer; without --no-wake; when no awake
+    /// machine can take the job), or null; the first by name when it would wake several (<see cref="WouldWakeAll"/>).
+    /// </summary>
     public string? WouldWake { get; init; }
+
+    /// <summary>0.13.0: before falling back to this computer, every sleeper lanq run would wake at once, by name. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? WouldWakeAll { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0): this computer's fallback entry when lanq run would go there instead of ending NOT RUN. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WouldFallBack { get; init; }
 
     /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>; else null.</summary>
     public bool? Retryable { get; init; }
@@ -408,7 +499,12 @@ internal sealed record PlanJson(string Status, int ExitCode)
 /// <summary>One machine in <c>lanq run --dry-run --json</c>: as the health --needs rows judge it (reason codes as in <see cref="ExcludedJson.Reason"/>).</summary>
 /// <param name="FreeSlots">max_jobs minus the slots in use.</param>
 /// <param name="JobSlots">How many copies of the job (shards) it could take now; for an --exclusive job the slots it would take (max_jobs); 0 when not eligible.</param>
-internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots);
+internal sealed record PlanMachineJson(string Machine, bool Eligible, string? Reason, string? Why, bool Permanent, int FreeSlots, int JobSlots)
+{
+    /// <summary>0.13.0 B1 (p1 review L5): the job's memory need on this machine (max of --mem and the job size), or absent when none applies.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? NeedGb { get; init; }
+}
 
 /// <summary>--shards --dry-run: the shards one machine would take at the start.</summary>
 internal sealed record PlacementJson(string Machine, IReadOnlyList<int> Shards);
@@ -424,6 +520,10 @@ internal sealed record PlacementJson(string Machine, IReadOnlyList<int> Shards);
 internal sealed record PlanFileRunJson(
     string Status, int ExitCode, string? Plan, double DurationSeconds, string Message, IReadOnlyList<string> Order, IReadOnlyList<PlanFileJobJson> Jobs)
 {
+    /// <summary>The Wake-on-LAN packets this run sent (0.13.0: also before falling back to this computer) and what came of each; null when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WakeAttemptJson>? Wakes { get; init; }
+
     /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>, from the job that decided the status.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Retryable { get; init; }
@@ -431,6 +531,14 @@ internal sealed record PlanFileRunJson(
     /// <summary>NoCapacity only: as in <see cref="RunJson.Excluded"/>, from the job that decided the status.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
+    /// <summary>0.13.0 B3 (top level): how many jobs ran on this computer's fallback entry; absent when none did. Above 0: not pool evidence.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FallbackJobs { get; init; }
 
     /// <summary>The plan file's static warnings (also printed on stderr).</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
@@ -478,6 +586,18 @@ internal sealed record PlanFileJobJson(
     /// <summary>NoCapacity only.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<ExcludedJson>? Excluded { get; init; }
+
+    /// <summary>NoCapacity after waiting (0.13.0): seconds charged to each wait state and the budget that ran out (top level, next to retryable).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WaitedJson? Waited { get; init; }
+
+    /// <summary>0.13.0 B3: true when this job ran on this computer's fallback entry, not on the pool (absent otherwise).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Fallback { get; init; }
+
+    /// <summary>A single job's post: step (0.13.0); a sharded job has one per shard. Absent when none ran.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PostJson? Post { get; init; }
 
     /// <summary>A single job with fetch: in lanq.yml only, as in <see cref="RunJson.Fetched"/> (a sharded job has them per shard).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -596,6 +716,14 @@ internal sealed record PlanFileDryJobJson(string Name, IReadOnlyList<string> Aft
     /// <summary>--exclusive (lanq.yml exclusive: true) only (0.9.0): true when the job takes every slot of its machine. Absent otherwise.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Exclusive { get; init; }
+
+    /// <summary>NoCapacity only (0.13.0): this computer's fallback entry when lanq run would go there instead of ending NOT RUN. Absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? WouldFallBack { get; init; }
+
+    /// <summary>post: in lanq.yml only (0.13.0): the job's post step as its words (runArgv carries it as --post too). Absent when there is none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Post { get; init; }
 }
 
 /// <summary>One fetched file in <c>lanq run --json</c>.</summary>
@@ -616,6 +744,37 @@ internal sealed record ErrorJson(string Status, int ExitCode, string Message)
 
 /// <summary>The one object <c>lanq wake --json</c> prints when a packet was sent: Sent (0), Awake (0, with --wait) or NoAnswer (1, with --wait). Failures use <see cref="ErrorJson"/>.</summary>
 /// <param name="Awake">Null without --wait (not checked).</param>
+/// <summary>lanq prune --json (0.13.0 D2): status Listed (no --yes), Completed, Incomplete, InfraError, Held or Rejected; one row per machine.</summary>
+internal sealed record PruneJson(string Status, int ExitCode, IReadOnlyList<PruneMachineJson> Machines)
+{
+    public IReadOnlyList<NextStepJson> NextSteps { get; init; } = [];
+}
+
+/// <summary>One machine of lanq prune: what it would remove (list only) or removed, what it kept and why, what could not be removed.</summary>
+internal sealed record PruneMachineJson(string Name)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PruneEntryJson>? WouldRemove { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PruneEntryJson>? Removed { get; init; }
+
+    public IReadOnlyList<PruneSkipJson> Skipped { get; init; } = [];
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<PruneEntryJson>? Failed { get; init; }
+
+    /// <summary>Why nothing was done there (unreachable, held, refused), or null.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Note { get; init; }
+}
+
+/// <summary>One prunable entry: kind job, incoming, pidfile, leftover or cache; its name (an id, a file or a cache folder); its size.</summary>
+internal sealed record PruneEntryJson(string Kind, string Name, long Bytes);
+
+/// <summary>An entry prune kept: its name, and why (live: a slot or a running process names it; busy: slots in use, caches left alone).</summary>
+internal sealed record PruneSkipJson(string Name, string Why);
+
 internal sealed record WakeJson(string Status, int ExitCode, string Machine, bool Sent, bool? Awake, double DurationSeconds, string Message)
 {
     /// <summary>What to do next (see <see cref="NextStepJson"/>): Sent suggests lanq health, never another wake.</summary>
@@ -689,7 +848,12 @@ internal sealed record StatsLogsJson(int Files, double Megabytes, int? KeepDays)
 /// <param name="SpeedSamples">How many such jobs it has (0 for none).</param>
 internal sealed record StatsMachineJson(
     string Machine, int Jobs, int Completed, int Failed, int Other, double WallMinutes, double? MedianSeconds, double? P90Seconds, DateTime LastRunUtc,
-    double? SpeedFactor, int SpeedSamples);
+    double? SpeedFactor, int SpeedSamples)
+{
+    /// <summary>0.13.0 B3: true when the machine is this computer's fallback entry (its jobs ran here, not on the pool); absent otherwise.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ThisComputer { get; init; }
+}
 
 /// <summary>One command of <c>lanq stats --json</c>: every job with the same key and dir (or, before 0.7.0, the same recorded command; dir null).</summary>
 /// <param name="Runs">Distinct runs: every shard of one --shards run is one run.</param>
@@ -733,6 +897,7 @@ internal sealed record StatsTimingJson(int RunsUsed, double WorkMinutes, double 
 [JsonSerializable(typeof(ResultsTotalJson))]
 [JsonSerializable(typeof(ErrorJson))]
 [JsonSerializable(typeof(WakeJson))]
+[JsonSerializable(typeof(PruneJson))]
 [JsonSerializable(typeof(InitJson))]
 [JsonSerializable(typeof(PlanJson))]
 [JsonSerializable(typeof(PlanFileRunJson))]

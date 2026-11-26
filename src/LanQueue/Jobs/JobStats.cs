@@ -8,7 +8,11 @@ namespace LanQueue.Jobs;
 /// <param name="MedianSeconds">Median wall-clock seconds of its Completed jobs (nearest rank, one decimal); null when none completed.</param>
 /// <param name="P90Seconds">90th percentile of the same (nearest rank, one decimal); null when none completed.</param>
 public sealed record MachineStats(
-    string Machine, int Jobs, int Completed, int Failed, int Other, double WallMinutes, double? MedianSeconds, double? P90Seconds, DateTimeOffset LastRunUtc);
+    string Machine, int Jobs, int Completed, int Failed, int Other, double WallMinutes, double? MedianSeconds, double? P90Seconds, DateTimeOffset LastRunUtc)
+{
+    /// <summary>0.13.0 B3: the machine's jobs ran on this computer's fallback entry (jobs.jsonl fallback: true).</summary>
+    public bool ThisComputer { get; init; }
+}
 
 /// <summary>One command in <see cref="JobStatsReport"/>: every job with the same (key, dir), or for a line written before 0.7.0 the same recorded command.</summary>
 /// <param name="Command">The key (<see cref="JobHistory.Key"/>), or the recorded command of a line without one.</param>
@@ -61,7 +65,10 @@ public static class JobStats
                 var times = CompletedSeconds(g);
                 return new MachineStats(
                     g.Key, g.Count(), completed, failed, other, Math.Round(g.Sum(r => r.WallSeconds) / 60, 1),
-                    Percentile(times, 50), Percentile(times, 90), g.Max(r => r.StartedUtc));
+                    Percentile(times, 50), Percentile(times, 90), g.Max(r => r.StartedUtc))
+                {
+                    ThisComputer = g.Any(r => r.Fallback == true),
+                };
             })
             .ToList();
 

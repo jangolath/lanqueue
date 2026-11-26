@@ -9,11 +9,14 @@ namespace LanQueue.Tests;
 /// <summary>The job wrapper on the worker: /bin/sh, the exit code, the worker-side deadline, and the PAUSE file name.</summary>
 public sealed class WorkerScriptTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-wscript-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
 
     public WorkerScriptTests()
     {
-        Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(_root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(_root, "locks"));
     }
 
@@ -48,7 +51,7 @@ public sealed class WorkerScriptTests : IDisposable
         var m = T.Linux();
         m.Env["FOO"] = "1";
         m.PathPrepend.Add("/opt/evil/bin");
-        var s = RemoteScripts.Execute(m, "j1", ".", ["npm", "test"]);
+        var s = RemoteScripts.Execute(m, _j1, ".", ["npm", "test"]);
         Assert.Contains("/opt/evil/bin'\"${PATH:+:$PATH}\" /bin/sh -c", s, StringComparison.Ordinal);
         Assert.DoesNotContain(" sh -c", s.Replace("/bin/sh -c", "", StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.Contains("/bin/sh -c", RemoteScripts.Doctor(m), StringComparison.Ordinal);
@@ -79,9 +82,9 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var m = Worker(MachineOs.Linux);
         m.Env["FOO"] = "bar";
-        var (code, _) = Shells.Run("linux", RemoteScripts.Execute(m, "j1", ".", ["sh", "-c", "exit 7"], TimeSpan.FromMinutes(5)));
+        var (code, _) = Shells.Run("linux", RemoteScripts.Execute(m, _j1, ".", ["sh", "-c", "exit 7"], TimeSpan.FromMinutes(5)));
         Assert.Equal(7, code);
-        Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+        Assert.False(File.Exists(Path.Combine(_root, "locks", "job-" + _j1 + ".pid")));
     }
 
     /// <summary>The wrapper's last stdout line is its exit marker with the job's real code, also after output without a final newline.</summary>
@@ -93,19 +96,19 @@ public sealed class WorkerScriptTests : IDisposable
 
     private void TheWrapperEndsWithTheJobsExitMarker(string shell, string[] argv)
     {
-        var (code, output) = Shells.Run(shell, RemoteScripts.Execute(Worker(shell == "linux" ? MachineOs.Linux : MachineOs.Windows), "j1", ".", argv, TimeSpan.FromMinutes(5)));
+        var (code, output) = Shells.Run(shell, RemoteScripts.Execute(Worker(shell == "linux" ? MachineOs.Linux : MachineOs.Windows), _j1, ".", argv, TimeSpan.FromMinutes(5)));
         Assert.Equal(255, code);
         var last = output.Replace("\r", "", StringComparison.Ordinal).TrimEnd('\n').Split('\n')[^1];
-        Assert.EndsWith(RemoteScripts.ExitMarker("j1") + "255", last, StringComparison.Ordinal);
-        Assert.Equal(255, JobRunner.ReadExitMarker(last, "j1").Code);
+        Assert.EndsWith(RemoteScripts.ExitMarker(_j1) + "255", last, StringComparison.Ordinal);
+        Assert.Equal(255, JobRunner.ReadExitMarker(last, _j1).Code);
     }
 
     [Fact]
     public void TheLinuxJobRunsUnderTimeoutWhenALimitIsGiven()
     {
-        var s = RemoteScripts.Execute(T.Linux(), "j1", ".", ["npm", "test"], TimeSpan.FromSeconds(90.5));
+        var s = RemoteScripts.Execute(T.Linux(), _j1, ".", ["npm", "test"], TimeSpan.FromSeconds(90.5));
         Assert.Contains("if timeout -k 1 30 true >/dev/null 2>&1; then T=\"timeout -k 30 91\"; fi", s, StringComparison.Ordinal);
-        Assert.Contains("$S $T $N $I env 'LANQ_JOB=j1' /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("$S $T $N $I env 'LANQ_JOB=" + _j1 + "' /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -118,18 +121,18 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var marker = Path.Combine(_root, "survivor");
         var watch = Stopwatch.StartNew();
-        var (code, _) = Shells.Run("linux", RemoteScripts.Execute(Worker(MachineOs.Linux), "j1", ".", ["sh", "-c", "sleep 20 & wait; touch " + marker], TimeSpan.FromSeconds(2)));
+        var (code, _) = Shells.Run("linux", RemoteScripts.Execute(Worker(MachineOs.Linux), _j1, ".", ["sh", "-c", "sleep 20 & wait; touch " + marker], TimeSpan.FromSeconds(2)));
         Assert.Equal(124, code);
         Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "took " + watch.Elapsed);
         Thread.Sleep(500);
         Assert.False(File.Exists(marker));
-        Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+        Assert.False(File.Exists(Path.Combine(_root, "locks", "job-" + _j1 + ".pid")));
     }
 
     [Fact]
     public void TheWindowsJobWaitsForItsDeadlineAndKillsTheTree()
     {
-        var s = RemoteScripts.Execute(T.Windows(), "j1", ".", ["dotnet", "test"], TimeSpan.FromSeconds(90.5));
+        var s = RemoteScripts.Execute(T.Windows(), _j1, ".", ["dotnet", "test"], TimeSpan.FromSeconds(90.5));
         Assert.Contains("WaitForExit(91000)", s, StringComparison.Ordinal);
         Assert.Contains("$jo=if($LqW){LqJob $pf $cp.Handle}", s, StringComparison.Ordinal); // the child and everything it starts are in one job object
         // The tree walk first, while the child is alive (it also reaches a grandchild started before the child was put in the job object),
@@ -154,17 +157,17 @@ public sealed class WorkerScriptTests : IDisposable
             + " -RedirectStandardError '" + Path.Combine(_root, "gc.err").Replace('/', (char)92) + "'";
         var m = Worker(MachineOs.Windows);
         InstallHelper(m); // as before every job (EnsureIncoming): the wrapper puts the job in a job object
-        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", detached], TimeSpan.FromSeconds(30)));
+        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, _j1, ".", ["powershell", "-NoProfile", "-Command", detached], TimeSpan.FromSeconds(30)));
         Assert.Equal(124, code);
         Assert.True(File.Exists(grandchild), "the grandchild never started: " + output);
         Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the deadline");
-        Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+        Assert.False(File.Exists(Path.Combine(_root, "locks", "job-" + _j1 + ".pid")));
     }
 
     [PowerShellFact]
     public void RealPowerShellJobExitCodePassesThrough()
     {
-        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", [OperatingSystem.IsWindows() ? "powershell" : "pwsh", "-NoProfile", "-Command", "Write-Output hello; exit 7"], TimeSpan.FromMinutes(5)));
+        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(Worker(MachineOs.Windows), _j1, ".", [OperatingSystem.IsWindows() ? "powershell" : "pwsh", "-NoProfile", "-Command", "Write-Output hello; exit 7"], TimeSpan.FromMinutes(5)));
         Assert.Equal(7, code);
         Assert.Contains("hello", output, StringComparison.Ordinal);
     }
@@ -172,8 +175,29 @@ public sealed class WorkerScriptTests : IDisposable
     [PowerShellFact]
     public void RealPowerShellJobThatCannotStartFailsWithOne()
     {
-        var (code, _) = Shells.Run("windows", RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["lanq-no-such-program-xyz"], TimeSpan.FromMinutes(5)));
+        var (code, _) = Shells.Run("windows", RemoteScripts.Execute(Worker(MachineOs.Windows), _j1, ".", ["lanq-no-such-program-xyz"], TimeSpan.FromMinutes(5)));
         Assert.Equal(1, code);
+    }
+
+    /// <summary>
+    /// 0.13.0 review L3: the job script builds its paths on the worker from the one quoted work_root. At run time its pid file must be exactly
+    /// the path stop and cleanup compute ("$root/locks/job-$id.pid", a trailing slash on work_root kept), and its job object must carry the name
+    /// LqName gives that literal path, or a later stop would not find either. The job itself checks both, with the helper's own functions.
+    /// </summary>
+    [WindowsFact]
+    public void TheJobScriptsPidFileAndJobObjectAreTheOnesStopAndCleanupCompute()
+    {
+        var m = Worker(MachineOs.Windows);
+        m.WorkRoot = _root + "/";
+        InstallHelper(m);
+        var pidFile = m.WorkRoot + "/locks/job-" + _j1 + ".pid";
+        var check = ". '" + RemoteScripts.WindowsHelperPath(m) + "'; 'pid=' + (Test-Path -LiteralPath '" + pidFile + "'); "
+            + "$j = $LqW::OpenJobObjectW(8, 0, (LqName '" + pidFile + "')); 'job=' + ($j -ne [IntPtr]::Zero)";
+        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, _j1, ".", ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", check], TimeSpan.FromMinutes(5)));
+        Assert.True(code == 0, "exit " + code + ": " + output);
+        Assert.Contains("pid=True", output, StringComparison.Ordinal);
+        Assert.Contains("job=True", output, StringComparison.Ordinal);
+        Assert.False(File.Exists(pidFile));
     }
 
     /// <summary>Writes the job wrapper's helper into the worker's work_root/bin, as the runner's EnsureIncoming step does before every job.</summary>
@@ -225,12 +249,12 @@ public sealed class WorkerScriptTests : IDisposable
 
         foreach (var arg in new[] { "Category=Unit|Category=Arch", "a&b" })
         {
-            var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, "j1", ".", ["lanqtool", "--filter", arg], TimeSpan.FromMinutes(5)));
+            var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, _j1, ".", ["lanqtool", "--filter", arg], TimeSpan.FromMinutes(5)));
 
             Assert.Equal(2, code);
             var lines = output.Replace("\r", "", StringComparison.Ordinal).TrimEnd('\n').Split('\n');
-            Assert.Equal(2, JobRunner.ReadExitMarker(lines[^1], "j1").Code);
-            var resolved = JobRunner.ReadWindowsArgsRefusal(lines[^2], "j1");
+            Assert.Equal(2, JobRunner.ReadExitMarker(lines[^1], _j1).Code);
+            var resolved = JobRunner.ReadWindowsArgsRefusal(lines[^2], _j1);
             Assert.NotNull(resolved);
             if (OperatingSystem.IsWindows())
             {
@@ -238,7 +262,7 @@ public sealed class WorkerScriptTests : IDisposable
             }
 
             Assert.False(File.Exists(ran), "the .cmd shim ran: " + output);
-            Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+            Assert.False(File.Exists(Path.Combine(_root, "locks", "job-" + _j1 + ".pid")));
         }
     }
 
@@ -251,7 +275,7 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var (code, output) = Shells.Run(
             "windows",
-            RemoteScripts.Execute(Worker(MachineOs.Windows), "j1", ".", ["git", "rev-parse", "--sq-quote", "A|B", "A B|C", "x&y", "Name~A B|Name~C", "it's"], TimeSpan.FromMinutes(5)));
+            RemoteScripts.Execute(Worker(MachineOs.Windows), _j1, ".", ["git", "rev-parse", "--sq-quote", "A|B", "A B|C", "x&y", "Name~A B|Name~C", "it's"], TimeSpan.FromMinutes(5)));
 
         Assert.Equal(0, code);
         Assert.Equal("'A|B' 'A B|C' 'x&y' 'Name~A B|Name~C' 'it'\\''s'", T.JobOutput(output).Trim());
@@ -269,8 +293,8 @@ public sealed class WorkerScriptTests : IDisposable
         InstallHelper(m);
         var job = Path.Combine(_root, "job.pid").Replace('/', (char)92);
         var script = Path.Combine(Path.GetTempPath(), "lanq-orphan-" + Guid.NewGuid().ToString("N") + ".ps1");
-        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", Recorded.PowerShellWrite(job) + "; Start-Sleep -Seconds 600"], TimeSpan.FromMinutes(30)));
-        var pidFile = Path.Combine(_root, "locks", "job-j1.pid");
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, _j1, ".", ["powershell", "-NoProfile", "-Command", Recorded.PowerShellWrite(job) + "; Start-Sleep -Seconds 600"], TimeSpan.FromMinutes(30)));
+        var pidFile = Path.Combine(_root, "locks", "job-" + _j1 + ".pid");
         using var wrapper = Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
         try
         {
@@ -281,7 +305,7 @@ public sealed class WorkerScriptTests : IDisposable
             wrapper.Kill(entireProcessTree: false);
             Assert.True(wrapper.WaitForExit(TimeSpan.FromSeconds(60)));
 
-            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
+            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, _j1, "1", null));
             Assert.True(code == 0, output);
             Assert.True(Recorded.Gone(job, TimeSpan.FromSeconds(60)), "the orphaned job is still running");
         }
@@ -309,10 +333,10 @@ public sealed class WorkerScriptTests : IDisposable
         })!;
         try
         {
-            File.WriteAllText(Path.Combine(_root, "locks", "job-j1.pid"), StaleSlotTests.PidRecord(parent));
+            File.WriteAllText(Path.Combine(_root, "locks", "job-" + _j1 + ".pid"), StaleSlotTests.PidRecord(parent));
             Assert.True(SpinWait.SpinUntil(() => File.Exists(grandchild) && new FileInfo(grandchild).Length > 0, TimeSpan.FromMinutes(2)), "the grandchild never started");
 
-            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
+            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, _j1, "1", null));
             Assert.True(code == 0, output);
             Assert.True(parent.WaitForExit(TimeSpan.FromSeconds(60)), "the recorded process is still running");
             Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the recorded process's child is still running");
@@ -364,11 +388,11 @@ public sealed class WorkerScriptTests : IDisposable
         try
         {
             Assert.True(SpinWait.SpinUntil(() => File.Exists(grandchild) && new FileInfo(grandchild).Length > 0, TimeSpan.FromMinutes(2)), "the grandchild never started");
-            var (code, output) = Shells.Run("windows", RemoteScripts.StopJob(m, "j1"));
+            var (code, output) = Shells.Run("windows", RemoteScripts.StopJob(m, _j1));
             Assert.True(code == 0, output);
             Assert.True(Recorded.Gone(grandchild, TimeSpan.FromSeconds(60)), "the job's grandchild survived the stop step");
             Assert.True(wrapper.WaitForExit(TimeSpan.FromSeconds(60)), "the wrapper survived the stop step");
-            Assert.False(File.Exists(Path.Combine(_root, "locks", "job-j1.pid")));
+            Assert.False(File.Exists(Path.Combine(_root, "locks", "job-" + _j1 + ".pid")));
         }
         finally
         {
@@ -390,18 +414,18 @@ public sealed class WorkerScriptTests : IDisposable
         var slot = Path.Combine(_root, "locks", "slot-1");
         foreach (var tampered in new[] { "exit 0", "function {{{ (( ) garbage", "Set-Content -LiteralPath '" + marker.Replace('/', (char)92) + "' -Value pwned" })
         {
-            Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+            Directory.CreateDirectory(Path.Combine(_root, "jobs", _j1));
             InstallHelper(m);
             File.WriteAllText(helper, tampered);
 
-            var (jobCode, jobOutput) = Shells.Run("windows", RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-Command", "exit 3"], TimeSpan.FromMinutes(5)));
+            var (jobCode, jobOutput) = Shells.Run("windows", RemoteScripts.Execute(m, _j1, ".", ["powershell", "-NoProfile", "-Command", "exit 3"], TimeSpan.FromMinutes(5)));
             Assert.True(jobCode == 3, tampered + ": " + jobOutput);
-            var (stopCode, stopOutput) = Shells.Run("windows", RemoteScripts.StopJob(m, "j1"));
+            var (stopCode, stopOutput) = Shells.Run("windows", RemoteScripts.StopJob(m, _j1));
             Assert.True(stopCode == 0, tampered + ": " + stopOutput);
 
-            File.WriteAllText(slot, "j1\n1\n");
-            File.WriteAllText(Path.Combine(_root, "locks", "job-j1.pid"), "1\n1\n"); // so cleanup goes through KillRecorded
-            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, "j1", "1", null));
+            File.WriteAllText(slot, _j1 + "\n1\n");
+            File.WriteAllText(Path.Combine(_root, "locks", "job-" + _j1 + ".pid"), "1\n1\n"); // so cleanup goes through KillRecorded
+            var (code, output) = Shells.Run("windows", RemoteScripts.Cleanup(m, _j1, "1", null));
             Assert.True(code == 0, tampered + ": " + output);
             Assert.False(File.Exists(slot), tampered + ": the slot was not removed: " + output);
             Assert.False(File.Exists(marker), tampered + ": the changed helper ran");
@@ -440,18 +464,17 @@ public sealed class WorkerScriptTests : IDisposable
     {
         var m = T.Windows();
         m.Capabilities = ["dotnet"];
-        foreach (var script in new[] { RemoteScripts.Execute(m, "j1", ".", ["dotnet", "test"]), RemoteScripts.StopJob(m, "j1"), RemoteScripts.Cleanup(m, "j1", "1", T.RepoId), RemoteScripts.WindowsSlotFunctions, RemoteScripts.Doctor(m), RemoteScripts.Unlock(m, all: false) })
+        foreach (var script in new[] { RemoteScripts.Execute(m, _j1, ".", ["dotnet", "test"]), RemoteScripts.StopJob(m, _j1), RemoteScripts.Cleanup(m, _j1, "1", T.RepoId), RemoteScripts.WindowsSlotFunctions, RemoteScripts.Doctor(m), RemoteScripts.Unlock(m, all: false) })
         {
             Assert.Contains("-ceq'" + RemoteScripts.WindowsJobHelperBase64 + "'", script, StringComparison.Ordinal);
             Assert.Contains("[scriptblock]::Create(", script, StringComparison.Ordinal);
             Assert.DoesNotContain(". $LqH", script, StringComparison.Ordinal);
         }
 
-        // The claims carry the slot functions (with the check above) deflated: exactly that text, dot-sourced.
-        foreach (var claim in new[] { RemoteScripts.AcquireSlot(m, "j1", TimeSpan.FromHours(1)), RemoteScripts.AcquireAll(m, "j1", TimeSpan.FromHours(1)) })
-        {
-            Assert.Contains(RemoteScripts.WindowsSlotFunctionsPacked, claim, StringComparison.Ordinal);
-        }
+        // The claims carry the slot functions (with the check above) deflated: exactly that text, dot-sourced (the claim of every slot with
+        // its own two functions in the same block).
+        Assert.Contains(RemoteScripts.WindowsSlotFunctionsPacked, RemoteScripts.AcquireSlot(m, _j1, TimeSpan.FromHours(1)), StringComparison.Ordinal);
+        Assert.Contains(RemoteScripts.WindowsExclusiveFunctionsPacked, RemoteScripts.AcquireAll(m, _j1, TimeSpan.FromHours(1)), StringComparison.Ordinal);
 
         Assert.Equal(64, RemoteScripts.WindowsJobHelperHash.Length);
     }
@@ -470,10 +493,10 @@ public sealed class WorkerScriptTests : IDisposable
         ];
     }
 
-    private static Process StartWrapper(Machine m, string[] argv, out string script)
+    private Process StartWrapper(Machine m, string[] argv, out string script)
     {
         script = Path.Combine(Path.GetTempPath(), "lanq-wrapper-" + Guid.NewGuid().ToString("N") + ".ps1");
-        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, "j1", ".", argv, TimeSpan.FromMinutes(30)));
+        File.WriteAllText(script, "﻿" + RemoteScripts.Execute(m, _j1, ".", argv, TimeSpan.FromMinutes(30)));
         return Process.Start(new ProcessStartInfo("powershell.exe") { ArgumentList = { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script }, UseShellExecute = false })!;
     }
 

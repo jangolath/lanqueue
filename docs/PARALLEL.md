@@ -276,3 +276,12 @@ At no point did the dev PC build or test anything: it held three editors, git an
 - [PLANS.md](PLANS.md): `lanq.yml` and `lanq run --plan`
 - [SHARDING.md](SHARDING.md): splitting suites, sizing machines
 - [WORKERS.md](WORKERS.md): setting up workers, including the Docker Linux worker
+
+## Waiting, and this PC (0.13.0)
+
+- Several agents share the pool: give each `--wait-slot` (time to wait for a free slot while capable machines are full,
+  for example 1800) and a short `--wait-eligible` (time to wait while no machine can take this kind of job). A
+  NoCapacity is NOT RUN, never a pass.
+- The developer's PC is never used unless the developer set `policy.fallback` or passes `--fallback on|ask`. An agent
+  never adds `--fallback on` or `ask`. A result with `fallbackJobs` above 0 ran (partly) on this PC: report it as not
+  pool evidence.

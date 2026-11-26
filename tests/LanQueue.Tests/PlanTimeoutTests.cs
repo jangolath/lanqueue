@@ -535,6 +535,56 @@ public sealed partial class PlanFileRunTests
         Assert.False(after.PlanTimedOut);
     }
 
+    /// <summary>
+    /// The limit reached during the last job's post: step (final review L4, L6): the step is cut short, the job stays Completed (never rewritten
+    /// TimedOut by PlanTimedOutJob), the plan stays green, and the message says a post: step was cut, not that nothing was stopped.
+    /// </summary>
+    [Fact(Timeout = TestTimeout)]
+    public async Task ExpiryDuringTheLastPostStepKeepsTheJobCompletedAndSaysThePostWasCut()
+    {
+        Plan("version: 1\njobs:\n  build:\n    command: npm run build\n    needs: [node]\n    post: npm run hook\n");
+        var inPost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ssh = new PoolSsh
+        {
+            OnExecute = async (e, c) =>
+            {
+                if (!e.Command.Contains("locks/post-", StringComparison.Ordinal))
+                {
+                    return e.Exit(0);
+                }
+
+                inPost.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, c);
+                return e.Exit(0);
+            },
+        };
+        var fire = new TaskCompletionSource();
+        var err = new LockedWriter();
+
+        var run = RunTimed(ssh, new RunnerTests.FakePayloads(""), fire, ["--plan", "--plan-timeout", "1", "--json"], stderr: err);
+        await inPost.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        fire.SetResult();
+        var (code, stdout, stderr) = await run;
+
+        Assert.Equal(0, code);
+        var json = Json(stdout);
+        Assert.Equal("Completed", json.GetProperty("status").GetString());
+        Assert.False(json.TryGetProperty("planTimedOut", out _));
+        var job = JobsOf(json)["build"];
+        Assert.Equal("Completed", job.GetProperty("status").GetString());
+        Assert.Equal(0, job.GetProperty("exitCode").GetInt32());
+        Assert.Equal("Completed", Assert.Single(Log.ReadAll()).Status);
+        Assert.Contains("[lanq] post: cancelled before it ended (the job's own result stands)", stderr, StringComparison.Ordinal);
+        Assert.Contains("[lanq] plan_timeout: only a post: step was cut short; every job had already ended (its result stands)", stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing was stopped", stderr, StringComparison.Ordinal);
+        Assert.Equal(0, ssh.Used("build-01") + ssh.Used("big-01")); // cleaned up
+
+        // And PlanTimedOutJob itself: a Completed job whose post was cancelled is never rewritten.
+        var completed = new PlanJobOutcome("build", "Completed", 0, "exit 0", []) { Single = new JobResult("j", JobStatus.Completed, 0, "build-01", "exit 0") { Post = new PostResult(130, false, 1) { Cancelled = true } } };
+        Assert.Same(completed, JobRunner.PlanTimedOutJob(completed, new PlanDeadline(1)));
+        Assert.True(JobRunner.PostCutShort(JobRunner.AggregatePlan([completed], cancelled: false)));
+    }
+
     /// <summary>--fail-fast first, then the limit: the stopped jobs are Cancelled by --fail-fast, never TimedOut, and the plan is not flagged.</summary>
     [Fact(Timeout = TestTimeout)]
     public async Task FailFastBeforeExpiryWins()

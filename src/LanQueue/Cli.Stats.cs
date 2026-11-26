@@ -114,7 +114,7 @@ public static partial class Cli
                 report.NewestUtc?.UtcDateTime, LogsJson(logs, keepDays),
                 [.. report.Machines.Select(m => new StatsMachineJson(
                     JobRunner.SafeLine(m.Machine), m.Jobs, m.Completed, m.Failed, m.Other, m.WallMinutes, m.MedianSeconds, m.P90Seconds, m.LastRunUtc.UtcDateTime,
-                    Speed(m.Machine).Factor, Speed(m.Machine).Samples))],
+                    Speed(m.Machine).Factor, Speed(m.Machine).Samples) { ThisComputer = m.ThisComputer ? true : null })],
                 [.. report.Commands.Take(MaxStatsCommands).Select(c => new StatsCommandJson(
                     JobRunner.SafeLine(c.Command), c.Dir is null ? null : JobRunner.SafeLine(c.Dir), c.Runs, c.Jobs, c.Completed, c.Failed, c.Other, c.MedianSeconds,
                     c.P90Seconds, c.LastRunUtc.UtcDateTime, c.LastShards, TimingJson(Timing(c))))])
@@ -150,7 +150,7 @@ public static partial class Cli
                     ["machine", "jobs", "pass", "fail", "other", "median", "p90", "last run", "speed"],
                     .. report.Machines.Select(m => new[]
                     {
-                        JobRunner.SafeLine(m.Machine), Num(m.Jobs), Num(m.Completed), Num(m.Failed), Num(m.Other), Seconds(m.MedianSeconds), Seconds(m.P90Seconds),
+                        JobRunner.SafeLine(m.Machine) + (m.ThisComputer ? " (this computer)" : ""), Num(m.Jobs), Num(m.Completed), Num(m.Failed), Num(m.Other), Seconds(m.MedianSeconds), Seconds(m.P90Seconds),
                         Local(m.LastRunUtc, zone), SpeedText(Speed(m.Machine)),
                     }),
                 ],

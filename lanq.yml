@@ -13,6 +13,8 @@ defaults:
 jobs:
   guard:
     command: [powershell, -NoProfile, -ExecutionPolicy, Bypass, -File, scripts/lanq/check-test-split.ps1, -Project, tests/LanQueue.Tests/LanQueue.Tests.csproj, -Shards, "2"]
+  # The shard script reads LANQ_SHARD, but this job has no shard_env: true yet: lanq 0.12 refuses the key, and this file
+  # must still load with the released lanq. Until 0.13.0 is out, the dry run warns that it has no {shard}; add the key then.
   unit-windows:
     command: [powershell, -NoProfile, -ExecutionPolicy, Bypass, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, tests/LanQueue.Tests/LanQueue.Tests.csproj]
     shards: 2

@@ -7,11 +7,14 @@ namespace LanQueue.Tests;
 /// <summary>priority: low (default) runs the job below normal priority; normal leaves it alone.</summary>
 public sealed class JobPriorityTests : IDisposable
 {
+    // Unique job ids per test (review B-L6): a real cleanup stops every process of this uid that carries LANQ_JOB=<id>.
+    private readonly string _j1 = T.NewJobId();
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "lanq-prio-" + Guid.NewGuid().ToString("N")).Replace('\\', '/');
 
     public JobPriorityTests()
     {
-        Directory.CreateDirectory(Path.Combine(_root, "jobs", "j1"));
+        Directory.CreateDirectory(Path.Combine(_root, "jobs", _j1));
         Directory.CreateDirectory(Path.Combine(_root, "locks"));
     }
 
@@ -41,10 +44,10 @@ public sealed class JobPriorityTests : IDisposable
     [Fact]
     public void LinuxLowPriorityWrapsTheJobWithNiceAndIoniceWhenTheyWork()
     {
-        var s = RemoteScripts.Execute(T.Linux(), "j1", ".", ["dotnet", "test"]);
+        var s = RemoteScripts.Execute(T.Linux(), _j1, ".", ["dotnet", "test"]);
         Assert.Contains("if nice -n 10 true >/dev/null 2>&1; then N=\"nice -n 10\"; fi", s, StringComparison.Ordinal);
         Assert.Contains("if ionice -c3 true >/dev/null 2>&1; then I=\"ionice -c3\"; fi", s, StringComparison.Ordinal);
-        Assert.Contains("$S $T $N $I env 'LANQ_JOB=j1' /bin/sh -c", s, StringComparison.Ordinal);
+        Assert.Contains("$S $T $N $I env 'LANQ_JOB=" + _j1 + "' /bin/sh -c", s, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -52,19 +55,19 @@ public sealed class JobPriorityTests : IDisposable
     {
         var m = T.Linux();
         m.Priority = JobPriority.Normal;
-        var s = RemoteScripts.Execute(m, "j1", ".", ["dotnet", "test"]);
+        var s = RemoteScripts.Execute(m, _j1, ".", ["dotnet", "test"]);
         Assert.DoesNotContain("nice", s, StringComparison.Ordinal);
     }
 
     [Fact]
     public void WindowsLowPriorityLowersThePowerShellHostBeforeTheJobStarts()
     {
-        var s = RemoteScripts.Execute(T.Windows(), "j1", ".", ["dotnet", "test"]);
+        var s = RemoteScripts.Execute(T.Windows(), _j1, ".", ["dotnet", "test"]);
         Assert.Contains("(Get-Process -Id $PID).PriorityClass = 'BelowNormal'", s, StringComparison.Ordinal);
         Assert.True(s.IndexOf("BelowNormal", StringComparison.Ordinal) < s.IndexOf("& 'dotnet' 'test'", StringComparison.Ordinal));
         var m = T.Windows();
         m.Priority = JobPriority.Normal;
-        Assert.DoesNotContain("PriorityClass", RemoteScripts.Execute(m, "j1", ".", ["dotnet", "test"]), StringComparison.Ordinal);
+        Assert.DoesNotContain("PriorityClass", RemoteScripts.Execute(m, _j1, ".", ["dotnet", "test"]), StringComparison.Ordinal);
     }
 
     /// <summary>A real Windows PowerShell: the job's child process inherits BelowNormal.</summary>
@@ -73,7 +76,7 @@ public sealed class JobPriorityTests : IDisposable
     {
         var m = T.Windows();
         m.WorkRoot = _root;
-        var script = RemoteScripts.Execute(m, "j1", ".", ["powershell", "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write((Get-Process -Id $PID).PriorityClass)"]);
+        var script = RemoteScripts.Execute(m, _j1, ".", ["powershell", "-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write((Get-Process -Id $PID).PriorityClass)"]);
         var file = Path.Combine(Path.GetTempPath(), "lanq-prio-" + Guid.NewGuid().ToString("N") + ".ps1");
         File.WriteAllText(file, "\ufeff" + script);
         try
@@ -93,7 +96,7 @@ public sealed class JobPriorityTests : IDisposable
         var m = T.Linux();
         m.WorkRoot = _root;
         var before = int.Parse(WorkerHealthTests.Capture("nice").Trim(), System.Globalization.CultureInfo.InvariantCulture);
-        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, "j1", ".", ["nice"])));
+        var output = T.JobOutput(WorkerHealthTests.Capture("sh", "-c", RemoteScripts.Execute(m, _j1, ".", ["nice"])));
         Assert.Equal(Math.Min(before + 10, 19), int.Parse(output.Trim(), System.Globalization.CultureInfo.InvariantCulture));
     }
 }

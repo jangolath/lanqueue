@@ -119,10 +119,7 @@ internal sealed class SuggestedCommand
         }
 
         var set = new List<(string, string)>();
-        if (waitSeconds is { } w && w > p.WaitSeconds)
-        {
-            set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
-        }
+        RaiseWait(p, waitSeconds, set);
 
         if (timeoutMinutes is { } t && t > p.TimeoutMinutes)
         {
@@ -134,9 +131,92 @@ internal sealed class SuggestedCommand
             set.Add(("--shard-retries", r.ToString(CultureInfo.InvariantCulture)));
         }
 
-        // The original could not wake a machine with --wait 0; a longer wait must not start doing so.
-        var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        // The original could not wake a machine with no eligible-wait budget (--wait 0); a longer wait must not start doing so.
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
         return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add, dropDryRun ? ["--dry-run"] : null)], safe: true);
+    }
+
+    /// <summary>
+    /// Raises the wait to at least <paramref name="waitSeconds"/>: --wait for a run that used it (or none), and with --wait-eligible /
+    /// --wait-slot (0.13.0) each of those instead, so a suggestion never combines --wait with them (which is refused).
+    /// </summary>
+    private static void RaiseWait(ParsedArgs p, int? waitSeconds, List<(string, string)> set)
+    {
+        if (waitSeconds is not { } w)
+        {
+            return;
+        }
+
+        if (!p.SplitWait)
+        {
+            if (w > p.WaitSeconds)
+            {
+                set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
+            }
+
+            return;
+        }
+
+        if (w > p.EligibleSeconds)
+        {
+            set.Add(("--wait-eligible", w.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        if (w > p.SlotSeconds)
+        {
+            set.Add(("--wait-slot", w.ToString(CultureInfo.InvariantCulture)));
+        }
+    }
+
+    /// <summary>
+    /// The same lanq run with one wait budget raised (0.13.0): --wait-slot or --wait-eligible set to <paramref name="seconds"/>; null when
+    /// it is not above the current budget or the run is not lanq run. Never adds --wait. Safe: it only waits longer.
+    /// </summary>
+    public static SuggestedCommand? RerunWithBudget(ParsedArgs p, Scheduling.WaitKind budget, int seconds)
+    {
+        var current = budget == Scheduling.WaitKind.Slot ? p.SlotSeconds : p.EligibleSeconds;
+        if (p.Command != "run" || seconds <= current)
+        {
+            return null;
+        }
+
+        var option = budget == Scheduling.WaitKind.Slot ? "--wait-slot" : "--wait-eligible";
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : []; // as Rerun: a longer wait must not start waking machines
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, [(option, seconds.ToString(CultureInfo.InvariantCulture))], add)], safe: true);
+    }
+
+    /// <summary>
+    /// 0.13.0 B3: the same lanq run with --fallback on, so a job the pool cannot take may run on this computer's fallback entry. Never safe
+    /// unattended: only the developer decides to use their own PC (an agent reports it as ask_developer).
+    /// </summary>
+    public static SuggestedCommand? RunWithFallback(ParsedArgs p) =>
+        p.Command != "run" ? null : Make(["lanq", .. CommandLine.Edit(p.Raw, [("--fallback", "on")], remove: ["--dry-run"])], safe: false);
+
+    /// <summary>
+    /// 0.13.0 B3: the same lanq run on the pool only, with time to wait for a slot: --fallback off and --wait-slot 1800 (or --wait 1800 when
+    /// the run used --wait). Not safe unattended: it repeats a run that already passed, which the developer decides.
+    /// </summary>
+    public static SuggestedCommand? RerunOnPool(ParsedArgs p)
+    {
+        if (p.Command != "run")
+        {
+            return null;
+        }
+
+        var wait = p.Raw.Contains("--wait") ? ("--wait", Math.Max(p.WaitSeconds, 1800)) : ("--wait-slot", Math.Max(p.SlotSeconds, 1800));
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, [("--fallback", "off"), (wait.Item1, wait.Item2.ToString(CultureInfo.InvariantCulture))])], safe: false);
+    }
+
+    /// <summary>The user's own lanq run --plan again with --only and one raised wait budget (p1 review M3); safe, as <see cref="RerunPlan"/>.</summary>
+    public static SuggestedCommand? RerunPlanWithBudget(ParsedArgs p, IReadOnlyCollection<string> only, string option, int seconds)
+    {
+        if (p.Command != "run" || !p.Plan || only.Count == 0)
+        {
+            return null;
+        }
+
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        return Make(["lanq", .. CommandLine.Edit(p.Raw, [("--only", string.Join(',', only)), (option, seconds.ToString(CultureInfo.InvariantCulture))], add)], safe: true);
     }
 
     /// <summary>
@@ -157,12 +237,9 @@ internal sealed class SuggestedCommand
         }
 
         var set = new List<(string, string)> { ("--only", string.Join(',', only)) };
-        if (waitSeconds is { } w && w > p.WaitSeconds)
-        {
-            set.Add(("--wait", w.ToString(CultureInfo.InvariantCulture)));
-        }
+        RaiseWait(p, waitSeconds, set);
 
-        var add = p.WaitSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
+        var add = p.EligibleSeconds == 0 && !p.NoWake ? new[] { "--no-wake" } : [];
         return Make(["lanq", .. CommandLine.Edit(p.Raw, set, add)], safe: safe);
     }
 
@@ -343,6 +420,67 @@ internal static class NextSteps
         }
     }
 
+    /// <summary>
+    /// 0.13.0 B3: the fallback's next steps, added after a run's own. <paramref name="hint"/> on a NoCapacity: TurnOn suggests the same run with
+    /// --fallback on (ask_developer: an agent never decides to use the developer's PC); SetUp points at WORKERS.md "Using this PC as a fallback".
+    /// <paramref name="onFallback"/> above 0: the result is not pool evidence; an ask_developer step says so with the pool-only rerun.
+    /// </summary>
+    internal static List<NextStepJson> WithFallback(ParsedArgs p, List<NextStepJson> steps, Jobs.FallbackHint? hint, int onFallback, int jobs)
+    {
+        if (hint == Jobs.FallbackHint.TurnOn)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "this computer's fallback entry could run the job; only the developer may allow it (lanq run --fallback on, or policy.fallback)", SuggestedCommand.RunWithFallback(p)));
+        }
+        else if (hint == Jobs.FallbackHint.SetUp)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "no pool machine took the job; the developer may let this computer run such a job as a last resort (docs/WORKERS.md, \"Using this PC as a fallback\")"));
+        }
+        else if (hint == Jobs.FallbackHint.Elevated)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "this computer's fallback entry could run the job, but lanq runs elevated (administrator) or as root; the developer may run lanq from a terminal without those rights"));
+        }
+        else if (hint == Jobs.FallbackHint.WorkRoot)
+        {
+            steps.Add(Step(NextAction.AskDeveloper, "this computer's fallback entry could run the job, but its work_root is inside the repository (or holds it); the developer may give it a work_root of its own in machines.yml"));
+        }
+
+        if (onFallback > 0)
+        {
+            steps.Add(Step(
+                NextAction.AskDeveloper,
+                string.Create(CultureInfo.InvariantCulture, $"{onFallback} of {jobs} job(s) ran on this computer (fallback), not on the pool: this is not pool evidence; rerun on the pool to confirm"),
+                SuggestedCommand.RerunOnPool(p)));
+        }
+
+        return steps;
+    }
+
+    /// <summary>
+    /// 0.13.0 wake before fallback: one step per Wake-on-LAN packet of the run that did not bring its machine up. NoAnswer and SendFailed:
+    /// ask_developer (Wake-on-LAN off in the BIOS/UEFI or the network card driver, no wired Ethernet, or the send itself); Waking (the run
+    /// ended while the machine may still be coming up): run_health, read-only. Never a wake command.
+    /// </summary>
+    internal static List<NextStepJson> WithWakes(ParsedArgs p, List<NextStepJson> steps, IReadOnlyList<Health.WakeAttempt> wakes)
+    {
+        foreach (var w in wakes)
+        {
+            switch (w.Outcome)
+            {
+                case Health.WakeOutcome.NoAnswer:
+                    steps.Add(Step(NextAction.AskDeveloper, $"{Jobs.JobRunner.WakeText(w)}: Wake-on-LAN may be off in the BIOS/UEFI or the network card driver, or the machine is not on wired Ethernet (docs/WORKERS.md)"));
+                    break;
+                case Health.WakeOutcome.SendFailed:
+                    steps.Add(Step(NextAction.AskDeveloper, Jobs.JobRunner.WakeText(w)));
+                    break;
+                case Health.WakeOutcome.Waking:
+                    steps.Add(Step(NextAction.RunHealth, $"{Jobs.JobRunner.WakeText(w)}; it may still be coming up: see whether it answers", SuggestedCommand.Health([], null, p.ConfigPath)));
+                    break;
+            }
+        }
+
+        return steps;
+    }
+
     /// <summary>What one lanq run (or dry run) ended with, for <see cref="ForRun(ParsedArgs, RunOutcome)"/>.</summary>
     /// <param name="MayStillRun">The job may still be running on <paramref name="Machine"/> (connection lost while it ran, cleanup not done).</param>
     internal sealed record RunOutcome(
@@ -351,12 +489,16 @@ internal static class NextSteps
     {
         /// <summary>lanq run --baseline: the rerun at the base commit after the job failed, or null.</summary>
         public BaselineResult? Baseline { get; init; }
+
+        /// <summary>NoCapacity after waiting (0.13.0): the wait budget that ran out, or null.</summary>
+        public Scheduling.WaitKind? WaitedBudget { get; init; }
     }
 
     internal static RunOutcome Outcome(JobResult r) => new(
         r.Status.ToString(), r.CliExitCode, r.Message, r.RejectKind, r.InfraKind, r.MayStillRun && !r.CleanedUp, r.Machine, r.Retryable, r.Excluded, r.LogPath)
     {
         Baseline = r.Baseline,
+        WaitedBudget = r.Waited?.Budget,
     };
 
     /// <summary>
@@ -388,7 +530,9 @@ internal static class NextSteps
             case nameof(JobStatus.Rejected):
                 return Rejected(p, o.RejectKind, o.Message);
             case nameof(JobStatus.NoCapacity):
-                return NoCapacity(p, o.Retryable ?? true, o.Excluded ?? [], health);
+                return p.SplitWait && (o.Retryable ?? true) && o.WaitedBudget is { } budget
+                    ? ForNoCapacityWait(p, budget, health)
+                    : NoCapacity(p, o.Retryable ?? true, o.Excluded ?? [], health);
             case nameof(JobStatus.InfraError):
                 return Infra(p, o, health);
             case nameof(JobStatus.TimedOut):
@@ -445,7 +589,10 @@ internal static class NextSteps
 
         var o = new RunOutcome(
             r.Status, r.ExitCode, r.Message, r.RejectKind, r.InfraKind, false, null, r.Retryable, r.Excluded,
-            r.Shards.FirstOrDefault(s => s.Status != nameof(JobStatus.Completed) && s.LogPath is not null)?.LogPath);
+            r.Shards.FirstOrDefault(s => s.Status != nameof(JobStatus.Completed) && s.LogPath is not null)?.LogPath)
+        {
+            WaitedBudget = r.Waited?.Budget, // p1 review M3: the budget that actually ran out
+        };
         return ForRun(p, o);
     }
 
@@ -500,6 +647,8 @@ internal static class NextSteps
                         + EnvConflictAdvice(r.Excluded ?? [], plan: true)),
                     Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health),
                 ];
+            case nameof(JobStatus.NoCapacity) when p.SplitWait && r.Waited is { } waited:
+                return PlanBudgetSteps(p, waited.Budget, r.Decided, again, health);
             case nameof(JobStatus.NoCapacity):
                 return [PlanWaitStep(p, $"no machine could take job '{r.Decided}' now; machines may free up", again), Step(NextAction.RunHealth, $"see how each machine is judged for job '{r.Decided}'", health)];
             case nameof(JobStatus.InfraError):
@@ -634,6 +783,23 @@ internal static class NextSteps
     private static string ExcludedText(IReadOnlyList<ExcludedMachine>? excluded) =>
         excluded is { Count: > 0 } x ? string.Join("; ", x.Select(e => $"{e.Machine}: {e.Why}")) : "no machine can take it";
 
+    /// <summary>
+    /// p1 review M3: a plan that used --wait-eligible / --wait-slot ran out of the budget <paramref name="budget"/>: as
+    /// <see cref="ForNoCapacityWait"/>, with the plan rerun for <paramref name="only"/> and that budget raised.
+    /// </summary>
+    private static List<NextStepJson> PlanBudgetSteps(ParsedArgs p, Scheduling.WaitKind budget, string? decided, IReadOnlyCollection<string> only, SuggestedCommand? health)
+    {
+        var used = budget == Scheduling.WaitKind.Slot ? p.SlotSeconds : p.EligibleSeconds;
+        var raised = (int)Math.Min(ParsedArgs.MaxWaitSeconds, Math.Max(SuggestedCommand.WaitSeconds, 2L * used));
+        var option = budget == Scheduling.WaitKind.Slot ? "--wait-slot" : "--wait-eligible";
+        var rerun = SuggestedCommand.RerunPlanWithBudget(p, only, option, raised);
+        var wait = rerun is null
+            ? Step(NextAction.Wait, string.Create(CultureInfo.InvariantCulture, $"job '{decided}': the {option} budget ({used} s) ran out; try again later"))
+            : Step(NextAction.Wait, string.Create(CultureInfo.InvariantCulture, $"job '{decided}': the {option} budget ({used} s) ran out; run the jobs again with {option} {raised}"), rerun);
+        var look = Step(NextAction.RunHealth, $"see how each machine is judged for job '{decided}'", health);
+        return budget == Scheduling.WaitKind.Slot ? [wait, look] : [look, wait];
+    }
+
     /// <summary>A plan's wait step: the same plan for <paramref name="only"/> with --wait 120 when it waited less (and --no-wake when it could not wake), else no command.</summary>
     private static NextStepJson PlanWaitStep(ParsedArgs p, string why, IReadOnlyCollection<string> only) =>
         p.WaitSeconds < SuggestedCommand.WaitSeconds && SuggestedCommand.RerunPlan(p, only, SuggestedCommand.WaitSeconds) is { } waiting
@@ -669,6 +835,28 @@ internal static class NextSteps
         [Step(NextAction.FixCommand, Policy.JobEnv.IsDeniedMessage(message)
             ? "this variable can never be set by a job; drop it or ask the developer: " + message
             : "fix the command line: " + message)];
+
+    /// <summary>
+    /// NoCapacity after a run with --wait-eligible / --wait-slot used up a budget (0.13.0 B2). Slot: the pool can take the job, its slots
+    /// were full: the same run with a larger --wait-slot. Eligible: nothing could take it: see how each machine is judged first, then a
+    /// larger --wait-eligible. The raised budget is double the old one, at least <see cref="SuggestedCommand.WaitSeconds"/>, at most a week.
+    /// </summary>
+    public static List<NextStepJson> ForNoCapacityWait(ParsedArgs p, Scheduling.WaitKind budget, SuggestedCommand? health = null)
+    {
+        health ??= HealthFor(p);
+        var used = budget == Scheduling.WaitKind.Slot ? p.SlotSeconds : p.EligibleSeconds;
+        var raised = (int)Math.Min(ParsedArgs.MaxWaitSeconds, Math.Max(SuggestedCommand.WaitSeconds, 2L * used));
+        var rerun = SuggestedCommand.RerunWithBudget(p, budget, raised);
+        var option = budget == Scheduling.WaitKind.Slot ? "--wait-slot" : "--wait-eligible";
+        var wait = rerun is null
+            ? Step(NextAction.Wait, string.Create(CultureInfo.InvariantCulture, $"the {option} budget ({used} s) ran out; try again later"))
+            : Step(NextAction.Wait, string.Create(
+                CultureInfo.InvariantCulture,
+                $"the {option} budget ({used} s) ran out{(budget == Scheduling.WaitKind.Slot ? " while machines that can take the job were full" : "")}; run again with {option} {raised}"), rerun);
+        return budget == Scheduling.WaitKind.Slot
+            ? [wait, Step(NextAction.RunHealth, "see how each machine is judged for this job", health)]
+            : [Step(NextAction.RunHealth, "no machine could take this kind of job while it waited (held, asleep, unreachable or short of memory); see how each is judged", health), wait];
+    }
 
     private static List<NextStepJson> NoCapacity(ParsedArgs p, bool retryable, IReadOnlyList<ExcludedMachine> excluded, SuggestedCommand? health)
     {
