@@ -150,7 +150,9 @@ public static partial class Cli
 
         if (plan.WouldWake is { } sleeper)
         {
-            Line(string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits for it within {(p.SplitWait ? "--wait-eligible " + p.EligibleSeconds : "--wait " + p.WaitSeconds)})"));
+            Line(plan.WouldFallBack is not null && !p.EligibleWaitGiven
+                ? string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits up to {JobRunner.FallbackWakeWait.TotalSeconds:0} s for it, never past its wake.wait_seconds, before falling back to this computer)")
+                : string.Create(CultureInfo.InvariantCulture, $"Would wake: {JobRunner.SafeLine(sleeper)} (one Wake-on-LAN packet, then lanq run waits for it within {(p.SplitWait ? "--wait-eligible " + p.EligibleSeconds : "--wait " + p.WaitSeconds)})"));
         }
 
         if (plan.WouldFallBack is { } fallback)

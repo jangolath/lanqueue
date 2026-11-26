@@ -672,9 +672,9 @@ public sealed partial class JobRunner
 
                         EndWaiting(WithFallback(NoCapacity("shard", AssessForWaiting(candidates.Zip(probes), needs, pending), ArchiveNote()), never));
                     }
-                    else if (launched == 0 && template.EffectiveBudgets.Eligible > TimeSpan.Zero && !template.NoWake && probe.Waker is { AnyPending: false })
+                    else if (launched == 0 && MayWake(template) && probe.Waker is { AnyPending: false })
                     {
-                        await WakeBestSleeperAsync(candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
+                        await WakeBestSleeperAsync(candidates, needs, probes, assessed, prepared.Archive, line => Emit(lead + line), stop.Token, WakesBeforeFallback(template)).ConfigureAwait(false);
                     }
                 }
 
@@ -686,7 +686,7 @@ public sealed partial class JobRunner
                 else if (pending.Count > 0 && running.Count == 0
                     && WaitedOut(template, waitClock, idleSince, WaitKindOfShards(candidates, lastProbes, needs, pending, lastEngaged, sshFailed), round, relooked) is { } budget)
                 {
-                    var why = budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now";
+                    var why = (budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now") + WakeWhy(template);
                     var waited = await FallbackGateAsync(template, needs, why, fellBack, line => Emit(lead + line), stop.Token).ConfigureAwait(false);
                     if (waited.Go)
                     {
@@ -694,7 +694,7 @@ public sealed partial class JobRunner
                         continue;
                     }
 
-                    EndWaiting(WithFallback(WaitedNoCapacity(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote()), template, waitClock, budget), waited));
+                    EndWaiting(WithFallback(WaitedNoCapacity(NoCapacity("shard", AssessForWaiting(candidates.Zip(lastProbes), needs, pending), ArchiveNote() + WakeNote(template)), template, waitClock, budget), waited));
                     break;
                 }
                 else if (pending.Count > 0 && running.Count == 0 && launched == 0 && Relook(plan, round, relooked) is > 0 and var release)

@@ -117,6 +117,10 @@ internal sealed record HealthNeedsJson : HealthJson
 /// <param name="ExitCode">lanq's own exit code (the job's code, or 2, 70, 75, 124, 130).</param>
 internal sealed record RunJson(string Status, int ExitCode, string? Machine, string? JobId, double DurationSeconds, string Message)
 {
+    /// <summary>The Wake-on-LAN packets this run sent (0.13.0: also before falling back to this computer) and what came of each; null when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WakeAttemptJson>? Wakes { get; init; }
+
     /// <summary>--shards only, in each element of shards: the 1-based shard index.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Shard { get; init; }
@@ -298,6 +302,10 @@ internal sealed record BaselineJson(
 /// <param name="Status">Completed, Failed, Rejected, NoCapacity, InfraError, TimedOut, WindowClosed or Cancelled.</param>
 internal sealed record ShardRunJson(string Status, int ExitCode, int ShardCount, double DurationSeconds, string Message, IReadOnlyList<RunJson> Shards)
 {
+    /// <summary>The Wake-on-LAN packets this run sent (0.13.0: also before falling back to this computer) and what came of each; null when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WakeAttemptJson>? Wakes { get; init; }
+
     /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Retryable { get; init; }
@@ -368,6 +376,17 @@ internal sealed record ShardTimingJson(
 /// </param>
 /// <param name="Permanent">True when waiting can never make this machine take the job (its config or the machine itself rules it out).</param>
 internal sealed record ExcludedJson(string Machine, string Reason, string Why, bool Permanent);
+
+/// <summary>
+/// One Wake-on-LAN packet of a run (0.13.0, top-level wakes): the machine, its result (Waking: may still come up; Awake: answered ssh;
+/// NoAnswer: no ssh answer within waitSeconds; SendFailed: not sent), its wake.wait_seconds, and the same for people.
+/// </summary>
+internal sealed record WakeAttemptJson(string Machine, string Result, int WaitSeconds, string Message)
+{
+    /// <summary>null (left out) for no attempts.</summary>
+    public static List<WakeAttemptJson>? Of(IReadOnlyList<Health.WakeAttempt> attempts) =>
+        attempts.Count == 0 ? null : [.. attempts.Select(a => new WakeAttemptJson(Jobs.JobRunner.SafeLine(a.Machine), a.Outcome.ToString(), a.WaitSeconds, Jobs.JobRunner.SafeLine(Jobs.JobRunner.WakeText(a))))];
+}
 
 /// <summary>The post: step of a job (0.13.0): its exit code is a warning only; timedOut when it was stopped at its 5-minute limit.</summary>
 internal sealed record PostJson(int ExitCode, bool TimedOut, double Seconds)
@@ -494,6 +513,10 @@ internal sealed record PlacementJson(string Machine, IReadOnlyList<int> Shards);
 internal sealed record PlanFileRunJson(
     string Status, int ExitCode, string? Plan, double DurationSeconds, string Message, IReadOnlyList<string> Order, IReadOnlyList<PlanFileJobJson> Jobs)
 {
+    /// <summary>The Wake-on-LAN packets this run sent (0.13.0: also before falling back to this computer) and what came of each; null when none.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<WakeAttemptJson>? Wakes { get; init; }
+
     /// <summary>NoCapacity only: as in <see cref="RunJson.Retryable"/>, from the job that decided the status.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Retryable { get; init; }

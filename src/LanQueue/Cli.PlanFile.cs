@@ -219,7 +219,8 @@ public static partial class Cli
         }
 
         // What to do next, then the logs of the jobs that did not complete (--json carries every logPath); all before the status line.
-        var next = NextSteps.WithFallback(p, NextSteps.ForPlanFile(p, result, jobArgs), result.FallbackHint, result.FallbackJobs, result.Units);
+        var wakes = runner.WakeAttempts;
+        var next = NextSteps.WithWakes(p, NextSteps.WithFallback(p, NextSteps.ForPlanFile(p, result, jobArgs), result.FallbackHint, result.FallbackJobs, result.Units), wakes);
 
         // results: (0.11.0): every completed job whose results show no test executed, whatever the plan's status.
         var noTests = result.Jobs.Select(j => (j.Name, Results: NoTestsRan(j.Status, PlanJobResults(j)))).Where(x => x.Results is not null).ToList();
@@ -245,6 +246,7 @@ public static partial class Cli
             var json = PlanRunJsonOf(result, plan.Path, started.Elapsed, [.. ordered.Select(j => j.Name)], plan.Warnings, specs, p.LogTail) with
             {
                 NextSteps = next,
+                Wakes = WakeAttemptJson.Of(wakes),
                 ScanSkipped = ScanSkippedJson(runner.ScanSkipped),
                 PlanTimeoutMinutes = planTimeout,
                 PlanTimedOut = Flag(result.PlanTimedOut),
@@ -277,6 +279,7 @@ public static partial class Cli
             Wait = TimeSpan.FromSeconds(p.WaitSeconds),
             Budgets = p.SplitWait ? p.Budgets : null,
             WaitGiven = p.WaitGiven,
+            EligibleWaitGiven = p.EligibleWaitGiven,
             NoWake = p.NoWake,
             Fallback = p.Fallback,
             FallbackOff = job.Args.Fallback == FallbackMode.Off,

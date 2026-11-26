@@ -199,6 +199,13 @@ public sealed record JobRequest(
     /// </summary>
     public bool WaitGiven { get; init; }
 
+    /// <summary>
+    /// True when the caller gave the eligible budget: --wait or --wait-eligible (not --wait-slot alone). Without it, a run that may fall back
+    /// wakes a sleeping pool machine and waits up to <see cref="JobRunner.FallbackWakeWait"/> for it before it falls back (0.13.0, wake before
+    /// fallback); with it, that budget decides, as for any run.
+    /// </summary>
+    public bool EligibleWaitGiven { get; init; }
+
     /// <summary>Set once the job fell back (0.13.0 B3): why the pool could not take it, for the "running on this computer" line (review A-L5).</summary>
     public string? FallbackWhy { get; init; }
 
@@ -977,23 +984,24 @@ public sealed partial class JobRunner(
             }
 
             // Wake-on-LAN last resort: only when no awake machine can take the job now, only with a real --wait to wait in (a pending wake is
-            // always inside that wait, so --wait 0 never blocks on one), and only one machine, the best-ranked sleeper.
-            if (ranked.Count == 0 && req.EffectiveBudgets.Eligible > TimeSpan.Zero && !req.NoWake && probe.Waker is { AnyPending: false })
+            // always inside that wait, so --wait 0 never blocks on one) or before falling back to this computer (MayWake, 0.13.0), and only
+            // one machine at a time, the best-ranked sleeper; each machine at most once per run (WakeService).
+            if (ranked.Count == 0 && MayWake(req) && probe.Waker is { AnyPending: false })
             {
-                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct).ConfigureAwait(false);
+                await WakeBestSleeperAsync(candidates, needs, probes, assessed, archive, say, ct, WakesBeforeFallback(req)).ConfigureAwait(false);
             }
 
             if (WaitedOut(req, waitClock, waitingSince, Scheduler.WaitKindOf(judged, sshFailed), round, relooked) is { } budget)
             {
                 var why = budget == WaitKind.Slot ? "no pool slot" : "no pool machine can take it now";
-                var waited = await FallbackGateAsync(req, needs, why, fellBack, say, ct).ConfigureAwait(false);
+                var waited = await FallbackGateAsync(req, needs, why + WakeWhy(req), fellBack, say, ct).ConfigureAwait(false);
                 if (waited.Go)
                 {
-                    (fellBack, req) = (true, req with { FallbackWhy = why });
+                    (fellBack, req) = (true, req with { FallbackWhy = why + WakeWhy(req) });
                     continue;
                 }
 
-                return WithFallback(WaitedNoCapacity(NoCapacity(jobId, judged, archive.Failure is null ? "" : " Archive build failed: " + archive.Failure), req, waitClock, budget), waited);
+                return WithFallback(WaitedNoCapacity(NoCapacity(jobId, judged, (archive.Failure is null ? "" : " Archive build failed: " + archive.Failure) + WakeNote(req)), req, waitClock, budget), waited);
             }
 
             if (Relook(req.Progress, round, relooked) is > 0 and var release)
@@ -1039,7 +1047,7 @@ public sealed partial class JobRunner(
         }
 
         clock.Look(Stopwatch.GetElapsedTime(0, Timestamp()), Stopwatch.GetElapsedTime(0, since), state);
-        return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(BudgetsOf(req));
+        return req.Progress is { } p && Relook(p, round, relooked) != 0 ? null : clock.SpentOut(BudgetsOf(req, WakePendingFor(req)));
     }
 
     /// <summary>
@@ -1241,8 +1249,10 @@ public sealed partial class JobRunner(
     /// and is judged again in <paramref name="assessed"/>.
     /// </summary>
     /// <param name="machines">The job's candidates (<see cref="Candidates"/>); <paramref name="probes"/> and <paramref name="assessed"/> are index-aligned with it.</param>
+    /// <param name="beforeFallback">True when the wake comes before a fallback to this computer (<see cref="WakesBeforeFallback"/>): the line says so.</param>
     private async Task WakeBestSleeperAsync(
-        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit, CancellationToken ct)
+        IReadOnlyList<Machine> machines, JobNeeds needs, MachineHealth[] probes, List<Assessment> assessed, LazyArchive archive, Action<string> emit, CancellationToken ct,
+        bool beforeFallback = false)
     {
         foreach (var i in WakeOrder(machines))
         {
@@ -1262,8 +1272,15 @@ public sealed partial class JobRunner(
             assessed[i] = Scheduler.Assess([(m, after)], needs)[0];
             if (probe.Waker!.AnyPending)
             {
-                emit($"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within the wait budget)");
+                emit(beforeFallback
+                    ? string.Create(CultureInfo.InvariantCulture, $"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {Math.Min(m.Wake!.WaitSeconds, (int)FallbackWakeWait.TotalSeconds)} s for it before falling back to this computer)")
+                    : $"[lanq] no awake machine can take the job; sent a Wake-on-LAN packet to {m.Name} (waiting up to {m.Wake!.WaitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)} s, within the wait budget)");
                 return;
+            }
+
+            if (after.Error is { } failed && failed.StartsWith("asleep, but the magic packet could not be sent", StringComparison.Ordinal))
+            {
+                emit($"[lanq] {m.Name}: {failed}");
             }
         }
     }

@@ -455,6 +455,32 @@ internal static class NextSteps
         return steps;
     }
 
+    /// <summary>
+    /// 0.13.0 wake before fallback: one step per Wake-on-LAN packet of the run that did not bring its machine up. NoAnswer and SendFailed:
+    /// ask_developer (Wake-on-LAN off in the BIOS/UEFI or the network card driver, no wired Ethernet, or the send itself); Waking (the run
+    /// ended while the machine may still be coming up): run_health, read-only. Never a wake command.
+    /// </summary>
+    internal static List<NextStepJson> WithWakes(ParsedArgs p, List<NextStepJson> steps, IReadOnlyList<Health.WakeAttempt> wakes)
+    {
+        foreach (var w in wakes)
+        {
+            switch (w.Outcome)
+            {
+                case Health.WakeOutcome.NoAnswer:
+                    steps.Add(Step(NextAction.AskDeveloper, $"{Jobs.JobRunner.WakeText(w)}: Wake-on-LAN may be off in the BIOS/UEFI or the network card driver, or the machine is not on wired Ethernet (docs/WORKERS.md)"));
+                    break;
+                case Health.WakeOutcome.SendFailed:
+                    steps.Add(Step(NextAction.AskDeveloper, Jobs.JobRunner.WakeText(w)));
+                    break;
+                case Health.WakeOutcome.Waking:
+                    steps.Add(Step(NextAction.RunHealth, $"{Jobs.JobRunner.WakeText(w)}; it may still be coming up: see whether it answers", SuggestedCommand.Health([], null, p.ConfigPath)));
+                    break;
+            }
+        }
+
+        return steps;
+    }
+
     /// <summary>What one lanq run (or dry run) ended with, for <see cref="ForRun(ParsedArgs, RunOutcome)"/>.</summary>
     /// <param name="MayStillRun">The job may still be running on <paramref name="Machine"/> (connection lost while it ran, cleanup not done).</param>
     internal sealed record RunOutcome(

@@ -161,6 +161,9 @@ public sealed record ParsedArgs(string Command, string? ConfigPath, IReadOnlyLis
     /// <summary>True when --wait, --wait-eligible or --wait-slot was given (0.13.0 B3: without any, a run that may fall back waits 120 s for a slot first).</summary>
     public bool WaitGiven { get; init; }
 
+    /// <summary>True when --wait or --wait-eligible was given (--wait-slot alone leaves the eligible budget to lanq: wake before fallback).</summary>
+    public bool EligibleWaitGiven => WaitGiven && (WaitEligibleSeconds is not null || WaitSlotSeconds is null);
+
     /// <summary>
     /// lanq run --fallback off|on|ask (0.13.0 B3; lanq.yml fallback: off): overrides policy.fallback for this run, or null. Also valid with --plan,
     /// where it applies to every job except one whose lanq.yml says fallback: off.
@@ -886,7 +889,8 @@ public static partial class Cli
         a link; exit 0 written, 2 the path exists (a file, folder or link) or bad arguments, 70 it could not be written.
         wake sends a Wake-on-LAN magic packet to a machine that has a wake: setting, even outside its allowed hours (you asked for it); --wait then waits
         up to its wake.wait_seconds for ssh. lanq run wakes one such machine by itself (once) only when no awake machine can take the job, it is
-        inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0 (--no-wake turns that off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
+        inside its allowed hours with min_window_minutes + wake.wait_seconds left and --wait is above 0, or before falling back to this computer
+        (fallback on/ask, no --wait or --wait-eligible: it then waits up to 120 s for it; --no-wake turns both off); lanq health --wake does the same for every sleeper and waits. Exit 0 sent (and, with --wait, answering), 1 no answer within the wait, 2 bad arguments or no wake: setting, 70 could not send.
         Every job's output is also kept in a log in the state folder: run prints "[lanq] log: PATH" just before its status line (--shards: for
         each shard that did not complete); run --json always carries logPath (null when no job started), and --log-tail N (1 to 200, --json
         only) adds logTail, the log's last N lines (each shard its own with --shards).
@@ -1154,7 +1158,8 @@ public static partial class Cli
         PruneLogs(log, config, stderr);
 
         // What to do next, then where the whole log is (--json carries it as logPath): always before the status line, which stays last.
-        var next = NextSteps.WithFallback(p, NextSteps.ForRun(p, NextSteps.Outcome(result)), result.Status == JobStatus.NoCapacity ? result.FallbackHint : null, result.Fallback ? 1 : 0, 1);
+        var wakes = runner.WakeAttempts;
+        var next = NextSteps.WithWakes(p, NextSteps.WithFallback(p, NextSteps.ForRun(p, NextSteps.Outcome(result)), result.Status == JobStatus.NoCapacity ? result.FallbackHint : null, result.Fallback ? 1 : 0, 1), wakes);
         if (NoTestsRan(result.Status.ToString(), result.Results) is { } noTests)
         {
             next = WithNoTestsSteps(next, [(null, noTests)]);
@@ -1180,6 +1185,7 @@ public static partial class Cli
                         Waited = result.Status == JobStatus.NoCapacity ? WaitedJson.Of(result.Waited) : null,
                         Fallback = Flag(result.Fallback),
                         FallbackJobs = result.Fallback ? 1 : null,
+                        Wakes = WakeAttemptJson.Of(wakes),
                         Post = PostJson.Of(result.Post),
                         NextSteps = next,
                         Env = EnvNames(p.Env),
@@ -1258,6 +1264,7 @@ public static partial class Cli
         {
             Budgets = p.SplitWait ? p.Budgets : null,
             WaitGiven = p.WaitGiven,
+            EligibleWaitGiven = p.EligibleWaitGiven,
             Fallback = p.Fallback,
             FallbackOff = p.Fallback == FallbackMode.Off,
             Post = p.Post,

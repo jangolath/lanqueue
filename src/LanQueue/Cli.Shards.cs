@@ -123,7 +123,8 @@ public static partial class Cli
 
         // What to do next, then the logs of the shards that did not complete (--json carries every shard's logPath); all before the status
         // line, which stays last.
-        var next = NextSteps.WithFallback(p, NextSteps.ForShards(p, result), result.Status == nameof(JobStatus.NoCapacity) ? result.FallbackHint : null, result.FallbackJobs, result.Count);
+        var wakes = runner.WakeAttempts;
+        var next = NextSteps.WithWakes(p, NextSteps.WithFallback(p, NextSteps.ForShards(p, result), result.Status == nameof(JobStatus.NoCapacity) ? result.FallbackHint : null, result.FallbackJobs, result.Count), wakes);
         var merged = MergedResults(result);
         if (NoTestsRan(result.Status, merged) is { } noTests)
         {
@@ -145,7 +146,7 @@ public static partial class Cli
         await stderr.WriteLineAsync($"[lanq] {result.Status}{JobRunner.FallbackNote(result.FallbackJobs, result.Count)}: {JobRunner.SafeLine(result.Message)}").ConfigureAwait(false);
         if (p.Json)
         {
-            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), ScanSkipped = ScanSkippedJson(runner.ScanSkipped) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
+            await stdout.WriteLineAsync(JsonSerializer.Serialize(ShardJson(result, started.Elapsed, fetch is not null, p.LogTail, next) with { Env = EnvNames(p.Env), Exclusive = Flag(p.Exclusive), ScanSkipped = ScanSkippedJson(runner.ScanSkipped), Wakes = WakeAttemptJson.Of(wakes) }, LanqJson.Default.ShardRunJson)).ConfigureAwait(false);
         }
 
         return result.ExitCode;

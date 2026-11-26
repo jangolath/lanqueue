@@ -217,12 +217,71 @@ public sealed partial class JobRunner
         return FallbackRefusal(config.Fallback!, req) is null ? mode : FallbackMode.Off;
     }
 
-    /// <summary>The wait budgets a job waits under: its own, but with a fallback that can really act and no wait flag given, at least 120 s for a slot (M1).</summary>
-    internal WaitBudgets BudgetsOf(JobRequest req)
+    /// <summary>
+    /// The wait budgets a job waits under: its own, but with a fallback that can really act and no wait flag given, at least 120 s for a slot
+    /// (M1); and while a Wake-on-LAN this run sent before falling back is pending (<paramref name="wakePending"/>, <see cref="WakesBeforeFallback"/>),
+    /// at least <see cref="FallbackWakeWait"/> for an eligible machine.
+    /// </summary>
+    internal WaitBudgets BudgetsOf(JobRequest req, bool wakePending = false)
     {
         var budgets = req.EffectiveBudgets;
-        return EffectiveFallbackModeOf(req) != FallbackMode.Off && !req.WaitGiven && budgets.Slot < FallbackSlotFloor ? budgets with { Slot = FallbackSlotFloor } : budgets;
+        if (EffectiveFallbackModeOf(req) != FallbackMode.Off && !req.WaitGiven && budgets.Slot < FallbackSlotFloor)
+        {
+            budgets = budgets with { Slot = FallbackSlotFloor };
+        }
+
+        return wakePending && WakesBeforeFallback(req) && budgets.Eligible < FallbackWakeWait ? budgets with { Eligible = FallbackWakeWait } : budgets;
     }
+
+    /// <summary>The Wake-on-LAN packets this run sent (or tried to) and what came of each, for its output, JSON wakes and next steps.</summary>
+    public IReadOnlyList<WakeAttempt> WakeAttempts => probe.Waker?.Attempts ?? [];
+
+    /// <summary>How long a run that may fall back waits for a pool machine it woke before it uses this computer (0.13.0, wake before fallback).</summary>
+    internal static readonly TimeSpan FallbackWakeWait = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// Wake before fallback (0.13.0, owner decision; replaces final review A-L6): a job that would fall back to this computer first wakes a
+    /// sleeping pool machine that could take it and waits up to <see cref="FallbackWakeWait"/> for it (never past that machine's
+    /// wake.wait_seconds). Only when the fallback could really take the job (<see cref="FallbackCouldTake"/>: on, or ask that can prompt),
+    /// without --no-wake, and when the caller left the eligible budget to lanq (no --wait, no --wait-eligible: <see cref="JobRequest.EligibleWaitGiven"/>);
+    /// a given eligible budget decides as for any run (above 0 it may wake, 0 never does). Off: unchanged.
+    /// </summary>
+    internal bool WakesBeforeFallback(JobRequest req) => !req.NoWake && !req.EligibleWaitGiven && FallbackCouldTake(req);
+
+    /// <summary>Whether a job may wake a sleeper at all: an eligible budget above 0 to wait in, or wake before fallback; never with --no-wake.</summary>
+    internal bool MayWake(JobRequest req) => !req.NoWake && (req.EffectiveBudgets.Eligible > TimeSpan.Zero || WakesBeforeFallback(req));
+
+    /// <summary>True while a packet this run sent to one of the job's candidates may still bring it up, within <see cref="FallbackWakeWait"/> of the send.</summary>
+    private bool WakePendingFor(JobRequest req) =>
+        probe.Waker is { } waker && Candidates(req).Any(m => waker.IsPending(m.Name, FallbackWakeWait));
+
+    /// <summary>
+    /// The packets this run sent to the job's candidates and what came of them, for the NoCapacity message and the fallback line: "" when none.
+    /// "Wake-on-LAN: build-02 woken, no ssh answer within 120 s."
+    /// </summary>
+    internal string WakeNote(JobRequest req)
+    {
+        if (probe.Waker is not { } waker)
+        {
+            return "";
+        }
+
+        var names = Candidates(req).Select(m => m.Name).ToHashSet(StringComparer.Ordinal);
+        var parts = waker.Attempts.Where(a => names.Contains(a.Machine)).Select(WakeText).ToList();
+        return parts.Count == 0 ? "" : " Wake-on-LAN: " + string.Join("; ", parts) + ".";
+    }
+
+    /// <summary>"; Wake-on-LAN: build-02 woken, no ssh answer within 120 s": the wake part of why the job falls back (the ask question, the fallback line); "" when none.</summary>
+    internal string WakeWhy(JobRequest req) => WakeNote(req) is { Length: > 0 } note ? ";" + note.TrimEnd('.') : "";
+
+    /// <summary>"build-02 woken, no ssh answer within 120 s": one wake attempt for people (also the JSON wakes message).</summary>
+    internal static string WakeText(WakeAttempt a) => a.Outcome switch
+    {
+        WakeOutcome.Awake => $"{a.Machine} woken and answering ssh",
+        WakeOutcome.NoAnswer => string.Create(CultureInfo.InvariantCulture, $"{a.Machine} woken, no ssh answer within {a.WaitSeconds} s"),
+        WakeOutcome.SendFailed => $"{a.Machine}: the packet could not be sent ({SafeLine(a.Error ?? "error")})",
+        _ => $"{a.Machine} woken, no ssh answer yet",
+    };
 
     /// <summary>
     /// True when the fallback could ever take the job as far as the config says (its capabilities, a declared size:, the job's --env), with the

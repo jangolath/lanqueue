@@ -54,7 +54,10 @@ public sealed record JobPlan(string Status, int ExitCode, string Message)
     /// <summary>--baseline: the base a failure would be rerun at (or that the rerun would be skipped), from <see cref="JobRunner.PreviewBaseline"/>; else null.</summary>
     public BaselineResult? Baseline { get; init; }
 
-    /// <summary>The sleeping machine lanq run would wake (only with --wait above 0, without --no-wake, when no awake machine can take the job), or null.</summary>
+    /// <summary>
+    /// The sleeping machine lanq run would wake (only with --wait above 0, or before falling back to this computer, without --no-wake, when no
+    /// awake machine can take the job), or null.
+    /// </summary>
     public string? WouldWake { get; init; }
 
     /// <summary>

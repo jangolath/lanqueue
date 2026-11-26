@@ -165,13 +165,14 @@ public sealed partial class JobRunner
 
     /// <summary>
     /// No machine can take the job now: the NoCapacity lanq run would end with (its message, retryable), and the sleeper it would wake first,
-    /// by the rules of <see cref="Dispatch"/>: only with --wait above 0, without --no-wake, and when not every machine is ruled out for good.
+    /// by the rules of <see cref="Dispatch"/>: only with --wait above 0 or before a fallback (<see cref="MayWake"/>), without --no-wake, and when
+    /// not every machine is ruled out for good.
     /// </summary>
     private JobPlan NoneNow(string id, JobRequest req, JobNeeds needs, IReadOnlyList<Machine> candidates, MachineHealth[] probes, JobPlan plan)
     {
         var none = NoCapacity(id, [.. plan.Assessed], "");
-        // As the real run: the wake gate uses the eligible budget (p1 review L2).
-        var wake = !plan.Never && req.EffectiveBudgets.Eligible > TimeSpan.Zero && !req.NoWake ? WouldWake(candidates, needs, probes) : null;
+        // As the real run: the wake gate uses the eligible budget (p1 review L2), or wakes before falling back to this computer (0.13.0).
+        var wake = !plan.Never && MayWake(req) ? WouldWake(candidates, needs, probes) : null;
         return plan with { Status = nameof(JobStatus.NoCapacity), ExitCode = none.CliExitCode, Message = none.Message, Machine = null, Retryable = none.Retryable, WouldWake = wake };
     }
 
