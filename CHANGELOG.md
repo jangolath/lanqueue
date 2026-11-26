@@ -96,9 +96,10 @@
 - The sample's CI job runs on pull requests that touch the sample, on main and weekly.
 - lanq.yml `shard_env: true` on a sharded job says its command splits its work through `LANQ_SHARD` / `LANQ_SHARDS` (a
   shard script reads them), so lanq no longer warns (in the dry run or on stderr) that the command has no `{shard}` or
-  `{shards}`. A command that reads `LANQ_SHARD` itself (`$LANQ_SHARD`, `${LANQ_SHARD}`, `$env:LANQ_SHARD` or
-  `%LANQ_SHARD%`, outside a `#` comment) is not warned about either; `LANQ_SHARDS` alone, a file name or a comment that
-  mentions it still warns. The sample plans use it.
+  `{shards}`. A command that reads `LANQ_SHARD` itself (`$LANQ_SHARD`, `${LANQ_SHARD}`, `$env:LANQ_SHARD`,
+  `${env:LANQ_SHARD}`, `GetEnvironmentVariable('LANQ_SHARD')`, `%LANQ_SHARD%` or `!LANQ_SHARD!`, outside a `#` comment;
+  a `#` inside quotes is not a comment) is not warned about either; `LANQ_SHARDS` alone, a file name or a comment that
+  mentions it still warns. Other ways of reading it need `shard_env: true`. The sample plans use it.
 
 ### Changed
 
@@ -126,7 +127,8 @@
   the limit and its length (each job's Windows job object is named after its pid file under `work_root`, and such
   names stop at 260 characters). Every script lanq sends fits at 200 characters, with `hygiene:`, the largest shard
   and plan job name; `env:` and `path_prepend:` still share the same room, and loading measures the `post:` step's
-  script too. The refusal (at load, in `lanq doctor --remote` and at run time) now names what fills the script: the
+  script too, whether or not a plan uses `post:`, so it leaves `env:` a little less room than in 0.12 (a Windows
+  machine whose `env:` only just fitted may now be refused at load). The refusal (at load, in `lanq doctor --remote` and at run time) now names what fills the script: the
   `work_root` and its length, and `env:`, `hygiene:` and `path_prepend:` only when set, with their sizes as written
   (each costs about 2.7 characters once encoded; it said "env: (0 entries) and path_prepend: (0 entries)" before).
 

@@ -838,8 +838,10 @@ public static partial class RemoteScripts
             var parts = string.Join(' ', argv.Select(ShellQuote.PowerShell));
             // work_root is written once ($rt) and every other path is built from it with single-quoted literals (0.13.0 smoke: it was
             // spelled out four times, so a work_root of about 95 characters already passed the encoded cap). The script is terse on purpose
-            // (0.13.0 review M1): 1024 is FILE_ATTRIBUTE_REPARSE_POINT, -nop -noni are -NoProfile -NonInteractive, and [Console]::WriteLine
-            // writes to [Console]::Out.
+            // (0.13.0 review M1): 1024 is FILE_ATTRIBUTE_REPARSE_POINT, and [Console]::WriteLine writes to [Console]::Out. The job's child
+            // starts with -NoProfile -NonInteractive spelled out, as in 0.12 (EDR rules key on the short forms; 0.13.0 review 2 L2); only the
+            // post: step's child, whose script also carries the time-limit marker, uses -nop -noni, which it needs to fit at a 200-character
+            // work_root (WindowsWorkRootCapTests).
             var pidName = (pidKind == "post" ? "post" : "job") + "-" + jobId + ".pid";
             return $$"""
                 $rt={{ShellQuote.PowerShell(m.WorkRoot)}};$wt=$rt+{{ShellQuote.PowerShell("/jobs/" + jobId)}}
@@ -865,7 +867,7 @@ public static partial class RemoteScripts
                 }
                 $inner='$ProgressPreference=''SilentlyContinue'';$global:LASTEXITCODE=0'+"`ntry{`n"+$job.ToString()+"`nexit `$LASTEXITCODE`n"+'}catch{Write-Output "$_";exit 1}'
                 $si=[Diagnostics.ProcessStartInfo]::new($me.Path)
-                $si.Arguments='-nop -noni -ep Bypass -ec '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+                $si.Arguments='{{(pidKind == "post" ? "-nop -noni" : "-NoProfile -NonInteractive")}} -ep Bypass -ec '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
                 $si.UseShellExecute=$false;$si.WorkingDirectory=$here;$code=1
                 try{
                   $cp=[Diagnostics.Process]::Start($si)

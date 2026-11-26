@@ -68,18 +68,55 @@ public static partial class PlanFileLoader
     private static partial Regex WholeNumberRegex();
 
     /// <summary>
-    /// A reference to the shard index in a command: $LANQ_SHARD or ${LANQ_SHARD} (sh, exact case), $env:LANQ_SHARD (PowerShell) or
-    /// %LANQ_SHARD% (cmd), both any case; not LANQ_SHARDS or a longer name (0.13.0 review L4).
+    /// A reference to the shard index in a command: $LANQ_SHARD or ${LANQ_SHARD} (sh, exact case); $env:LANQ_SHARD, ${env:LANQ_SHARD} or
+    /// GetEnvironmentVariable('LANQ_SHARD') (PowerShell and .NET); %LANQ_SHARD%, %LANQ_SHARD:~...% or !LANQ_SHARD! (cmd), any case; not
+    /// LANQ_SHARDS or a longer name (0.13.0 review L4, review 2 L3). A warning heuristic only: a command it misses says shard_env: true.
     /// </summary>
-    [GeneratedRegex(@"(?:\$\{?LANQ_SHARD|(?i:\$env:LANQ_SHARD|%LANQ_SHARD%))(?![A-Za-z0-9_])", RegexOptions.CultureInvariant, 1000)]
+    [GeneratedRegex(@"(?:\$\{?LANQ_SHARD|(?i:\$\{?env:LANQ_SHARD|GetEnvironmentVariable\(\s*['""]LANQ_SHARD['""]|%LANQ_SHARD[%:]|!LANQ_SHARD!))(?![A-Za-z0-9_])", RegexOptions.CultureInvariant, 1000)]
     private static partial Regex ShardReferenceRegex();
 
-    /// <summary>A shell comment: from a # at the start of a line or after white space to the end of that line (sh and PowerShell alike).</summary>
-    [GeneratedRegex(@"(?m)(?:^|(?<=\s))#.*$", RegexOptions.CultureInvariant, 1000)]
-    private static partial Regex ShellCommentRegex();
+    /// <summary>
+    /// The argument without its shell comments: from a # at the start of a line or after white space, outside single or double quotes, to
+    /// the end of that line (sh and PowerShell alike). Escapes are not followed; it only decides whether to warn.
+    /// </summary>
+    internal static string WithoutComments(string argument)
+    {
+        var text = new System.Text.StringBuilder(argument.Length);
+        var quote = '\0';
+        for (var i = 0; i < argument.Length; i++)
+        {
+            var c = argument[i];
+            if (quote != '\0')
+            {
+                quote = c == quote ? '\0' : quote;
+            }
+            else if (c is '\'' or '"')
+            {
+                quote = c;
+            }
+            else if (c == '#' && (i == 0 || char.IsWhiteSpace(argument[i - 1])))
+            {
+                while (i < argument.Length && argument[i] != '\n')
+                {
+                    i++;
+                }
+
+                if (i < argument.Length)
+                {
+                    text.Append('\n');
+                }
+
+                continue;
+            }
+
+            text.Append(c);
+        }
+
+        return text.ToString();
+    }
 
     /// <summary>True when an argument reads the shard index through the environment (<see cref="ShardReferenceRegex"/>) outside a comment.</summary>
-    internal static bool ReadsShardIndex(string argument) => ShardReferenceRegex().IsMatch(ShellCommentRegex().Replace(argument, ""));
+    internal static bool ReadsShardIndex(string argument) => ShardReferenceRegex().IsMatch(WithoutComments(argument));
 
     /// <summary>
     /// The plan file lanq run --plan reads: <paramref name="planFile"/> (relative to <paramref name="cwd"/>) when given, else lanq.yml at the
@@ -846,7 +883,7 @@ public static partial class PlanFileLoader
     /// <summary>
     /// What a dry run warns about (stderr on a real run): two jobs with the same command in the same folder, and a sharded job whose command
     /// has neither {shard} nor {shards} (each shard would run the same command unless a script reads LANQ_SHARD). No such warning when the
-    /// command itself reads the index (as $LANQ_SHARD, ${LANQ_SHARD}, $env:LANQ_SHARD or %LANQ_SHARD%, not in a comment; LANQ_SHARDS alone,
+    /// command itself reads the index (as $LANQ_SHARD, ${env:LANQ_SHARD}, %LANQ_SHARD% and the like, not in a comment; LANQ_SHARDS alone,
     /// the count, does not split the work: <see cref="ReadsShardIndex"/>) or the job says shard_env: true.
     /// </summary>
     private static List<string> Warnings(List<PlanJob> jobs)

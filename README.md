@@ -1498,6 +1498,8 @@ See [SECURITY.md](SECURITY.md) for what this does not protect against.
   lists are refused with a message giving the limit and the actual size. A Windows machine whose `env:` and
   `path_prepend:` alone would already pass that limit in the job script is refused when the config loads, with the
   machine, the settings and how much is over; `lanq doctor --remote` reports its own script's overflow as a FAIL line.
+  Since 0.13.0 that load check measures the `post:` step's script as well as the job script, whether or not a plan
+  uses `post:`, so the `post:` step slightly reduces the room left for `env:` entries.
   A job's `--env` values count too: a Windows machine they push over the limit is not used for that job
   (`windows_command_too_long`).
 - In git mode the first job on a machine sends the full history of HEAD; later jobs send only what that machine does not
