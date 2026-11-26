@@ -1052,16 +1052,29 @@ public sealed class ExclusiveTests : IDisposable
         return (r, ssh, lines);
     }
 
-    /// <summary>The deflated block both claims dot-source is exactly the slot functions plus the reclaim function, nothing else.</summary>
+    /// <summary>
+    /// The deflated block a claim dot-sources is exactly the slot functions plus the reclaim function, nothing else; the claim of every slot's
+    /// block (0.13.0 review M1) is the same text plus its own BO and HL functions.
+    /// </summary>
     [Fact]
     public void ThePackedSlotFunctionsAreExactlyTheSlotAndReclaimFunctions()
     {
-        var packed = RemoteScripts.WindowsSlotFunctionsPacked;
-        var start = packed.IndexOf("FromBase64String('", StringComparison.Ordinal) + "FromBase64String('".Length;
-        var base64 = packed[start..packed.IndexOf('\'', start)];
-        using var inflate = new System.IO.Compression.DeflateStream(new MemoryStream(Convert.FromBase64String(base64)), System.IO.Compression.CompressionMode.Decompress);
-        using var reader = new StreamReader(inflate, System.Text.Encoding.UTF8);
-        Assert.Equal(RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction, reader.ReadToEnd());
+        static string Inflate(string packed)
+        {
+            var start = packed.IndexOf("FromBase64String('", StringComparison.Ordinal) + "FromBase64String('".Length;
+            var base64 = packed[start..packed.IndexOf('\'', start)];
+            using var inflate = new System.IO.Compression.DeflateStream(new MemoryStream(Convert.FromBase64String(base64)), System.IO.Compression.CompressionMode.Decompress);
+            using var reader = new StreamReader(inflate, System.Text.Encoding.UTF8);
+            return reader.ReadToEnd();
+        }
+
+        Assert.Equal(RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction, Inflate(RemoteScripts.WindowsSlotFunctionsPacked));
+        Assert.Equal(
+            RemoteScripts.WindowsSlotFunctions + "\n" + RemoteScripts.WindowsReclaimFunction + "\n" + RemoteScripts.WindowsExclusiveFunctions,
+            Inflate(RemoteScripts.WindowsExclusiveFunctionsPacked));
+        Assert.Contains("function BO{", RemoteScripts.WindowsExclusiveFunctions, StringComparison.Ordinal);
+        Assert.Contains("[long]$Matches[1] -le $mx)", RemoteScripts.WindowsExclusiveFunctions, StringComparison.Ordinal);
+        Assert.Contains("+1800)", RemoteScripts.WindowsExclusiveFunctions, StringComparison.Ordinal);
     }
 
     /// <summary>Many claims (shards, plan jobs) report the same stuck slot at once: the line is printed exactly once.</summary>

@@ -179,6 +179,27 @@ public sealed class WorkerScriptTests : IDisposable
         Assert.Equal(1, code);
     }
 
+    /// <summary>
+    /// 0.13.0 review L3: the job script builds its paths on the worker from the one quoted work_root. At run time its pid file must be exactly
+    /// the path stop and cleanup compute ("$root/locks/job-$id.pid", a trailing slash on work_root kept), and its job object must carry the name
+    /// LqName gives that literal path, or a later stop would not find either. The job itself checks both, with the helper's own functions.
+    /// </summary>
+    [WindowsFact]
+    public void TheJobScriptsPidFileAndJobObjectAreTheOnesStopAndCleanupCompute()
+    {
+        var m = Worker(MachineOs.Windows);
+        m.WorkRoot = _root + "/";
+        InstallHelper(m);
+        var pidFile = m.WorkRoot + "/locks/job-" + _j1 + ".pid";
+        var check = ". '" + RemoteScripts.WindowsHelperPath(m) + "'; 'pid=' + (Test-Path -LiteralPath '" + pidFile + "'); "
+            + "$j = $LqW::OpenJobObjectW(8, 0, (LqName '" + pidFile + "')); 'job=' + ($j -ne [IntPtr]::Zero)";
+        var (code, output) = Shells.Run("windows", RemoteScripts.Execute(m, _j1, ".", ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", check], TimeSpan.FromMinutes(5)));
+        Assert.True(code == 0, "exit " + code + ": " + output);
+        Assert.Contains("pid=True", output, StringComparison.Ordinal);
+        Assert.Contains("job=True", output, StringComparison.Ordinal);
+        Assert.False(File.Exists(pidFile));
+    }
+
     /// <summary>Writes the job wrapper's helper into the worker's work_root/bin, as the runner's EnsureIncoming step does before every job.</summary>
     private static void InstallHelper(Machine m)
     {
@@ -450,11 +471,10 @@ public sealed class WorkerScriptTests : IDisposable
             Assert.DoesNotContain(". $LqH", script, StringComparison.Ordinal);
         }
 
-        // The claims carry the slot functions (with the check above) deflated: exactly that text, dot-sourced.
-        foreach (var claim in new[] { RemoteScripts.AcquireSlot(m, _j1, TimeSpan.FromHours(1)), RemoteScripts.AcquireAll(m, _j1, TimeSpan.FromHours(1)) })
-        {
-            Assert.Contains(RemoteScripts.WindowsSlotFunctionsPacked, claim, StringComparison.Ordinal);
-        }
+        // The claims carry the slot functions (with the check above) deflated: exactly that text, dot-sourced (the claim of every slot with
+        // its own two functions in the same block).
+        Assert.Contains(RemoteScripts.WindowsSlotFunctionsPacked, RemoteScripts.AcquireSlot(m, _j1, TimeSpan.FromHours(1)), StringComparison.Ordinal);
+        Assert.Contains(RemoteScripts.WindowsExclusiveFunctionsPacked, RemoteScripts.AcquireAll(m, _j1, TimeSpan.FromHours(1)), StringComparison.Ordinal);
 
         Assert.Equal(64, RemoteScripts.WindowsJobHelperHash.Length);
     }

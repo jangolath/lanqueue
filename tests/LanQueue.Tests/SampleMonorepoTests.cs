@@ -10,7 +10,7 @@ using Xunit;
 namespace LanQueue.Tests;
 
 /// <summary>
-/// samples/monorepo (0.13.0): the public fixture every pool-facing change is tried on. Its plan files load with no warnings beyond the shard-script one, the
+/// samples/monorepo (0.13.0): the public fixture every pool-facing change is tried on. Its plan files load with no warnings (the shard-script jobs say shard_env: true), the
 /// Windows and Linux plans pick their own shard script (lanq.yml has no conditions), every command is on the README's allowlist, the
 /// solution lists every non-opt-in test project, and nothing in it trips lanq's own secret scan (a finding there would make every
 /// lanq run --plan of this repository Rejected).

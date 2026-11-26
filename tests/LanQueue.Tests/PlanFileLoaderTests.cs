@@ -437,6 +437,9 @@ public sealed class PlanFileLoaderTests : IDisposable
                 command: [powershell, -NoProfile, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, x.csproj]
                 shards: 3
                 shard_env: true
+              cmd-env:
+                command: [cmd, /c, 'run-part %LANQ_SHARD%']
+                shards: 2
               off:
                 command: [sh, scripts/lanq/test-shard.sh]
                 shards: 3
@@ -445,6 +448,34 @@ public sealed class PlanFileLoaderTests : IDisposable
         Assert.Equal(
             ["job 'off' has shards: but its command has no {shard} or {shards}: each shard runs the same command unless a script reads LANQ_SHARD (then say shard_env: true)"],
             plan.Warnings);
+
+        // 0.13.0 review L4: only a reference to the variable counts. A comment, a file name, the count alone (LANQ_SHARDS: every shard would
+        // still run the same work) or a longer name still warns.
+        var mentions = PlanFileLoader.Parse("""
+            version: 1
+            jobs:
+              comment:
+                command: [sh, -c, 'run.sh # TODO use $LANQ_SHARD']
+                shards: 2
+              ps-comment:
+                command: [pwsh, -Command, "run.ps1 # LANQ_SHARD later"]
+                shards: 2
+              file:
+                command: [sh, -c, 'cat lanq_shard_notes.txt']
+                shards: 2
+              count:
+                command: [sh, -c, 'run-part "$LANQ_SHARDS"']
+                shards: 2
+              longer:
+                command: [sh, -c, 'run-part "${LANQ_SHARD_FOO}"']
+                shards: 2
+              bare:
+                command: [sh, -c, 'echo LANQ_SHARD']
+                shards: 2
+            """);
+        Assert.Equal(
+            ["comment", "ps-comment", "file", "count", "longer", "bare"],
+            mentions.Warnings.Select(w => w.Split('\'')[1]).ToArray());
         Assert.True(plan.Job("script")!.ShardEnv);
         Assert.False(plan.Job("off")!.ShardEnv);
         Assert.DoesNotContain("shard_env", string.Join(' ', plan.Job("script")!.RunArgs), StringComparison.Ordinal);
