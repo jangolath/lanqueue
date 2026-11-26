@@ -48,15 +48,23 @@
   run is not pool evidence. With the fallback off, a NoCapacity whose job this computer could run suggests `--fallback
   on` (`ask_developer`, never run by an agent). `--on <the fallback>` is refused for `lanq run`; `lanq health --on`,
   `lanq unlock` and `lanq prune` can name it. `--dry-run` says when a run would fall back (`wouldFallBack`).
-- **Wake before fallback.** With the fallback `on` or `ask`, a job that would fall back first wakes a sleeping pool
-  machine that could take it (it has a `wake:` setting and is inside its `allowed_hours`) and waits up to 120 s for it,
-  never past its `wake.wait_seconds`; if it comes up the job runs there. A paused machine is never woken and never
-  delays the fallback. With `ask`, lanq wakes first and asks only if still needed. Shard sets and plans wake one
-  machine at a time, each at most once per run. It applies when no `--wait` or `--wait-eligible` is given (`--wait-slot`
-  alone keeps it); an explicit eligible budget decides as before, and with the fallback `off` nothing changes. The
-  fallback line, the ask question and the NOT RUN message say what the wake did; JSON has top-level `wakes`
-  (`{machine, result, waitSeconds, message}` on run, shard set and plan), with an `ask_developer` step for a wake that
-  got no answer and a `run_health` step for one still coming up; `--dry-run` names the machine (`wouldWake`).
+- **Wake before fallback.** With the fallback `on` or `ask`, a job that would fall back first wakes every sleeping pool
+  machine that could take it (it has a `wake:` setting, the job's capabilities and size, and is inside its
+  `allowed_hours`), all at once and each at most once per run, then waits one shared wait of up to 120 s counted from
+  the first packet. The wait ends early only when the job is placed or every woken machine is ruled out for good or
+  paused; a woken machine that answers but is still busy from its own boot (load, memory pressure, an unreadable
+  probe) keeps the wait going, and one that never answers stops counting once its `wake.wait_seconds` have passed. A
+  machine with broken Wake-on-LAN therefore costs at most that one wait per run, never 120 s per sleeper, and a plan
+  pays it once, not once per job. A plan job waits only for wakes on machines it could use, and its messages name only
+  those. A machine known to be paused (awake, with its `PAUSE` file) is never woken; one paused while asleep may be,
+  but once it answers as paused it no longer delays the fallback. With `ask`, lanq wakes first and asks only if still
+  needed (the wake line says "before asking to use this computer"). It applies when no `--wait` or `--wait-eligible` is
+  given (`--wait-slot` alone keeps it); an explicit eligible budget decides as before (one sleeper at a time inside it),
+  and with the fallback `off` nothing changes. The fallback line, the ask question and the NOT RUN message say what the
+  wake did; JSON has top-level `wakes` (`{machine, result, waitSeconds, message}` per machine, on run, shard set and
+  plan, also after Ctrl+C), with an `ask_developer` step for a wake that got no answer and a `run_health` step for one
+  still coming up; `--dry-run` names the machines (`wouldWake`, the first by name, and `wouldWakeAll`), also under
+  `ask` where the real run could ask.
 - **`hygiene: [dotnet]` / `[dotnet-lean]`** per machine: `dotnet` sets `MSBUILDDISABLENODEREUSE=1`,
   `DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` for the machine's jobs (MSBuild nodes end with each build, so
   parallel jobs never share one); `dotnet-lean` also sets `UseSharedCompilation=false` (no resident compiler server;

@@ -395,21 +395,34 @@ machines:
   fallback cannot act (`ask` with no terminal, or a refusal below), the run behaves exactly as with `off`: no 120 s
   wait, and a job no pool machine can ever take ends at once. A refusal, and `--fallback on|ask` with no usable fallback
   entry, is said once on stderr at the start.
-- The 120 s floor is a slot wait only. **Wake before fallback:** when a pool machine that could take the job looks asleep
-  and has a `wake:` setting (inside its `allowed_hours`, as for any automatic wake), a run that may fall back first
-  sends it one Wake-on-LAN packet (`[lanq] ... sent a Wake-on-LAN packet to build-02 (waiting up to 120 s for it before
-  falling back to this computer)`) and waits up to 120 s for it, never past its `wake.wait_seconds`. If it comes up, the
-  job runs there; if not, the job falls back, and the fallback line, the `ask` question, the NOT RUN message, JSON
-  `wakes` and the next steps say what the wake did (`build-02 woken, no ssh answer within 60 s`). A **paused** machine
-  (its `PAUSE` file) is never woken and never delays the fallback; nor does a sleeper without `wake:`. With `ask`, lanq
-  wakes first and asks only if the job still needs this computer. Shard sets and plans wake one machine at a time and
-  each machine at most once per run. This applies when lanq chooses the eligible wait: no `--wait` and no
-  `--wait-eligible` (`--wait-slot` alone keeps it). `--wait-eligible S` or `--wait S` decide instead, as for any run:
-  above 0 a sleeper is woken inside that budget, 0 never wakes. `--no-wake` never wakes; with the fallback `off`
-  nothing changes. `--wait-eligible` alone sets no slot floor, so a busy pool falls back at once.
+- The 120 s floor is a slot wait only. **Wake before fallback:** when pool machines that could take the job look asleep
+  and have a `wake:` setting (with the job's capabilities and size, inside their `allowed_hours`, as for any automatic
+  wake), a run that may fall back first sends each of them one Wake-on-LAN packet, all at once (`[lanq] ... sent
+  Wake-on-LAN packets to build-02, build-03 (waiting up to 120 s for them before falling back to this computer)`; under
+  `ask`, "before asking to use this computer"). Then it waits **one shared wait of up to 120 s, counted from the first
+  packet**. The wait ends early only when the job is placed, or when every woken machine is ruled out for good or
+  paused. A woken machine that answers ssh but is held, as Windows often is just after boot (load or memory pressure
+  from its own startup, an unreadable probe), keeps the wait going until the 120 s are up; one that has not answered
+  stops counting once its own `wake.wait_seconds` have passed. If a woken machine can take the job, it runs there; if
+  not, the job falls back, and the fallback line, the `ask` question, the NOT RUN message, JSON `wakes` (one entry per
+  machine) and the next steps say what each wake did (`build-02 woken, no ssh answer within 60 s`). Because the
+  sleepers are woken together, a machine with Wake-on-LAN broken costs at most that one 120 s per run, not 120 s per
+  sleeper; each machine is woken at most once per run, and later jobs of the run (plan jobs, a baseline rerun) that
+  could use the same machines do not wait again once that wait is over. A job waits only for wakes on machines it could
+  use. A machine **known to be paused** (awake, with its `PAUSE` file) is never woken; one paused while asleep cannot
+  say so and may be woken, but once it answers as paused it no longer delays the fallback. A sleeper without `wake:`
+  never delays it either. With `ask`, lanq wakes first and asks only if the job still needs this computer. This applies
+  when lanq chooses the eligible wait: no `--wait` and no `--wait-eligible` (`--wait-slot` alone keeps it).
+  `--wait-eligible S` or `--wait S` decide instead, as for any run: above 0 one sleeper at a time is woken inside that
+  budget, 0 never wakes. `--no-wake` never wakes; with the fallback `off` nothing changes. `--wait-eligible` alone sets
+  no slot floor, so a busy pool falls back at once.
+- The wake comes when no awake machine can take the job (or, for a shard set, when no new shard could start this look),
+  not only just before the fallback: a shard set whose capable machines are all full, or a single job waiting for a
+  slot, may therefore wake a sleeper for extra capacity while it waits, as with `--wait` above 0. `--no-wake` avoids that.
 - `lanq run --dry-run` says when the run would fall back (`Would fall back: ...`, JSON `wouldFallBack: "dev-pc"`), and
-  which sleeper it would wake first (`Would wake: build-02 (... before falling back to this computer)`, JSON
-  `wouldWake`).
+  which sleepers it would wake (`Would wake: build-02, build-03 (... before falling back to this computer)`, JSON
+  `wouldWake`, the first by name, and `wouldWakeAll`). Under `ask` it predicts as the real run would where that run
+  could ask (a terminal, no `--json`, not CI or an agent).
 - `lanq run --fallback off|on|ask` overrides the policy for one run (also with `--plan`). A lanq.yml job's
   `fallback: off` wins over both; lanq.yml may not say `on` or `ask` (a repository never chooses to run on your PC).
   `--on <worker>` never falls back; `--on dev-pc` is refused.

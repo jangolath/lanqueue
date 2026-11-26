@@ -796,13 +796,15 @@ interface: set `broadcast` to the directed broadcast of the worker's own subnet*
   `wake.wait_seconds` of the window left (10 min + 120 s by default): a machine with less left would be held as "window
   closing" once awake, so it is left asleep and the reason is shown. Nothing is woken while an awake machine can take the job,
   with `--wait 0` (the default), or with `--no-wake`, except before falling back to this computer: with the fallback
-  `on` or `ask` and no `--wait`/`--wait-eligible`, lanq wakes such a machine and waits up to 120 s for it before it
-  uses your PC (docs/WORKERS.md). The wake happens inside `--wait`: it never makes `lanq run`
-  wait longer than you asked, and the other machines keep being tried meanwhile. At most once per machine per `lanq`
-  invocation, and not another machine while one is still coming up.
+  `on` or `ask` and no `--wait`/`--wait-eligible`, lanq wakes every such machine at once and waits one shared wait of
+  up to 120 s for them before it uses your PC (docs/WORKERS.md, "Wake before fallback"). With an explicit `--wait` or
+  `--wait-eligible`, the wake happens inside that budget: it never makes `lanq run` wait longer than you asked, and the
+  other machines keep being tried meanwhile. At most once per machine per `lanq` invocation, and (with an explicit
+  budget) not another machine while one is still coming up.
   When every awake machine that fits the job is merely busy, `lanq` may therefore wake a sleeper for extra capacity; use
   `--no-wake` to avoid that. If a woken machine never answers, the next eligible sleeper (by name) may be tried once the
-  first one's `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run.
+  first one's `wait_seconds` have passed, still within `--wait` and with at most one packet per machine per run (before
+  a fallback all of them were woken at once already).
 - **`lanq health` stays read-only and quick.** It never wakes anything by itself. `lanq health --wake` sends a packet
   to every machine that looks asleep and is inside its hours with that much of its window left, then waits for each (probing again after 5 s, 10 s, then
   every 20 s, up to `wait_seconds`).
