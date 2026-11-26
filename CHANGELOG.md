@@ -94,6 +94,9 @@
   (WARN two or more above it, or when not even one fits).
 - `lanq run --dry-run --json` machines carry `needGb`; `lanq health` shows a slot cap a job size sets.
 - The sample's CI job runs on pull requests that touch the sample, on main and weekly.
+- lanq.yml `shard_env: true` on a sharded job says its command splits its work through `LANQ_SHARD` / `LANQ_SHARDS` (a
+  shard script reads them), so the dry run no longer warns that the command has no `{shard}` or `{shards}`. A command
+  that names `LANQ_SHARD` itself (`$LANQ_SHARD`, `$env:LANQ_SHARD`) is not warned about either. The sample plans use it.
 
 ### Changed
 
@@ -108,11 +111,17 @@
   runs without it; a run without the cap (another config, an older lanq) can still fill `max_jobs`.
 - Cleanup in git mode removes the job folder with the `\\?\` form of `rd /s /q` (paths over MAX_PATH), as archive mode did.
 - **New keys need lanq 0.13.0:** `job_mem_gb`, `hygiene`, `fallback`, `local`, `policy.fallback` in machines.yml;
-  `fallback` and `post` in lanq.yml. An older lanq refuses a file that uses them ("unknown key").
+  `fallback`, `post` and `shard_env` in lanq.yml. An older lanq refuses a file that uses them ("unknown key").
 - **The free-memory floor is kept free when slots are counted.** With `--mem` (or a job size), a machine's job slots are
   now (free memory - `min_free_mem_gb`) / need instead of free memory / need, so a machine may take one copy fewer than
   in 0.12 (for example 12.5 GB free, a 2 GB floor and `--mem 4`: two copies, not three). A machine whose total memory
   less its floor is below the need is `mem_exceeds_total`. Without `--mem` and without a job size nothing changes.
+- **A longer Windows `work_root` fits.** The Windows job script spelled the `work_root` out four times, so a `work_root`
+  of about 95 characters already passed the 8000-character encoded command limit and the machine was refused. It is
+  written once now and the other paths are built from it on the worker, so a `work_root` of a few hundred characters
+  fits. The refusal (at load, in `lanq doctor --remote` and at run time) now names what fills the script: the
+  `work_root` and its length, and `env:`, `hygiene:` and `path_prepend:` only when set, with their sizes (it said
+  "env: (0 entries) and path_prepend: (0 entries)" before).
 
 ## 0.12.0 (2026-11-14)
 

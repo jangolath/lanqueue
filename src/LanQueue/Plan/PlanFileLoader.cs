@@ -51,8 +51,8 @@ public static partial class PlanFileLoader
 
     /// <summary>The keys of a job.</summary>
     internal static readonly string[] JobKeys =
-        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "target_minutes", "shard_retries", "fail_fast", "after", "fetch", "fetch_max",
-        "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results", "fallback", "post"];
+        ["command", "dir", "needs", "mem", "size", "min_size", "on", "timeout", "shards", "shard_env", "target_minutes", "shard_retries", "fail_fast", "after", "fetch",
+        "fetch_max", "fetch_max_files", "env", "exclusive", "baseline", "baseline_ref", "results", "fallback", "post"];
 
     /// <summary>Keys people may expect from machines.yml; the unknown-key message then says where they belong (env: is a plan key: a job's own variables).</summary>
     private static readonly string[] MachineKeys =
@@ -504,6 +504,14 @@ public static partial class PlanFileLoader
             args.Add("--fail-fast");
         }
 
+        // shard_env: true (0.13.0) says the command splits its work through LANQ_SHARD / LANQ_SHARDS (a shard script reads them), so the dry
+        // run does not warn that it has no {shard}. It changes nothing that runs, so it is not on the lanq run line.
+        var shardEnv = values.TryGetValue("shard_env", out var shardEnvNode) && Flag(shardEnvNode, "shard_env", Error);
+        if (shardEnv && !values.ContainsKey("shards"))
+        {
+            throw Error("shard_env: needs shards: (it only says how a sharded job's command splits its work).");
+        }
+
         if (values.TryGetValue("exclusive", out var exclusive) && Flag(exclusive, "exclusive", Error))
         {
             args.Add("--exclusive");
@@ -630,7 +638,10 @@ public static partial class PlanFileLoader
             parsed = parsed with { Post = post };
         }
 
-        return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed);
+        return new PlanJob(name, line, index, [.. after.Select(d => names.First(n => string.Equals(n, d, StringComparison.OrdinalIgnoreCase)))], args, parsed)
+        {
+            ShardEnv = shardEnv,
+        };
     }
 
     /// <summary>True when --post "<words joined by spaces>" gives back exactly these words (none has a space or a character --post refuses).</summary>
@@ -820,7 +831,8 @@ public static partial class PlanFileLoader
 
     /// <summary>
     /// What a dry run warns about (stderr on a real run): two jobs with the same command in the same folder, and a sharded job whose command
-    /// has neither {shard} nor {shards} (each shard would run the same command unless a script reads LANQ_SHARD).
+    /// has neither {shard} nor {shards} (each shard would run the same command unless a script reads LANQ_SHARD). No such warning when the
+    /// command itself names LANQ_SHARD (as $LANQ_SHARD, ${LANQ_SHARD} or $env:LANQ_SHARD, LANQ_SHARDS too) or the job says shard_env: true.
     /// </summary>
     private static List<string> Warnings(List<PlanJob> jobs)
     {
@@ -838,10 +850,11 @@ public static partial class PlanFileLoader
                 seen[key] = job;
             }
 
-            if (job.Args.Shards is not null
-                && !job.Args.Argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)))
+            if (job.Args.Shards is not null && !job.ShardEnv
+                && !job.Args.Argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)
+                    || a.Contains("LANQ_SHARD", StringComparison.OrdinalIgnoreCase)))
             {
-                warnings.Add($"job '{job.Name}' has shards: but its command has no {{shard}} or {{shards}}: each shard runs the same command unless a script reads LANQ_SHARD");
+                warnings.Add($"job '{job.Name}' has shards: but its command has no {{shard}} or {{shards}}: each shard runs the same command unless a script reads LANQ_SHARD (then say shard_env: true)");
             }
         }
 

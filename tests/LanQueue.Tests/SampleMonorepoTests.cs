@@ -62,8 +62,8 @@ public sealed class SampleMonorepoTests : IDisposable
         var plan = Load(file);
         var config = ConfigLoader.Parse(Policy);
 
-        // The only warning: the shard scripts read LANQ_SHARD, so their command has no {shard} (lanq's own lanq.yml has the same).
-        Assert.All(plan.Warnings, w => Assert.Matches(@"^job '(unit|integration)' has shards: but its command has no \{shard\}.*reads LANQ_SHARD$", w));
+        // No warnings (0.13.0 smoke): the shard-script jobs say shard_env: true, since the scripts read LANQ_SHARD instead of a {shard} argument.
+        Assert.Empty(plan.Warnings);
         Assert.All(plan.Jobs, j =>
         {
             Assert.True(JobPolicy.AllowedBy(config.Policy, j.Args.Argv) is not null, $"{file}: {j.Name} is not on the README's allowlist");

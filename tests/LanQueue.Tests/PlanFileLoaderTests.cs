@@ -411,10 +411,68 @@ public sealed class PlanFileLoaderTests : IDisposable
         Assert.Equal(
         [
             "jobs 'one' and 'two' run the same command in the same folder (dotnet test in .)",
-            "job 'unit' has shards: but its command has no {shard} or {shards}: each shard runs the same command unless a script reads LANQ_SHARD",
+            "job 'unit' has shards: but its command has no {shard} or {shards}: each shard runs the same command unless a script reads LANQ_SHARD (then say shard_env: true)",
         ],
             plan.Warnings);
         Assert.Empty(PlanFileLoader.Parse(Example).Warnings);
+    }
+
+    /// <summary>
+    /// 0.13.0 smoke: the sample's shard scripts read LANQ_SHARD, yet their jobs warned "no {shard}". No warning when the command names
+    /// LANQ_SHARD itself (sh or PowerShell spelling) or the job says shard_env: true; shard_env: false keeps it, and shard_env needs shards:.
+    /// </summary>
+    [Fact]
+    public void NoShardWarningWhenTheCommandUsesLanqShardOrTheJobSaysShardEnv()
+    {
+        var plan = PlanFileLoader.Parse("""
+            version: 1
+            jobs:
+              sh-env:
+                command: [sh, -c, 'exec run-part "$LANQ_SHARD" "${LANQ_SHARDS}"']
+                shards: 2
+              ps-env:
+                command: [pwsh, -Command, 'run-part $env:LANQ_SHARD $env:LANQ_SHARDS']
+                shards: 2
+              script:
+                command: [powershell, -NoProfile, -File, scripts/lanq/dotnet-test-shard.ps1, -Project, x.csproj]
+                shards: 3
+                shard_env: true
+              off:
+                command: [sh, scripts/lanq/test-shard.sh]
+                shards: 3
+                shard_env: false
+            """);
+        Assert.Equal(
+            ["job 'off' has shards: but its command has no {shard} or {shards}: each shard runs the same command unless a script reads LANQ_SHARD (then say shard_env: true)"],
+            plan.Warnings);
+        Assert.True(plan.Job("script")!.ShardEnv);
+        Assert.False(plan.Job("off")!.ShardEnv);
+        Assert.DoesNotContain("shard_env", string.Join(' ', plan.Job("script")!.RunArgs), StringComparison.Ordinal);
+
+        Refused("""
+            version: 1
+            jobs:
+              one:
+                command: dotnet test
+                shard_env: true
+            """, "shard_env: needs shards:");
+        Refused("""
+            version: 1
+            jobs:
+              one:
+                command: dotnet test
+                shards: 2
+                shard_env: yes
+            """, "shard_env: must be true or false");
+        Refused("""
+            version: 1
+            defaults:
+              shard_env: true
+            jobs:
+              one:
+                command: dotnet test
+                shards: 2
+            """);
     }
 
     [Fact]

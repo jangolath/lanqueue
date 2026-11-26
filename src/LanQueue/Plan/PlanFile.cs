@@ -22,6 +22,9 @@ public sealed record PlanJob(string Name, int Line, int Index, IReadOnlyList<str
 {
     /// <summary>"lanq run ..." as one line for bash and PowerShell, or null when an argument cannot be written safely for both (see <see cref="CommandLine.Render"/>).</summary>
     public string? RunCommand => CommandLine.Render(["lanq", .. RunArgs]);
+
+    /// <summary>shard_env: true (0.13.0): the command splits its work through LANQ_SHARD / LANQ_SHARDS, so no "no {shard}" warning.</summary>
+    public bool ShardEnv { get; init; }
 }
 
 /// <summary>A loaded, checked plan file (lanq.yml): its jobs in file order and the warnings a dry run shows (stderr on a real run).</summary>
