@@ -12,9 +12,11 @@ namespace LanQueue.Tests;
 
 /// <summary>
 /// 0.13.0, owner decision "wake before fallback" (replaces final review A-L6): with the fallback on or ask, a job that would fall back to this
-/// computer first wakes a sleeping pool machine that could take it and waits up to about 120 s for it (never past its wake.wait_seconds). A
-/// paused machine is never woken and never delays the fallback; off is unchanged; one wake per machine per run; ask wakes first and asks only
-/// if still needed. Every packet goes to a fake sender.
+/// computer first wakes every sleeping pool machine that could take it, all at once, and waits one shared wait of up to 120 s from the first
+/// packet (never past a machine's own wake.wait_seconds while it does not answer). The wait ends early only when the job is placed or every woken
+/// machine is ruled out for good or paused. A machine known to be paused is never woken and never delays the fallback; off is unchanged; one
+/// wake per machine per run; ask wakes first and asks only if still needed. Every packet goes to a fake sender; the tests keep the real default
+/// wake.wait_seconds of 120 unless they say otherwise.
 /// </summary>
 public sealed class WakeBeforeFallbackTests : IDisposable
 {
@@ -61,19 +63,32 @@ public sealed class WakeBeforeFallbackTests : IDisposable
         Awake,
     }
 
-    /// <summary>A pool machine: its state, whether it has a wake: setting, its wake.wait_seconds, and after how long a packet brings it up (null: never).</summary>
-    private sealed record Box(string Name, State State, bool Wol = true, int WaitSeconds = 120, int? BootSeconds = null);
+    /// <summary>
+    /// A pool machine: its state, whether it has a wake: setting, its wake.wait_seconds, and after how long a packet brings it up (null: never).
+    /// Once up, it may first report <see cref="Busy"/> ("load", "pressure" or "unreadable") for <see cref="BusySeconds"/>, as a Windows machine
+    /// does just after boot, or report itself paused (<see cref="PausedOnBoot"/>: a PAUSE file it could not report while asleep).
+    /// </summary>
+    private sealed record Box(string Name, State State, bool Wol = true, int WaitSeconds = 120, int? BootSeconds = null)
+    {
+        public string[] Caps { get; init; } = ["dotnet"];
+
+        public string Busy { get; init; } = "load";
+
+        public int BusySeconds { get; init; }
+
+        public bool PausedOnBoot { get; init; }
+    }
 
     private static string MacOf(int i) => $"02:00:00:00:00:{i + 1:x2}";
 
-    private string Yaml(string policy, IReadOnlyList<Box> pool)
+    private string Yaml(string policy, IReadOnlyList<Box> pool, string devCaps = "dotnet")
     {
         var machines = string.Join("\n", pool.Select((b, i) => $"""
               - name: {b.Name}
                 os: linux
                 ssh: user@10.20.30.{11 + i}
                 work_root: /srv/lanq
-                capabilities: [dotnet]
+                capabilities: [{string.Join(", ", b.Caps)}]
             {(b.Wol ? $"    wake: {{ mac: \"{MacOf(i)}\", wait_seconds: {b.WaitSeconds} }}" : "")}
             """));
         return $"""
@@ -88,11 +103,19 @@ public sealed class WakeBeforeFallbackTests : IDisposable
                 local: true
                 fallback: true
                 work_root: {_work}
-                capabilities: [dotnet]
+                capabilities: [{devCaps}]
             """;
     }
 
     private const string Healthy = "load=0.1\ndisk_free_gb=50\nslots_used=0\ntool=ok";
+
+    /// <summary>What a machine busy just after boot reports: load or memory pressure from other work (0 lanq slots), or no readable load at all.</summary>
+    private static string BusyOutput(string kind) => kind switch
+    {
+        "load" => "load=99\ndisk_free_gb=50\nslots_used=0\ntool=ok\npaused=0",
+        "pressure" => Healthy + "\nmem_pressure=95\npaused=0",
+        _ => "disk_free_gb=50\nslots_used=0\ntool=ok\npaused=0",
+    };
 
     private static string Text(Machine m, string cmd) =>
         cmd.Contains("-EncodedCommand ", StringComparison.Ordinal)
@@ -110,7 +133,13 @@ public sealed class WakeBeforeFallbackTests : IDisposable
         public required FakeSsh Ssh { get; init; }
 
         /// <summary>When each machine was sent a packet (by the fake clock).</summary>
-        public Dictionary<string, DateTimeOffset> WokenAt { get; } = new(StringComparer.Ordinal);
+        public System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> WokenAt { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Called after each packet (a test may cancel the run there).</summary>
+        public Action? OnPacket { get; set; }
+
+        /// <summary>Every output line with the fake time it was written at.</summary>
+        public List<(TimeSpan At, string Line)> Timed { get; } = [];
     }
 
     private sealed class ScriptedPrompt(Func<int> packets, params bool?[] answers) : IFallbackPrompt
@@ -128,9 +157,11 @@ public sealed class WakeBeforeFallbackTests : IDisposable
         }
     }
 
-    private Rig Make(string policy, IReadOnlyList<Box> pool, bool ask = false, bool?[]? answers = null)
+    private Rig Make(
+        string policy, IReadOnlyList<Box> pool, bool ask = false, bool?[]? answers = null, string devCaps = "dotnet",
+        Func<Rig, TimeSpan, CancellationToken, Task>? delay = null, IFallbackPrompt? prompt = null, int sleepProbeSeconds = 0)
     {
-        var config = ConfigLoader.Parse(Yaml(policy, pool));
+        var config = ConfigLoader.Parse(Yaml(policy, pool, devCaps));
         var clock = new StepClock();
         var sender = new FakeSender();
         Rig? rig = null;
@@ -144,6 +175,8 @@ public sealed class WakeBeforeFallbackTests : IDisposable
                     rig!.WokenAt[pool[i].Name] = clock.Now;
                 }
             }
+
+            rig!.OnPacket?.Invoke();
         };
         var ssh = new FakeSsh
         {
@@ -151,23 +184,53 @@ public sealed class WakeBeforeFallbackTests : IDisposable
             {
                 var text = Text(m, cmd);
                 var box = pool.FirstOrDefault(b => b.Name == m.Name);
-                if (box is not null && box.State == State.Asleep
-                    && !(rig!.WokenAt.TryGetValue(box.Name, out var at) && box.BootSeconds is { } boot && clock.Now >= at + TimeSpan.FromSeconds(boot)))
+                DateTimeOffset? upAt = null;
+                if (box is not null && box.State == State.Asleep)
                 {
-                    return new SshResult(255, $"ssh: connect to host {m.Name}.lan port 22: Connection timed out");
+                    if (!(rig!.WokenAt.TryGetValue(box.Name, out var at) && box.BootSeconds is { } boot && clock.Now >= at + TimeSpan.FromSeconds(boot)))
+                    {
+                        clock.Now += TimeSpan.FromSeconds(sleepProbeSeconds); // ssh's connect timeout to a sleeper
+                        return new SshResult(255, $"ssh: connect to host {m.Name}.lan port 22: Connection timed out");
+                    }
+
+                    upAt = at + TimeSpan.FromSeconds(box.BootSeconds!.Value);
                 }
 
-                return text.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1")
-                    : text.Contains("disk_free_gb", StringComparison.Ordinal) ? new SshResult(0, Healthy + (box?.State == State.Paused ? "\npaused=1" : "\npaused=0"))
-                    : new SshResult(0, "ran");
+                if (text.Contains("disk_free_gb", StringComparison.Ordinal))
+                {
+                    var paused = box is not null && (box.State == State.Paused || (upAt is not null && box.PausedOnBoot));
+                    return box is not null && upAt is { } up && clock.Now < up + TimeSpan.FromSeconds(box.BusySeconds) ? new SshResult(0, BusyOutput(box.Busy))
+                        : new SshResult(0, Healthy + (paused ? "\npaused=1" : "\npaused=0"));
+                }
+
+                return text.Contains("SLOT=", StringComparison.Ordinal) ? new SshResult(0, "SLOT=1") : new SshResult(0, "ran");
             },
         };
-        ScriptedPrompt? prompt = ask ? new ScriptedPrompt(() => sender.Sent.Count, answers ?? [true]) : null;
+        ScriptedPrompt? scripted = ask ? new ScriptedPrompt(() => sender.Sent.Count, answers ?? [true]) : null;
+        prompt ??= scripted;
         var runner = new JobRunner(
             config, ssh, new RunnerTests.FakePayloads(""), new HealthProbe(ssh, clock, new WakeService(sender, clock)), new JobLog(Path.Combine(_dir, ".lanq")),
-            Path.Combine(_dir, "tmp"), _output.Add,
-            delay: (d, _) =>
+            Path.Combine(_dir, "tmp"),
+            line =>
             {
+                lock (_output)
+                {
+                    _output.Add(line);
+                    rig?.Timed.Add((clock.Elapsed, line));
+                }
+            },
+            delay: (d, c) =>
+            {
+                if (delay is not null)
+                {
+                    return delay(rig!, d, c);
+                }
+
+                if (c.IsCancellationRequested)
+                {
+                    return Task.FromCanceled(c); // as Task.Delay: a cancelled wait takes no time
+                }
+
                 clock.Now += d;
                 return Task.CompletedTask;
             },
@@ -179,11 +242,14 @@ public sealed class WakeBeforeFallbackTests : IDisposable
             Timestamp = () => clock.Ticks,
         };
         rig = new Rig { Runner = runner, Sender = sender, Clock = clock, Ssh = ssh };
-        Prompts[rig] = prompt;
+        Prompts[rig] = scripted;
         return rig;
     }
 
     private readonly Dictionary<Rig, ScriptedPrompt?> Prompts = [];
+
+    /// <summary>The run's lines with their fake times, for a failure message.</summary>
+    private static string Dump(Rig rig) => string.Join("\n", rig.Timed.Select(t => $"{t.At.TotalSeconds,6:0} {t.Line}"));
 
     private JobRequest Req() => new(["dotnet"], ["dotnet", "test"], ".", _dir, TimeSpan.Zero);
 
@@ -226,27 +292,16 @@ public sealed class WakeBeforeFallbackTests : IDisposable
     }
 
     [Fact]
-    public void ThePendingWakeRaisesOnlyTheEligibleBudgetAndOnlyWhenLanqChoseIt()
+    public void TheWakeWaitNeverRaisesTheJobsOwnBudgets()
     {
         Box[] pool = [new("sleep-01", State.Asleep)];
         var on = Make("fallback: on", pool).Runner;
-        var off = Make("", pool).Runner;
-        var s120 = TimeSpan.FromSeconds(120);
 
-        Assert.Equal(new WaitBudgets(s120, s120) { Legacy = true }, on.BudgetsOf(Req(), wakePending: true));
-        Assert.Equal(TimeSpan.Zero, on.BudgetsOf(Req(), wakePending: false).Eligible);          // nothing pending (paused, no wake:, none sent): no delay
-        Assert.Equal(TimeSpan.Zero, off.BudgetsOf(Req(), wakePending: true).Eligible);          // off: unchanged
-
-        // --wait-slot 600 alone: the slot budget is the caller's, the eligible wait for the woken machine is lanq's.
-        var slotOnly = Req() with { WaitGiven = true, Budgets = new WaitBudgets(TimeSpan.Zero, TimeSpan.FromSeconds(600)) };
-        Assert.Equal(new WaitBudgets(s120, TimeSpan.FromSeconds(600)), on.BudgetsOf(slotOnly, wakePending: true));
-
-        // --wait-eligible 30 / 300: the caller's eligible budget decides, shorter or longer.
-        foreach (var e in new[] { 30, 300 })
-        {
-            var given = Req() with { WaitGiven = true, EligibleWaitGiven = true, Budgets = new WaitBudgets(TimeSpan.FromSeconds(e), TimeSpan.Zero) };
-            Assert.Equal(TimeSpan.FromSeconds(e), on.BudgetsOf(given, wakePending: true).Eligible);
-        }
+        // The shared wake wait is its own window, counted from the first packet (review M1); the eligible budget stays the job's own.
+        Assert.Equal(TimeSpan.Zero, on.BudgetsOf(Req()).Eligible);
+        Assert.Equal(TimeSpan.FromSeconds(120), on.BudgetsOf(Req()).Slot);
+        var given = Req() with { WaitGiven = true, EligibleWaitGiven = true, Budgets = new WaitBudgets(TimeSpan.FromSeconds(30), TimeSpan.Zero) };
+        Assert.Equal(TimeSpan.FromSeconds(30), on.BudgetsOf(given).Eligible);
     }
 
     [Fact]
@@ -274,22 +329,24 @@ public sealed class WakeBeforeFallbackTests : IDisposable
         Assert.Equal(WakeDecision.AlreadyWoken, waker.TryClaim(m, asleep, clock.Now.DateTime, policy).Decision); // never twice in one run
         await waker.SendAsync(m, CancellationToken.None);
         Assert.Equal(WakeOutcome.Waking, Assert.Single(waker.Attempts).Outcome);
-        Assert.True(waker.IsPending("sleep-01", TimeSpan.FromSeconds(120)));
+        Assert.Equal(Start, waker.SentAt("sleep-01"));
+        Assert.True(waker.IsLive("sleep-01"));
         clock.Now += TimeSpan.FromSeconds(121);
-        Assert.False(waker.IsPending("sleep-01", TimeSpan.FromSeconds(120)));                   // the fallback waits about 120 s, not 300
-        Assert.True(waker.IsPending("sleep-01", TimeSpan.FromSeconds(600)));
-        Assert.Equal(WakeOutcome.Waking, waker.Attempts[0].Outcome);                            // its own wait_seconds still run
+        Assert.True(waker.IsLive("sleep-01"));                                                   // its own wait_seconds (300) still run
+        Assert.Equal(WakeOutcome.Waking, waker.Attempts[0].Outcome);
         clock.Now += TimeSpan.FromSeconds(180);
+        Assert.False(waker.IsLive("sleep-01"));
         Assert.Equal(WakeOutcome.NoAnswer, waker.Attempts[0].Outcome);
         waker.MarkUp(m);
         Assert.Equal(WakeOutcome.Awake, waker.Attempts[0].Outcome);
-        Assert.False(waker.IsPending("sleep-01", TimeSpan.FromSeconds(600)));
+        Assert.True(waker.IsLive("sleep-01"));                                                   // answering: it may still take the job (H1)
 
         var failing = new WakeService(new FakeSender { Failure = new System.Net.Sockets.SocketException() }, clock);
         failing.TryClaim(m, asleep, clock.Now.DateTime, policy);
         await Assert.ThrowsAsync<System.Net.Sockets.SocketException>(() => failing.SendAsync(m, CancellationToken.None));
         Assert.Equal(WakeOutcome.SendFailed, Assert.Single(failing.Attempts).Outcome);
-        Assert.False(failing.IsPending("sleep-01", TimeSpan.FromSeconds(600)));
+        Assert.Null(failing.SentAt("sleep-01"));                                                 // a failed send starts no wait
+        Assert.False(failing.IsLive("sleep-01"));
     }
 
     // ---- through the runner (fake sender, fake clock) ----
@@ -447,7 +504,7 @@ public sealed class WakeBeforeFallbackTests : IDisposable
     }
 
     [Fact(Timeout = TestTimeout)]
-    public async Task ShardsWakeOneMachineAtATimeNeverTwiceAndThenFallBack()
+    public async Task ShardsWakeEverySleeperOnceTogetherAndFallBackAfterOneSharedWait()
     {
         var rig = Make("fallback: on", [new("sleep-01", State.Asleep, WaitSeconds: 300), new("sleep-02", State.Asleep, WaitSeconds: 300)]);
 
@@ -455,8 +512,21 @@ public sealed class WakeBeforeFallbackTests : IDisposable
 
         Assert.Equal(nameof(JobStatus.Completed), r.Status);
         Assert.Equal(3, r.FallbackJobs);
-        Assert.Single(rig.Sender.Sent); // no wake storm: one pending wake at a time, each machine at most once
-        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 120, 400);
+        Assert.Equal(2, rig.Sender.Sent.Count);                                       // both at once, each once
+        Assert.Equal(rig.WokenAt["sleep-01"], rig.WokenAt["sleep-02"]);
+        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 120, 150);                     // one shared 120 s wait, not 120 s per sleeper
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task ShardsUseAMachineThatWakesBusyOnceItIsFree()
+    {
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep, BootSeconds: 30) { BusySeconds = 40 }]);
+
+        var r = await rig.Runner.RunShardsAsync(Req(), new ShardOptions(2), CancellationToken.None);
+
+        Assert.Equal(nameof(JobStatus.Completed), r.Status);
+        Assert.Equal(0, r.FallbackJobs);
+        Assert.All(r.Shards, s => Assert.Equal("sleep-01", s.Machine));
     }
 
     [Fact(Timeout = TestTimeout)]
@@ -487,6 +557,273 @@ public sealed class WakeBeforeFallbackTests : IDisposable
 
         var text = Cli.PlanText(ParsedArgs.Parse(["run", "--dry-run", "--needs", "dotnet", "--", "dotnet", "test"]), on);
         Assert.Contains("Would wake: sleep-01 (one Wake-on-LAN packet, then lanq run waits up to 120 s for it, never past its wake.wait_seconds, before falling back to this computer)", text, StringComparison.Ordinal);
+
+        // Review L6: the last line no longer says the run would end at once; it says what wake before fallback does.
+        var last = text.TrimEnd().Split('\n')[^1];
+        Assert.DoesNotContain("exit 75 at once", last, StringComparison.Ordinal);
+        Assert.Contains("up to 120 s", last, StringComparison.Ordinal);
+        Assert.Contains("this computer", last, StringComparison.Ordinal);
+
+        // An explicit --wait 0 keeps the old line.
+        var waitZero = Cli.PlanText(ParsedArgs.Parse(["run", "--dry-run", "--wait", "0", "--needs", "dotnet", "--", "dotnet", "test"]), on with { WouldWake = null, WouldWakeAll = null });
+        Assert.DoesNotContain("Would wake", waitZero, StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TheDryRunNamesEverySleeperItWouldWake()
+    {
+        var plan = await Make("fallback: on", [new("sleep-02", State.Asleep), new("sleep-01", State.Asleep), new("paused-01", State.Paused)]).Runner.PlanAsync(Req(), null, CancellationToken.None);
+
+        Assert.Equal("sleep-01", plan.WouldWake);
+        Assert.Equal(["sleep-01", "sleep-02"], plan.WouldWakeAll);
+        var text = Cli.PlanText(ParsedArgs.Parse(["run", "--dry-run", "--needs", "dotnet", "--", "dotnet", "test"]), plan);
+        Assert.Contains("Would wake: sleep-01, sleep-02 (one Wake-on-LAN packet each, at once, then lanq run waits up to 120 s for them", text, StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TheDryRunTreatsAskThatCouldPromptAsAsk()
+    {
+        // Review L6: the dry run has no terminal prompt of its own, but where the real run could ask it must predict the wake and the fallback.
+        var config = ConfigLoader.Parse(Yaml("fallback: ask", [new("sleep-01", State.Asleep)]));
+        var p = ParsedArgs.Parse(["run", "--dry-run", "--needs", "dotnet", "--", "dotnet", "test"]);
+        var stand = Cli.DryRunPrompt(p, config, whyNot: null);
+        Assert.NotNull(stand);
+        Assert.Null(Cli.DryRunPrompt(p, config, whyNot: "no terminal"));
+        Assert.Null(Cli.DryRunPrompt(p, ConfigLoader.Parse(Yaml("fallback: on", [new("sleep-01", State.Asleep)])), whyNot: null));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => stand!.AskAsync("?", CancellationToken.None)); // a dry run never asks
+
+        var plan = await Make("fallback: ask", [new("sleep-01", State.Asleep)], prompt: stand).Runner.PlanAsync(Req(), null, CancellationToken.None);
+        Assert.Equal("sleep-01", plan.WouldWake);
+        Assert.Equal("dev-pc", plan.WouldFallBack);
+        Assert.Null((await Make("fallback: ask", [new("sleep-01", State.Asleep)]).Runner.PlanAsync(Req(), null, CancellationToken.None)).WouldWake); // cannot ask: off
+    }
+
+    // ---- review fixes: one shared wait from the first packet (M1), busy after boot (H1), all sleepers at once (M2), only useful wakes (M3) ----
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TwoSleepersAtTheDefault120sAreWokenTogetherAndTheRunFallsBackOnceAfter120s()
+    {
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep), new("sleep-02", State.Asleep)]);
+
+        var r = await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.True(r.Fallback);
+        Assert.Equal(2, rig.Sender.Sent.Count);
+        Assert.Equal(TimeSpan.Zero, rig.WokenAt["sleep-01"] - rig.WokenAt["sleep-02"]); // in one look, not one after the other
+        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 120, 135);
+        var line = Assert.Single(_output, l => l.Contains("Wake-on-LAN packet", StringComparison.Ordinal));
+        Assert.Contains("sent Wake-on-LAN packets to sleep-01, sleep-02 (waiting up to 120 s for them before falling back to this computer)", line, StringComparison.Ordinal);
+        Assert.All(rig.Runner.WakeAttempts, a => Assert.Equal(WakeOutcome.NoAnswer, a.Outcome));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task TheSharedWaitCountsFromTheFirstPacketNotFromTheJobsStart()
+    {
+        // ssh takes 20 s to give up on a sleeper, so the packet goes out at about 20 s: the 120 s run from there.
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep)], sleepProbeSeconds: 20);
+
+        var r = await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.True(r.Fallback);
+        var sent = rig.WokenAt["sleep-01"] - Start;
+        Assert.True(sent >= TimeSpan.FromSeconds(20), "sent at " + sent);
+        var fellBack = rig.Timed.Single(t => t.Line.Contains("running on this computer", StringComparison.Ordinal)).At;
+        Assert.True(fellBack >= sent + TimeSpan.FromSeconds(120), $"fell back at {fellBack}, packet at {sent}");
+    }
+
+    [Theory(Timeout = TestTimeout)]
+    [InlineData("load")]
+    [InlineData("pressure")]
+    [InlineData("unreadable")]
+    public async Task AWokenMachineBusyAfterBootKeepsTheWaitGoingAndTakesTheJob(string busy)
+    {
+        // Review H1: it answers ssh at 40 s but is held (load or memory pressure from its own boot, or an unreadable probe) until 70 s.
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep, BootSeconds: 40) { Busy = busy, BusySeconds = 30 }]);
+
+        var r = await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.Equal(JobStatus.Completed, r.Status);
+        Assert.Equal("sleep-01", r.Machine);
+        Assert.False(r.Fallback);
+        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 70, 120);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task AWokenMachineStillBusyAtTheEndOfTheSharedWaitFallsBackThen()
+    {
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep, BootSeconds: 40) { BusySeconds = 600 }]);
+
+        var r = await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.True(r.Fallback);
+        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 120, 135);
+        Assert.Contains(_output, l => l.Contains("running on this computer (fallback: no pool machine can take it now; Wake-on-LAN: sleep-01 woken and answering ssh)", StringComparison.Ordinal));
+        Assert.Equal(WakeOutcome.Awake, Assert.Single(rig.Runner.WakeAttempts).Outcome);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task AWokenMachineFoundPausedEndsTheWaitAtOnce()
+    {
+        // Review H1 (b) and L4: paused while asleep, so it could not say so and was woken; once it answers as paused it no longer delays the fallback.
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep, BootSeconds: 40) { PausedOnBoot = true }]);
+
+        var r = await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.True(r.Fallback);
+        Assert.Single(rig.Sender.Sent);
+        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 40, 60);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task AMachineWithBrokenWakeOnLanDoesNotHoldBackAnotherSleeper()
+    {
+        // Review M2: a-broken never comes up; b-fine boots in 30 s. Both are woken at once, so the job runs on b-fine at about 30 s.
+        var rig = Make("fallback: on", [new("a-broken", State.Asleep), new("b-fine", State.Asleep, BootSeconds: 30)]);
+
+        var r = await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.Equal("b-fine", r.Machine);
+        Assert.False(r.Fallback);
+        Assert.InRange(rig.Clock.Elapsed.TotalSeconds, 30, 60);
+        var wakes = rig.Runner.WakeAttempts.ToDictionary(a => a.Machine, a => a.Outcome);
+        Assert.Equal(WakeOutcome.Waking, wakes["a-broken"]);                               // the per-machine outcome is in JSON wakes
+        Assert.Equal(WakeOutcome.Awake, wakes["b-fine"]);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task APlanPaysTheSharedWaitOncePerRunNotOncePerJob()
+    {
+        // Review M2: three jobs one after another and two sleepers that never answer, at the default 120 s: one 120 s wait in all.
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep), new("sleep-02", State.Asleep)]);
+        PlanJobSpec Job(string name, params string[] after) => new(name, Req() with { PlanJob = name }, null, after);
+
+        var r = await rig.Runner.RunPlanAsync([Job("a"), Job("b", "a"), Job("c", "b")], false, CancellationToken.None);
+
+        Assert.Equal(3, r.FallbackJobs);
+        Assert.Equal(2, rig.Sender.Sent.Count);
+        var packet = rig.WokenAt.Values.Min() - Start;
+        var fellBack = rig.Timed.Where(t => t.Line.Contains("running on this computer", StringComparison.Ordinal)).Select(t => t.At).ToList();
+        Assert.Equal(3, fellBack.Count);
+        Assert.True(fellBack[0] - packet >= TimeSpan.FromSeconds(120) && fellBack[0] - packet <= TimeSpan.FromSeconds(135), Dump(rig)); // a: the shared wait
+        // b and c: at their first look (after the plan's 30 s start stagger at most), never another 120 s.
+        Assert.True(fellBack[1] - fellBack[0] <= JobRunner.PlanStagger && fellBack[2] - fellBack[1] <= JobRunner.PlanStagger, Dump(rig));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task ParallelPlanJobsWakeEachSleeperOnceInAll()
+    {
+        // Review L1: jobs that look at the same time never wake a machine twice, and every sleeper is woken in that first look.
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep), new("sleep-02", State.Asleep), new("sleep-03", State.Asleep)]);
+        PlanJobSpec Job(string name) => new(name, Req() with { PlanJob = name }, null, []);
+
+        var r = await rig.Runner.RunPlanAsync([Job("a"), Job("b"), Job("c")], false, CancellationToken.None);
+
+        Assert.Equal(3, r.FallbackJobs);
+        Assert.True(rig.Sender.Sent.Count == 3, Dump(rig));
+        Assert.Equal(3, rig.WokenAt.Count);
+        Assert.Equal(3, rig.Runner.WakeAttempts.Count);
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task APlanJobWaitsOnlyForWakesOnMachinesItCouldUse()
+    {
+        // Review M3: job test (dotnet) wakes build-02, which has no docker; job docker must not wait for it, nor name it.
+        var rig = Make("fallback: on", [new("build-02", State.Asleep)], devCaps: "dotnet, docker");
+        var test = new PlanJobSpec("test", Req() with { PlanJob = "test" }, null, []);
+        var docker = new PlanJobSpec("docker", new JobRequest(["docker"], ["dotnet", "test"], ".", _dir, TimeSpan.Zero) { PlanJob = "docker" }, null, []);
+
+        var r = await rig.Runner.RunPlanAsync([test, docker], false, CancellationToken.None);
+
+        Assert.Equal(2, r.FallbackJobs);
+        Assert.Single(rig.Sender.Sent);
+        var packet = rig.WokenAt["build-02"] - Start;
+        var lines = rig.Timed.Where(t => t.Line.Contains("running on this computer", StringComparison.Ordinal)).ToList();
+        var dockerLine = Assert.Single(lines, t => t.Line.Contains("[docker", StringComparison.Ordinal));
+        var testLine = Assert.Single(lines, t => t.Line.Contains("[test", StringComparison.Ordinal));
+        var dockerStart = rig.Timed.First(t => t.Line.Contains("[docker", StringComparison.Ordinal)).At;
+        Assert.DoesNotContain("Wake-on-LAN", dockerLine.Line, StringComparison.Ordinal);
+        Assert.True(dockerLine.At == dockerStart, Dump(rig));                                   // at its first look: no wait for build-02
+        Assert.Contains("Wake-on-LAN: build-02", testLine.Line, StringComparison.Ordinal);
+        Assert.True(testLine.At - packet >= TimeSpan.FromSeconds(120), Dump(rig));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task UnderAskTheWakeLineSaysItAsksBeforeUsingThisComputer()
+    {
+        // Review L7: under ask nothing falls back without a yes.
+        var rig = Make("fallback: ask", [new("sleep-01", State.Asleep)], ask: true);
+
+        await rig.Runner.RunAsync(Req(), CancellationToken.None);
+
+        Assert.Contains(_output, l => l.Contains("sent a Wake-on-LAN packet to sleep-01 (waiting up to 120 s for it before asking to use this computer)", StringComparison.Ordinal));
+        Assert.DoesNotContain(_output, l => l.Contains("before falling back", StringComparison.Ordinal));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task CtrlCDuringTheWakeWaitCancelsAndKeepsTheWake()
+    {
+        // Review L8: Ctrl+C while the run waits for the woken machine.
+        using var cts = new CancellationTokenSource();
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep)]);
+        rig.OnPacket = cts.Cancel;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => rig.Runner.RunAsync(Req(), cts.Token));
+
+        Assert.Equal(WakeOutcome.Waking, Assert.Single(rig.Runner.WakeAttempts).Outcome);
+        Assert.True(rig.Clock.Elapsed < TimeSpan.FromSeconds(120));
+        Assert.DoesNotContain(rig.Ssh.Calls, c => c.Machine == "dev-pc" && c.Command.Contains("SLOT=", StringComparison.Ordinal));
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task CtrlCDuringTheWakeWaitStillPutsWakesInTheJson()
+    {
+        // Review L8, through lanq run --json: Cancelled, exit 130, and the packet it sent is still reported.
+        using var cts = new CancellationTokenSource();
+        var rig = Make("", [new("sleep-01", State.Asleep)]);
+        rig.OnPacket = cts.Cancel;
+        var config = ConfigLoader.Parse(Yaml("", [new("sleep-01", State.Asleep)]));
+        var probe = new HealthProbe(rig.Ssh, rig.Clock, new WakeService(rig.Sender, rig.Clock));
+        var o = new StringWriter();
+
+        var code = await Cli.Run(
+            ParsedArgs.Parse(["run", "--json", "--needs", "dotnet", "--wait", "300", "--", "dotnet", "test"]), config, rig.Ssh, new RunnerTests.FakePayloads(""), probe,
+            new JobLog(Path.Combine(_dir, ".lanq")), Path.Combine(_dir, "home"), _dir, o, new StringWriter(), cts.Token);
+
+        Assert.Equal(130, code);
+        using var doc = JsonDocument.Parse(o.ToString());
+        Assert.Equal("Cancelled", doc.RootElement.GetProperty("status").GetString());
+        var wake = Assert.Single(doc.RootElement.GetProperty("wakes").EnumerateArray());
+        Assert.Equal("sleep-01", wake.GetProperty("machine").GetString());
+        Assert.Equal("Waking", wake.GetProperty("result").GetString());
+    }
+
+    [Fact(Timeout = TestTimeout)]
+    public async Task PlanTimeoutDuringTheWakeWaitEndsThePlanWithoutFallingBack()
+    {
+        // Review L8: plan_timeout is reached while the job waits for the woken machine.
+        var limit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rig = Make("fallback: on", [new("sleep-01", State.Asleep)], delay: (rig, d, c) =>
+        {
+            if (d == TimeSpan.FromMinutes(1))
+            {
+                return limit.Task.WaitAsync(c); // the plan timer
+            }
+
+            if (rig.Sender.Sent.Count > 0)
+            {
+                return Task.Delay(Timeout.InfiniteTimeSpan, c); // the wake wait: held until the limit cancels it
+            }
+
+            rig.Clock.Now += d;
+            return Task.CompletedTask;
+        });
+        rig.OnPacket = () => limit.TrySetResult();
+
+        var r = await rig.Runner.RunPlanAsync([new PlanJobSpec("a", Req() with { PlanJob = "a" }, null, [])], false, CancellationToken.None, planTimeoutMinutes: 1);
+
+        Assert.True(r.PlanTimedOut);
+        Assert.Equal(0, r.FallbackJobs);
+        Assert.Equal(WakeOutcome.Waking, Assert.Single(rig.Runner.WakeAttempts).Outcome);
     }
 
     // ---- JSON and next steps ----
