@@ -85,7 +85,10 @@ public static partial class RemoteScripts
     internal const string WmiCheck = "try { $null = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; 'wmi=ok' } catch { 'wmi=fail|' + \"$_\".Trim() }";
 
     /// <summary>Where <see cref="EnsureIncoming"/> keeps <see cref="WindowsJobHelper"/> on a Windows worker; the name carries a hash of its text, so a changed helper is a new file.</summary>
-    internal static string WindowsHelperPath(Machine m) => $"{m.WorkRoot}/bin/lanq-{WindowsJobHelperHash[..10]}.ps1";
+    internal static string WindowsHelperPath(Machine m) => m.WorkRoot + WindowsHelperRelativePath;
+
+    /// <summary><see cref="WindowsHelperPath"/> below work_root, starting with '/' (scripts add it to their one quoted work_root).</summary>
+    internal static string WindowsHelperRelativePath => $"/bin/lanq-{WindowsJobHelperHash[..10]}.ps1";
 
     /// <summary>SHA-256 of the UTF-8 bytes of <see cref="WindowsJobHelper"/>, lowercase hex (its first ten characters name the file).</summary>
     internal static string WindowsJobHelperHash => Convert.ToHexStringLower(WindowsJobHelperDigest);
@@ -118,11 +121,12 @@ public static partial class RemoteScripts
     /// <summary>
     /// Writes <see cref="WindowsJobHelper"/> to <see cref="WindowsHelperPath"/> when it is not there or is not exactly lanq's text, through a
     /// temporary file (moved into place, or replacing the changed file) so a reader never sees half of it. The text travels deflated (it is
-    /// lanq's own constant; the script must stay under the command-line cap) and is written as the exact bytes the hash was taken of.
+    /// lanq's own constant; the script must stay under the command-line cap) and is written as the exact bytes the hash was taken of. Its
+    /// paths are built from <c>$rt</c>, the work_root that <see cref="EnsureIncoming"/> sets once.
     /// </summary>
-    private static string WindowsInstallHelper(Machine m) => $$"""
-        New-Item -ItemType Directory -Force -Path ({{ShellQuote.PowerShell(m.WorkRoot + "/bin")}}) | Out-Null
-        $h = {{ShellQuote.PowerShell(WindowsHelperPath(m))}}; $ok = $false
+    private static string WindowsInstallHelper => $$"""
+        New-Item -ItemType Directory -Force -Path ($rt+'/bin') | Out-Null
+        $h = $rt+{{ShellQuote.PowerShell(WindowsHelperRelativePath)}}; $ok = $false
         try { $ok = {{WindowsHelperVerified("$h")}} } catch { }
         if (-not $ok) { $t = "$h.$PID"; try { $z = New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('{{Deflated(WindowsJobHelper)}}')), ([IO.Compression.CompressionMode]::Decompress); $ms = New-Object IO.MemoryStream; $z.CopyTo($ms); [IO.File]::WriteAllBytes($t, $ms.ToArray()); if ([IO.File]::Exists($h)) { try { [IO.File]::Replace($t, $h, [NullString]::Value) } catch { [IO.File]::Delete($h); [IO.File]::Move($t, $h) } } else { [IO.File]::Move($t, $h) } } catch { }; if (Test-Path -LiteralPath $t) { Remove-Item -Force -EA 0 -LiteralPath $t } }
         """;

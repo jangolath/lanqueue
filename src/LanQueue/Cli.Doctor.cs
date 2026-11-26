@@ -526,7 +526,8 @@ public static partial class Cli
             var (inputs, fix) = RemoteScripts.WindowsScriptInputs(m);
             return [Check("script_size", "fail", $"not checked: with its {inputs} and "
                 + $"{m.Capabilities.Count(RemoteScripts.ToolChecks.ContainsKey)} tool checks, the doctor script is {size} characters once encoded, "
-                + $"{size - RemoteScripts.MaxWindowsCommandLength} over the {RemoteScripts.MaxWindowsCommandLength}-character Windows command-line limit. "
+                + $"{size - RemoteScripts.MaxWindowsCommandLength} over the {RemoteScripts.MaxWindowsCommandLength}-character Windows command-line limit "
+                + $"({RemoteScripts.EncodedCostNote}). "
                 + $"Shorten {fix} for this machine", $"shorten {fix} for this machine")];
         }
 

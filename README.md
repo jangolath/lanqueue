@@ -1314,7 +1314,7 @@ machines:
     os: linux                 # linux | windows
     ssh: user@host            # no leading "-"
     key_env: ENV_VAR_NAME     # optional. Omit to use ssh-agent (no -i is passed). Else the NAME of an env var holding a key file path
-    work_root: /srv/lq        # Linux: absolute path. Windows: a drive path such as D:/lq. Forward slashes, no spaces, no ".."
+    work_root: /srv/lq        # Linux: absolute path. Windows: a drive path such as D:/lq, at most 200 characters. Forward slashes, no spaces, no ".."
     capabilities: [dotnet]    # tags matched by --needs (all must be present)
     max_jobs: 2               # concurrent jobs via slot files
     transfer: git             # optional: git (default, recommended; worker needs git) | archive (worker needs only tar)

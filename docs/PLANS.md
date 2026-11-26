@@ -77,7 +77,7 @@ Each key is the `lanq run` option of the same name, with the same rules, ranges 
 | `on` | `--on` | Machine names from your `machines.yml`; see the note under [lanq.yml and machines.yml](#lanqyml-and-machinesyml). |
 | `timeout` | `--timeout` | Minutes, 1 to 10080 (default 240). |
 | `shards` | `--shards` | A number (1 to 64) or `auto`. |
-| `shard_env` | (none) | `true`: the command splits its work through `LANQ_SHARD` / `LANQ_SHARDS` (a shard script reads them), so the dry run does not warn that it has no `{shard}` or `{shards}` (0.13.0). Needs `shards`. A command that names `LANQ_SHARD` itself (`$LANQ_SHARD`, `$env:LANQ_SHARD`) needs no `shard_env`. |
+| `shard_env` | (none) | `true`: the command splits its work through `LANQ_SHARD` / `LANQ_SHARDS` (a shard script reads them), so the dry run does not warn that it has no `{shard}` or `{shards}` (0.13.0). Needs `shards`. A command that reads `LANQ_SHARD` itself (`$LANQ_SHARD`, `${LANQ_SHARD}`, `$env:LANQ_SHARD`, `%LANQ_SHARD%`, not in a `#` comment) needs no `shard_env`; `LANQ_SHARDS` alone does not count. |
 | `target_minutes` | `--target-minutes` | With `shards: auto`. |
 | `shard_retries` | `--shard-retries` | 0 to 3; only re-runs a shard whose machine stopped answering. |
 | `fail_fast` | `--fail-fast` | `true`: the first failing shard of this job cancels its other shards. Needs `shards`. |

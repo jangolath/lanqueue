@@ -95,8 +95,10 @@
 - `lanq run --dry-run --json` machines carry `needGb`; `lanq health` shows a slot cap a job size sets.
 - The sample's CI job runs on pull requests that touch the sample, on main and weekly.
 - lanq.yml `shard_env: true` on a sharded job says its command splits its work through `LANQ_SHARD` / `LANQ_SHARDS` (a
-  shard script reads them), so the dry run no longer warns that the command has no `{shard}` or `{shards}`. A command
-  that names `LANQ_SHARD` itself (`$LANQ_SHARD`, `$env:LANQ_SHARD`) is not warned about either. The sample plans use it.
+  shard script reads them), so lanq no longer warns (in the dry run or on stderr) that the command has no `{shard}` or
+  `{shards}`. A command that reads `LANQ_SHARD` itself (`$LANQ_SHARD`, `${LANQ_SHARD}`, `$env:LANQ_SHARD` or
+  `%LANQ_SHARD%`, outside a `#` comment) is not warned about either; `LANQ_SHARDS` alone, a file name or a comment that
+  mentions it still warns. The sample plans use it.
 
 ### Changed
 
@@ -116,12 +118,17 @@
   now (free memory - `min_free_mem_gb`) / need instead of free memory / need, so a machine may take one copy fewer than
   in 0.12 (for example 12.5 GB free, a 2 GB floor and `--mem 4`: two copies, not three). A machine whose total memory
   less its floor is below the need is `mem_exceeds_total`. Without `--mem` and without a job size nothing changes.
-- **A longer Windows `work_root` fits.** The Windows job script spelled the `work_root` out four times, so a `work_root`
-  of about 95 characters already passed the 8000-character encoded command limit and the machine was refused. It is
-  written once now and the other paths are built from it on the worker, so a `work_root` of a few hundred characters
-  fits. The refusal (at load, in `lanq doctor --remote` and at run time) now names what fills the script: the
-  `work_root` and its length, and `env:`, `hygiene:` and `path_prepend:` only when set, with their sizes (it said
-  "env: (0 entries) and path_prepend: (0 entries)" before).
+- **A longer Windows `work_root` fits, up to 200 characters.** The Windows job script spelled the `work_root` out four
+  times, so a `work_root` of about 95 characters already passed the 8000-character encoded command limit and the
+  machine was refused. The job and upload scripts now write it once and build the other paths from it on the worker,
+  and the probe and the `--exclusive` claim are shorter (the claim passed the limit with a `work_root` of about 45
+  characters before). A Windows `work_root` may now be up to 200 characters; a longer one is refused at load, naming
+  the limit and its length (each job's Windows job object is named after its pid file under `work_root`, and such
+  names stop at 260 characters). Every script lanq sends fits at 200 characters, with `hygiene:`, the largest shard
+  and plan job name; `env:` and `path_prepend:` still share the same room, and loading measures the `post:` step's
+  script too. The refusal (at load, in `lanq doctor --remote` and at run time) now names what fills the script: the
+  `work_root` and its length, and `env:`, `hygiene:` and `path_prepend:` only when set, with their sizes as written
+  (each costs about 2.7 characters once encoded; it said "env: (0 entries) and path_prepend: (0 entries)" before).
 
 ## 0.12.0 (2026-11-14)
 

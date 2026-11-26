@@ -22,14 +22,14 @@ public static partial class RemoteScripts
         return command.Length > MaxWindowsCommandLength
             ? throw new InvalidOperationException(
                 $"The command for Windows machine '{m.Name}' is {command.Length} characters once encoded; the limit is {MaxWindowsCommandLength}. "
-                + "Shorten the arguments (the machine's work_root, env: and path_prepend: count too).")
+                + $"Shorten the arguments (this machine's config puts its {WindowsScriptInputs(m).Inputs} into it too; {EncodedCostNote}).")
             : command;
     }
 
     /// <summary>
     /// For a message about a Windows script's length: what this machine's config puts into every such script, with its size. work_root always;
     /// env:, hygiene: variables and path_prepend: only when set (0.13.0 smoke: a long work_root alone was reported as "env: (0 entries) and
-    /// path_prepend: (0 entries)"). <c>Fix</c> names the same settings for "Shorten ...".
+    /// path_prepend: (0 entries)"). <c>Fix</c> names the same settings for "Shorten ...". The sizes are as written (see <see cref="EncodedCostNote"/>).
     /// </summary>
     internal static (string Inputs, string Fix) WindowsScriptInputs(Machine m)
     {
@@ -60,6 +60,12 @@ public static partial class RemoteScripts
         return (Join(inputs, "and"), Join(fix, "or"));
     }
 
+    /// <summary>
+    /// Said next to <see cref="WindowsScriptInputs"/>' sizes, which are characters as written, while the cap counts encoded characters (0.13.0
+    /// review L2): base64 of UTF-16, so each character written into a script costs about 2.7, more when quoting doubles it.
+    /// </summary>
+    internal const string EncodedCostNote = "sizes as written; each character costs about 2.7 once encoded";
+
     /// <summary>The powershell command line for a script, whatever its length (<see cref="Wrap"/> refuses one over the cap).</summary>
     internal static string WindowsCommand(string script)
     {
@@ -74,37 +80,38 @@ public static partial class RemoteScripts
     /// The health probe: one <c>key=value</c> per line. On Windows <c>load=</c> and memory come from CIM when the ssh user may use it, else
     /// load from GetSystemTimes (<see cref="WindowsProbeLoad"/>) and memory from .NET's ComputerInfo (GlobalMemoryStatusEx underneath);
     /// <c>load_source=cim|native|none</c> and <c>mem_source=cim|vb|none</c> say which (with none, load= stays 0 for an older lanq, and this one
-    /// shows the load as unknown). Keys are only ever added, so an older lanq reads the output of a newer probe.
+    /// shows the load as unknown). Keys are only ever added, so an older lanq reads the output of a newer probe. The Windows probe is written
+    /// tersely (aliases, no spaces around operators): it is one encoded command line, where every character costs about 2.7 (0.13.0 review M1).
     /// </summary>
     public static string Probe(Machine m) => m.Os == MachineOs.Windows
         ? $$"""
             $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
-            $inv = [cultureinfo]::InvariantCulture
-            $cpu = $null; $ls = 'cim'
-            try { $cpu = (Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average } catch { }
-            if ($null -eq $cpu) { $ls = 'none'; try {
+            $inv=[cultureinfo]::InvariantCulture
+            $cpu=$null;$ls='cim'
+            try{$cpu=(Get-CimInstance Win32_Processor -EA Stop|Measure-Object -Property LoadPercentage -Average).Average}catch{}
+            if($null -eq $cpu){$ls='none';try{
             {{WindowsProbeLoad}}
-            } catch { } }
-            if ($null -eq $cpu) { $cpu = 0 }
-            $drive = New-Object System.IO.DriveInfo ($root.Substring(0,1))
-            $sf = @(Get-ChildItem -Path "$root/locks" -Filter 'slot-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^slot-[0-9]+\z' }); $slots = $sf.Count
-            'load=' + ([double]$cpu / 100).ToString('0.###', $inv)
-            'load_source=' + $ls
-            'disk_free_gb=' + ($drive.AvailableFreeSpace / 1GB).ToString('0.#', $inv)
-            'slots_used=' + $slots
-            $mt = 0; $ms = 'cim'
-            try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $mt = 1KB * $os.TotalVisibleMemorySize; $mf = 1KB * $os.FreePhysicalMemory } catch { }
-            if (-not $mt) { $ms = 'vb'; try { Add-Type -AssemblyName Microsoft.VisualBasic; $vb = New-Object Microsoft.VisualBasic.Devices.ComputerInfo; $mt = $vb.TotalPhysicalMemory; $mf = $vb.AvailablePhysicalMemory } catch { } }
-            if ($mt) { 'mem_free_gb=' + ($mf / 1GB).ToString('0.##', $inv); 'mem_total_gb=' + ($mt / 1GB).ToString('0.##', $inv) } else { $ms = 'none' }
-            'mem_source=' + $ms
-            'cores=' + [Environment]::ProcessorCount
-            'paused=' + $(if (Test-Path -LiteralPath "$root/PAUSE") { '1' } else { '0' })
-            'local_time=' + (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
-            $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $s = $e - ($e % 900)
+            }catch{} }
+            if($null -eq $cpu){$cpu=0}
+            $drive=New-Object IO.DriveInfo ($root.Substring(0,1))
+            $sf=@(gci -Path "$root/locks" -Filter 'slot-*' -EA 0|?{$_.Name -match '^slot-[0-9]+\z'});$slots=$sf.Count
+            'load='+([double]$cpu/100).ToString('0.###',$inv)
+            'load_source='+$ls
+            'disk_free_gb='+($drive.AvailableFreeSpace/1GB).ToString('0.#',$inv)
+            'slots_used='+$slots
+            $mt=0;$ms='cim'
+            try{$os=Get-CimInstance Win32_OperatingSystem -EA Stop;$mt=1KB*$os.TotalVisibleMemorySize;$mf=1KB*$os.FreePhysicalMemory}catch{}
+            if(!$mt){$ms='vb';try{Add-Type -AssemblyName Microsoft.VisualBasic;$vb=New-Object Microsoft.VisualBasic.Devices.ComputerInfo;$mt=$vb.TotalPhysicalMemory;$mf=$vb.AvailablePhysicalMemory}catch{} }
+            if($mt){'mem_free_gb='+($mf/1GB).ToString('0.##',$inv);'mem_total_gb='+($mt/1GB).ToString('0.##',$inv)}else{$ms='none'}
+            'mem_source='+$ms
+            'cores='+[Environment]::ProcessorCount
+            'paused='+$(if(Test-Path -LiteralPath "$root/PAUSE"){'1'}else{'0'})
+            'local_time='+(Get-Date).ToString('yyyy-MM-ddTHH:mm:ss', $inv)
+            $e=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$s=$e-($e%900)
             {{WindowsStaleSlotCount}}
-            'now_epoch=' + $e
-            'tz_start=' + $s
-            'tz_offsets=' + ((0..144 | ForEach-Object { [int][TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds($s + 900 * $_)).TotalMinutes }) -join ',')
+            'now_epoch='+$e
+            'tz_start='+$s
+            'tz_offsets='+((0..144|%{[int][TimeZoneInfo]::Local.GetUtcOffset([DateTimeOffset]::FromUnixTimeSeconds($s+900*$_)).TotalMinutes}) -join ',')
             {{(m.Transfer == TransferMode.Archive ? WindowsTarProbe : GitProbeWindows)}}
             """
         : $$"""
@@ -199,10 +206,10 @@ public static partial class RemoteScripts
     /// every restricting extract option: that is probed once here with an empty archive (extracts nothing), so Prepare never needs a fallback.
     /// </summary>
     internal const string WindowsTarProbe =
-        "$t = \"$env:SystemRoot\\System32\\tar.exe\"\n"
-        + "$ok = (Test-Path -LiteralPath $t) -and (\"$(& $t --version 2>$null | Select-Object -First 1)\" -match 'bsdtar|libarchive')\n"
-        + "if ($ok) { & $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null | Out-Null; $ok = ($LASTEXITCODE -eq 0) }\n"
-        + "'tool=' + $(if ($ok) { 'ok' } else { 'missing' })";
+        "$t=\"$env:SystemRoot\\System32\\tar.exe\"\n"
+        + "$ok=(Test-Path -LiteralPath $t) -and (\"$(& $t --version 2>$null|select -First 1)\" -match 'bsdtar|libarchive')\n"
+        + "if($ok){& $t -xf NUL --no-acls --no-xattrs --no-fflags --no-same-owner --no-same-permissions -C $env:TEMP 2>$null|Out-Null;$ok=($LASTEXITCODE -eq 0)}\n"
+        + "'tool='+$(if($ok){'ok'}else{'missing'})";
 
     /// <summary>
     /// sh helpers for reclaim and unlock (they need $R). <c>deadline_of</c> prints a slot file's deadline as plain base-10 (leading zeros
@@ -420,9 +427,28 @@ public static partial class RemoteScripts
     /// <see cref="WindowsSlotFunctions"/> and <see cref="WindowsReclaimFunction"/> (lanq's own constant text) deflated and dot-sourced, so the
     /// claims stay under the Windows command-line cap; it defines the same functions and variables in the same scope.
     /// </summary>
-    internal static readonly string WindowsSlotFunctionsPacked =
+    internal static readonly string WindowsSlotFunctionsPacked = Packed(WindowsSlotFunctions + "\n" + WindowsReclaimFunction);
+
+    /// <summary>
+    /// <see cref="AcquireAll"/>'s own functions (they need $root, $now, $jid, $got and $mx, the machine's max_jobs): <c>BO</c> backs out
+    /// (removes each slot this attempt created whose first line is still $jid, prints SLOT=FULL and exits), and <c>HL</c> returns 1 when a
+    /// live slot-N with N above max_jobs exists (one past its deadline plus the grace does not count).
+    /// </summary>
+    internal static string WindowsExclusiveFunctions => """
+        function BO{foreach($n in $got){$g="$root/locks/slot-$n";try{if(($IOFile::ReadAllText($g) -split "`n")[0].Trim() -ceq $jid){$IOFile::Delete($g)} }catch{} };'SLOT=FULL';exit 0}
+        function HL{foreach($h in (gci "$root/locks" -Filter slot-* -EA 0)){if($h.Name -notmatch '^slot-0*([0-9]+)\z' -or ($Matches[1].Length -lt 10 -and [long]$Matches[1] -le $mx)){continue};try{$x=$IOFile::ReadAllText($h.FullName) -split "`n"}catch [IO.FileNotFoundException]{continue}catch{return 1};if(!($x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$x[1].Trim()+GRACE))){return 1} };0}
+        """.Replace("GRACE", StaleSlotGraceSeconds.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+
+    /// <summary>
+    /// The slot functions and <see cref="WindowsExclusiveFunctions"/> in one deflated text for <see cref="AcquireAll"/> (0.13.0 review M1: with
+    /// the exclusive functions spelled out, the claim of every slot passed the cap once work_root was about 45 characters long).
+    /// </summary>
+    internal static readonly string WindowsExclusiveFunctionsPacked = Packed(WindowsSlotFunctions + "\n" + WindowsReclaimFunction + "\n" + WindowsExclusiveFunctions);
+
+    /// <summary>Lanq's own constant PowerShell text, deflated and dot-sourced: it defines the same functions and variables in the same scope.</summary>
+    private static string Packed(string text) =>
         ". ([scriptblock]::Create((New-Object IO.StreamReader (New-Object IO.Compression.DeflateStream ([IO.MemoryStream][Convert]::FromBase64String('"
-        + Deflated(WindowsSlotFunctions + "\n" + WindowsReclaimFunction) + "')), ([IO.Compression.CompressionMode]::Decompress))).ReadToEnd()))";
+        + Deflated(text) + "')), ([IO.Compression.CompressionMode]::Decompress))).ReadToEnd()))";
 
     /// <summary>
     /// lanq run --exclusive: claims EVERY slot file, slot-1 to slot-max_jobs in ascending order, each exactly as <see cref="AcquireSlot"/>
@@ -446,11 +472,9 @@ public static partial class RemoteScripts
                 $root = {{ShellQuote.PowerShell(m.WorkRoot)}}
                 [void][IO.Directory]::CreateDirectory("$root/locks")
                 $now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();$deadline=$now+{{lease}}
-                {{WindowsSlotFunctionsPacked}}
-                $jid={{ShellQuote.PowerShell(jobId)}};$got=@()
-                function BO{foreach($n in $got){$g="$root/locks/slot-$n";try{if(($IOFile::ReadAllText($g) -split "`n")[0].Trim() -ceq $jid){$IOFile::Delete($g)} }catch{} };'SLOT=FULL';exit 0}
-                function HL{foreach($h in (gci "$root/locks" -Filter slot-* -EA 0)){if($h.Name -notmatch '^slot-0*([0-9]+)\z' -or ($Matches[1].Length -lt 10 -and [long]$Matches[1] -le {{max}})){continue};try{$x=$IOFile::ReadAllText($h.FullName) -split "`n"}catch [IO.FileNotFoundException]{continue}catch{return 1};if(!($x.Count -ge 2 -and $x[1].Trim() -match '^[0-9]{1,18}\z' -and $now -gt ([long]$x[1].Trim()+{{grace}}))){return 1} };0}
-                for($i=1;$i -le {{max}};$i++){
+                {{WindowsExclusiveFunctionsPacked}}
+                $jid={{ShellQuote.PowerShell(jobId)}};$got=@();$mx={{max}}
+                for($i=1;$i -le $mx;$i++){
                   $f="$root/locks/slot-$i"
                   Reclaim $f $i
                   $ok=$false
@@ -765,9 +789,14 @@ public static partial class RemoteScripts
 
     public static string Incoming(Machine m, string jobId) => $"{m.WorkRoot}/incoming/{jobId}{(m.Transfer == TransferMode.Archive ? ".tar.gz" : ".bundle")}";
 
-    /// <summary>Creates incoming/ before an upload; on Windows also writes the job wrapper's helper (<see cref="WindowsInstallHelper"/>).</summary>
+    /// <summary>
+    /// Creates incoming/ before an upload; on Windows also writes the job wrapper's helper (<see cref="WindowsInstallHelper"/>). On Windows
+    /// work_root is written once (<c>$rt</c>) and every path is built from it with single-quoted literals, as in the job script (0.13.0
+    /// review M1: it was spelled out three times next to the deflated helper, so this script, run before every job, was the first to pass
+    /// the encoded cap as work_root grew).
+    /// </summary>
     public static string EnsureIncoming(Machine m) => m.Os == MachineOs.Windows
-        ? $"New-Item -ItemType Directory -Force -Path ({ShellQuote.PowerShell(m.WorkRoot + "/incoming")}) | Out-Null\n" + WindowsInstallHelper(m)
+        ? $"$rt={ShellQuote.PowerShell(m.WorkRoot)}\nNew-Item -ItemType Directory -Force -Path ($rt+'/incoming') | Out-Null\n" + WindowsInstallHelper
         : $"mkdir -p {ShellQuote.Posix(m.WorkRoot + "/incoming")}";
 
     /// <summary>
@@ -808,7 +837,9 @@ public static partial class RemoteScripts
 
             var parts = string.Join(' ', argv.Select(ShellQuote.PowerShell));
             // work_root is written once ($rt) and every other path is built from it with single-quoted literals (0.13.0 smoke: it was
-            // spelled out four times, so a work_root of about 95 characters already passed the encoded cap).
+            // spelled out four times, so a work_root of about 95 characters already passed the encoded cap). The script is terse on purpose
+            // (0.13.0 review M1): 1024 is FILE_ATTRIBUTE_REPARSE_POINT, -nop -noni are -NoProfile -NonInteractive, and [Console]::WriteLine
+            // writes to [Console]::Out.
             var pidName = (pidKind == "post" ? "post" : "job") + "-" + jobId + ".pid";
             return $$"""
                 $rt={{ShellQuote.PowerShell(m.WorkRoot)}};$wt=$rt+{{ShellQuote.PowerShell("/jobs/" + jobId)}}
@@ -818,7 +849,7 @@ public static partial class RemoteScripts
                 $here=(Get-Location).ProviderPath;$sep=[IO.Path]::DirectorySeparatorChar
                 if(!(($here+$sep).StartsWith($wr+$sep,'OrdinalIgnoreCase'))){exit 126}
                 $p=Get-Item -LiteralPath $here
-                while($p.FullName.Length -gt $wr.Length){if($p.Attributes -band [IO.FileAttributes]::ReparsePoint){exit 126};$p=$p.Parent}
+                while($p.FullName.Length -gt $wr.Length){if($p.Attributes -band 1024){exit 126};$p=$p.Parent}
                 {{JobEnvironmentPowerShell(m)}}
                 {{JobEnvPowerShell(env)}}
                 $env:{{JobMarker}} = {{ShellQuote.PowerShell(SafeJobId(jobId))}}
@@ -826,7 +857,7 @@ public static partial class RemoteScripts
                 {{PlanJobEnvironmentPowerShell(planJob)}}
                 {{WindowsNativeCheck(jobId, argv, nonce)}}
                 {{(m.Priority == JobPriority.Low ? "try{(Get-Process -Id $PID).PriorityClass = 'BelowNormal'}catch{}" : "")}}
-                {{WindowsHelperLoad("($rt+" + ShellQuote.PowerShell(WindowsHelperPath(m)[m.WorkRoot.Length..]) + ")", job: true)}}
+                {{WindowsHelperLoad("($rt+" + ShellQuote.PowerShell(WindowsHelperRelativePath) + ")", job: true)}}
                 $me=Get-Process -Id $PID
                 Set-Content -LiteralPath $pf @($PID,$me.StartTime.ToUniversalTime().Ticks)
                 $job={
@@ -834,16 +865,16 @@ public static partial class RemoteScripts
                 }
                 $inner='$ProgressPreference=''SilentlyContinue'';$global:LASTEXITCODE=0'+"`ntry{`n"+$job.ToString()+"`nexit `$LASTEXITCODE`n"+'}catch{Write-Output "$_";exit 1}'
                 $si=[Diagnostics.ProcessStartInfo]::new($me.Path)
-                $si.Arguments='-NoProfile -NonInteractive -ep Bypass -ec '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+                $si.Arguments='-nop -noni -ep Bypass -ec '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
                 $si.UseShellExecute=$false;$si.WorkingDirectory=$here;$code=1
                 try{
                   $cp=[Diagnostics.Process]::Start($si)
                   $jo=if($LqW){LqJob $pf $cp.Handle}
                   Add-Content -LiteralPath $pf @($cp.Id,$cp.StartTime.ToUniversalTime().Ticks)
                   if($cp.WaitForExit({{WindowsWaitMilliseconds(limit)}})){$cp.WaitForExit();$code=$cp.ExitCode}
-                  else{$code=124;{{(pidKind == "post" ? $"[Console]::Out.WriteLine({ShellQuote.PowerShell(LimitMarker(jobId, nonce))});" : "")}}LqKill $cp.Id;if($jo){[void]$LqW::TerminateJobObject($jo,124)} }
+                  else{$code=124;{{(pidKind == "post" ? $"[Console]::WriteLine({ShellQuote.PowerShell(LimitMarker(jobId, nonce))});" : "")}}LqKill $cp.Id;if($jo){[void]$LqW::TerminateJobObject($jo,124)} }
                 }finally{Remove-Item -Force -EA 0 -LiteralPath $pf}
-                [Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce))}} + $code)
+                [Console]::WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce))}}+$code)
                 exit $code
                 """;
         }
@@ -982,7 +1013,7 @@ public static partial class RemoteScripts
             $lc=Get-Command -Name {{ShellQuote.PowerShell(argv[0])}} -EA 0|select -First 1;$la=$null -ne $lc -and $lc.CommandType -eq 'Application'
             if(!($la -and $lc.Path -like '*.exe' -and @({{shims}}) -notcontains [IO.Path]::GetFileNameWithoutExtension($lc.Path))){
             $lr=if($la){$lc.Path}elseif($null -ne $lc){[string]$lc.CommandType+' '+$lc.Name}else{''}
-            [Console]::Out.WriteLine({{ShellQuote.PowerShell(WindowsArgsMarker(jobId, nonce))}}+$lr);[Console]::Out.WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce) + "2")}});exit 2}
+            [Console]::WriteLine({{ShellQuote.PowerShell(WindowsArgsMarker(jobId, nonce))}}+$lr);[Console]::WriteLine({{ShellQuote.PowerShell(ExitMarker(jobId, nonce) + "2")}});exit 2}
             """;
     }
 
@@ -1033,12 +1064,13 @@ public static partial class RemoteScripts
     /// <summary>
     /// The Windows job script's encoded length at its largest for a machine, before any job arguments: the largest LANQ_SHARD / LANQ_SHARDS,
     /// the longest LANQ_PLAN_JOB, and the native .exe check a job given &amp; or | carries, plus the job's own <paramref name="env"/> (none for
-    /// the config check). Over <see cref="MaxWindowsCommandLength"/> every such job there would fail.
+    /// the config check), measured as the post: step's script (the same wrapper with its limit line, so a little longer: 0.13.0 review M1).
+    /// Over <see cref="MaxWindowsCommandLength"/> every such job, or its post: step, there would fail.
     /// </summary>
     internal static int WorstCaseWindowsCommandLength(Machine m, IReadOnlyList<JobEnvVar>? env = null) =>
-        WindowsCommand(Execute(
+        new[] { "job", "post" }.Max(kind => WindowsCommand(Execute(
             m, "20260101-000000-000000", ".", WorstCaseArgv, JobRequest.DefaultTimeout, new ShardInfo(ShardInfo.MaxShards, ShardInfo.MaxShards),
-            new string('x', Plan.PlanFileLoader.MaxNameLength), new string('0', 16), env)).Length;
+            new string('x', Plan.PlanFileLoader.MaxNameLength), new string('0', 16), env, kind)).Length);
 
     /// <summary>The same for PowerShell: process environment variables set just before the job starts, so its children inherit them.</summary>
     internal static string JobEnvironmentPowerShell(Machine m)

@@ -90,6 +90,14 @@ public static partial class ConfigLoader
     [GeneratedRegex(@"^[A-Za-z]:/[A-Za-z0-9_./-]*\z", RegexOptions.None, 1000)]
     private static partial Regex WindowsWorkRootRegex();
 
+    /// <summary>
+    /// The longest Windows work_root lanq loads (0.13.0 review M1). Two limits bind: the job object named "lanq-" plus the pid file path
+    /// (work_root + 43 characters for a post: step's, at most MAX_PATH - 1 = 259, so at most 216) and the post: step's script at its largest
+    /// (hygiene: dotnet-lean, the largest shard and plan job name, the native .exe check: about 218). Every other Windows script has more room.
+    /// WindowsWorkRootCapTests builds each one at this length and checks it against its limit.
+    /// </summary>
+    internal const int MaxWindowsWorkRootLength = 200;
+
     // \z, not $: "$" would also match just before a trailing newline.
     [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*\z", RegexOptions.None, 1000)]
     private static partial Regex EnvNameRegex();
@@ -276,6 +284,14 @@ public static partial class ConfigLoader
                 throw new ConfigException(m.Os == MachineOs.Windows
                     ? $"Machine '{m.Name}': a Windows work_root must be a drive path like D:/lq (forward slashes, no spaces, no '..')."
                     : $"Machine '{m.Name}': a Linux work_root must be an absolute path like /srv/lq (no spaces, no '..').");
+            }
+
+            if (m.Os == MachineOs.Windows && m.WorkRoot.Length > MaxWindowsWorkRootLength)
+            {
+                throw new ConfigException(
+                    $"Machine '{m.Name}': a Windows work_root may be at most {MaxWindowsWorkRootLength} characters; this one is {m.WorkRoot.Length}. "
+                    + "Each job's Windows job object is named after its pid file under work_root (names stop at MAX_PATH, 260), and every script lanq "
+                    + "sends must fit one 8000-character command line. Use a shorter folder, like D:/lq.");
             }
 
             if (!Enum.IsDefined(m.Os))
@@ -473,7 +489,8 @@ public static partial class ConfigLoader
             var (inputs, fix) = Jobs.RemoteScripts.WindowsScriptInputs(m);
             throw new ConfigException(
                 $"Machine '{m.Name}': the Windows job script is {size} characters once encoded, {size - limit} over the {limit}-character Windows "
-                + $"command-line limit before any job arguments. From this machine's config it carries its {inputs}. Shorten {fix}.");
+                + $"command-line limit before any job arguments. From this machine's config it carries its {inputs} ({Jobs.RemoteScripts.EncodedCostNote}). "
+                + $"Shorten {fix}.");
         }
     }
 

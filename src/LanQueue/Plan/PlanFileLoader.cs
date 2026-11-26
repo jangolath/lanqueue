@@ -68,6 +68,20 @@ public static partial class PlanFileLoader
     private static partial Regex WholeNumberRegex();
 
     /// <summary>
+    /// A reference to the shard index in a command: $LANQ_SHARD or ${LANQ_SHARD} (sh, exact case), $env:LANQ_SHARD (PowerShell) or
+    /// %LANQ_SHARD% (cmd), both any case; not LANQ_SHARDS or a longer name (0.13.0 review L4).
+    /// </summary>
+    [GeneratedRegex(@"(?:\$\{?LANQ_SHARD|(?i:\$env:LANQ_SHARD|%LANQ_SHARD%))(?![A-Za-z0-9_])", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex ShardReferenceRegex();
+
+    /// <summary>A shell comment: from a # at the start of a line or after white space to the end of that line (sh and PowerShell alike).</summary>
+    [GeneratedRegex(@"(?m)(?:^|(?<=\s))#.*$", RegexOptions.CultureInvariant, 1000)]
+    private static partial Regex ShellCommentRegex();
+
+    /// <summary>True when an argument reads the shard index through the environment (<see cref="ShardReferenceRegex"/>) outside a comment.</summary>
+    internal static bool ReadsShardIndex(string argument) => ShardReferenceRegex().IsMatch(ShellCommentRegex().Replace(argument, ""));
+
+    /// <summary>
     /// The plan file lanq run --plan reads: <paramref name="planFile"/> (relative to <paramref name="cwd"/>) when given, else lanq.yml at the
     /// repository top (the nearest folder up from <paramref name="cwd"/> holding .git, as --fetch finds it; else <paramref name="cwd"/>).
     /// </summary>
@@ -832,7 +846,8 @@ public static partial class PlanFileLoader
     /// <summary>
     /// What a dry run warns about (stderr on a real run): two jobs with the same command in the same folder, and a sharded job whose command
     /// has neither {shard} nor {shards} (each shard would run the same command unless a script reads LANQ_SHARD). No such warning when the
-    /// command itself names LANQ_SHARD (as $LANQ_SHARD, ${LANQ_SHARD} or $env:LANQ_SHARD, LANQ_SHARDS too) or the job says shard_env: true.
+    /// command itself reads the index (as $LANQ_SHARD, ${LANQ_SHARD}, $env:LANQ_SHARD or %LANQ_SHARD%, not in a comment; LANQ_SHARDS alone,
+    /// the count, does not split the work: <see cref="ReadsShardIndex"/>) or the job says shard_env: true.
     /// </summary>
     private static List<string> Warnings(List<PlanJob> jobs)
     {
@@ -852,7 +867,7 @@ public static partial class PlanFileLoader
 
             if (job.Args.Shards is not null && !job.ShardEnv
                 && !job.Args.Argv.Any(a => a.Contains(Jobs.ShardInfo.IndexToken, StringComparison.Ordinal) || a.Contains(Jobs.ShardInfo.CountToken, StringComparison.Ordinal)
-                    || a.Contains("LANQ_SHARD", StringComparison.OrdinalIgnoreCase)))
+                    || ReadsShardIndex(a)))
             {
                 warnings.Add($"job '{job.Name}' has shards: but its command has no {{shard}} or {{shards}}: each shard runs the same command unless a script reads LANQ_SHARD (then say shard_env: true)");
             }
